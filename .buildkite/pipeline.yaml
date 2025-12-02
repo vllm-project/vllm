@@ -21,6 +21,9 @@ steps:
         limit: 2
     env:
       DOCKER_BUILDKIT: '1'
+  - block: 'Run :docker: Build CPU image'
+    depends_on: []
+    key: block--docker--build-cpu-image
   - label: ':docker: Build CPU image'
     key: image-build-cpu
     agents:
@@ -28,7 +31,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_cpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
-    depends_on: []
+    depends_on: block--docker--build-cpu-image
     soft_fail: false
     retry:
       automatic:
@@ -58,6 +61,9 @@ steps:
         limit: 2
     env:
       DOCKER_BUILDKIT: '1'
+  - block: 'Run :docker: Build HPU image'
+    depends_on: []
+    key: block--docker--build-hpu-image
   - label: ':docker: Build HPU image'
     key: image-build-hpu
     agents:
@@ -65,7 +71,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_hpu.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
-    depends_on: []
+    depends_on: block--docker--build-hpu-image
     soft_fail: true
     retry:
       automatic:
@@ -75,6 +81,9 @@ steps:
         limit: 2
     env:
       DOCKER_BUILDKIT: '1'
+  - block: 'Run :docker: Build image'
+    depends_on: []
+    key: block--docker--build-image
   - label: ':docker: Build image'
     key: image-build
     agents:
@@ -82,7 +91,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
-    depends_on: []
+    depends_on: block--docker--build-image
     soft_fail: false
     retry:
       automatic:
@@ -94,6 +103,9 @@ steps:
       DOCKER_BUILDKIT: '1'
 - group: Attention
   steps:
+  - block: Run V1 attention (B200)
+    depends_on: []
+    key: block-v1-attention-b200
   - label: V1 attention (B200)
     agents:
       queue: B200
@@ -102,8 +114,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention
-    depends_on:
-    - image-build
+    depends_on: block-v1-attention-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -120,6 +131,9 @@ steps:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  - block: Run V1 attention (H100)
+    depends_on: []
+    key: block-v1-attention-h100
   - label: V1 attention (H100)
     agents:
       queue: mithril-h100-pool
@@ -128,22 +142,13 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s v1/attention
-    depends_on:
-    - image-build
+    depends_on: block-v1-attention-h100
     soft_fail: false
     plugins:
     - kubernetes:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -176,6 +181,9 @@ steps:
               type: DirectoryOrCreate
 - group: Basic Correctness
   steps:
+  - block: Run Basic Correctness
+    depends_on: []
+    key: block-basic-correctness
   - label: Basic Correctness
     agents:
       queue: gpu_1_queue
@@ -187,8 +195,7 @@ steps:
     - pytest -v -s basic_correctness/test_cumem.py
     - pytest -v -s basic_correctness/test_basic_correctness.py
     - pytest -v -s basic_correctness/test_cpu_offload.py
-    depends_on:
-    - image-build
+    depends_on: block-basic-correctness
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -207,6 +214,9 @@ steps:
         mount_buildkite_agent: true
 - group: Benchmarks
   steps:
+  - block: Run Benchmarks
+    depends_on: []
+    key: block-benchmarks
   - label: Benchmarks
     agents:
       queue: gpu_1_queue
@@ -215,8 +225,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/.buildkite
     - bash scripts/run-benchmarks.sh
-    depends_on:
-    - image-build
+    depends_on: block-benchmarks
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -233,6 +242,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Benchmarks CLI Test
+    depends_on: []
+    key: block-benchmarks-cli-test
   - label: Benchmarks CLI Test
     agents:
       queue: gpu_1_queue
@@ -241,8 +253,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s benchmarks/
-    depends_on:
-    - image-build
+    depends_on: block-benchmarks-cli-test
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -261,6 +272,9 @@ steps:
         mount_buildkite_agent: true
 - group: CUDA
   steps:
+  - block: Run Cudagraph
+    depends_on: []
+    key: block-cudagraph
   - label: Cudagraph
     agents:
       queue: gpu_1_queue
@@ -270,8 +284,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
-    depends_on:
-    - image-build
+    depends_on: block-cudagraph
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -288,6 +301,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Platform Tests (CUDA)
+    depends_on: []
+    key: block-platform-tests-cuda
   - label: Platform Tests (CUDA)
     agents:
       queue: gpu_1_queue
@@ -296,8 +312,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s cuda/test_cuda_context.py
-    depends_on:
-    - image-build
+    depends_on: block-platform-tests-cuda
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -317,7 +332,7 @@ steps:
 - group: Compile
   steps:
   - block: Run Fusion E2E (2 GPUs)(B200)
-    depends_on: image-build
+    depends_on: []
     key: block-fusion-e2e-2-gpusb200
   - label: Fusion E2E (2 GPUs)(B200)
     agents:
@@ -345,6 +360,9 @@ steps:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  - block: Run Fusion and Compile Tests (B200)
+    depends_on: []
+    key: block-fusion-and-compile-tests-b200
   - label: Fusion and Compile Tests (B200)
     agents:
       queue: B200
@@ -359,8 +377,7 @@ steps:
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
       -k "True and not +quant_fp8 and not +rms_norm"
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
-    depends_on:
-    - image-build
+    depends_on: block-fusion-and-compile-tests-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -379,6 +396,9 @@ steps:
         - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: Distributed
   steps:
+  - block: Run 2 Node Test (4 GPUs)
+    depends_on: []
+    key: block-2-node-test-4-gpus
   - label: 2 Node Test (4 GPUs)
     agents:
       queue: gpu_4_queue
@@ -404,9 +424,11 @@ steps:
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1
       --node-size=2 --node-rank=1 --master-addr=192.168.10.10 --master-port=12345
       --enforce-eager --trust-remote-code
-    depends_on:
-    - image-build
+    depends_on: block-2-node-test-4-gpus
     soft_fail: false
+  - block: Run Distributed (2 GPUs)
+    depends_on: []
+    key: block-distributed-2-gpus
   - label: Distributed (2 GPUs)
     agents:
       queue: gpu_4_queue
@@ -429,8 +451,7 @@ steps:
     - pytest -v -s distributed/test_sequence_parallel.py
     - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
     - pytest -v -s v1/worker/test_worker_memory_snapshot.py
-    depends_on:
-    - image-build
+    depends_on: block-distributed-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -447,6 +468,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Distributed Comm Ops
+    depends_on: []
+    key: block-distributed-comm-ops
   - label: Distributed Comm Ops
     agents:
       queue: gpu_4_queue
@@ -458,8 +482,7 @@ steps:
     - pytest -v -s distributed/test_shm_broadcast.py
     - pytest -v -s distributed/test_shm_buffer.py
     - pytest -v -s distributed/test_shm_storage.py
-    depends_on:
-    - image-build
+    depends_on: block-distributed-comm-ops
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -476,6 +499,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Distributed NixlConnector PD accuracy (4 GPUs)
+    depends_on: []
+    key: block-distributed-nixlconnector-pd-accuracy-4-gpus
   - label: Distributed NixlConnector PD accuracy (4 GPUs)
     agents:
       queue: gpu_4_queue
@@ -485,8 +511,7 @@ steps:
     - cd /vllm-workspace/tests
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
-    depends_on:
-    - image-build
+    depends_on: block-distributed-nixlconnector-pd-accuracy-4-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -504,7 +529,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Distributed Tests (2 GPUs)(B200)
-    depends_on: image-build
+    depends_on: []
     key: block-distributed-tests-2-gpusb200
   - label: Distributed Tests (2 GPUs)(B200)
     agents:
@@ -534,7 +559,7 @@ steps:
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
   - block: Run Distributed Tests (2 GPUs)(H200)
-    depends_on: image-build
+    depends_on: []
     key: block-distributed-tests-2-gpush200
   - label: Distributed Tests (2 GPUs)(H200)
     agents:
@@ -572,6 +597,9 @@ steps:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  - block: Run Distributed Tests (4 GPUs)
+    depends_on: []
+    key: block-distributed-tests-4-gpus
   - label: Distributed Tests (4 GPUs)
     agents:
       queue: gpu_4_queue
@@ -602,8 +630,7 @@ steps:
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
     - popd
-    depends_on:
-    - image-build
+    depends_on: block-distributed-tests-4-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -621,7 +648,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Distributed Tests (4 GPUs)(A100)
-    depends_on: image-build
+    depends_on: []
     key: block-distributed-tests-4-gpusa100
   - label: Distributed Tests (4 GPUs)(A100)
     agents:
@@ -642,14 +669,6 @@ steps:
           priorityClassName: ci
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -681,7 +700,7 @@ steps:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
   - block: Run Distributed Tests (8 GPUs)(H100)
-    depends_on: image-build
+    depends_on: []
     key: block-distributed-tests-8-gpush100
   - label: Distributed Tests (8 GPUs)(H100)
     agents:
@@ -700,14 +719,6 @@ steps:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -738,6 +749,9 @@ steps:
             hostPath:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
+  - block: Run Pipeline + Context Parallelism (4 GPUs))
+    depends_on: []
+    key: block-pipeline---context-parallelism-4-gpus
   - label: Pipeline + Context Parallelism (4 GPUs))
     agents:
       queue: gpu_4_queue
@@ -747,8 +761,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_pp_cudagraph.py
     - pytest -v -s distributed/test_pipeline_parallel.py
-    depends_on:
-    - image-build
+    depends_on: block-pipeline---context-parallelism-4-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -768,7 +781,7 @@ steps:
 - group: E2E Integration
   steps:
   - block: Run DeepSeek V2-Lite Accuracy
-    depends_on: image-build
+    depends_on: []
     key: block-deepseek-v2-lite-accuracy
   - label: DeepSeek V2-Lite Accuracy
     agents:
@@ -786,14 +799,6 @@ steps:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -825,7 +830,7 @@ steps:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
   - block: Run Prime-RL Integration (2 GPUs)
-    depends_on: image-build
+    depends_on: []
     key: block-prime-rl-integration-2-gpus
   - label: Prime-RL Integration (2 GPUs)
     agents:
@@ -853,7 +858,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Qwen3-30B-A3B-FP8-block Accuracy
-    depends_on: image-build
+    depends_on: []
     key: block-qwen3-30b-a3b-fp8-block-accuracy
   - label: Qwen3-30B-A3B-FP8-block Accuracy
     agents:
@@ -871,14 +876,6 @@ steps:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -911,6 +908,9 @@ steps:
               type: DirectoryOrCreate
 - group: Engine
   steps:
+  - block: Run Engine
+    depends_on: []
+    key: block-engine
   - label: Engine
     agents:
       queue: gpu_1_queue
@@ -919,8 +919,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
-    depends_on:
-    - image-build
+    depends_on: block-engine
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -937,6 +936,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run V1 e2e + engine
+    depends_on: []
+    key: block-v1-e2e---engine
   - label: V1 e2e + engine
     agents:
       queue: gpu_1_queue
@@ -946,8 +948,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
-    depends_on:
-    - image-build
+    depends_on: block-v1-e2e---engine
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -966,6 +967,9 @@ steps:
         mount_buildkite_agent: true
 - group: Entrypoints
   steps:
+  - block: Run Entrypoints Integration (API Server)
+    depends_on: []
+    key: block-entrypoints-integration-api-server
   - label: Entrypoints Integration (API Server)
     agents:
       queue: gpu_1_queue
@@ -980,8 +984,7 @@ steps:
       --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
       --ignore=entrypoints/openai/tool_parsers/
     - pytest -v -s entrypoints/test_chat_utils.py
-    depends_on:
-    - image-build
+    depends_on: block-entrypoints-integration-api-server
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -998,6 +1001,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Entrypoints Integration (LLM)
+    depends_on: []
+    key: block-entrypoints-integration-llm
   - label: Entrypoints Integration (LLM)
     agents:
       queue: gpu_1_queue
@@ -1009,8 +1015,7 @@ steps:
     - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
     - pytest -v -s entrypoints/llm/test_generate.py
     - pytest -v -s entrypoints/offline_mode
-    depends_on:
-    - image-build
+    depends_on: block-entrypoints-integration-llm
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1027,6 +1032,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Entrypoints Integration (Pooling)
+    depends_on: []
+    key: block-entrypoints-integration-pooling
   - label: Entrypoints Integration (Pooling)
     agents:
       queue: gpu_1_queue
@@ -1036,8 +1044,7 @@ steps:
     - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s entrypoints/pooling
-    depends_on:
-    - image-build
+    depends_on: block-entrypoints-integration-pooling
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1054,6 +1061,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Entrypoints Unit Tests
+    depends_on: []
+    key: block-entrypoints-unit-tests
   - label: Entrypoints Unit Tests
     agents:
       queue: gpu_1_queue
@@ -1064,8 +1074,7 @@ steps:
     - pytest -v -s entrypoints/openai/tool_parsers
     - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai
       --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
-    depends_on:
-    - image-build
+    depends_on: block-entrypoints-unit-tests
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1082,6 +1091,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Entrypoints V1
+    depends_on: []
+    key: block-entrypoints-v1
   - label: Entrypoints V1
     agents:
       queue: gpu_1_queue
@@ -1090,8 +1102,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s v1/entrypoints
-    depends_on:
-    - image-build
+    depends_on: block-entrypoints-v1
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1108,6 +1119,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run OpenAI API Correctness
+    depends_on: []
+    key: block-openai-api-correctness
   - label: OpenAI API Correctness
     agents:
       queue: gpu_1_queue
@@ -1116,8 +1130,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -s entrypoints/openai/correctness/
-    depends_on:
-    - image-build
+    depends_on: block-openai-api-correctness
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1136,6 +1149,9 @@ steps:
         mount_buildkite_agent: true
 - group: Expert Parallelism
   steps:
+  - block: Run EPLB Algorithm
+    depends_on: []
+    key: block-eplb-algorithm
   - label: EPLB Algorithm
     agents:
       queue: gpu_1_queue
@@ -1144,8 +1160,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_eplb_algo.py
-    depends_on:
-    - image-build
+    depends_on: block-eplb-algorithm
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1162,6 +1177,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run EPLB Execution
+    depends_on: []
+    key: block-eplb-execution
   - label: EPLB Execution
     agents:
       queue: gpu_4_queue
@@ -1171,8 +1189,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_eplb_execute.py
     - pytest -v -s distributed/test_eplb_spec_decode.py
-    depends_on:
-    - image-build
+    depends_on: block-eplb-execution
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1191,6 +1208,9 @@ steps:
         mount_buildkite_agent: true
 - group: Kernels
   steps:
+  - block: Run Kernels (B200)
+    depends_on: []
+    key: block-kernels-b200
   - label: Kernels (B200)
     agents:
       queue: B200
@@ -1217,8 +1237,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-    depends_on:
-    - image-build
+    depends_on: block-kernels-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1235,6 +1254,9 @@ steps:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  - block: Run Kernels Attention Test %N
+    depends_on: []
+    key: block-kernels-attention-test-n
   - label: Kernels Attention Test %N
     agents:
       queue: gpu_1_queue
@@ -1243,8 +1265,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    depends_on:
-    - image-build
+    depends_on: block-kernels-attention-test-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1262,6 +1283,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 2
+  - block: Run Kernels Core Operation Test
+    depends_on: []
+    key: block-kernels-core-operation-test
   - label: Kernels Core Operation Test
     agents:
       queue: gpu_1_queue
@@ -1270,8 +1294,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s kernels/core kernels/test_top_k_per_row.py
-    depends_on:
-    - image-build
+    depends_on: block-kernels-core-operation-test
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1288,6 +1311,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Kernels DeepGEMM Test (H100)
+    depends_on: []
+    key: block-kernels-deepgemm-test-h100
   - label: Kernels DeepGEMM Test (H100)
     agents:
       queue: mithril-h100-pool
@@ -1299,22 +1325,13 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
-    depends_on:
-    - image-build
+    depends_on: block-kernels-deepgemm-test-h100
     soft_fail: false
     plugins:
     - kubernetes:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1345,6 +1362,9 @@ steps:
             hostPath:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
+  - block: Run Kernels Mamba Test
+    depends_on: []
+    key: block-kernels-mamba-test
   - label: Kernels Mamba Test
     agents:
       queue: gpu_1_queue
@@ -1353,8 +1373,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s kernels/mamba
-    depends_on:
-    - image-build
+    depends_on: block-kernels-mamba-test
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1371,6 +1390,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Kernels MoE Test %N
+    depends_on: []
+    key: block-kernels-moe-test-n
   - label: Kernels MoE Test %N
     agents:
       queue: gpu_1_queue
@@ -1379,8 +1401,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    depends_on:
-    - image-build
+    depends_on: block-kernels-moe-test-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1398,6 +1419,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 2
+  - block: Run Kernels Quantization Test %N
+    depends_on: []
+    key: block-kernels-quantization-test-n
   - label: Kernels Quantization Test %N
     agents:
       queue: gpu_1_queue
@@ -1406,8 +1430,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    depends_on:
-    - image-build
+    depends_on: block-kernels-quantization-test-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1428,7 +1451,7 @@ steps:
 - group: LM Eval
   steps:
   - block: Run LM Eval Large Models (4 GPUs)(A100)
-    depends_on: image-build
+    depends_on: []
     key: block-lm-eval-large-models-4-gpusa100
   - label: LM Eval Large Models (4 GPUs)(A100)
     agents:
@@ -1448,14 +1471,6 @@ steps:
           priorityClassName: ci
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1487,7 +1502,7 @@ steps:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
   - block: Run LM Eval Large Models (4 GPUs)(H100)
-    depends_on: image-build
+    depends_on: []
     key: block-lm-eval-large-models-4-gpush100
   - label: LM Eval Large Models (4 GPUs)(H100)
     agents:
@@ -1506,14 +1521,6 @@ steps:
         podSpec:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1544,6 +1551,9 @@ steps:
             hostPath:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
+  - block: Run LM Eval Small Models
+    depends_on: []
+    key: block-lm-eval-small-models
   - label: LM Eval Small Models
     agents:
       queue: gpu_1_queue
@@ -1553,8 +1563,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
       --tp-size=1
-    depends_on:
-    - image-build
+    depends_on: block-lm-eval-small-models
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1572,7 +1581,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run LM Eval Small Models (B200)
-    depends_on: image-build
+    depends_on: []
     key: block-lm-eval-small-models-b200
   - label: LM Eval Small Models (B200)
     agents:
@@ -1602,6 +1611,9 @@ steps:
         - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: LoRA
   steps:
+  - block: Run LoRA %N
+    depends_on: []
+    key: block-lora-n
   - label: LoRA %N
     agents:
       queue: gpu_1_queue
@@ -1609,12 +1621,11 @@ steps:
     - (command nvidia-smi || true)
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
-    - pytest -v -s lora \ --shard-id=$$BUILDKITE_PARALLEL_JOB \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-      \ --ignore=lora/test_chatglm3_tp.py \ --ignore=lora/test_llama_tp.py \ --ignore=lora/test_llm_with_multi_loras.py
-      \ --ignore=lora/test_olmoe_tp.py \ --ignore=lora/test_deepseekv2_tp.py \ --ignore=lora/test_gptoss_tp.py
-      \ --ignore=lora/test_qwen3moe_tp.py
-    depends_on:
-    - image-build
+    - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
+      --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py
+      --ignore=lora/test_qwen3moe_tp.py
+    depends_on: block-lora-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1632,6 +1643,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 4
+  - block: Run LoRA TP (Distributed)
+    depends_on: []
+    key: block-lora-tp-distributed
   - label: LoRA TP (Distributed)
     agents:
       queue: gpu_4_queue
@@ -1645,8 +1659,7 @@ steps:
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
     - pytest -v -s -x lora/test_gptoss_tp.py
-    depends_on:
-    - image-build
+    depends_on: block-lora-tp-distributed
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1665,6 +1678,9 @@ steps:
         mount_buildkite_agent: true
 - group: Miscellaneous
   steps:
+  - block: Run Async Engine, Inputs, Utils, Worker
+    depends_on: []
+    key: block-async-engine--inputs--utils--worker
   - label: Async Engine, Inputs, Utils, Worker
     agents:
       queue: gpu_1_queue
@@ -1674,8 +1690,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s -m "not cpu_test" multimodal
     - pytest -v -s utils_
-    depends_on:
-    - image-build
+    depends_on: block-async-engine--inputs--utils--worker
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1692,6 +1707,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Async Engine, Inputs, Utils, Worker, Config (CPU)
+    depends_on: []
+    key: block-async-engine--inputs--utils--worker--config-cpu
   - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -1706,8 +1724,7 @@ steps:
     - pytest -v -s tokenizers_
     - pytest -v -s transformers_utils
     - pytest -v -s config
-    depends_on:
-    - image-build
+    depends_on: block-async-engine--inputs--utils--worker--config-cpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1724,6 +1741,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Examples
+    depends_on: []
+    key: block-examples
   - label: Examples
     agents:
       queue: gpu_1_queue
@@ -1756,8 +1776,7 @@ steps:
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens
       3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp
       0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
-    depends_on:
-    - image-build
+    depends_on: block-examples
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1775,7 +1794,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run GPT-OSS Eval (B200)
-    depends_on: image-build
+    depends_on: []
     key: block-gpt-oss-eval-b200
   - label: GPT-OSS Eval (B200)
     agents:
@@ -1804,6 +1823,9 @@ steps:
         - /dev/shm:/dev/shm
         - /data/benchmark-hf-cache:/benchmark-hf-cache
         - /data/benchmark-vllm-cache:/root/.cache/vllm
+  - block: Run Metrics, Tracing (2 GPUs)
+    depends_on: []
+    key: block-metrics--tracing-2-gpus
   - label: Metrics, Tracing (2 GPUs)
     agents:
       queue: gpu_4_queue
@@ -1814,8 +1836,7 @@ steps:
     - pip install "opentelemetry-sdk>=1.26.0" "opentelemetry-api>=1.26.0" "opentelemetry-exporter-otlp>=1.26.0"
       "opentelemetry-semantic-conventions-ai>=0.4.1"
     - pytest -v -s v1/tracing
-    depends_on:
-    - image-build
+    depends_on: block-metrics--tracing-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1832,6 +1853,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Python-only Installation
+    depends_on: []
+    key: block-python-only-installation
   - label: Python-only Installation
     agents:
       queue: gpu_1_queue
@@ -1840,8 +1864,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - bash standalone_tests/python_only_compile.sh
-    depends_on:
-    - image-build
+    depends_on: block-python-only-installation
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1858,6 +1881,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Regression
+    depends_on: []
+    key: block-regression
   - label: Regression
     agents:
       queue: gpu_1_queue
@@ -1867,8 +1893,7 @@ steps:
     - cd /vllm-workspace/tests
     - pip install modelscope
     - pytest -v -s test_regression.py
-    depends_on:
-    - image-build
+    depends_on: block-regression
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1885,6 +1910,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run V1 Others
+    depends_on: []
+    key: block-v1-others
   - label: V1 Others
     agents:
       queue: gpu_1_queue
@@ -1907,8 +1935,7 @@ steps:
     - pytest -v -s v1/test_outputs.py
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
-    depends_on:
-    - image-build
+    depends_on: block-v1-others
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1925,6 +1952,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run V1 Others (CPU)
+    depends_on: []
+    key: block-v1-others-cpu
   - label: V1 Others (CPU)
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -1937,8 +1967,7 @@ steps:
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s -m "cpu_test" v1/kv_connector/unit
     - pytest -v -s -m "cpu_test" v1/metrics
-    depends_on:
-    - image-build
+    depends_on: block-v1-others-cpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1957,6 +1986,9 @@ steps:
         mount_buildkite_agent: true
 - group: Model Executor
   steps:
+  - block: Run Model Executor
+    depends_on: []
+    key: block-model-executor
   - label: Model Executor
     agents:
       queue: gpu_1_queue
@@ -1968,8 +2000,7 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
     - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
-    depends_on:
-    - image-build
+    depends_on: block-model-executor
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -1988,6 +2019,9 @@ steps:
         mount_buildkite_agent: true
 - group: Models - Basic
   steps:
+  - block: Run Basic Models Test (Other CPU)
+    depends_on: []
+    key: block-basic-models-test-other-cpu
   - label: Basic Models Test (Other CPU)
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -1996,8 +2030,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s models/test_utils.py models/test_vision.py
-    depends_on:
-    - image-build
+    depends_on: block-basic-models-test-other-cpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2014,6 +2047,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Basic Models Tests (Extra Initialization) %N
+    depends_on: []
+    key: block-basic-models-tests-extra-initialization-n
   - label: Basic Models Tests (Extra Initialization) %N
     agents:
       queue: gpu_1_queue
@@ -2021,10 +2057,9 @@ steps:
     - (command nvidia-smi || true)
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
-    - pytest -v -s models/test_initialization.py \ -k "not test_can_initialize_small_subset"
-      \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \ --shard-id=$$BUILDKITE_PARALLEL_JOB
-    depends_on:
-    - image-build
+    - pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset"
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    depends_on: block-basic-models-tests-extra-initialization-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2042,6 +2077,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 2
+  - block: Run Basic Models Tests (Initialization)
+    depends_on: []
+    key: block-basic-models-tests-initialization
   - label: Basic Models Tests (Initialization)
     agents:
       queue: gpu_1_queue
@@ -2050,8 +2088,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
-    depends_on:
-    - image-build
+    depends_on: block-basic-models-tests-initialization
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2068,6 +2105,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Basic Models Tests (Other)
+    depends_on: []
+    key: block-basic-models-tests-other
   - label: Basic Models Tests (Other)
     agents:
       queue: gpu_1_queue
@@ -2076,8 +2116,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s models/test_transformers.py models/test_registry.py
-    depends_on:
-    - image-build
+    depends_on: block-basic-models-tests-other
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2095,7 +2134,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Transformers Nightly Models
-    depends_on: image-build
+    depends_on: []
     key: block-transformers-nightly-models
   - label: Transformers Nightly Models
     agents:
@@ -2132,6 +2171,9 @@ steps:
         mount_buildkite_agent: true
 - group: Models - Distributed
   steps:
+  - block: Run Distributed Model Tests (2 GPUs)
+    depends_on: []
+    key: block-distributed-model-tests-2-gpus
   - label: Distributed Model Tests (2 GPUs)
     agents:
       queue: gpu_4_queue
@@ -2146,8 +2188,7 @@ steps:
     - pytest models/multimodal -v -s -m "distributed(num_gpus=2)" --ignore models/multimodal/generation/test_whisper.py
     - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py
       -v -s -m "distributed(num_gpus=2)"
-    depends_on:
-    - image-build
+    depends_on: block-distributed-model-tests-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2167,7 +2208,7 @@ steps:
 - group: Models - Language
   steps:
   - block: Run Language Models Test (Extended Generation)
-    depends_on: image-build
+    depends_on: []
     key: block-language-models-test-extended-generation
   - label: Language Models Test (Extended Generation)
     agents:
@@ -2197,7 +2238,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Language Models Test (Extended Pooling)
-    depends_on: image-build
+    depends_on: []
     key: block-language-models-test-extended-pooling
   - label: Language Models Test (Extended Pooling)
     agents:
@@ -2225,7 +2266,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Language Models Test (MTEB)
-    depends_on: image-build
+    depends_on: []
     key: block-language-models-test-mteb
   - label: Language Models Test (MTEB)
     agents:
@@ -2253,7 +2294,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Language Models Test (PPL)
-    depends_on: image-build
+    depends_on: []
     key: block-language-models-test-ppl
   - label: Language Models Test (PPL)
     agents:
@@ -2280,6 +2321,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Language Models Tests (Extra Standard) %N
+    depends_on: []
+    key: block-language-models-tests-extra-standard-n
   - label: Language Models Tests (Extra Standard) %N
     agents:
       queue: gpu_1_queue
@@ -2288,10 +2332,9 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pip freeze | grep -E "torch"
-    - pytest -v -s models/language -m "core_model and slow_test" \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-      \ --shard-id=$$BUILDKITE_PARALLEL_JOB
-    depends_on:
-    - image-build
+    - pytest -v -s models/language -m "core_model and slow_test" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      --shard-id=$$BUILDKITE_PARALLEL_JOB
+    depends_on: block-language-models-tests-extra-standard-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2309,6 +2352,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 2
+  - block: Run Language Models Tests (Hybrid) %N
+    depends_on: []
+    key: block-language-models-tests-hybrid-n
   - label: Language Models Tests (Hybrid) %N
     agents:
       queue: gpu_1_queue
@@ -2318,10 +2364,9 @@ steps:
     - cd /vllm-workspace/tests
     - uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
     - uv pip install --system --no-build-isolation "git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2"
-    - pytest -v -s models/language/generation \ -m hybrid_model \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-      \ --shard-id=$$BUILDKITE_PARALLEL_JOB
-    depends_on:
-    - image-build
+    - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      --shard-id=$$BUILDKITE_PARALLEL_JOB
+    depends_on: block-language-models-tests-hybrid-n
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2339,6 +2384,9 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
     parallelism: 2
+  - block: Run Language Models Tests (Standard)
+    depends_on: []
+    key: block-language-models-tests-standard
   - label: Language Models Tests (Standard)
     agents:
       queue: gpu_1_queue
@@ -2348,8 +2396,7 @@ steps:
     - cd /vllm-workspace/tests
     - pip freeze | grep -E "torch"
     - pytest -v -s models/language -m "core_model and (not slow_test)"
-    depends_on:
-    - image-build
+    depends_on: block-language-models-tests-standard
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2369,7 +2416,7 @@ steps:
 - group: Models - Multimodal
   steps:
   - block: Run Custom Models
-    depends_on: image-build
+    depends_on: []
     key: block-custom-models
   - label: Custom Models
     agents:
@@ -2396,6 +2443,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Accuracy Eval (Small Models)
+    depends_on: []
+    key: block-multi-modal-accuracy-eval-small-models
   - label: Multi-Modal Accuracy Eval (Small Models)
     agents:
       queue: gpu_1_queue
@@ -2405,8 +2455,7 @@ steps:
     - cd /vllm-workspace/.buildkite/lm-eval-harness
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
       --tp-size=1
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-accuracy-eval-small-models
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2424,7 +2473,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Multi-Modal Models (Extended) 1
-    depends_on: image-build
+    depends_on: []
     key: block-multi-modal-models-extended-1
   - label: Multi-Modal Models (Extended) 1
     agents:
@@ -2454,7 +2503,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Multi-Modal Models (Extended) 2
-    depends_on: image-build
+    depends_on: []
     key: block-multi-modal-models-extended-2
   - label: Multi-Modal Models (Extended) 2
     agents:
@@ -2484,7 +2533,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Multi-Modal Models (Extended) 3
-    depends_on: image-build
+    depends_on: []
     key: block-multi-modal-models-extended-3
   - label: Multi-Modal Models (Extended) 3
     agents:
@@ -2513,6 +2562,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Models (Standard)
+    depends_on: []
+    key: block-multi-modal-models-standard
   - label: Multi-Modal Models (Standard)
     agents:
       queue: gpu_1_queue
@@ -2526,8 +2578,7 @@ steps:
       --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py
       -m core_model
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-models-standard
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2544,6 +2595,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Processor
+    depends_on: []
+    key: block-multi-modal-processor
   - label: Multi-Modal Processor
     agents:
       queue: gpu_1_queue
@@ -2553,8 +2607,7 @@ steps:
     - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-processor
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2571,6 +2624,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Multi-Modal Processor Test (CPU)
+    depends_on: []
+    key: block-multi-modal-processor-test-cpu
   - label: Multi-Modal Processor Test (CPU)
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -2580,8 +2636,7 @@ steps:
     - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
-    depends_on:
-    - image-build
+    depends_on: block-multi-modal-processor-test-cpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2600,6 +2655,9 @@ steps:
         mount_buildkite_agent: true
 - group: Plugins
   steps:
+  - block: Run Plugin Tests (2 GPUs)
+    depends_on: []
+    key: block-plugin-tests-2-gpus
   - label: Plugin Tests (2 GPUs)
     agents:
       queue: gpu_4_queue
@@ -2622,8 +2680,7 @@ steps:
     - pytest -v -s entrypoints/openai/test_oot_registration.py
     - pytest -v -s models/test_oot_registration.py
     - pytest -v -s plugins/lora_resolvers
-    depends_on:
-    - image-build
+    depends_on: block-plugin-tests-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2642,6 +2699,9 @@ steps:
         mount_buildkite_agent: true
 - group: PyTorch
   steps:
+  - block: Run PyTorch Compilation Unit Tests
+    depends_on: []
+    key: block-pytorch-compilation-unit-tests
   - label: PyTorch Compilation Unit Tests
     agents:
       queue: gpu_1_queue
@@ -2650,36 +2710,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - find compile/ -maxdepth 1 -name "test_*.py" -exec pytest -s -v {} \\\\;
-    depends_on:
-    - []
-    soft_fail: false
-    plugins:
-    - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:52ef28ad15b328f5b6b3edb3f8b8904528a183f6
-        always-pull: true
-        propagate-environment: true
-        environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        volumes:
-        - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
-  - label: PyTorch Fullgraph
-    agents:
-      queue: gpu_1_queue
-    commands:
-    - (command nvidia-smi || true)
-    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-    - cd /vllm-workspace/tests
-    - pytest -v -s compile/fullgraph/test_full_graph.py -k "not test_fp8_kv_scale_compile"
-    - pytest -v -s compile/distributed/test_fusions_e2e.py -k "TRITON and not +quant_fp8
-      and not Llama-4"
-    depends_on:
-    - image-build
+    depends_on: block-pytorch-compilation-unit-tests
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2696,21 +2727,24 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
-  - label: PyTorch Fullgraph Smoke Test
+  - block: Run PyTorch Fullgraph
+    depends_on: []
+    key: block-pytorch-fullgraph
+  - label: PyTorch Fullgraph
     agents:
       queue: gpu_1_queue
     commands:
     - (command nvidia-smi || true)
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
-    - find compile/fullgraph/ -name "test_*.py" -not -name "test_full_graph.py" -exec
-      pytest -s -v {} \\\\;
-    depends_on:
-    - []
+    - pytest -v -s compile/fullgraph/test_full_graph.py -k "not test_fp8_kv_scale_compile"
+    - pytest -v -s compile/distributed/test_fusions_e2e.py -k "TRITON and not +quant_fp8
+      and not Llama-4"
+    depends_on: block-pytorch-fullgraph
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:52ef28ad15b328f5b6b3edb3f8b8904528a183f6
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
         always-pull: true
         propagate-environment: true
         environment:
@@ -2723,6 +2757,38 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run PyTorch Fullgraph Smoke Test
+    depends_on: []
+    key: block-pytorch-fullgraph-smoke-test
+  - label: PyTorch Fullgraph Smoke Test
+    agents:
+      queue: gpu_1_queue
+    commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - find compile/fullgraph/ -name "test_*.py" -not -name "test_full_graph.py" -exec
+      pytest -s -v {} \\\\;
+    depends_on: block-pytorch-fullgraph-smoke-test
+    soft_fail: false
+    plugins:
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
+        mount_buildkite_agent: true
+  - block: Run Pytorch Nightly Dependency Override Check
+    depends_on: []
+    key: block-pytorch-nightly-dependency-override-check
   - label: Pytorch Nightly Dependency Override Check
     agents:
       queue: gpu_1_queue
@@ -2731,8 +2797,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - bash standalone_tests/pytorch_nightly_dependency.sh
-    depends_on:
-    - image-build
+    depends_on: block-pytorch-nightly-dependency-override-check
     soft_fail: true
     plugins:
     - docker#v5.2.0:
@@ -2751,6 +2816,9 @@ steps:
         mount_buildkite_agent: true
 - group: Quantization
   steps:
+  - block: Run Quantization
+    depends_on: []
+    key: block-quantization
   - label: Quantization
     agents:
       queue: gpu_1_queue
@@ -2761,8 +2829,7 @@ steps:
     - uv pip install --system torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129
     - uv pip install --system conch-triton-kernels
     - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
-    depends_on:
-    - image-build
+    depends_on: block-quantization
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2779,6 +2846,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run Quantized MoE Test (B200)
+    depends_on: []
+    key: block-quantized-moe-test-b200
   - label: Quantized MoE Test (B200)
     agents:
       queue: B200
@@ -2787,8 +2857,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/
     - pytest -s -v tests/quantization/test_blackwell_moe.py
-    depends_on:
-    - image-build
+    depends_on: block-quantized-moe-test-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2807,6 +2876,9 @@ steps:
         - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: Samplers
   steps:
+  - block: Run Samplers Test
+    depends_on: []
+    key: block-samplers-test
   - label: Samplers Test
     agents:
       queue: gpu_1_queue
@@ -2816,8 +2888,7 @@ steps:
     - cd /vllm-workspace/tests
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
-    depends_on:
-    - image-build
+    depends_on: block-samplers-test
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2836,6 +2907,9 @@ steps:
         mount_buildkite_agent: true
 - group: Tool use
   steps:
+  - block: Run OpenAI-Compatible Tool Use
+    depends_on: []
+    key: block-openai-compatible-tool-use
   - label: OpenAI-Compatible Tool Use
     agents:
       queue: gpu_1_queue
@@ -2844,8 +2918,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s -m "not cpu_test" tool_use
-    depends_on:
-    - image-build
+    depends_on: block-openai-compatible-tool-use
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2862,6 +2935,9 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+  - block: Run OpenAI-Compatible Tool Use (CPU)
+    depends_on: []
+    key: block-openai-compatible-tool-use-cpu
   - label: OpenAI-Compatible Tool Use (CPU)
     agents:
       queue: cpu_queue_premerge_us_east_1
@@ -2870,8 +2946,7 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - pytest -v -s -m "cpu_test" tool_use
-    depends_on:
-    - image-build
+    depends_on: block-openai-compatible-tool-use-cpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
@@ -2891,7 +2966,7 @@ steps:
 - group: Weight Loading
   steps:
   - block: Run Weight Loading Multiple GPU
-    depends_on: image-build
+    depends_on: []
     key: block-weight-loading-multiple-gpu
   - label: Weight Loading Multiple GPU
     agents:
@@ -2919,7 +2994,7 @@ steps:
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
   - block: Run Weight Loading Multiple GPU - Large Models
-    depends_on: image-build
+    depends_on: []
     key: block-weight-loading-multiple-gpu---large-models
   - label: Weight Loading Multiple GPU - Large Models
     agents:
@@ -2937,14 +3012,6 @@ steps:
           priorityClassName: ci
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
-            command:
-            - bash
-            - -c
-            - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
-              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
-              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
-              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
