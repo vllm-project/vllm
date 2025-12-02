@@ -96,9 +96,9 @@ start_server() {
     # This correctly passes each element as a separate argument.
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
-        PROFILE_ARGS="--profiler-config '{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$profile_dir\"}'"
+        local profile_config_json="{\"profiler\": \"torch\", \"torch_profiler_dir\": \"$profile_dir\"}"
         VLLM_SERVER_DEV_MODE=1 \
-            vllm serve $PROFILE_ARGS "${common_args_array[@]}" > "$vllm_log" 2>&1 &
+            vllm serve --profiler-config "$profile_config_json" "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
         VLLM_SERVER_DEV_MODE=1 \
