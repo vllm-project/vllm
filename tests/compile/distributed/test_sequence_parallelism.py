@@ -153,10 +153,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         ]
 
     def ops_in_model(self):
-        if (
-            self.vllm_config.compilation_config.pass_config.fuse_norm_quant
-            and self.vllm_config.compilation_config.pass_config.fuse_act_quant
-        ):
+        if self.vllm_config.compilation_config.pass_config.fuse_norm_quant:
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         elif RMSNorm.enabled():
             return [
@@ -187,7 +184,6 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
-@pytest.mark.parametrize("fuse_act_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(

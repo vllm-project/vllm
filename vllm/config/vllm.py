@@ -83,11 +83,20 @@ IS_DENSE = False
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
-def enable_fusion(cfg: "VllmConfig") -> bool:
-    """Returns True if RMS norm or quant FP8 is enabled."""
+def enable_norm_fusion(cfg: "VllmConfig") -> bool:
+    """Returns True if both RMS norm and quant FP8 custom ops are enabled.
+    RMSNormQuantFusionPass requires both."""
     return cfg.compilation_config.is_custom_op_enabled(
         "rms_norm"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    ) and cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+
+
+def enable_act_fusion(cfg: "VllmConfig") -> bool:
+    """Returns True if quant FP8 custom op is enabled.
+    ActivationQuantFusionPass (SiLU+Mul+Quant) requires quant_fp8."""
+    return cfg.compilation_config.is_custom_op_enabled(
+        "silu_and_mul"
+    ) and cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
 OPTIMIZATION_LEVEL_00 = {
@@ -109,8 +118,8 @@ OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
         "pass_config": {
             "eliminate_noops": True,
-            "fuse_norm_quant": enable_fusion,
-            "fuse_act_quant": enable_fusion,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": False,
             "enable_sp": False,
@@ -124,8 +133,8 @@ OPTIMIZATION_LEVEL_02 = {
     "compilation_config": {
         "pass_config": {
             "eliminate_noops": True,
-            "fuse_norm_quant": enable_fusion,
-            "fuse_act_quant": enable_fusion,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
@@ -139,8 +148,8 @@ OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
         "pass_config": {
             "eliminate_noops": True,
-            "fuse_norm_quant": enable_fusion,
-            "fuse_act_quant": enable_fusion,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,

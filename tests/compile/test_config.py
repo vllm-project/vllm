@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
 from contextlib import nullcontext
 from unittest.mock import patch
 
@@ -10,8 +11,9 @@ from pydantic import ValidationError
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.logger import _print_warning_once
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
@@ -376,3 +378,57 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+def test_pass_config_deprecation(caplog):
+    # Enable propagation for vllm logger so caplog can capture it
+    vllm_logger = logging.getLogger("vllm")
+    vllm_logger.propagate = True
+
+    caplog.set_level(logging.WARNING)
+
+    # Clear cache to ensure warnings are re-issued
+    _print_warning_once.cache_clear()
+
+    # Test enable_fusion -> fuse_norm_quant, fuse_act_quant
+    caplog.clear()
+    config = PassConfig(enable_fusion=True)
+    assert "enable_fusion is deprecated" in caplog.text
+    assert config.fuse_norm_quant is True
+    assert config.fuse_act_quant is True
+    assert config.enable_fusion is None
+
+    # Test enable_attn_fusion -> fuse_attn_quant
+    caplog.clear()
+    config = PassConfig(enable_attn_fusion=True)
+    assert "enable_attn_fusion is deprecated" in caplog.text
+    assert config.fuse_attn_quant is True
+    assert config.enable_attn_fusion is None
+
+    # Test enable_noop -> eliminate_noops
+    caplog.clear()
+    config = PassConfig(enable_noop=True)
+    assert "enable_noop is deprecated" in caplog.text
+    assert config.eliminate_noops is True
+    assert config.enable_noop is None
+
+    # Test enable_sequence_parallelism -> enable_sp
+    caplog.clear()
+    config = PassConfig(enable_sequence_parallelism=True)
+    assert "enable_sequence_parallelism is deprecated" in caplog.text
+    assert config.enable_sp is True
+    assert config.enable_sequence_parallelism is None
+
+    # Test enable_async_tp -> fuse_gemm_comms
+    caplog.clear()
+    config = PassConfig(enable_async_tp=True)
+    assert "enable_async_tp is deprecated" in caplog.text
+    assert config.fuse_gemm_comms is True
+    assert config.enable_async_tp is None
+
+    # Test enable_fi_allreduce_fusion -> fuse_allreduce_rms
+    caplog.clear()
+    config = PassConfig(enable_fi_allreduce_fusion=True)
+    assert "enable_fi_allreduce_fusion is deprecated" in caplog.text
+    assert config.fuse_allreduce_rms is True
+    assert config.enable_fi_allreduce_fusion is None

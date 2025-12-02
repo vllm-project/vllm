@@ -107,33 +107,40 @@ class PassConfig:
 
     # New flags
     fuse_norm_quant: bool = Field(default=False)
-    """Whether to enable the custom RMSNorm+quant fusion pass."""
+    """Fuse the custom RMSNorm + quant ops."""
     fuse_act_quant: bool = Field(default=False)
-    """Whether to enable the custom SiluMul+quant fusion pass."""
+    """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Field(default=False)
-    """Whether to enable the custom attention+quant fusion pass."""
+    """Fuse the custom attention + quant ops."""
     eliminate_noops: bool = Field(default=False)
-    """Whether to enable the custom no-op elimination pass."""
+    """Eliminate no-op ops."""
     enable_sp: bool = Field(default=False)
-    """Whether to enable sequence parallelism."""
+    """Enable sequence parallelism."""
     fuse_gemm_comms: bool = Field(default=False)
-    """Whether to enable async TP."""
+    """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=False)
-    """Whether to enable flashinfer allreduce fusion."""
+    """Enable flashinfer allreduce fusion."""
 
     # Deprecated flags
     enable_fusion: bool = Field(default=None)
-    """Deprecated. Use fuse_norm_quant and fuse_act_quant instead."""
+    """Deprecated in: v0.12.0. Use fuse_norm_quant and fuse_act_quant 
+    instead. Will be removed in v0.13.0 or v1.0.0, whichever is sooner.
+    """
     enable_attn_fusion: bool = Field(default=None)
-    """Deprecated. Use fuse_attn_quant instead."""
+    """Deprecated in: v0.12.0. Use fuse_attn_quant instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
     enable_noop: bool = Field(default=None)
-    """Deprecated. Use eliminate_noops instead."""
+    """Deprecated in: v0.12.0. Use eliminate_noops instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
     enable_sequence_parallelism: bool = Field(default=None)
-    """Deprecated. Use enable_sp instead."""
+    """Deprecated in: v0.12.0. Use enable_sp instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
     enable_async_tp: bool = Field(default=None)
-    """Deprecated. Use fuse_gemm_comms instead."""
+    """Deprecated in: v0.12.0. Use fuse_gemm_comms instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
     enable_fi_allreduce_fusion: bool = Field(default=None)
-    """Deprecated. Use fuse_allreduce_rms instead."""
+    """Deprecated in: v0.12.0. Use fuse_allreduce_rms instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -154,7 +161,7 @@ class PassConfig:
             },
         }, where key is the device capability"""
     enable_qk_norm_rope_fusion: bool = False
-    """Whether to enable the fused Q/K RMSNorm + RoPE pass."""
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # TODO(luka) better pass enabling system.
 
