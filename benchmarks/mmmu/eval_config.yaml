@@ -1,0 +1,18 @@
+# Adapted from
+# https://github.com/MMMU-Benchmark/MMMU
+
+task_instructions:
+- ""
+multi_choice_example_format:
+- "{}
+
+{}
+
+Answer with the option's letter from the given choices directly."
+
+short_ans_example_format:
+- "{}
+
+Answer the question using a single word or phrase."
+temperature:
+- 0
