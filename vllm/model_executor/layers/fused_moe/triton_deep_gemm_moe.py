@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
 )
 
 
@@ -94,7 +95,9 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm and _valid_deep_gemm_shape(M, N, K):
+        if self.allow_deep_gemm and (
+            is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K)
+        ):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
                 M,
@@ -134,7 +137,10 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        use_deep_gemm = self.allow_deep_gemm and _valid_deep_gemm(hidden_states, w1, w2)
+        use_deep_gemm = self.allow_deep_gemm and (
+            is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2)
+        )
+
         experts = self.deep_gemm_expert if use_deep_gemm else self.triton_expert
         assert experts is not None
 

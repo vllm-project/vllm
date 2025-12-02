@@ -63,7 +63,17 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.handle = None
         self.expert_probs = None
         self.num_local_experts = num_local_experts
-        # Set to True to try cudagraph support.
+
+        # The hybrid kernels have the option of taking in a pre-computed
+        # routing map as an argument instead of computing it internally.
+        # The internally computed map uses a torch all gather which breaks
+        # CUDA graphs. When 'do_routing' is True, the routing map is computed
+        # by DeepEPHybridPrepareAndFinalize using CUDA graph-able communication
+        # primitives. Unfortunately, there's other stuff in the hybrid kernels
+        # that prevent CUDA graphs from working. This flag in for future work
+        # on CUDA graph support.
+        # Set to True to try compute the routing map in
+        # DeepEPHybridPrepareAndFinalize.
         self.do_routing = False
 
     def num_dispatchers(self) -> int:
