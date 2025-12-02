@@ -1413,6 +1413,7 @@ class OpenAIServingChat(OpenAIServing):
                 content=content,
                 enable_auto_tools=self.enable_auto_tools,
                 tool_parser_cls=self.tool_parser,
+                token_ids=token_ids,
             )
             tool_call_class = (
                 MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
