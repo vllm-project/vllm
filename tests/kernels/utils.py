@@ -14,6 +14,7 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention.backends.abstract import AttentionType
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.torch_utils import make_tensor_with_pad
@@ -839,6 +840,7 @@ def torch_experts(
     per_act_token_quant=False,
     block_shape: list[int] | None = None,
     apply_router_weights_on_input: bool = False,
+    activation: str = "silu_and_mul",
 ) -> torch.Tensor:
     assert (
         global_num_experts == -1
@@ -881,6 +883,8 @@ def torch_experts(
 
     f32 = torch.float32
 
+    act = CustomOp.op_registry[activation]
+
     for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
@@ -888,7 +892,7 @@ def torch_experts(
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+                tmp2 = act()(tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(tmp1.dtype)
@@ -969,6 +973,7 @@ def torch_moe(
     b_bias2: torch.Tensor | None = None,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    activation: str = "silu_and_mul",
 ) -> torch.Tensor:
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
     topk_weight, topk_ids = torch.topk(score, topk)
@@ -982,6 +987,7 @@ def torch_moe(
         b_bias1,
         b_bias2,
         expert_map,
+        activation=activation,
     )
 
 

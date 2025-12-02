@@ -25,7 +25,6 @@ from typing_extensions import TypeVar, assert_never
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -80,9 +79,9 @@ def _cached_encode(
     tokenizer: TokenizerLike,
     text: str,
     *,
-    add_special_tokens: bool | None = None,
+    add_special_tokens: bool = True,
 ) -> list[int]:
-    return encode_tokens(tokenizer, text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -90,11 +89,9 @@ def _cached_decode(
     tokenizer: TokenizerLike,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool | None = None,
+    skip_special_tokens: bool = False,
 ) -> str:
-    return decode_tokens(
-        tokenizer, list(token_ids), skip_special_tokens=skip_special_tokens
-    )
+    return tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens)
 
 
 def _seq2text(
@@ -110,7 +107,7 @@ def _seq2text(
         raise ValueError("You cannot decode tokens when `skip_tokenizer_init=True`")
 
     if not use_cache:
-        return decode_tokens(tokenizer, seq)
+        return tokenizer.decode(seq)
 
     return _cached_decode(tokenizer, tuple(seq))
 
@@ -126,7 +123,7 @@ def _seq2tokens(
             raise ValueError("You cannot encode text when `skip_tokenizer_init=True`")
 
         if not use_cache:
-            return encode_tokens(tokenizer, seq, add_special_tokens=False)
+            return tokenizer.encode(seq, add_special_tokens=False)
 
         return _cached_encode(tokenizer, seq, add_special_tokens=False)
 
@@ -1248,7 +1245,13 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 
 MultiModalHashes = dict[str, list[str]]
 """
-A collection of hashes with a similar structure as
+A collection of the multi-modal hash for each item, with a similar structure as
+[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
+"""
+
+MultiModalIsCached = dict[str, list[bool]]
+"""
+A collection of the `is_cached` flag for each item, with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
 
@@ -1681,7 +1684,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
-                for i, item in enumerate(items):
+                for i, item in enumerate(items.get_all_items_for_hash()):
                     item_uuid = mm_uuids_per_modality[i]
 
                     # NOTE: Even if a item_uuid is provided, we still compute a
@@ -1725,7 +1728,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache,
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
-    ) -> MultiModalDataItems:
+    ) -> tuple[MultiModalIsCached, MultiModalDataItems]:
         mm_is_cached = {
             modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
         }
@@ -1752,7 +1755,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        return self._to_mm_items(mm_missing_data)
+        return mm_is_cached, self._to_mm_items(mm_missing_data)
 
     def _recompute_cached_prompt_update(
         self,
@@ -1769,14 +1772,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         cache: BaseMultiModalProcessorCache,
         mm_hashes: MultiModalHashes,
+        mm_is_cached: MultiModalIsCached,
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
-        # Need to calculate this at the beginning to avoid skipping cache logic
-        # for subsequently repeated items in the same modality
-        mm_is_cached = {
-            modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
-        }
+        # Need to touch all mm hashes before update to avoid hash in updated
+        # list evict during update
+        for hashes in mm_hashes.values():
+            for item_hash in hashes:
+                cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
@@ -1789,15 +1793,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
-                kwargs: MultiModalKwargsItem | None
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
-                    kwargs = missing_kwargs[missing_next_idx]
-                    updates = missing_prompt_updates[missing_next_idx]
+                    missing_kwargs_item = missing_kwargs[missing_next_idx]
+                    missing_updates_item = missing_prompt_updates[missing_next_idx]
 
                     mm_missing_next_idx[modality] += 1
 
-                    item = kwargs, updates
+                    item = missing_kwargs_item, missing_updates_item
                 else:
                     item = None
 
@@ -1896,7 +1899,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_uuids=mm_uuids,
         )
 
-        mm_missing_data_items = self._get_cache_missing_items(
+        mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
@@ -1933,6 +1936,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
             cache,
             mm_hashes=mm_hashes,
+            mm_is_cached=mm_is_cached,
             mm_missing_kwargs=mm_missing_kwargs,
             mm_missing_prompt_updates=mm_missing_prompt_updates,
         )
@@ -2191,8 +2195,8 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt_raw, str):
-            decoder_prompt_ids = encode_tokens(
-                tokenizer, decoder_prompt_raw, add_special_tokens=False
+            decoder_prompt_ids = tokenizer.encode(
+                decoder_prompt_raw, add_special_tokens=False
             )
         else:
             decoder_prompt_ids = decoder_prompt_raw

@@ -33,7 +33,7 @@ class AsyncScheduler(Scheduler):
                 # in this scheduling step.
                 request.num_output_placeholders += 1 + cur_num_spec_tokens
                 # Add placeholders for the new tokens in spec_token_ids.
-                # Wwe will update the actual spec token ids in the worker process.
+                # We will update the actual spec token ids in the worker process.
                 request.spec_token_ids = [-1] * self.num_spec_tokens
 
         scheduler_output.pending_structured_output_tokens = (
@@ -45,6 +45,12 @@ class AsyncScheduler(Scheduler):
         request: Request,
         new_token_ids: list[int],
     ) -> tuple[list[int], bool]:
+        if request.discard_latest_async_tokens:
+            # If the request is force preempted in reset_prefix_cache, we
+            # should discard the latest async token.
+            request.discard_latest_async_tokens = False
+            return [], False
+
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids

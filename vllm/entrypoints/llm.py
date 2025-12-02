@@ -72,7 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.transformers_utils.tokenizer import get_cached_tokenizer
+from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -188,7 +188,7 @@ class LLM:
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
         tokenizer: str | None = None,
-        tokenizer_mode: TokenizerMode = "auto",
+        tokenizer_mode: TokenizerMode | str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
@@ -1492,8 +1492,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> None:
-        self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+        return self.llm_engine.reset_prefix_cache(reset_running_requests)
 
     def sleep(self, level: int = 1):
         """

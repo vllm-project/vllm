@@ -19,7 +19,7 @@ from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
     ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
@@ -51,8 +51,8 @@ def _cosine_similarity(
     for emb_1, emb_2 in zip(embed_1, embed_2):
         pair_score = scorer(emb_1.outputs.data, emb_2.outputs.data)
 
-        padding = []
-        if (pad_token_id := getattr(tokenizer, "pad_token_id", None)) is not None:
+        padding: list[int] = []
+        if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
         tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids

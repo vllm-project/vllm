@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from typing_extensions import Self
-
 if TYPE_CHECKING:
+    from transformers import BatchEncoding
+
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
 
@@ -13,11 +13,13 @@ class TokenizerLike(Protocol):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str,
-        /,
-        *,
+        path_or_repo_id: str | Path,
+        *args,
+        trust_remote_code: bool = False,
         revision: str | None = None,
-    ) -> Self:
+        download_dir: str | None = None,
+        **kwargs,
+    ) -> "TokenizerLike":
         raise NotImplementedError
 
     @property
@@ -34,6 +36,10 @@ class TokenizerLike(Protocol):
 
     @property
     def eos_token_id(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def pad_token_id(self) -> int:
         raise NotImplementedError
 
     @property
@@ -60,12 +66,12 @@ class TokenizerLike(Protocol):
 
     def __call__(
         self,
-        text: str | list[str] | list[int],
+        text: str | list[str],
         text_pair: str | None = None,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
-    ):
+    ) -> "BatchEncoding":
         raise NotImplementedError
 
     def get_vocab(self) -> dict[str, int]:
@@ -79,7 +85,7 @@ class TokenizerLike(Protocol):
         text: str,
         truncation: bool | None = None,
         max_length: int | None = None,
-        add_special_tokens: bool | None = None,
+        add_special_tokens: bool = True,
     ) -> list[int]:
         raise NotImplementedError
 
@@ -94,12 +100,12 @@ class TokenizerLike(Protocol):
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
         raise NotImplementedError
 
     def convert_ids_to_tokens(
         self,
         ids: list[int],
-        skip_special_tokens: bool = True,
+        skip_special_tokens: bool = False,
     ) -> list[str]:
         raise NotImplementedError
