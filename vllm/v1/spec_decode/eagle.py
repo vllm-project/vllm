@@ -80,6 +80,7 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -151,7 +152,9 @@ class EagleProposer:
         )
 
         self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
+            (self.max_num_tokens, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=device,
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
@@ -1013,6 +1016,10 @@ class EagleProposer:
                 "Qwen3VLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
+            elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.vision_config.image_token_id
+                )
             else:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
