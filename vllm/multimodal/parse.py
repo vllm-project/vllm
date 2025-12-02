@@ -134,7 +134,9 @@ class EmbeddingItems(
     or a list of embedding tensors (one per item).
     """
 
-    def _unwrap(self, item: torch.Tensor | MediaWithBytes[torch.Tensor]) -> torch.Tensor:
+    def _unwrap(
+        self, item: torch.Tensor | MediaWithBytes[torch.Tensor]
+    ) -> torch.Tensor:
         """Extract media from wrapper if present."""
         return item.media if isinstance(item, MediaWithBytes) else item
 
