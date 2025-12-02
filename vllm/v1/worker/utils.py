@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
@@ -16,9 +16,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
-
-if TYPE_CHECKING:
-    from vllm.attention.layer import Attention
 
 
 class MultiModalBudget:
@@ -278,7 +275,7 @@ def add_kv_sharing_layers_to_kv_cache_groups(
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, "Attention"],
+    forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
 ) -> None:
