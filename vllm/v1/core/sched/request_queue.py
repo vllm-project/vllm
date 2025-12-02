@@ -143,7 +143,7 @@ class PriorityRequestQueue(RequestQueue):
     """
 
     def __init__(self) -> None:
-        self._heap: list[tuple[int, float, Request]] = []
+        self._heap: list[tuple[int, float, str, int, Request]] = []
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
