@@ -4,7 +4,6 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
-import torch.nn as nn
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig
@@ -61,11 +60,10 @@ class AllReduceMoePattern(_SequenceParallelMOEPatternHelper):
             return chunks
 
         def replacement(input: torch.Tensor):
-            seq_len = input.size(0)
-            pad_len = (-seq_len) % self.tp_size
-            y = nn.functional.pad(input, (0, 0, 0, pad_len))
+            ### no need to pad as we that the input shape is always padded
+            reduce_scatter = self._reduce_scatter(input)
 
-            return y
+            return reduce_scatter
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
@@ -95,19 +93,9 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable(self, shape: int | None) -> bool:
-        # When sequence parallelism is enabled, the residual tensor from RMSNorm
-        # needs to be split along the sequence dimension. However, this dimension
-        # is symbolic during piecewise compilation, and splitting symbolic shapes
-        # is not supported.
-        #
-        # This pass is therefore only applied when the sequence dimension is
-        # concrete:
-        # 1. In full-graph compilation mode (no Dynamo splitting ops are used).
-        #   For this case we always pad num_tokens to be a multiple of
-        #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
-        # 2. For specific shape provided during compilation (e.g., from
-        #    `compile_sizes`), which must be divisible by the tensor-parallel
-        #    size.
+        # This pass is only applied when the sequence dimension is
+        # concrete(In full graph compilation or specific shape
+        # provided during compilation)
         if (
             not self.compilation_config.splitting_ops
             or self.compilation_config.use_inductor_graph_partition

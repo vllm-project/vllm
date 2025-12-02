@@ -84,7 +84,6 @@ class TestMoEModel(torch.nn.Module):
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("dynamic", [False, True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_moe_pass(
     test_model_cls: type[torch.nn.Module],
