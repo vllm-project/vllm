@@ -1026,7 +1026,9 @@ class GPUModelRunner(
 
         # Incrementally update ngram_gpu tensors after batch is stable
         if is_ngram_gpu:
-            with record_function_or_nullcontext("update_ngram_gpu_tensors_incremental"):
+            with record_function_or_nullcontext(
+                "gpu_model_runner: update_ngram_gpu_tensors_incremental"
+            ):
                 self._update_ngram_gpu_tensors_incremental(ngram_gpu_new_reqs)
 
     def _update_ngram_gpu_tensors_incremental(
