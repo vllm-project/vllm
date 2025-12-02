@@ -4,7 +4,7 @@ Large-scale cluster-level expert parallel, as described in the [DeepSeek-V3 Tech
 
 Here we break down the requirements in 2 steps:
 
-1. Build and install the Python libraries (both [pplx-kernels](https://github.com/ppl-ai/pplx-kernels) and [DeepEP](https://github.com/deepseek-ai/DeepEP)), including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this.
+1. Build and install the Python libraries ([pplx-kernels](https://github.com/ppl-ai/pplx-kernels), [pplx-garden](https://github.com/perplexityai/pplx-garden) and [DeepEP](https://github.com/deepseek-ai/DeepEP)), including necessary dependencies like NVSHMEM. This step does not require any privileged access. Any user can do this.
 2. Configure NVIDIA driver to enable IBGDA. This step requires root access, and must be done on the host machine.
 
 2 is necessary for multi-node deployment.
