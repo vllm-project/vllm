@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -175,9 +175,19 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
+
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        factors.append(self.max_num_batched_tokens)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -223,19 +233,6 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
-
-    @property
-    @deprecated(
-        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
-        "`SchedulerConfig.enable_chunked_prefill`. "
-        "The old name will be removed in v0.12."
-    )
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
@@ -287,3 +284,8 @@ class SchedulerConfig:
             )
 
         return self
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "max_model_len" or name == "is_encoder_decoder":
+            raise AttributeError(f"{name} is an init-only parameter. ")
+        return object.__getattribute__(self, name)

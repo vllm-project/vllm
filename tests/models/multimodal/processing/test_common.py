@@ -22,11 +22,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.transformers_utils.tokenizer import (
-    MistralTokenizer,
-    cached_tokenizer_from_config,
-    encode_tokens,
-)
+from vllm.tokenizers import MistralTokenizer, cached_tokenizer_from_config
+from vllm.transformers_utils.tokenizer import encode_tokens
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -233,7 +230,7 @@ def _test_processing_correctness(
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    factories = model_cls._processor_factory
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
