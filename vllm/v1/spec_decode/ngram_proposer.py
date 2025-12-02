@@ -196,9 +196,9 @@ def batch_propose_numba(
             k=k,
         )
 
-        valid_ngram_num_drafts[i] = drafter_output.shape[0]
+        valid_ngram_num_drafts[idx] = drafter_output.shape[0]
         if len(drafter_output):
-            valid_ngram_draft[i, : drafter_output.shape[0]] = drafter_output
+            valid_ngram_draft[idx, : drafter_output.shape[0]] = drafter_output
 
 
 @jit(nopython=True)
