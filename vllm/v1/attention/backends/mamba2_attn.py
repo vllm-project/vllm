@@ -380,8 +380,12 @@ class Mamba2AttentionMetadataBuilder(
                     block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
                         self.num_spec + 1, device=self.device
                     ).unsqueeze(0)
+                    batch_indices = torch.arange(
+                        common_attn_metadata.block_table_tensor.size(0),
+                        device=self.device,
+                    ).unsqueeze(1)
                     spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        :, block_indices
+                        batch_indices, block_indices
                     ]
                 else:
                     spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
@@ -392,9 +396,6 @@ class Mamba2AttentionMetadataBuilder(
                 non_spec_query_start_loc = None
             else:
                 if self.vllm_config.cache_config.enable_prefix_caching:
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token[
-                        ~spec_sequence_masks
-                    ]
                     block_idx_last_scheduled_token = block_idx_last_scheduled_token[
                         ~spec_sequence_masks
                     ]
@@ -415,9 +416,12 @@ class Mamba2AttentionMetadataBuilder(
                     block_indices = num_cacheable_blocks[spec_sequence_masks].unsqueeze(
                         1
                     ) + torch.arange(self.num_spec + 1, device=self.device).unsqueeze(0)
+                    batch_indices = torch.arange(
+                        spec_sequence_masks.sum().item(), device=self.device
+                    ).unsqueeze(1)
                     spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        spec_sequence_masks, block_indices
-                    ]
+                        spec_sequence_masks
+                    ][batch_indices, block_indices]
                     non_spec_state_indices_tensor = (
                         common_attn_metadata.block_table_tensor[~spec_sequence_masks]
                     )
