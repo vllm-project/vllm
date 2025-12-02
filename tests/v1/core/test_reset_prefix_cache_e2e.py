@@ -17,6 +17,7 @@ def test_reset_prefix_cache_e2e():
         gpu_memory_utilization=0.2,
         async_scheduling=True,
         max_num_batched_tokens=32,
+        max_model_len=2048,
         compilation_config={"mode": 0},
     )
     engine = LLMEngine.from_engine_args(engine_args)
