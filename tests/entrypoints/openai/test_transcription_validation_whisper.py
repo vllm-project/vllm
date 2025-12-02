@@ -143,7 +143,6 @@ async def test_streaming_response(winning_call, whisper_client):
         language="en",
         temperature=0.0,
         stream=True,
-        timeout=30,
     )
     # Reconstruct from chunks and validate
     async for chunk in res:
@@ -162,7 +161,6 @@ async def test_stream_options(winning_call, whisper_client):
         temperature=0.0,
         stream=True,
         extra_body=dict(stream_include_usage=True, stream_continuous_usage_stats=True),
-        timeout=30,
     )
     final = False
     continuous = True
