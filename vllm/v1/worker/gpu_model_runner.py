@@ -276,7 +276,6 @@ class GPUModelRunner(
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        self.fwd_idx = 0
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -2911,7 +2910,6 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        self.fwd_idx += 1
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3073,28 +3071,6 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-
-        # Count context tokens per request
-        context_requests = 0
-        decode_requests = 0
-
-        for req in scheduler_output.scheduled_new_reqs:
-            context_len = len(req.prompt_token_ids) if req.prompt_token_ids else 0
-            num_computed = req.num_computed_tokens
-            if num_computed < context_len:
-                context_requests += 1
-            else:
-                decode_requests += 1
-        # For cached requests
-        for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
-            context_len = self.requests[req_id].num_prompt_tokens
-            num_computed = scheduler_output.scheduled_cached_reqs.num_computed_tokens[i]
-
-            if num_computed < context_len:
-                context_requests += 1
-            else:
-                decode_requests += 1
-
         with (
             set_forward_context(
                 attn_metadata,
@@ -3104,9 +3080,6 @@ class GPUModelRunner(
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
-            ),
-            record_function_or_nullcontext(
-                f"Forward_{self.fwd_idx}_ctx_{context_requests}_decode_{decode_requests}_total_tokens_{num_tokens_padded}"
             ),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
