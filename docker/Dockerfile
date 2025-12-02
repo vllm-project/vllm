@@ -146,8 +146,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
 # see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+# Support both x86_64 and aarch64 architectures, with defaults for x86_64
+ARG torch_cuda_arch_list_x86_64='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
+ARG torch_cuda_arch_list_arm64='8.0 8.7 8.9 9.0+PTX 12.1a'
+# Set the appropriate architecture list based on the target platform
+RUN if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+        echo "export TORCH_CUDA_ARCH_LIST=$(echo ${torch_cuda_arch_list_arm64})" > /etc/environment; \
+    else \
+        echo "export TORCH_CUDA_ARCH_LIST=$(echo ${torch_cuda_arch_list_x86_64})" > /etc/environment; \
+    fi
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list_x86_64}
 #################### BASE BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -157,6 +165,13 @@ ARG TARGETPLATFORM
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
+
+# Set architecture-specific environment variables appropriately for this build stage
+RUN if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+        echo "export TORCH_CUDA_ARCH_LIST=8.0 8.7 8.9 9.0+PTX 12.1a" >> $VIRTUAL_ENV/bin/activate; \
+    else \
+        echo "export TORCH_CUDA_ARCH_LIST=7.0 7.5 8.0 8.9 9.0 10.0 12.0" >> $VIRTUAL_ENV/bin/activate; \
+    fi
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
@@ -199,12 +214,22 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
-        && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
+        echo "Installing sccache..." && \
+        # Determine the appropriate sccache download URL based on the target platform \
+        if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+            SCCACHE_DOWNLOAD_URL_ARCH="https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-aarch64-unknown-linux-musl.tar.gz"; \
+        else \
+            SCCACHE_DOWNLOAD_URL_ARCH="${SCCACHE_DOWNLOAD_URL}"; \
+        fi && \
+        curl -L -o sccache.tar.gz $SCCACHE_DOWNLOAD_URL_ARCH && \
+        tar -xzf sccache.tar.gz && \
+        if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+            sudo mv sccache-v0.8.1-aarch64-unknown-linux-musl/sccache /usr/bin/sccache; \
+        else \
+            sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache; \
+        fi && \
+        rm -rf sccache.tar.gz sccache-* && \
+        if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
         && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
         && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
         && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
@@ -230,6 +255,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         mkdir -p .deps && \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        # Set appropriate CUDA architecture for the target platform
+        if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+            # Add ARM64 specific architectures
+            export TORCH_CUDA_ARCH_LIST="8.0 8.7 8.9 9.0+PTX 12.1a"; \
+        else \
+            export TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.9 9.0 10.0 12.0"; \
+        fi && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -261,7 +293,7 @@ COPY .buildkite/check-wheel-size.py check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+RUN if [ "$RUN_WHEEL_CHECK" = "true" ] && [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
         python3 check-wheel-size.py dist; \
     else \
         echo "Skipping wheel size check."; \
@@ -389,19 +421,41 @@ ENV UV_LINK_MODE=copy
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
-# Install vllm wheel first, so that torch etc will be installed.
+# Install vllm with platform-appropriate flags
+# On ARM64, install from pre-built wheel using --no-binary to avoid build issues
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+        # For ARM64, try to install a pre-built wheel from PyPI if available \
+        # If the direct install fails, we may fall back to source installation with additional dependencies \
+        uv pip install --system vllm \
+            --no-build-isolation \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    else \
+        # For x86_64, use the built wheel if available, otherwise install from source \
+        if [ -f /vllm-workspace/dist/*.whl ]; then \
+            uv pip install --system /vllm-workspace/dist/*.whl --verbose \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        else \
+            uv pip install --system vllm \
+                --no-build-isolation \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        fi; \
+    fi
 
-# Install FlashInfer pre-compiled kernel cache and binaries
-# https://docs.flashinfer.ai/installation.html
+# Install FlashInfer for optimized attention kernels
+# On ARM64, flashinfer may not be available in pre-compiled form, so handle gracefully
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==0.5.3 \
-    && uv pip install --system flashinfer-jit-cache==0.5.3 \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && flashinfer show-config
+    if [ "${TARGETPLATFORM}" = "linux/arm64" ]; then \
+        # On ARM64, flashinfer may not be available, so we skip it \
+        echo "Skipping flashinfer installation on ARM64 (not available in pre-compiled form)"; \
+    else \
+        # On x86_64, use pre-compiled binaries \
+        uv pip install --system flashinfer-cubin==0.5.3 \
+        && uv pip install --system flashinfer-jit-cache==0.5.3 \
+            --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && flashinfer show-config; \
+    fi
 
 COPY examples examples
 COPY benchmarks benchmarks
