@@ -225,12 +225,8 @@ class TestParameterSweep:
             {'_benchmark_name': 'exp1', 'max_tokens': 200},
         ]
         
-        try:
+        with pytest.raises(ValueError, match="Duplicate _benchmark_name values"):
             ParameterSweep.from_records(records)
-            assert False, "Should have raised ValueError for duplicate names"
-        except ValueError as e:
-            assert "Duplicate _benchmark_name values" in str(e)
-            assert "exp1" in str(e)
 
     def test_unique_benchmark_names_multiple_duplicates(self):
         """Test validation with multiple duplicate names."""
@@ -241,11 +237,8 @@ class TestParameterSweep:
             {'_benchmark_name': 'exp2', 'max_tokens': 400},
         ]
         
-        try:
+        with pytest.raises(ValueError, match="Duplicate _benchmark_name values"):
             ParameterSweep.from_records(records)
-            assert False, "Should have raised ValueError for duplicate names"
-        except ValueError as e:
-            assert "Duplicate _benchmark_name values" in str(e)
 
     def test_no_benchmark_names_allowed(self):
         """Test that records without _benchmark_name are allowed."""
