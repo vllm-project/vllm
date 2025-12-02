@@ -809,7 +809,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 2. Recurrent attention
 
-        # 3.1: process the multi-query part
+        # 3.1: Process the multi-query part
         if spec_sequence_masks is not None:
             core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
                 q=query_spec,
