@@ -33,8 +33,8 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import Attention
 from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -287,7 +287,10 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        if config.n_shared_experts is None or self.is_rocm_aiter_moe_enabled:
+        self.is_fusion_moe_shared_experts_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
+        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -327,7 +330,7 @@ class DeepseekV2MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
-            if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            if self.is_fusion_moe_shared_experts_enabled
             else None,
         )
 
@@ -390,6 +393,16 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
+
+
+def _get_llama_4_scaling(
+    original_max_position_embeddings: int, scaling_beta: float, positions: torch.Tensor
+) -> torch.Tensor:
+    scaling = 1 + scaling_beta * torch.log(
+        1 + torch.floor(positions / original_max_position_embeddings)
+    )
+    # Broadcast over num_heads and head_dim
+    return scaling[..., None, None]
 
 
 class DeepseekV2Attention(nn.Module):
@@ -478,7 +491,11 @@ class DeepseekV2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = "deepseek_yarn"
+            config.rope_parameters["rope_type"] = (
+                "deepseek_yarn"
+                if config.rope_parameters.get("apply_yarn_scaling", True)
+                else "deepseek_llama_scaling"
+            )
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
@@ -488,7 +505,10 @@ class DeepseekV2Attention(nn.Module):
             is_neox_style=False,
         )
 
-        if config.rope_parameters["rope_type"] != "default":
+        if (
+            config.rope_parameters["rope_type"] != "default"
+            and config.rope_parameters["rope_type"] == "deepseek_yarn"
+        ):
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
@@ -508,6 +528,7 @@ class DeepseekV2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.q_lora_rank is not None:
             q = self.q_a_proj(hidden_states)[0]
@@ -533,6 +554,11 @@ class DeepseekV2Attention(nn.Module):
         k = torch.empty_like(q)
         k[..., : self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim :] = k_pe
+
+        # Apply llama 4 scaling if provided
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
         # padding value to qk_head_dim for alignment
         v = torch.nn.functional.pad(
             v, [0, self.qk_head_dim - self.v_head_dim], value=0
@@ -591,6 +617,7 @@ def sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
+    fp8_dtype = current_platform.fp8_dtype()
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return sparse_attn_indexer_fake(
@@ -630,7 +657,7 @@ def sparse_attn_indexer(
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
                 device=k.device,
-                dtype=torch.float8_e4m3fn,
+                dtype=fp8_dtype,
             )
             k_scale = torch.empty(
                 [chunk.total_seq_lens, 4],
@@ -644,7 +671,12 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            logits = fp8_mqa_logits(
+            fp8_mqa_logits_func = fp8_mqa_logits
+            if current_platform.is_rocm():
+                from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
+
+                fp8_mqa_logits_func = rocm_fp8_mqa_logits
+            logits = fp8_mqa_logits_func(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
                 weights[chunk.token_start : chunk.token_end],
@@ -689,7 +721,14 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        logits = fp8_paged_mqa_logits(
+        fp8_paged_mqa_logits_func = fp8_paged_mqa_logits
+        if current_platform.is_rocm():
+            from vllm.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_fp8_paged_mqa_logits,
+            )
+
+            fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+        logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
@@ -746,7 +785,8 @@ def sparse_attn_indexer_fake(
     _flattened_kv = torch.empty(
         [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
     )
-    _k_fp8 = _flattened_kv[..., :head_dim].view(torch.float8_e4m3fn).contiguous()
+    fp8_dtype = current_platform.fp8_dtype()
+    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
     _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
@@ -837,8 +877,8 @@ class Indexer(nn.Module):
         )
 
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        q = torch.cat([q_pe, q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze(1), k_nope], dim=-1)
+        q = torch.cat([q_pe.squeeze(0), q_nope], dim=-1)
+        k = torch.cat([k_pe.squeeze((0, 2)), k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -970,7 +1010,12 @@ class DeepseekV2MLAAttention(nn.Module):
         )
 
         if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = "deepseek_yarn"
+            config.rope_parameters["rope_type"] = (
+                "deepseek_yarn"
+                if config.rope_parameters.get("apply_yarn_scaling", True)
+                else "deepseek_llama_scaling"
+            )
+
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
@@ -978,7 +1023,11 @@ class DeepseekV2MLAAttention(nn.Module):
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
         )
-        if config.rope_parameters["rope_type"] != "default":
+
+        if (
+            config.rope_parameters["rope_type"] != "default"
+            and config.rope_parameters["rope_type"] == "deepseek_yarn"
+        ):
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
@@ -987,6 +1036,13 @@ class DeepseekV2MLAAttention(nn.Module):
         self.is_v32 = hasattr(config, "index_topk")
 
         if self.is_v32:
+            self.indexer_rope_emb = get_rope(
+                qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=config.rope_parameters,
+                is_neox_style=True,
+            )
             self.indexer = Indexer(
                 vllm_config,
                 config,
@@ -998,6 +1054,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 f"{prefix}.indexer",
             )
         else:
+            self.indexer_rope_emb = None
             self.indexer = None
 
         mla_modules = MLAModules(
@@ -1015,6 +1072,7 @@ class DeepseekV2MLAAttention(nn.Module):
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
             indexer=self.indexer,
+            indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
         )
@@ -1038,8 +1096,9 @@ class DeepseekV2MLAAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None,
     ) -> torch.Tensor:
-        return self.mla_attn(positions, hidden_states)
+        return self.mla_attn(positions, hidden_states, llama_4_scaling)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -1129,6 +1188,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -1139,6 +1199,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            llama_4_scaling=llama_4_scaling,
         )
 
         if (
@@ -1240,8 +1301,24 @@ class DeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Compute llama 4 scaling once per forward pass if enabled
+        llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
+        llama_4_scaling: torch.Tensor | None
+        if llama_4_scaling_config is not None:
+            llama_4_scaling = _get_llama_4_scaling(
+                original_max_position_embeddings=llama_4_scaling_config[
+                    "original_max_position_embeddings"
+                ],
+                scaling_beta=llama_4_scaling_config["beta"],
+                positions=positions,
+            )
+        else:
+            llama_4_scaling = None
+
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, llama_4_scaling
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1299,6 +1376,7 @@ class DeepseekV2ForCausalLM(
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+    model_cls = DeepseekV2Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1329,7 +1407,7 @@ class DeepseekV2ForCausalLM(
                 "kv_a_proj_with_mqa",
             ]
 
-        self.model = DeepseekV2Model(
+        self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         if get_pp_group().is_last_rank:
@@ -1453,8 +1531,8 @@ class DeepseekV2ForCausalLM(
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            is_fuse_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and (
-                "mlp.shared_experts" in name
+            is_fusion_moe_shared_experts_layer = (
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -1469,7 +1547,7 @@ class DeepseekV2ForCausalLM(
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
-                if is_fuse_shared_experts_layer:
+                if is_fusion_moe_shared_experts_layer:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
 
@@ -1505,7 +1583,7 @@ class DeepseekV2ForCausalLM(
                 # appended expert slots mlp.experts.{n_routed_experts + j}.*
                 # accordingly.
                 num_chunks = 1
-                if is_fuse_shared_experts_layer:
+                if is_fusion_moe_shared_experts_layer:
                     num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
@@ -1522,7 +1600,7 @@ class DeepseekV2ForCausalLM(
                     chunk_name = name
                     weight_to_load = loaded_weight
 
-                    if is_fuse_shared_experts_layer:
+                    if is_fusion_moe_shared_experts_layer:
                         if split_dim == 0:
                             weight_to_load = loaded_weight[
                                 j * chunk_size : (j + 1) * chunk_size, :
@@ -1573,7 +1651,7 @@ class DeepseekV2ForCausalLM(
                             return_success=True,
                         )
                         if success:
-                            if not is_fuse_shared_experts_layer:
+                            if not is_fusion_moe_shared_experts_layer:
                                 name = name_mapped
                             else:
                                 loaded_params.add(name_mapped)
@@ -1602,7 +1680,7 @@ class DeepseekV2ForCausalLM(
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fuse_shared_experts_layer:
+            if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
         return loaded_params

@@ -14,7 +14,11 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (
+    MarlinLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
     marlin_repeat_scales_on_all_ranks,
 )
 from vllm.model_executor.parameter import (
@@ -45,12 +49,14 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         group_size: int | None = None,
         symmetric: bool | None = True,
         actorder: ActivationOrdering | None = None,
+        layer_name: str | None = None,
     ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
         self.has_g_idx = actorder == ActivationOrdering.GROUP
+        self.layer_name = layer_name
 
         if self.group_size == -1 and self.strategy != "channel":
             raise ValueError(
@@ -73,8 +79,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # ampere and up
-        return 80
+        # Turing and up
+        return 75
 
     def create_weights(
         self,
@@ -107,6 +113,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.info("Using %s for CompressedTensorsWNA16", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
+
+        if isinstance(kernel_type, MarlinLinearKernel):
+            input_dtype = get_marlin_input_dtype(self.layer_name)
+            if input_dtype is not None:
+                mp_linear_kernel_config.act_type = input_dtype
 
         # If group_size is -1, we are in channelwise case.
         group_size = self.group_size if self.group_size != -1 else input_size
