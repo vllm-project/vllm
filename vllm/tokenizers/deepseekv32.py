@@ -93,7 +93,8 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return hash(id(self))
 
     def __len__(self) -> int:
-        return self.vocab_size
+        # </think> is an added token in DeepseekV32 tokenizer
+        return self.vocab_size + len(self.get_added_vocab())
 
     def __call__(
         self,
@@ -135,7 +136,6 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return self.tokenizer.convert_tokens_to_string(tokens)
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
-        skip_special_tokens = False
         return self.tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
 
     def convert_ids_to_tokens(
@@ -143,4 +143,6 @@ class DeepseekV32Tokenizer(HfTokenizer):
         ids: list[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
-        return [self.decode(ids, skip_special_tokens=skip_special_tokens)]
+        return self.tokenizer.convert_ids_to_tokens(
+            ids, skip_special_tokens=skip_special_tokens
+        )
