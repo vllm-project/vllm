@@ -65,9 +65,6 @@ class DeepSeekV32ToolParser(MinimaxM2ToolParser):
             r"<｜DSML｜invoke name=(.*?)</｜DSML｜invoke>", re.DOTALL
         )
         self.parameter_complete_regex = re.compile(
-            r"<｜DSML｜parameter name=(.*?)</｜DSML｜parameter>", re.DOTALL
-        )
-        self.parameter_complete_regex = re.compile(
             r'<｜DSML｜parameter\s+name="([^"]+)"\s+string=".*?"\s*>(.*?)</｜DSML｜parameter>'
         )
 
