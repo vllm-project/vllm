@@ -410,16 +410,17 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
-        for token_index in range(self.num_speculative_tokens - 1):
-            # In padded drafter batch, we need to adjust the sequence lengths
-            # to remove the "padding" (i.e. rejected tokens).
-            if token_index == 0 and is_padded:
-                assert num_rejected_tokens_gpu is not None
-                common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-                # TODO: remove seq_lens_cpu adjustment once
-                # https://github.com/vllm-project/vllm/pull/29624 lands
-                common_attn_metadata.seq_lens_cpu -= num_rejected_tokens_gpu.to("cpu")
 
+        # In padded drafter batch, we need to adjust the sequence lengths
+        # to remove the "padding" (i.e. rejected tokens).
+        if self.num_speculative_tokens > 1 and is_padded:
+            assert num_rejected_tokens_gpu is not None
+            common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+            # TODO: remove seq_lens_cpu adjustment once
+            # https://github.com/vllm-project/vllm/pull/29624 lands
+            common_attn_metadata.seq_lens_cpu -= num_rejected_tokens_gpu.to("cpu")
+
+        for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
