@@ -143,15 +143,10 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/score` - Scoring API (non-`/v1` variant)
 - `/rerank` - Reranking API (non-`/v1` variant)
 
-**Operational control endpoints:**
+**Operational control endpoints (always enabled):**
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/scale_elastic_ep` - Trigger scaling operations
-- `/reset_prefix_cache` - Reset prefix cache
-- `/reset_mm_cache` - Reset multimodal cache
-- `/sleep` - Put engine to sleep
-- `/wake_up` - Wake engine from sleep
-- `/collective_rpc` - Internal RPC endpoint
 
 **Utility endpoints:**
 - `/tokenize` - Tokenize text
@@ -162,6 +157,25 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/version` - Version information
 - `/load` - Server load metrics
 
+**Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`):**
+
+These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
+
+- `/server_info` - Get detailed server configuration
+- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
+- `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
+- `/sleep` - Put engine to sleep (causes denial of service)
+- `/wake_up` - Wake engine from sleep
+- `/is_sleeping` - Check if engine is sleeping
+- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
+
+**Profiler endpoints (only when `VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE` are set):**
+
+These endpoints are only available when profiling is enabled and should only be used for local development:
+
+- `/start_profile` - Start PyTorch profiler
+- `/stop_profile` - Stop PyTorch profiler
+
 **Note:** The `/invocations` endpoint is particularly concerning as it provides unauthenticated access to the same inference capabilities as the protected `/v1` endpoints.
 
 ### Security Implications
@@ -170,14 +184,27 @@ An attacker who can reach the vLLM HTTP server can:
 
 1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
 2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
-3. **Access operational controls** to manipulate server state via `/reset_prefix_cache`, `/sleep`, and other management endpoints
+3. **Access operational controls** to manipulate server state (e.g., pausing generation)
+4. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
 ### Recommended Security Practices
 
-One effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
+#### 1. Never Enable Development Mode in Production
+
+**CRITICAL:** Never set `VLLM_SERVER_DEV_MODE=1` in production environments. Development endpoints expose extremely dangerous functionality including:
+- Arbitrary RPC execution via `/collective_rpc`
+- Cache manipulation that can disrupt service
+- Detailed server configuration disclosure
+
+Similarly, never enable profiler endpoints (`VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE`) in production.
+
+#### 2. Deploy Behind a Reverse Proxy
+
+The most effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
 
 - Explicitly allowlists only the endpoints you want to expose to end users
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
+- Implements additional authentication, rate limiting, and logging at the proxy layer
 
 ## Reporting Security Vulnerabilities
 
