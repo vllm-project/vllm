@@ -161,11 +161,10 @@ class Processor:
                 or params.structured_outputs
             )
         ):
-            logger.warning_once("There be dragons here!")
-            # raise ValueError(
-            #     "async scheduling with spec decoding doesn't yet support "
-            #     "penalties, bad words or structured outputs in sampling parameters."
-            # )
+            raise ValueError(
+                "async scheduling with spec decoding doesn't yet support "
+                "penalties, bad words or structured outputs in sampling parameters."
+            )
 
     def _validate_params(
         self,
