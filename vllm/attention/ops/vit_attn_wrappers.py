@@ -28,10 +28,16 @@ def flash_attn_maxseqlen_wrapper(
     batch_size: int,
     is_rocm_aiter: bool,
 ) -> torch.Tensor:
+    kwargs = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+        from vllm.attention.utils.fa_utils import (
+            flash_attn_varlen_func,
+            get_flash_attn_version,
+        )
+
+        kwargs["fa_version"] = get_flash_attn_version()
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
@@ -43,6 +49,7 @@ def flash_attn_maxseqlen_wrapper(
         max_seqlen_k=max_seqlen.item(),
         dropout_p=0.0,
         causal=False,
+        **kwargs,
     )
     context_layer = einops.rearrange(
         output, "(b s) h d -> s b (h d)", b=batch_size
