@@ -774,6 +774,7 @@ class SpeculativeConfig:
             "hunyuan_v1_dense",
             "afmoe",
             "nemotron_h",
+            "deepseek_v2",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states")
