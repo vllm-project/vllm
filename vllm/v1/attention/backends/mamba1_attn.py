@@ -31,7 +31,6 @@ class Mamba1AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    num_padded_decodes: int
 
     block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor  # shape: [batch,]
@@ -68,7 +67,6 @@ class Mamba1AttentionMetadataBuilder(
 
         has_initial_states_p = None
         query_start_loc_p = None
-        padded_decodes = num_decodes
         num_computed_tokens, num_computed_tokens_p = None, None
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
@@ -125,11 +123,10 @@ class Mamba1AttentionMetadataBuilder(
             and num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )
-            state_indices_tensor = self.state_indices_tensor[:padded_decodes]
+            state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
             if self.vllm_config.cache_config.enable_prefix_caching:
@@ -137,17 +134,15 @@ class Mamba1AttentionMetadataBuilder(
                     block_idx_last_scheduled_token, non_blocking=True
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :padded_decodes
+                    :num_decode_tokens
                 ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
 
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :padded_decodes
+                    :num_decode_tokens
                 ]
-                block_idx_last_computed_token[num_decodes:] = 0
 
         return Mamba1AttentionMetadata(
             query_start_loc_p=query_start_loc_p,
@@ -157,7 +152,6 @@ class Mamba1AttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_padded_decodes=padded_decodes,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,

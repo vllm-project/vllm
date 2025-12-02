@@ -10,7 +10,6 @@ from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
@@ -304,30 +303,25 @@ class Mamba2AttentionMetadataBuilder(
             num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            # Pad state tensor for CUDA graph
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )
-            state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
-            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+            state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
 
             if self.vllm_config.cache_config.enable_prefix_caching:
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
                     block_idx_last_scheduled_token, non_blocking=True
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :num_input_tokens
+                    :num_decode_tokens
                 ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
 
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :num_input_tokens
+                    :num_decode_tokens
                 ]
-                block_idx_last_computed_token[num_decodes:] = 0
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
