@@ -26,42 +26,49 @@ uv pip install vllm --torch-backend=auto
 
 ??? console "pip"
     ```bash
-    # Install vLLM with CUDA 12.8.
-    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
+    # Install vLLM with CUDA 12.9.
+    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
     ```
 
-We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`). If this doesn't work, try running `uv self update` to update `uv` first.
+We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu128`), set `--torch-backend=cu128` (or `UV_TORCH_BACKEND=cu128`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.8 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.6, 11.8, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 11.8 or 12.6).
+# Install vLLM with a specific CUDA version (e.g., 13.0).
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=118 # or 126
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+export CUDA_VERSION=130 # or other
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_31_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
 #### Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on an x86 platform with CUDA 12 for every commit since `v0.5.3`.
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
+
+* `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 12.9.
+* `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu130`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
+
+To install from nightly index, run:
 
 ```bash
 uv pip install -U vllm \
     --torch-backend=auto \
-    --extra-index-url https://wheels.vllm.ai/nightly
+    --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
 ```
 
-??? console "pip"
-    ```bash
-    pip install -U vllm \
-        --pre \
-        --extra-index-url https://wheels.vllm.ai/nightly
-    ```
+!!! warning "`pip` caveat"
 
-    `--pre` is required for `pip` to consider pre-released versions.
+    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+
+    If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
+
+    ```bash
+    pip install -U https://wheels.vllm.ai/nightly/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # current nightly build (the filename will change!)
+    pip install -U https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # from specific commit
+    ```
 
 ##### Install specific revisions
 
@@ -71,33 +78,13 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
 uv pip install vllm \
     --torch-backend=auto \
-    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT} # add variant subdirectory here if needed
 ```
-
-The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
-
-??? note "pip"
-    If you want to access the wheels for previous commits (e.g. to bisect the behavior change,
-    performance regression), due to the limitation of `pip`, you have to specify the full URL of the
-    wheel file by embedding the commit hash in the URL:
-
-    ```bash
-    export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-    pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-    ```
-
-    Note that the wheels are built with Python 3.8 ABI (see [PEP
-    425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible
-    with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a
-    placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in
-    the wheel metadata (the wheels listed in the extra index url have correct versions). Although we
-    don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the
-    wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-#### Set up using Python-only build (without compilation)
+#### Set up using Python-only build (without compilation) {#python-only-build}
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `uv pip`'s [`--editable` flag](https://docs.astral.sh/uv/pip/packages/#editable-packages), changes you make to the code will be reflected when you run vLLM:
 
@@ -121,10 +108,16 @@ This command will do the following:
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
 ```bash
-export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+export VLLM_PRECOMPILED_WHEEL_COMMIT=$(git rev-parse HEAD~1) # or earlier commit on main
+export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 ```
+
+There are more environment variables to control the behavior of Python-only build:
+
+* `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
+* `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+* `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cpu`. If not specified, the CUDA variant with `VLLM_MAIN_CUDA_VERSION` will be tried, then fallback to the default variant on the remote index.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
@@ -132,7 +125,7 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
     It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
-#### Full build (with compilation)
+#### Full build (with compilation) {#full-build}
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
