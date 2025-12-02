@@ -75,15 +75,13 @@ def find_op_nodes(
         return
 
     assert isinstance(op, OpOverload)
-    if not op._schema.is_mutable:
-        yield from graph.find_nodes(op="call_function", target=op)
+
+    for n in graph.find_nodes(op="call_function", target=op):
+        yield n
 
     for n in graph.find_nodes(op="call_function", target=auto_functionalized):
         if n.args[0] == op:
             yield n
-
-    for n in graph.find_nodes(op="call_function", target=op):
-        yield n
 
 
 # Asserts that the node only has one user and returns it
