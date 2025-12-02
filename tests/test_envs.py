@@ -376,11 +376,11 @@ class TestVllmConfigureLogging:
         with patch.dict(os.environ, {}, clear=False):
             if "VLLM_CONFIGURE_LOGGING" in os.environ:
                 del os.environ["VLLM_CONFIGURE_LOGGING"]
-            
+
             # Clear cache if it exists
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
-            
+
             result = envs.VLLM_CONFIGURE_LOGGING
             assert result is True
             assert isinstance(result, bool)
@@ -391,7 +391,7 @@ class TestVllmConfigureLogging:
             # Clear cache if it exists
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
-            
+
             result = envs.VLLM_CONFIGURE_LOGGING
             assert result is False
             assert isinstance(result, bool)
@@ -402,7 +402,7 @@ class TestVllmConfigureLogging:
             # Clear cache if it exists
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
-            
+
             result = envs.VLLM_CONFIGURE_LOGGING
             assert result is True
             assert isinstance(result, bool)
@@ -413,21 +413,21 @@ class TestVllmConfigureLogging:
             ("0", False),
             ("1", True),
         ]
-        
+
         for env_value, expected in test_cases:
             with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": env_value}):
                 # Clear cache if it exists
                 if hasattr(envs.__getattr__, "cache_clear"):
                     envs.__getattr__.cache_clear()
-                
+
                 result = envs.VLLM_CONFIGURE_LOGGING
-                
+
                 # Should be a bool, not an int
                 assert isinstance(result, bool), (
                     f"Expected bool for VLLM_CONFIGURE_LOGGING={env_value!r}, "
                     f"got {type(result).__name__}"
                 )
-                
+
                 # Should have the correct value
                 assert result == expected, (
                     f"Expected {expected} for VLLM_CONFIGURE_LOGGING={env_value!r}, "
@@ -440,6 +440,6 @@ class TestVllmConfigureLogging:
             # Clear cache if it exists
             if hasattr(envs.__getattr__, "cache_clear"):
                 envs.__getattr__.cache_clear()
-            
+
             with pytest.raises(ValueError, match="invalid literal for int"):
                 _ = envs.VLLM_CONFIGURE_LOGGING
