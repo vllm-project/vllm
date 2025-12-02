@@ -310,7 +310,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             config.rope_parameters["rope_theta"] = rope_theta
 
     # No RoPE parameters to patch
-    if not hasattr(config, "rope_parameters"):
+    if getattr(config, "rope_parameters", None) is None:
         return
 
     # Add original_max_position_embeddings if present
