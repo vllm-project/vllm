@@ -136,6 +136,7 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 The following endpoints **do not require authentication** even when `--api-key` is configured:
 
 **Inference endpoints:**
+
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 - `/inference/v1/generate` - Generate completions
 - `/pooling` - Pooling API
@@ -144,18 +145,25 @@ The following endpoints **do not require authentication** even when `--api-key` 
 - `/rerank` - Reranking API (non-`/v1` variant)
 
 **Operational control endpoints (always enabled):**
+
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
 - `/scale_elastic_ep` - Trigger scaling operations
 
 **Utility endpoints:**
+
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/tokenizer_info` - Get tokenizer information
 - `/health` - Health check
 - `/ping` - SageMaker health check
 - `/version` - Version information
 - `/load` - Server load metrics
+
+**Tokenizer information endpoint (only when `--enable-tokenizer-info-endpoint` is set):**
+
+This endpoint is **only available when the `--enable-tokenizer-info-endpoint` flag is set**. It may expose sensitive information such as chat templates and tokenizer configuration:
+
+- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
 **Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`):**
 
@@ -185,18 +193,22 @@ An attacker who can reach the vLLM HTTP server can:
 1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
 2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
 3. **Access operational controls** to manipulate server state (e.g., pausing generation)
-4. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
+4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
+5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
 ### Recommended Security Practices
 
-#### 1. Never Enable Development Mode in Production
+#### 1. Minimize Exposed Endpoints
 
 **CRITICAL:** Never set `VLLM_SERVER_DEV_MODE=1` in production environments. Development endpoints expose extremely dangerous functionality including:
+
 - Arbitrary RPC execution via `/collective_rpc`
 - Cache manipulation that can disrupt service
 - Detailed server configuration disclosure
 
 Similarly, never enable profiler endpoints (`VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE`) in production.
+
+**Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
 
 #### 2. Deploy Behind a Reverse Proxy
 
