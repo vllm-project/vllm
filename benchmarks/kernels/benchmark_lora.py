@@ -652,7 +652,15 @@ class BenchmarkTensors:
             num_tokens_post_pad = torch.empty(
                 (max_loras), dtype=torch.int32, device=topk_ids.device
             )
-
+            # Newer ops.moe_lora_align_block_size signature requires
+            # adapter_enabled and lora_ids. For benchmarking we can use
+            # synthetic values that enable all loras.
+            adapter_enabled = torch.ones(
+                (max_loras + 1,), dtype=torch.int32, device=topk_ids.device
+            )
+            lora_ids = torch.arange(
+                max_loras + 1, dtype=torch.int32, device=topk_ids.device
+            )
             ops.moe_lora_align_block_size(
                 topk_ids,
                 token_lora_mapping,
@@ -664,13 +672,23 @@ class BenchmarkTensors:
                 sorted_ids,
                 expert_ids,
                 num_tokens_post_pad,
+                adapter_enabled,
+                lora_ids,
             )
             if expert_map is not None:
                 expert_ids = expert_map[expert_ids]
 
             return sorted_ids, expert_ids, num_tokens_post_pad
 
-        num_tokens = ctx.batch_size
+        # NOTE:
+        # Use the logical token count (batch_size * seq_length) instead of
+        # just batch_size so that the synthetic topk_ids/topk_weights tensors
+        # and the fused_moe_lora_* kernels agree on the number of tokens.
+        # When seq_length > 1, using batch_size alone would make the
+        # intermediate buffers have shape (batch_size, ...) while the output
+        # tensor has shape (batch_size * seq_length, ...), causing shape
+        # mismatches in _fused_moe_lora_expand.
+        num_tokens = ctx.batch_size * ctx.seq_length
         curr_topk_ids = torch.randint(
             0,
             ctx.num_experts,
@@ -834,6 +852,12 @@ class BenchmarkTensors:
             )
         )
 
+        # Synthetic adapter_enabled for benchmarking: enable all loras.
+        max_loras = lw_shape[0]
+        adapter_enabled = torch.ones(
+            (max_loras + 1,), dtype=torch.int32, device=self.input.device
+        )
+
         return {
             "qcurr_hidden_states": self.input,
             "lora_a_stacked": self.lora_weights_lst,
@@ -843,6 +867,9 @@ class BenchmarkTensors:
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
             "top_k_num": ctx.top_k_num,
+             # Use lora_ids from LoRAKernelMeta and synthetic adapter_enabled.
+            "lora_ids": self.lora_kernel_meta.active_lora_ids,
+            "adapter_enabled": adapter_enabled,
             "device": self.input.device,
             "N": lora_rank,
             "M": topk_weights.shape[0],
@@ -851,13 +878,13 @@ class BenchmarkTensors:
             "num_tokens": num_tokens,
             "num_experts": ctx.num_experts,
             "num_slices": num_slices,
-            "shrink_block_size_m": kernel_config["BLOCK_SIZE_M"],
-            "shrink_block_size_n": kernel_config["BLOCK_SIZE_N"],
-            "shrink_block_size_k": kernel_config["BLOCK_SIZE_K"],
-            "shrink_group_size_m": kernel_config["GROUP_SIZE_M"],
-            "shrink_num_warps": kernel_config["NUM_WARPS"],
-            "shrink_num_stages": kernel_config["NUM_STAGES"],
-            "shrink_split_k": kernel_config.get("SPLIT_K", 1),
+            "block_size_m": kernel_config["BLOCK_SIZE_M"],
+            "block_size_n": kernel_config["BLOCK_SIZE_N"],
+            "block_size_k": kernel_config["BLOCK_SIZE_K"],
+            "group_size_m": kernel_config["GROUP_SIZE_M"],
+            "num_warps": kernel_config["NUM_WARPS"],
+            "num_stages": kernel_config["NUM_STAGES"],
+            "split_k": kernel_config.get("SPLIT_K", 1),
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -907,6 +934,12 @@ class BenchmarkTensors:
             )
         )
 
+        # Synthetic adapter_enabled for benchmarking: enable all loras.
+        max_loras = lw_shape[0]
+        adapter_enabled = torch.ones(
+            (max_loras + 1,), dtype=torch.int32, device=self.input.device
+        )
+
         return {
             "a_intermediate_cache1": self.input,
             "lora_b_stacked": self.lora_weights_lst,
@@ -916,6 +949,8 @@ class BenchmarkTensors:
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
             "top_k_num": ctx.top_k_num,
+            "lora_ids": self.lora_kernel_meta.active_lora_ids,
+            "adapter_enabled": adapter_enabled,
             "device": self.input.device,
             "N": lora_rank,
             "M": topk_weights.shape[0],
@@ -926,13 +961,13 @@ class BenchmarkTensors:
             "num_slices": num_slices,
             "max_lora_rank": lora_rank,
             "w1_output_dim_size": lw_shape[2],
-            "expand_block_size_m": kernel_config["BLOCK_SIZE_M"],
-            "expand_block_size_n": kernel_config["BLOCK_SIZE_N"],
-            "expand_block_size_k": kernel_config["BLOCK_SIZE_K"],
-            "expand_group_size_m": kernel_config["GROUP_SIZE_M"],
-            "expand_num_warps": kernel_config["NUM_WARPS"],
-            "expand_num_stages": kernel_config["NUM_STAGES"],
-            "expand_split_k": kernel_config.get("SPLIT_K", 1),
+            "block_size_m": kernel_config["BLOCK_SIZE_M"],
+            "block_size_n": kernel_config["BLOCK_SIZE_N"],
+            "block_size_k": kernel_config["BLOCK_SIZE_K"],
+            "group_size_m": kernel_config["GROUP_SIZE_M"],
+            "num_warps": kernel_config["NUM_WARPS"],
+            "num_stages": kernel_config["NUM_STAGES"],
+            "split_k": kernel_config.get("SPLIT_K", 1),
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -955,7 +990,7 @@ class BenchmarkTensors:
         raise ValueError(f"Unrecognized optype {self}")
 
     def test_correctness(
-        self, op_type: OpType, expand_fn_add_inputs: bool | None
+        self, ctx: BenchmarkContext, op_type: OpType, expand_fn_add_inputs: bool | None
     ) -> bool:
         """
         Test correctness of op_type implementation against a grouped gemm
@@ -966,7 +1001,9 @@ class BenchmarkTensors:
         ref_output = self.output.clone()
 
         self.output.zero_()
-        op_type.bench_fn()(**self.bench_fn_kwargs(op_type, expand_fn_add_inputs))
+        op_type.bench_fn()(
+            **self.bench_fn_kwargs(ctx, op_type, expand_fn_add_inputs)
+        )
 
         op_type.run_ref_group_gemm(
             ref_output,
