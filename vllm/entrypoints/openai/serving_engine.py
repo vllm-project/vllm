@@ -1121,7 +1121,8 @@ class OpenAIServing:
 
         request_prompt: str | list[int]
         print(
-            f"--------{isinstance(tokenizer, DeepseekV32Tokenizer)}--{type(tokenizer)}-----------"
+            f"--------{isinstance(tokenizer, DeepseekV32Tokenizer)}--{type(tokenizer)}--"
+            f"-{(hasattr(tokenizer, '__raw_class__') and issubclass(tokenizer.__raw_class__, DeepseekV32Tokenizer))}--------"
         )
         if tokenizer is None:
             request_prompt = "placeholder"
@@ -1131,7 +1132,9 @@ class OpenAIServing:
                 messages=messages,
                 **_chat_template_kwargs,
             )
-        elif isinstance(tokenizer, DeepseekV32Tokenizer):
+        elif hasattr(tokenizer, "__raw_class__") and issubclass(
+            tokenizer.__raw_class__, DeepseekV32Tokenizer
+        ):
             request_prompt = tokenizer.apply_chat_template(
                 messages=messages,
                 model_config=model_config,
