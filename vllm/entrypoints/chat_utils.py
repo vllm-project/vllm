@@ -51,6 +51,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalU
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.transformers_utils.chat_templates.registry import (
+    _SKIP_TOKENIZER_CHAT_TEMPLATE,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import random_uuid
 from vllm.utils.func_utils import supports_kw
@@ -504,10 +507,6 @@ def resolve_hf_chat_template(
             return chat_template
 
     # 3rd priority: AutoTokenizer chat template
-    from vllm.transformers_utils.chat_templates.registry import (
-        _SKIP_TOKENIZER_CHAT_TEMPLATE,
-    )
-
     if model_config.hf_config.model_type not in _SKIP_TOKENIZER_CHAT_TEMPLATE:
         try:
             return tokenizer.get_chat_template(chat_template, tools=tools)
