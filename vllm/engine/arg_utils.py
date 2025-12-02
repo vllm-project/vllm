@@ -86,8 +86,9 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
-from vllm.transformers_utils.utils import is_cloud_storage, is_gguf
+from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -516,6 +517,10 @@ class EngineArgs:
     otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
+    )
+    kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
+    kv_cache_metrics_sample: float = get_field(
+        ObservabilityConfig, "kv_cache_metrics_sample"
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -1012,6 +1017,13 @@ class EngineArgs:
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
+        )
+        observability_group.add_argument(
+            "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
+        )
+        observability_group.add_argument(
+            "--kv-cache-metrics-sample",
+            **observability_kwargs["kv_cache_metrics_sample"],
         )
 
         # Scheduler arguments
@@ -1698,6 +1710,8 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
         )
 
         # Compilation config overrides
