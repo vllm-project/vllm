@@ -271,6 +271,10 @@ class OffloadingConnectorScheduler:
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
                 self._request_block_ids[req_id] = []
+                self._next_stored_block_idx.pop(req_id, None)
+                old_blocks = self._reqs_being_stored.pop(req_id, None)
+                if old_blocks:
+                    self.manager.complete_store(old_blocks, success=False)
 
             if new_block_id_groups:
                 new_block_ids = new_block_id_groups[0]
