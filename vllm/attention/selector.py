@@ -38,7 +38,13 @@ def get_attn_backend(
             f"Valid values are: {valid_cache_dtypes}"
         )
 
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    backend_enum = vllm_config.attention_config.backend
+
     return _cached_get_attn_backend(
+        backend=backend_enum,
         head_size=head_size,
         dtype=dtype,
         kv_cache_dtype=cast(CacheDType | None, kv_cache_dtype),
@@ -52,6 +58,7 @@ def get_attn_backend(
 
 @cache
 def _cached_get_attn_backend(
+    backend,
     head_size: int,
     dtype: torch.dtype,
     kv_cache_dtype: CacheDType | None,
@@ -61,10 +68,8 @@ def _cached_get_attn_backend(
     use_sparse: bool = False,
     attn_type: str | None = None,
 ) -> type[AttentionBackend]:
-    from vllm.config import get_current_vllm_config
     from vllm.platforms import current_platform
 
-    vllm_config = get_current_vllm_config()
     sig = inspect.signature(current_platform.get_attn_backend_cls)
     if "use_v1" in sig.parameters:
         logger.warning_once(
@@ -73,7 +78,7 @@ def _cached_get_attn_backend(
             "remove it from your plugin code."
         )
         attention_cls = current_platform.get_attn_backend_cls(
-            vllm_config.attention_config.backend,
+            backend,
             head_size,
             dtype,
             kv_cache_dtype,
@@ -86,7 +91,7 @@ def _cached_get_attn_backend(
         )
     else:
         attention_cls = current_platform.get_attn_backend_cls(
-            vllm_config.attention_config.backend,
+            backend,
             head_size,
             dtype,
             kv_cache_dtype,
