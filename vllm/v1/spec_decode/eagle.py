@@ -231,7 +231,6 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
-        is_padded: bool = False,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -413,8 +412,9 @@ class EagleProposer:
 
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
-        if self.num_speculative_tokens > 1 and is_padded:
-            assert num_rejected_tokens_gpu is not None
+        # Only apply this adjustment when we have rejected tokens
+        # (i.e., not the first proposal).
+        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # TODO: remove seq_lens_cpu adjustment once
             # https://github.com/vllm-project/vllm/pull/29624 lands
