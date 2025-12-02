@@ -177,11 +177,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 dtype=torch.int32,
                 device=device,
             )
-            self.state_indices_tensor_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs, self._max_cached_blocks),
-                dtype=torch.int32,
-                device=device,
-            )
             self.block_idx_last_computed_token_d_buf = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -193,57 +188,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 device=device,
             )
 
-            max_num_prefill_chunks = (
-                cdiv(vllm_config.model_config.max_model_len, self.chunk_size)
-                * self.decode_cudagraph_max_bs
-            )
-            self.seq_idx_p_buf = torch.empty(
-                (max_num_prefill_chunks,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.cu_chunk_seqlen_p_buf = torch.empty(
-                (max_num_prefill_chunks + 1,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.last_chunk_indices_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.num_computed_tokens_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_first_scheduled_token_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_computed_token_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.block_idx_last_scheduled_token_p_buf = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
         else:
             self.state_indices_tensor_d_buf = None
             self.block_idx_last_computed_token_d_buf = None
             self.block_idx_last_scheduled_token_d_buf = None
-            self.state_indices_tensor_p_buf = None
-            self.seq_idx_p_buf = None
-            self.cu_chunk_seqlen_p_buf = None
-            self.last_chunk_indices_p_buf = None
-            self.num_computed_tokens_p_buf = None
-            self.block_idx_first_scheduled_token_p_buf = None
-            self.block_idx_last_computed_token_p_buf = None
-            self.block_idx_last_scheduled_token_p_buf = None
 
     def build(  # type: ignore[override]
         self,
