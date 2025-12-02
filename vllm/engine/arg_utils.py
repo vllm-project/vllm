@@ -970,6 +970,11 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
 
+        multimodal_group.add_argument(
+            "--enable-mm-processor-stats",
+            **multimodal_kwargs["enable_mm_processor_stats"],
+        )
+
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
         lora_group = parser.add_argument_group(

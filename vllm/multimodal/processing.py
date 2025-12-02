@@ -115,9 +115,11 @@ def get_timing_stats_from_engine_client(engine_client) -> dict[str, dict[str, fl
     Returns:
         A dictionary mapping request_id to stats dict.
     """
-    import vllm.envs as envs
-
-    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+    try:
+        mm_config = engine_client.vllm_config.model_config.multimodal_config
+        if mm_config is None or not mm_config.enable_mm_processor_stats:
+            return {}
+    except (AttributeError, RuntimeError):
         return {}
 
     try:
@@ -145,9 +147,11 @@ def clear_timing_stats_from_engine_client(engine_client) -> int:
     Returns:
         The number of stats cleared.
     """
-    import vllm.envs as envs
-
-    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+    try:
+        mm_config = engine_client.vllm_config.model_config.multimodal_config
+        if mm_config is None or not mm_config.enable_mm_processor_stats:
+            return 0
+    except (AttributeError, RuntimeError):
         return 0
 
     try:
@@ -1310,7 +1314,7 @@ class InputProcessingContext:
         """
         Get timing stats for a request.
         """
-        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        if not self.get_mm_config().enable_mm_processor_stats:
             return None
         with self._timing_stats_registry_lock:
             return self.timing_stats_registry.get(request_id)
@@ -1322,7 +1326,7 @@ class InputProcessingContext:
         This should be called at the start of processing for a request.
         The stats object is created immediately and stored in the registry.
         """
-        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        if not self.get_mm_config().enable_mm_processor_stats:
             # Return a dummy stats object if timing is disabled
             return MultiModalProcessorTimingStats()
 
@@ -1339,7 +1343,7 @@ class InputProcessingContext:
         """
         Clear all stats from the registry. Returns the number of stats cleared.
         """
-        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        if not self.get_mm_config().enable_mm_processor_stats:
             return 0
         with self._timing_stats_registry_lock:
             count = len(self.timing_stats_registry)
@@ -1350,7 +1354,7 @@ class InputProcessingContext:
         """
         Get all timing stats as a dictionary for API endpoints.
         """
-        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        if not self.get_mm_config().enable_mm_processor_stats:
             return {}
         with self._timing_stats_registry_lock:
             return {

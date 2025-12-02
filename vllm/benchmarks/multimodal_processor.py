@@ -5,7 +5,9 @@ r"""Benchmark multimodal processor latency.
 This benchmark measures the latency of the multimodal processor module.
 
 On the server side, run:
-    VLLM_ENABLE_MM_PROCESSOR_STATS=1 vllm serve <your_model> <engine arguments>
+    vllm serve <your_model> --enable-mm-processor-stats <engine arguments>
+    # Or use environment variable:
+    # VLLM_ENABLE_MM_PROCESSOR_STATS=1 vllm serve <your_model> <engine arguments>
 
 On the client side, run:
     vllm bench multimodal-processor \

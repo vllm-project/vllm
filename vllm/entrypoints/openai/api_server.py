@@ -364,20 +364,20 @@ async def get_mm_processor_stats(request: Request):
     Returns:
         JSON response with timing statistics for all requests.
     """
-    import vllm.envs as envs
+    engine = engine_client(request)
+    mm_config = engine.vllm_config.model_config.multimodal_config
 
-    if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+    if mm_config is None or not mm_config.enable_mm_processor_stats:
         return JSONResponse(
             content={
                 "error": "MM processor stats collection is not enabled. "
-                "Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
+                "Set --enable-mm-processor-stats or VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
             },
             status_code=400,
         )
 
     from vllm.multimodal.processing import get_timing_stats_from_engine_client
 
-    engine = engine_client(request)
     all_stats = get_timing_stats_from_engine_client(engine)
     return JSONResponse(content={"stats": all_stats})
 
@@ -931,13 +931,14 @@ if envs.VLLM_SERVER_DEV_MODE:
         """
         Clear all multimodal processor timing stats from the registry.
         """
-        import vllm.envs as envs
+        engine = engine_client(raw_request)
+        mm_config = engine.vllm_config.model_config.multimodal_config
 
-        if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
+        if mm_config is None or not mm_config.enable_mm_processor_stats:
             return JSONResponse(
                 content={
                     "error": "MM processor stats collection is not enabled. "
-                    "Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
+                    "Set --enable-mm-processor-stats or VLLM_ENABLE_MM_PROCESSOR_STATS=1 to enable."
                 },
                 status_code=400,
             )
@@ -946,7 +947,6 @@ if envs.VLLM_SERVER_DEV_MODE:
             clear_timing_stats_from_engine_client,
         )
 
-        engine = engine_client(raw_request)
         count = clear_timing_stats_from_engine_client(engine)
         logger.info(f"Cleared {count} MM processor timing stats from registry")
         return JSONResponse(
