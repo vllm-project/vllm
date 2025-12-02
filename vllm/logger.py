@@ -162,7 +162,7 @@ DEFAULT_LOGGING_CONFIG = {
     "loggers": {
         "vllm": {
             "handlers": ["vllm"],
-            "level": "DEBUG",
+            "level": envs.VLLM_LOGGING_LEVEL,
             "propagate": False,
         },
     },
@@ -279,6 +279,9 @@ def _configure_vllm_root_logger() -> None:
             vllm_handler["formatter"] = "vllm_json"
         else:
             vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+
+        vllm_loggers = logging_config["loggers"]["vllm"]
+        vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
 
     if envs.VLLM_LOGGING_CONFIG_PATH:
         if not path.exists(envs.VLLM_LOGGING_CONFIG_PATH):
