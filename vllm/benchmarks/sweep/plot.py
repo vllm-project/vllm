@@ -183,7 +183,7 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
 def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
     """
     Convert string values "inf", "-inf", and "nan" to their float equivalents.
-    
+
     This handles the case where JSON serialization represents inf/nan as strings.
     """
     converted_data = []
@@ -214,10 +214,10 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
 
 def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str):
     parts = list[str]()
-    
+
     # Start with figure name (always provided, defaults to "FIGURE")
     parts.append(fig_name)
-    
+
     # Always append group data if present
     if group:
         parts.extend(f"{k}={v}" for k, v in group)
