@@ -170,7 +170,9 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(
+        default_factory=SchedulerConfig.default_factory,
+    )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
@@ -193,8 +195,8 @@ class VllmConfig:
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, one can append compilation arguments via 
-    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    As a shorthand, one can append compilation arguments via
+    -cc.parameter=argument such as `-cc.mode=3` (same as `-cc='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -265,10 +267,6 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
-            # LoRA creates static buffers based on max_num_batched_tokens.
-            # The tensor sizes and strides get captured in the torch.compile
-            # graph explicitly.
-            vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
@@ -797,8 +795,7 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1()
 
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             # With pipeline parallelism or dynamo partitioning,
@@ -806,6 +803,13 @@ class VllmConfig:
             # Use custom rms norm to unblock. In the future,
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
+            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                logger.warning(
+                    "Sequence parallelism is enabled, but running in wrong "
+                    "vllm compile mode: %s.",
+                    self.compilation_config.mode,
+                )
+
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
                 or len(self.compilation_config.splitting_ops) == 0

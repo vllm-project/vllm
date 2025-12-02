@@ -248,15 +248,15 @@ def test_optimization_level(args, expected):
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
-        (["-O.mode=0"], 0),
-        (["-O.mode=1"], 1),
-        (["-O.mode=2"], 2),
-        (["-O.mode=3"], 3),
+        (["-cc.mode=0"], 0),
+        (["-cc.mode=1"], 1),
+        (["-cc.mode=2"], 2),
+        (["-cc.mode=3"], 3),
     ],
 )
 def test_mode_parser(args, expected):
     """
-    Test compilation config modes (-O.mode=int) map to compilation_config.
+    Test compilation config modes (-cc.mode=int) map to compilation_config.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args(args)
@@ -273,7 +273,7 @@ def test_compilation_config():
     # set to string form of a dict
     args = parser.parse_args(
         [
-            "-O",
+            "-cc",
             '{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], "backend": "eager"}',
         ]
     )

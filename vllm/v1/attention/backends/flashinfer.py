@@ -250,7 +250,11 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
         )
         output_context, lse_context = cp_lse_ag_out_rs(
-            output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
+            output_context_tmp,
+            lse_context_tmp,
+            get_dcp_group(),
+            return_lse=True,
+            is_lse_base_on_e=False,
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
@@ -1457,7 +1461,10 @@ class FlashInferImpl(AttentionImpl):
                         return_lse=True,
                     )
                     output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                        output_tmp, lse, get_dcp_group()
+                        output_tmp,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=False,
                     )
                 else:
                     decode_wrapper.run(

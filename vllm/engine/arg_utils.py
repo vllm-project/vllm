@@ -83,10 +83,10 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.transformers_utils.config import (
-    get_model_path,
     is_interleaved,
     maybe_override_with_speculators,
 )
+from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage, is_gguf
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
@@ -360,7 +360,7 @@ class EngineArgs:
     task: TaskOption | None = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
-    tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
+    tokenizer_mode: TokenizerMode | str = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
@@ -517,6 +517,10 @@ class EngineArgs:
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
     )
+    kv_cache_metrics: bool = ObservabilityConfig.kv_cache_metrics
+    kv_cache_metrics_sample: float = get_field(
+        ObservabilityConfig, "kv_cache_metrics_sample"
+    )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -581,15 +585,26 @@ class EngineArgs:
         from vllm.plugins import load_general_plugins
 
         load_general_plugins()
-        # when use hf offline,replace model id to local model path
+        # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
             model_id = self.model
             self.model = get_model_path(self.model, self.revision)
-            logger.info(
-                "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                model_id,
-                self.model,
-            )
+            if model_id is not self.model:
+                logger.info(
+                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
+                    model_id,
+                    self.model,
+                )
+            if self.tokenizer is not None:
+                tokenizer_id = self.tokenizer
+                self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
+                if tokenizer_id is not self.tokenizer:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace tokenizer_id [%s] "
+                        "to tokenizer_path [%s]",
+                        tokenizer_id,
+                        self.tokenizer,
+                    )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1002,6 +1017,13 @@ class EngineArgs:
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
         )
+        observability_group.add_argument(
+            "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
+        )
+        observability_group.add_argument(
+            "--kv-cache-metrics-sample",
+            **observability_kwargs["kv_cache_metrics_sample"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1107,7 +1129,7 @@ class EngineArgs:
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
         vllm_group.add_argument(
-            "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
+            "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
@@ -1687,6 +1709,8 @@ class EngineArgs:
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
         )
 
         # Compilation config overrides
@@ -1954,7 +1978,9 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
+        self,
+        usage_context: UsageContext | None,
+        model_config: ModelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
