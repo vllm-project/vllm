@@ -414,6 +414,8 @@ def test_eagle_correctness(
             )
 
         if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+            if "deepseek" in model_setup[1].lower():
+                pytest.skip("FLASH_ATTN for deepseek not supported on ROCm platform")
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
