@@ -19,7 +19,7 @@ from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.outputs import PoolingRequestOutput
-from vllm.transformers_utils.tokenizer import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 ScoreContentPartParam: TypeAlias = (
     ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
