@@ -139,9 +139,7 @@ def autotune_kernel(
         # Skip enabled check during autotuning - we want to force autotune for
         # Helion kernels. The issue is that the compilation config is being
         # reset to ['none'] by system defaults
-        logger.info(
-            "Forcing autotuning for %s (bypassing enabled check)", kernel_name
-        )
+        logger.info("Forcing autotuning for %s (bypassing enabled check)", kernel_name)
 
         kernel_instance = op_cls()
 
@@ -150,7 +148,7 @@ def autotune_kernel(
         logger.info(
             "Will generate %d configs: %s",
             len(autotune_inputs),
-            list(autotune_inputs.keys())
+            list(autotune_inputs.keys()),
         )
 
         # Filter out existing configs (unless forcing)
@@ -170,16 +168,19 @@ def autotune_kernel(
             if existing_configs and configs_to_autotune:
                 logger.info(
                     "Found existing configs for %s, will autotune remaining: %s",
-                    existing_configs, list(configs_to_autotune.keys())
+                    existing_configs,
+                    list(configs_to_autotune.keys()),
                 )
             elif existing_configs and not configs_to_autotune:
                 logger.info(
-                    f"All configs already exist for {existing_configs}, use --force to re-generate"
+                    "All configs already exist for %s, use --force to re-generate",
+                    existing_configs,
                 )
                 return True
             elif not existing_configs:
                 logger.info(
-                    f"No existing configs found, will autotune all: {list(configs_to_autotune.keys())}"
+                    "No existing configs found, will autotune all: %s",
+                    list(configs_to_autotune.keys()),
                 )
 
         if not configs_to_autotune:
@@ -202,19 +203,22 @@ def autotune_kernel(
                     kernel_instance.__class__, config_key, config
                 )
                 saved_configs.append(config_key)
-                logger.info(f"Saved config {config_key} to: {config_path}")
+                logger.info("Saved config %s to: %s", config_key, config_path)
             except Exception as e:
-                logger.error(f"Failed to save config {config_key}: {e}")
+                logger.error("Failed to save config %s: %s", config_key, e)
 
-        logger.info(f"Autotuning completed in {end_time - start_time:.2f}s")
+        logger.info("Autotuning completed in %.2fs", end_time - start_time)
         logger.info(
-            f"Generated and saved {len(saved_configs)} configs for {kernel_name}: {saved_configs}"
+            "Generated and saved %d configs for %s: %s",
+            len(saved_configs),
+            kernel_name,
+            saved_configs,
         )
 
         return True
 
     except Exception as e:
-        logger.error(f"Failed to autotune {kernel_name}: {e}")
+        logger.error("Failed to autotune %s: %s", kernel_name, e)
         return False
 
 
@@ -233,7 +237,8 @@ def main():
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for config files (default: <vllm_repo>/vllm/compilation/helion/configs)",
+        help="Output directory for config files "
+        "(default: <vllm_repo>/vllm/compilation/helion/configs)",
     )
 
     parser.add_argument(
@@ -287,9 +292,9 @@ def main():
     # Filter to specific kernel if requested
     if args.kernel:
         if args.kernel not in helion_kernels:
-            logger.error(f"Kernel '{args.kernel}' not found. Available kernels:")
-            for name in helion_kernels.keys():
-                logger.error(f"  - {name}")
+            logger.error("Kernel '%s' not found. Available kernels:", args.kernel)
+            for name in helion_kernels:
+                logger.error("  - %s", name)
             sys.exit(1)
         helion_kernels = {args.kernel: helion_kernels[args.kernel]}
 
@@ -299,7 +304,7 @@ def main():
     # Create output directory
     try:
         os.makedirs(output_dir, exist_ok=True)
-        logger.info(f"Output directory: {output_dir}")
+        logger.info("Output directory: %s", output_dir)
 
         # Verify directory is writable
         test_file = os.path.join(output_dir, ".write_test")
@@ -308,31 +313,33 @@ def main():
                 f.write("test")
             os.remove(test_file)
         except Exception as e:
-            logger.error(f"Output directory is not writable: {e}")
+            logger.error("Output directory is not writable: %s", e)
             sys.exit(1)
 
     except Exception as e:
-        logger.error(f"Failed to create output directory '{output_dir}': {e}")
+        logger.error("Failed to create output directory '%s': %s", output_dir, e)
         sys.exit(1)
 
     # Autotune kernels
     total_kernels = len(helion_kernels)
     successful = 0
 
-    logger.info(f"Starting autotuning for {total_kernels} kernel(s)")
+    logger.info("Starting autotuning for %d kernel(s)", total_kernels)
 
     for kernel_name, op_cls in helion_kernels.items():
         if autotune_kernel(kernel_name, op_cls, output_dir, args.force):
             successful += 1
         else:
-            logger.warning(f"Skipped or failed: {kernel_name}")
+            logger.warning("Skipped or failed: %s", kernel_name)
 
     # Summary
     logger.info("=" * 50)
-    logger.info(f"Autotuning complete: {successful}/{total_kernels} kernels successful")
+    logger.info(
+        "Autotuning complete: %d/%d kernels successful", successful, total_kernels
+    )
 
     if successful < total_kernels:
-        logger.warning(f"{total_kernels - successful} kernels failed or were skipped")
+        logger.warning("%d kernels failed or were skipped", total_kernels - successful)
         sys.exit(1)
     else:
         logger.info("All kernels autotuned successfully!")
