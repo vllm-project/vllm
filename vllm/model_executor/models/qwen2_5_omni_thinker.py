@@ -88,7 +88,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -591,7 +590,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     tokenization_kwargs=tokenization_kwargs,
                 )
             tokenizer = self.info.get_tokenizer()
-            prompt_ids = encode_tokens(tokenizer, prompt)
+            prompt_ids = tokenizer.encode(prompt)
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
