@@ -110,7 +110,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Identify valid tokens using threshold comparison
         invalid_token_mask = probability_values < adjusted_min_p
         # Apply mask using boolean indexing
-        logits[invalid_token_mask] = -float("inf")
+        logits[invalid_token_mask].fill_(-float("inf"))
         return logits
 
 
@@ -229,7 +229,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length
-            logits[self.logits_slice] = -float("inf")
+            logits[self.logits_slice].fill_(-float("inf"))
         return logits
 
 
