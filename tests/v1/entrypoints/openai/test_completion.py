@@ -9,7 +9,7 @@ import regex as re
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"

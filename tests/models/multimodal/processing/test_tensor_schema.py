@@ -31,7 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 

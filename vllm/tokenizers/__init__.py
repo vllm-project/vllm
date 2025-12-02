@@ -4,12 +4,21 @@
 from .hf import HfTokenizer
 from .mistral import MistralTokenizer
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry, get_tokenizer
+from .registry import (
+    TokenizerRegistry,
+    cached_get_tokenizer,
+    cached_tokenizer_from_config,
+    get_tokenizer,
+    init_tokenizer_from_config,
+)
 
 __all__ = [
     "TokenizerLike",
     "HfTokenizer",
     "MistralTokenizer",
     "TokenizerRegistry",
+    "cached_get_tokenizer",
     "get_tokenizer",
+    "cached_tokenizer_from_config",
+    "init_tokenizer_from_config",
 ]

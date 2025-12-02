@@ -19,7 +19,7 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
