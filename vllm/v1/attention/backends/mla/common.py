@@ -205,11 +205,15 @@ from vllm.attention.backends.abstract import (
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
-from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_pcp_group,
+    is_global_first_rank,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -225,9 +229,12 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
+    get_pcp_kv_indices,
+    get_pcp_query_indices,
     get_per_layer_parameters,
     infer_global_hyperparameters,
+    pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -350,6 +357,16 @@ class MLACommonPrefillMetadata:
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
 
+    @dataclass
+    class PCPMetadata:
+        # For PCP
+        pcp_allgather_restore_idx: torch.Tensor | None = None
+        kv_head_indices: torch.Tensor | None = None
+        kv_tail_indices: torch.Tensor | None = None
+        query_head_indices: torch.Tensor | None = None
+        query_tail_indices: torch.Tensor | None = None
+        output_restore_idx: torch.Tensor | None = None
+
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
@@ -357,6 +374,7 @@ class MLACommonPrefillMetadata:
     query_seq_lens: torch.Tensor | None = None
     workspace_buffer: torch.Tensor | None = None
     q_data_type: torch.dtype | None = None
+    pcp_metadata: PCPMetadata | None = None
 
 
 @dataclass
@@ -379,7 +397,7 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
 class MLACommonDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-    dcp_tot_seq_lens: torch.Tensor | None
+    cp_tot_seq_lens: torch.Tensor | None
 
 
 D = TypeVar("D", bound=MLACommonDecodeMetadata)
@@ -535,7 +553,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[M] | None = None,
-        supports_dcp_with_varlen: bool = False,
+        supports_cp_with_varlen: bool = False,
     ):
         self.metadata_cls = (
             metadata_cls if metadata_cls is not None else MLACommonMetadata
@@ -558,9 +576,18 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
-        self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
-        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            # PCP might not be initialized in testing
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.cp_world_size = self.dcp_world_size * self.pcp_world_size
+        self.cp_local_block_size = parallel_config.cp_kv_cache_interleave_size
+        self.cp_virtual_block_size = self.cp_local_block_size * self.cp_world_size
+        # TODO(yyj) Remove this once the PCP bug for decode_length > 1 is fixed.
+        supports_cp_with_varlen = supports_cp_with_varlen and self.pcp_world_size == 1
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -570,16 +597,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.determine_chunked_prefill_workspace_size(vllm_config)
         )
 
-        if self.dcp_world_size > 1:
-            # Note(hc): The local kvcache is incomplete when DCP is triggered,
-            # an additional kvcache allgather across the DCP group is therefore
-            # required, so the workspace has to be enlarged by 1/DCP relative
+        if self.cp_world_size > 1:
+            # Note(hc): The local kvcache is incomplete when DCP or PCP is triggered,
+            # an additional kvcache allgather across the DCP&PCP group is therefore
+            # required, so the workspace has to be enlarged by 1/CP relative
             # to the original TP allocation.
-            assert self.chunked_prefill_workspace_size % self.dcp_world_size == 0
+            assert self.chunked_prefill_workspace_size % self.cp_world_size == 0
             self.chunked_prefill_workspace = torch.empty(
                 (
                     self.chunked_prefill_workspace_size
-                    + self.chunked_prefill_workspace_size // self.dcp_world_size,
+                    + self.chunked_prefill_workspace_size // self.cp_world_size,
                     self.model_config.get_head_size(),
                 ),
                 dtype=self.model_config.dtype,
@@ -636,7 +663,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
+            self.reorder_batch_threshold, supports_spec_decode, supports_cp_with_varlen
         )
 
         # Validate consistency between query_len_support and reorder_batch_threshold
@@ -730,12 +757,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: torch.Tensor | None,
+        cp_tot_seq_lens_device: torch.Tensor | None,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
-            dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -765,6 +792,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.max_seq_len
+        pcp_allgather_restore_idx = common_attn_metadata.pcp_allgather_restore_idx
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -776,7 +804,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
-        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        cp_local_seq_lens = common_attn_metadata.cp_local_seq_lens
+        cp_local_seq_lens_cpu = common_attn_metadata.cp_local_seq_lens_cpu
+
+        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+
+        num_computed_tokens_cpu = common_attn_metadata.seq_lens_cpu - query_seq_lens_cpu
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -800,6 +834,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
+            )
+            prefill_query_start_loc_cpu = (
+                query_start_loc_cpu[reqs_start:] - query_start_loc_cpu[reqs_start]
             )
 
             chunked_context_metadata = None
@@ -863,34 +900,34 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     chunk_len = chunk_token_to_seq_tensor.shape[0]
                     token_to_seq_tensor_cpu[i, :chunk_len] = chunk_token_to_seq_tensor
 
-                if self.dcp_world_size > 1:
-                    local_context_lens_allranks = get_dcp_local_seq_lens(
+                if self.cp_world_size > 1:
+                    local_context_lens_allranks = get_cp_local_seq_lens(
                         context_lens_cpu,
-                        self.dcp_world_size,
+                        self.cp_world_size,
                         None,
-                        self.dcp_local_block_size,
+                        self.cp_local_block_size,
                     )
                     # Note(qcs): The max local context lengths
-                    # padded to `dcp_local_block_size`.
+                    # padded to `cp_local_block_size`.
                     padded_local_context_lens_cpu = (
                         cdiv(
                             context_lens_cpu,
-                            self.dcp_virtual_block_size,
+                            self.cp_virtual_block_size,
                         )
-                        * self.dcp_local_block_size
+                        * self.cp_local_block_size
                     )
                     # Note(hc): The above max_context_chunk already enforces
-                    # block_size alignment, DCP just need the block_size can
-                    # be divisible by dcp_world_size, because DCP use
+                    # block_size alignment, DCP and PCP just need the block_size can
+                    # be divisible by cp_world_size, because DCP and PCP use
                     # cp_gather_cache which not require `cp_chunk_starts`
                     # aligned to page_size.
-                    assert max_context_chunk % self.dcp_world_size == 0
+                    assert max_context_chunk % self.cp_world_size == 0
                     padded_local_max_context_chunk_across_ranks = (
                         cdiv(
                             max_context_chunk,
-                            self.dcp_virtual_block_size,
+                            self.cp_virtual_block_size,
                         )
-                        * self.dcp_local_block_size
+                        * self.cp_local_block_size
                     )
                     local_chunk_starts = (
                         torch.arange(num_chunks, dtype=torch.int32)
@@ -922,7 +959,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     if self._use_cudnn_prefill
                     else MLACommonPrefillMetadata.ChunkedContextMetadata
                 )
-                if self.dcp_world_size > 1:
+                if self.cp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                         starts=local_chunk_starts.to(device, non_blocking=True),
@@ -964,11 +1001,47 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     <= self.chunked_prefill_workspace_size
                 )
 
+            pcp_metadata = None
+            if self.pcp_world_size > 1:
+                # NOTE(yyj): We need to get the indices here for
+                # split the query, key and value in prefill forward.
+                q_head_idx, q_tail_idx = get_pcp_query_indices(
+                    prefill_query_start_loc_cpu
+                )
+                output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                prefill_kv_start_loc_cpu = (
+                    prefill_query_start_loc_cpu * self.pcp_world_size
+                )
+                kv_head_idx, kv_tail_idx = get_pcp_kv_indices(
+                    prefill_kv_start_loc_cpu,
+                    self.pcp_rank,
+                    self.pcp_world_size,
+                )
+                pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
+                    kv_head_indices=kv_head_idx.to(
+                        device, dtype=torch.int32, non_blocking=True
+                    ),
+                    kv_tail_indices=kv_tail_idx.to(
+                        device, dtype=torch.int32, non_blocking=True
+                    ),
+                    query_head_indices=q_head_idx.to(
+                        device, dtype=torch.int32, non_blocking=True
+                    ),
+                    query_tail_indices=q_tail_idx.to(
+                        device, dtype=torch.int32, non_blocking=True
+                    ),
+                    output_restore_idx=output_res_idx.to(
+                        device, dtype=torch.int32, non_blocking=True
+                    ),
+                    pcp_allgather_restore_idx=pcp_allgather_restore_idx,
+                )
+
             prefill_metadata = self.prefill_metadata_cls(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
+                pcp_metadata=pcp_metadata,
             )
 
             if self._use_cudnn_prefill:
@@ -986,10 +1059,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         decode_metadata = None
         if num_decodes > 0:
-            dcp_tot_seq_lens_device = None
-            if self.dcp_world_size > 1:
-                dcp_tot_seq_lens_device = seq_lens[:num_decodes]
-                seq_lens = dcp_local_seq_lens
+            cp_tot_seq_lens_device = None
+            if self.cp_world_size > 1:
+                cp_tot_seq_lens_device = seq_lens[:num_decodes]
+                seq_lens_cpu = cp_local_seq_lens_cpu
+                seq_lens = cp_local_seq_lens
 
                 # After DCP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
@@ -1008,7 +1082,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu=query_start_loc_cpu[: num_decodes + 1],
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
-                dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
+                cp_tot_seq_lens_device=cp_tot_seq_lens_device,
             )
 
         attn_metadata = self.metadata_cls(
@@ -1331,6 +1405,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
         self.dcp_world_size: int | None = None
+        self.pcp_world_size: int | None = None
+        self.dcp_rank: int | None = None
+        self.pcp_rank: int | None = None
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
@@ -1381,24 +1458,92 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def _run_prefill_new_tokens_fa(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
-        return self._flash_attn_varlen_diff_headdims(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=prefill.query_start_loc,
-            cu_seqlens_k=prefill.query_start_loc,
-            max_seqlen_q=prefill.max_query_len,
-            max_seqlen_k=prefill.max_query_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=return_softmax_lse,
-        )
+        assert self.pcp_world_size is not None
+        assert self.pcp_rank is not None
+        if self.pcp_world_size > 1:
+            # NOTE When PCP is enabled, we split the queries keys and values into
+            # "head" and "tail" parts using the DualChunkSwap strategy to balance
+            # workload across PCP ranks. We run attention twice (once for the head
+            # part and once for the tail part), then concatenate the results and
+            # restore the original ordering.
+            #
+            # Example pcp_world_size=2 & full sequence: [0,1,2,3]
+            #
+            #   pcp_rank0: Q [0,3] KV [0,1,2,3]
+            #    Q\KV  0 1 2 3
+            # head 0   1 0 0 0
+            #      -----------
+            # tail 3   1 1 1 1
+            #
+            #   pcp_rank1: Q[1,3] KV[0,1,2,3]
+            #    Q\KV  0 1 2 3
+            # head 1   1 1 0 0
+            #      -----------
+            # tail 2   1 1 1 0
+
+            pcp_metadata = prefill.pcp_metadata
+            assert pcp_metadata is not None
+            output_head, lse_head = self._flash_attn_varlen_diff_headdims(
+                q=torch.index_select(q, 0, pcp_metadata.query_head_indices),
+                k=torch.index_select(k, 0, pcp_metadata.kv_head_indices),
+                v=torch.index_select(v, 0, pcp_metadata.kv_head_indices),
+                cu_seqlens_q=prefill.query_start_loc // 2,
+                cu_seqlens_k=prefill.query_start_loc // 2 * (self.pcp_rank + 1),
+                max_seqlen_q=prefill.max_query_len // 2,
+                max_seqlen_k=prefill.max_query_len // 2 * (self.pcp_rank + 1),
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+
+            output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
+                q=torch.index_select(q, 0, pcp_metadata.query_tail_indices),
+                k=torch.index_select(k, 0, pcp_metadata.kv_tail_indices),
+                v=torch.index_select(v, 0, pcp_metadata.kv_tail_indices),
+                cu_seqlens_q=prefill.query_start_loc // 2,
+                cu_seqlens_k=prefill.query_start_loc
+                // 2
+                * (self.pcp_world_size * 2 - self.pcp_rank),
+                max_seqlen_q=prefill.max_query_len // 2,
+                max_seqlen_k=prefill.max_query_len
+                // 2
+                * (self.pcp_world_size * 2 - self.pcp_rank),
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=True,
+            )
+
+            output = torch.cat([output_head, output_tail], dim=0)
+            output_restore_idx = pcp_metadata.output_restore_idx
+            if return_softmax_lse:
+                # FA returns LSE in shape [ H, B ]
+                lse = torch.cat([lse_head, lse_tail], dim=-1)
+                return (
+                    torch.index_select(output, 0, output_restore_idx),
+                    torch.index_select(lse, -1, output_restore_idx),
+                )
+            else:
+                return torch.index_select(output, 0, output_restore_idx)
+        else:
+            return self._flash_attn_varlen_diff_headdims(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=prefill.query_start_loc,
+                cu_seqlens_k=prefill.query_start_loc,
+                max_seqlen_q=prefill.max_query_len,
+                max_seqlen_k=prefill.max_query_len,
+                softmax_scale=self.scale,
+                causal=True,
+                return_softmax_lse=return_softmax_lse,
+            )
 
     def _run_prefill_new_tokens_fi(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
+        assert self.pcp_world_size == 1, "PCP is not supported for FlashInfer Prefill."
 
         ret = prefill.prefill_main.run(
             q=q,
@@ -1416,6 +1561,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
+        assert self.pcp_world_size == 1, "PCP is not supported for CUDNN Prefill."
+
         output, lse = cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -1501,6 +1648,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         assert prefill.query_seq_lens is not None
         assert prefill.workspace_buffer is not None
+        assert self.pcp_world_size == 1, "PCP is not supported for TRT-LLM Prefill."
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
@@ -1763,9 +1911,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-        dcp_world_size: int,
+        cp_world_size: int,
     ):
-        assert k_scale is None, "DCP not support scaled kvcache now."
+        assert k_scale is None, "PCP/DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
@@ -1792,19 +1940,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
             # workspace
-            # |------- N tokens --------|--------- N*dcp_size tokens ----------|
+            # |------- N tokens --------|--------- N*cp_size tokens ----------|
             # |<- use for loca_gather ->|<--------- use for allgather -------->|
-            allgather_offset = workspace.shape[0] // (dcp_world_size + 1)
-            assert allgather_offset * (dcp_world_size + 1) == workspace.shape[0]
+            allgather_offset = workspace.shape[0] // (cp_world_size + 1)
+            assert allgather_offset * (cp_world_size + 1) == workspace.shape[0]
             assert toks <= allgather_offset
             local_gathered_kvcache = workspace[:toks]
             cur_allgather_workspace = workspace[
-                allgather_offset : allgather_offset * (1 + dcp_world_size)
+                allgather_offset : allgather_offset * (1 + cp_world_size)
             ]
-            assert toks * dcp_world_size <= cur_allgather_workspace.shape[0]
-            cur_allgather_kvcache = cur_allgather_workspace[: toks * dcp_world_size]
+            assert toks * cp_world_size <= cur_allgather_workspace.shape[0]
+            cur_allgather_kvcache = cur_allgather_workspace[: toks * cp_world_size]
+            # TODO(yyj) Reduce to a single all-gather operation
             cur_allgather_kvcache.copy_(
-                get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
+                get_pcp_group().all_gather(
+                    get_dcp_group().all_gather(local_gathered_kvcache, dim=0),
+                    dim=0,
+                )
             )
             assert (
                 cur_allgather_kvcache.shape[-1]
@@ -1874,6 +2026,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # TODO (zyongye): Prefill function here
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size is not None
+        assert self.pcp_world_size is not None
 
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -1893,14 +2046,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_context:
             suffix_output, suffix_lse = output_prefill
-            if self.dcp_world_size > 1:
+            if self.dcp_world_size * self.pcp_world_size > 1:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
                         kv_c_and_k_pe_cache,
                         attn_metadata,
                         k_scale=None,
-                        dcp_world_size=self.dcp_world_size,
+                        cp_world_size=self.dcp_world_size * self.pcp_world_size,
                     )
                 )
             else:
@@ -1975,17 +2128,43 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if self.dcp_world_size is None:
             self.dcp_world_size = get_dcp_group().world_size
+        if self.pcp_world_size is None:
+            self.pcp_world_size = get_pcp_group().world_size
+        if self.dcp_rank is None:
+            self.dcp_rank = get_dcp_group().rank_in_group
+        if self.pcp_rank is None:
+            self.pcp_rank = get_pcp_group().rank_in_group
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
+        k_c_normed = k_c_normed[:num_actual_toks, ...]
+        k_pe = k_pe[:num_actual_toks, ...]
+
+        if self.pcp_world_size > 1:
+            if attn_metadata.prefill is not None:
+                pcp_metadata = attn_metadata.prefill.pcp_metadata
+                assert pcp_metadata is not None
+                assert pcp_metadata.pcp_allgather_restore_idx is not None
+                k_c_normed, k_pe = pcp_kv_allgather_and_restore(
+                    k_c_normed,
+                    k_pe,
+                    num_actual_toks,
+                    pcp_metadata.pcp_allgather_restore_idx,
+                    get_pcp_group(),
+                )
+            else:
+                # NOTE(yyj) Skip unnecessary kv all-gather when there are only decode
+                # requests, but token duplication is still required to align with
+                # the padding in slot mapping.
+                k_c_normed = k_c_normed.repeat_interleave(self.pcp_world_size, dim=0)
+                k_pe = k_pe.repeat_interleave(self.pcp_world_size, dim=0)
+
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
         q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
 
         assert (
             attn_metadata.num_decodes is not None
@@ -1996,12 +2175,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-
-        decode_q = q[:num_decode_tokens]
-
-        prefill_q = q[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -2018,6 +2191,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
+            prefill_q = q[num_decode_tokens:]
+            prefill_k_pe = k_pe[num_decode_tokens * self.pcp_world_size :]
+            prefill_k_c_normed = k_c_normed[num_decode_tokens * self.pcp_world_size :]
             self._forward_prefill(
                 prefill_q,
                 prefill_k_c_normed,
@@ -2031,6 +2207,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_decode:
             assert attn_metadata.decode is not None
 
+            decode_q = q[:num_decode_tokens]
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
@@ -2113,10 +2290,20 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             # correct dcp attn_out with lse.
             if self.dcp_world_size > 1:
-                attn_out = cp_lse_ag_out_rs(
+                attn_out, lse = cp_lse_ag_out_rs(
                     attn_out,
                     lse,
                     get_dcp_group(),
+                    return_lse=True,
+                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                )
+
+            # recorect pcp attn_out with lse.
+            if self.pcp_world_size > 1:
+                attn_out = cp_lse_ag_out_ar(
+                    attn_out,
+                    lse,
+                    get_pcp_group(),
                     is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
                 )
 
