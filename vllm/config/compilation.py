@@ -855,6 +855,13 @@ class CompilationConfig:
         self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(self):
+        # To compatible with OOT hardware plugin platform (for example vllm-ascend)
+        # which currently only supports sequence parallelism in eager mode.
+        if self.mode != CompilationMode.VLLM_COMPILE:
+            if self.splitting_ops is None:
+                self.splitting_ops = []
+            return
+
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
