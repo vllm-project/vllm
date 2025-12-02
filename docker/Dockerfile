@@ -244,9 +244,15 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Install EP kernels(pplx-kernels and DeepEP)
+ARG PPLX_COMMIT_HASH
+ARG DEEPEP_COMMIT_HASH
 RUN --mount=type=cache,target=/root/.cache/uv \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
-    /tmp/install_python_libraries.sh /tmp/ep_kernels_workspace wheel && \
+    /tmp/install_python_libraries.sh \
+        --workspace /tmp/ep_kernels_workspace \
+        --mode wheel \
+        ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
+        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -392,8 +398,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==0.5.2 \
-    && uv pip install --system flashinfer-jit-cache==0.5.2 \
+    uv pip install --system flashinfer-cubin==0.5.3 \
+    && uv pip install --system flashinfer-jit-cache==0.5.3 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 

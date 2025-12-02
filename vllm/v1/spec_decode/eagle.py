@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -24,6 +25,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
@@ -39,6 +41,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import (
+    eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_next_token_padded_kernel,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -74,6 +80,7 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -145,7 +152,9 @@ class EagleProposer:
         )
 
         self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
+            (self.max_num_tokens, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=device,
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
@@ -157,8 +166,6 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
@@ -556,20 +563,15 @@ class EagleProposer:
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
-        discard_request_indices: torch.Tensor,
-        num_discarded_requests: int,
+        discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead.
-        It also accounts for the rejected tokens in `sampled_token_ids`.
-        This function must use device functions to operate on the inputs, and
-        should not introduce any blocking CPU-GPU synchronization.
+        is not sampled and comes from `request.get_token_id()` instead. This is denoted
+        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # TODO(Ben): Combine this into a custom fused kernel
-
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         self.backup_next_token_ids.np[:num_reqs] = np.array(
@@ -578,44 +580,39 @@ class EagleProposer:
                     common_attn_metadata.seq_lens_cpu[i].item()
                 )
                 for i in range(num_reqs)
-            ]
+            ],
+            dtype=np.int32,
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu
 
-        # Mask out the sampled tokens indices that should not be sampled.
-        discard_sampled_tokens_req_indices = discard_request_indices[
-            :num_discarded_requests
-        ]
+        batch_size, num_tokens = sampled_token_ids.shape
+        device = sampled_token_ids.device
 
-        valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu.index_fill_(
-            0, discard_sampled_tokens_req_indices, -1
+        assert discard_request_mask.dtype == torch.bool
+        assert backup_tokens_gpu.dtype == torch.int32
+
+        next_token_ids = torch.empty((batch_size,), dtype=torch.int32, device=device)
+        valid_sampled_tokens_count = torch.empty(
+            (batch_size,), dtype=torch.int32, device=device
         )
 
-        # Generate a mask for all valid tokens within those requests
-        valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-        )
+        # Kernel grid: one program per request (row)
+        grid = (batch_size,)
 
-        # Count the number of valid tokens in each request
-        valid_sampled_tokens_count = valid_mask.sum(dim=1)
-
-        # Get the rightmost valid index per row
-        last_valid_indices = valid_sampled_tokens_count - 1
-        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
-
-        # Get last valid token from each row
-        # (assume undefined state where there is no valid token)
-        selected_tokens = torch.gather(
-            valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
-        ).squeeze(1)
-
-        # Use last token if valid, pre-computed backup if not
-        batch_size = valid_sampled_token_ids_gpu.shape[0]
-        next_token_ids = torch.where(
-            last_valid_indices != -1,
-            selected_tokens,
-            self.backup_next_token_ids.gpu[:batch_size],
+        # Find the next power of 2 for block sizes
+        BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
+        eagle_prepare_next_token_padded_kernel[grid](
+            sampled_token_ids,
+            discard_request_mask,
+            backup_tokens_gpu,
+            next_token_ids,
+            valid_sampled_tokens_count,
+            gpu_input_batch.vocab_size,
+            num_tokens,
+            batch_size,
+            sampled_token_ids.stride(0),
+            BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
         )
 
         return next_token_ids, valid_sampled_tokens_count
@@ -625,35 +622,35 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
         used as padding and filtered out later by `token_indices_to_sample`.
-        No blocking CPU operations should be introduced in this function.
         """
-        num_draft_tokens_gpu = torch.cat(
-            [
-                spec_decode_metadata.cu_num_draft_tokens[0:1],
-                spec_decode_metadata.cu_num_draft_tokens[1:]
-                - spec_decode_metadata.cu_num_draft_tokens[:-1],
-            ]
+        num_reqs = common_attn_metadata.num_reqs
+        device = valid_sampled_tokens_count.device
+
+        token_indices_to_sample = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
         )
 
-        num_rejected_tokens_gpu = torch.where(
-            num_draft_tokens_gpu > 0,
-            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-            torch.zeros_like(num_draft_tokens_gpu),
+        # Kernel grid: one program per request (row)
+        grid = (num_reqs,)
+        eagle_prepare_inputs_padded_kernel[grid](
+            spec_decode_metadata.cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            common_attn_metadata.query_start_loc,
+            token_indices_to_sample,
+            num_reqs,
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
         total_num_tokens = query_start_loc_cpu[-1].item()
-        token_indices = self.arange[:total_num_tokens]
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
@@ -666,16 +663,12 @@ class EagleProposer:
             max_query_len=new_query_len_per_req.max().item(),
             max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
-        token_indices_to_sample = (
-            common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
-        )
-
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return spec_common_attn_metadata, token_indices_to_sample
 
     def propose_tree(
         self,
@@ -1018,10 +1011,10 @@ class EagleProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
-            if (
-                self.get_model_name(target_model)
-                == "Qwen2_5_VLForConditionalGeneration"
-            ):
+            if self.get_model_name(target_model) in [
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
+            ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             else:
                 self.model.config.image_token_index = (
