@@ -375,14 +375,10 @@ async def get_mm_processor_stats(request: Request):
             status_code=400,
         )
 
-    from vllm.multimodal.processing import (
-        _timing_stats_registry,
-        _timing_stats_registry_lock,
-    )
-    with _timing_stats_registry_lock:
-        all_stats = {
-            rid: stats.to_dict() for rid, stats in _timing_stats_registry.items()
-        }
+    from vllm.multimodal.processing import get_timing_stats_from_engine_client
+
+    engine = engine_client(request)
+    all_stats = get_timing_stats_from_engine_client(engine)
     return JSONResponse(content={"stats": all_stats})
 
 
@@ -947,10 +943,11 @@ if envs.VLLM_SERVER_DEV_MODE:
             )
 
         from vllm.multimodal.processing import (
-            clear_mm_processor_timing_stats_registry,
+            clear_timing_stats_from_engine_client,
         )
 
-        count = clear_mm_processor_timing_stats_registry()
+        engine = engine_client(raw_request)
+        count = clear_timing_stats_from_engine_client(engine)
         logger.info(f"Cleared {count} MM processor timing stats from registry")
         return JSONResponse(
             content={"status": "cleared", "count": count},
