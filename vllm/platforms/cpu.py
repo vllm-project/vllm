@@ -14,6 +14,7 @@ import regex as re
 import torch
 
 from vllm import envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
@@ -21,10 +22,8 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    AttentionBackendEnum = None
     VllmConfig = None
 
 
@@ -135,8 +134,6 @@ class CpuPlatform(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
@@ -192,7 +189,7 @@ class CpuPlatform(Platform):
 
         scheduler_config = vllm_config.scheduler_config
         if (
-            scheduler_config.chunked_prefill_enabled
+            scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
         ) and cache_config.cache_dtype != "auto":
             raise RuntimeError(
@@ -339,7 +336,7 @@ class CpuPlatform(Platform):
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
+                vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
@@ -387,7 +384,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on CPU.")
         return False
 
     @classmethod

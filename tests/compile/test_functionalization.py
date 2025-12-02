@@ -137,7 +137,7 @@ class TestRotaryEmbedding(torch.nn.Module):
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=max_position,
-            base=base,
+            rope_parameters={"rope_type": "default", "rope_theta": base},
         )
 
     def forward(self, positions, q, k):
@@ -172,7 +172,7 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=base,
+            rope_parameters={"rope_type": "default", "rope_theta": base},
         )
 
     def forward(self, positions, hidden_states):

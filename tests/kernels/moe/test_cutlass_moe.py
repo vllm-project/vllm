@@ -42,8 +42,6 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclasses.dataclass

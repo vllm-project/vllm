@@ -2,11 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import flashinfer
 import pytest
-import torch
 
 from vllm.platforms import current_platform
+
+try:
+    import flashinfer
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "flashinfer is not supported for vLLM on ROCm.", allow_module_level=True
+        )
+
+import torch
 
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]

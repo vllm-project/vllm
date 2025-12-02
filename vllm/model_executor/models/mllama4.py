@@ -292,13 +292,17 @@ class Llama4VisionAttention(nn.Module):
                 prefix=f"{prefix}.o_proj",
             )
 
+        rope_parameters = {
+            "rope_type": "mllama4",
+            "rope_theta": config.rope_parameters["rope_theta"],
+        }
+
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             rotary_dim=config.hidden_size // config.num_attention_heads // 2,
             # number of image patches
             max_position=(config.image_size // config.patch_size) ** 2,
-            base=config.rope_theta,
-            rope_scaling={"rope_type": "mllama4"},
+            rope_parameters=rope_parameters,
             is_neox_style=False,
             dtype=torch.complex64,  # important
         )
