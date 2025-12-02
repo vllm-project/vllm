@@ -197,7 +197,7 @@ async def test_conversation_embedding(
     chat_response.raise_for_status()
     chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
 
-    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name)
     prompt = tokenizer.apply_chat_template(
         messages,
         chat_template=DUMMY_CHAT_TEMPLATE,

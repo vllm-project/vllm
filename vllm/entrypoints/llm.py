@@ -188,7 +188,7 @@ class LLM:
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
         tokenizer: str | None = None,
-        tokenizer_mode: TokenizerMode = "auto",
+        tokenizer_mode: TokenizerMode | str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
