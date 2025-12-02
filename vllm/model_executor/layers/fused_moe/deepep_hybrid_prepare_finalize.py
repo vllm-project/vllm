@@ -16,27 +16,6 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.math_utils import round_up
 
 
-# Copied from DeepEP hybrid_ep_buffer.py
-def indices_to_map(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    num_of_tokens: int,
-    num_of_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Generate the routing map and the probs according to the topk_ids and topk_weights.
-    routing_map = torch.zeros(
-        num_of_tokens, num_of_experts, device="cuda", dtype=torch.bool
-    )
-    routing_map = routing_map.scatter(1, topk_ids.to(torch.int64), 1).bool()
-
-    probs = torch.zeros(
-        num_of_tokens, num_of_experts, device="cuda", dtype=torch.float32
-    )
-    probs = probs.scatter(1, topk_ids.to(torch.int64), topk_weights)
-
-    return routing_map, probs
-
-
 class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     Prepare/Finalize using DeepEP Hybrid kernels.
@@ -63,18 +42,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.handle = None
         self.expert_probs = None
         self.num_local_experts = num_local_experts
-
-        # The hybrid kernels have the option of taking in a pre-computed
-        # routing map as an argument instead of computing it internally.
-        # The internally computed map uses a torch all gather which breaks
-        # CUDA graphs. When 'do_routing' is True, the routing map is computed
-        # by DeepEPHybridPrepareAndFinalize using CUDA graph-able communication
-        # primitives. Unfortunately, there's other stuff in the hybrid kernels
-        # that prevent CUDA graphs from working. This flag in for future work
-        # on CUDA graph support.
-        # Set to True to try compute the routing map in
-        # DeepEPHybridPrepareAndFinalize.
-        self.do_routing = False
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -198,23 +165,14 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        if self.do_routing:
-            M, K = a1.shape
-            routing_map, probs = indices_to_map(topk_ids, topk_weights, M, num_experts)
-            handle = self.construct_handle(K, M, num_experts, routing_map)
-        else:
-            routing_map = None
-            probs = None
-            handle = None
-
         (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
             hidden=a1q,
             scaling_factor=a1q_scale,
             topk_idx=topk_ids,
             topk_weights=topk_weights,
-            routing_map=routing_map,
-            probs=probs,
-            handle=handle,
+            routing_map=None,
+            probs=None,
+            handle=None,
             num_dispatched_tokens=None,
             num_of_experts=num_experts,
         )
@@ -223,6 +181,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.expert_probs = expert_probs
         assert self.handle is not None
 
+        # TODO(bnell): add comment
         new_topk_ids, new_topk_weights = self.create_new_topk_data(
             topk_ids,
             topk_weights,
