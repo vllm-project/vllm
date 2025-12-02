@@ -2,7 +2,7 @@
 
 This directory includes benchmarks between DeepSeek's DeepGEMM block fp8 kernels against vLLM's existing triton and CUTLASS-based kernels.
 
-Currently this just includes dense GEMMs and only works on Hopper GPUs.
+Currently, this just includes dense GEMMs and only works on Hopper GPUs.
 
 ## Setup
 

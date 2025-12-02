@@ -3,6 +3,7 @@
 from collections.abc import Sequence
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
@@ -17,7 +18,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
 )
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import bind_kv_cache
 
 
@@ -144,19 +144,19 @@ def build_attn_metadata(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
     num_tokens: int,
-    query_start_loc: CpuGpuBuffer,
-    seq_lens: CpuGpuBuffer,
-    num_computed_tokens_cpu: torch.Tensor,
+    query_start_loc_gpu: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens: torch.Tensor,
+    seq_lens_np: np.ndarray,
+    num_computed_tokens_cpu: torch.Tensor | None,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
-    query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
-    query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
-    max_query_len = int(query_start_loc.np[: num_reqs + 1].max())
-    seq_lens_gpu = seq_lens.gpu[:num_reqs]
-    seq_lens_cpu = seq_lens.cpu[:num_reqs]
-    max_seq_len = int(seq_lens.np[:num_reqs].max())
+    max_query_len = int(query_start_loc_cpu.max())
+    seq_lens = seq_lens[:num_reqs]
+    seq_lens_cpu = torch.from_numpy(seq_lens_np)
+    max_seq_len = int(seq_lens_np.max())
 
     attn_metadata: dict[str, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
@@ -167,7 +167,7 @@ def build_attn_metadata(
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
-            seq_lens=seq_lens_gpu,
+            seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             max_seq_len=max_seq_len,
             num_computed_tokens_cpu=num_computed_tokens_cpu,

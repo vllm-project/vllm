@@ -49,9 +49,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
 from vllm.utils.func_utils import supports_kw
 
@@ -536,7 +536,7 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -593,7 +593,7 @@ def resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -627,7 +627,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig, tokenizer: AnyTokenizer):
+    def __init__(self, model_config: ModelConfig, tokenizer: TokenizerLike):
         super().__init__()
 
         self._model_config = model_config
@@ -1283,6 +1283,7 @@ MM_PARSER_MAP: dict[
     "text": lambda part: _TextParser(part).get("text", None),
     "thinking": lambda part: _ThinkParser(part).get("thinking", None),
     "input_text": lambda part: _TextParser(part).get("text", None),
+    "output_text": lambda part: _TextParser(part).get("text", None),
     "input_image": lambda part: _ResponsesInputImageParser(part).get("image_url", None),
     "image_url": lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds": lambda part: _ImageEmbedsParser(part).get("image_embeds", None),
@@ -1463,7 +1464,7 @@ def _parse_chat_message_content_part(
         )
         return None
 
-    if part_type in ("text", "input_text", "refusal", "thinking"):
+    if part_type in ("text", "input_text", "output_text", "refusal", "thinking"):
         str_content = cast(str, content)
         if wrap_dicts:
             return {"type": "text", "text": str_content}
@@ -1591,7 +1592,7 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1623,7 +1624,7 @@ def parse_chat_messages(
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
