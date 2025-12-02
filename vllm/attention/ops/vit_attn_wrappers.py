@@ -37,7 +37,9 @@ def flash_attn_maxseqlen_wrapper(
             get_flash_attn_version,
         )
 
-        kwargs["fa_version"] = get_flash_attn_version()
+        # check if we can use vllm's FA3
+        if get_flash_attn_version() == 3:
+            kwargs["fa_version"] = 3
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
