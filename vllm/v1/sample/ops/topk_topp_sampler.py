@@ -101,9 +101,13 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        if os.getenv("VLLM_ENABLE_OPTIMIZE_TOPK_TOPP", "0") == "1" and k is not None and p is not None:
+        if (
+            os.getenv("VLLM_ENABLE_OPTIMIZE_TOPK_TOPP", "0") == "1"
+            and k is not None
+            and p is not None
+        ):
             return optimized_top_k_top_p(logits, generators, k, p, self.logprobs_mode)
-        logits_to_return = None    
+        logits_to_return = None
         logits = self.apply_top_k_top_p(logits, k, p)
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -131,9 +135,10 @@ class TopKTopPSampler(nn.Module):
                     "PyTorch-native implementation."
                 )
             return self.forward_native(logits, generators, k, p)
-        assert self.logprobs_mode not in ("processed_logits", "processed_logprobs"), (
-            "FlashInfer does not support returning logits/logprobs"
-        )
+        assert self.logprobs_mode not in (
+            "processed_logits",
+            "processed_logprobs",
+        ), "FlashInfer does not support returning logits/logprobs"
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
@@ -280,12 +285,13 @@ def apply_top_k_top_p(
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
     return logits
 
+
 def optimized_top_k_top_p_sample(
     logits: torch.Tensor,
     generators: dict[int, torch.Generator],
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
-    logprobs_mode: Optional[LogprobsMode] = None
+    logprobs_mode: Optional[LogprobsMode] = None,
 ) -> torch.Tensor:
     max_k = k.max().item()
     topk_values, topk_indices = logits.topk(max_k, dim=1)
@@ -316,6 +322,7 @@ def optimized_top_k_top_p_sample(
         topk_indices, dim=1, index=probs.div_(q).argmax(dim=-1).unsqueeze(1)
     ).squeeze(1)
     return sampled_token_indices, logits_to_return
+
 
 def apply_top_k_only(
     logits: torch.Tensor,
