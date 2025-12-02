@@ -5,6 +5,7 @@ import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Union
 
@@ -17,9 +18,19 @@ from vllm.entrypoints.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.openai.parser.responses_parser import (
+    get_responses_parser_for_simple_context,
+)
+from vllm.entrypoints.openai.protocol import (
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
+from vllm.entrypoints.responses_utils import construct_tool_dicts
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -177,6 +188,71 @@ class SimpleContext(ConversationContext):
         pass
 
     async def cleanup_session(self) -> None:
+        raise NotImplementedError("Should not be called.")
+
+
+class ParsableContext(ConversationContext):
+    def __init__(
+        self,
+        *,
+        response_messages: list[ResponseInputOutputItem],
+        tokenizer: AnyTokenizer,
+        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
+        request: ResponsesRequest,
+    ):
+        self.num_prompt_tokens = 0
+        self.num_output_tokens = 0
+        self.num_cached_tokens = 0
+        # TODO: num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
+        # not implemented yet for ParsableContext
+        self.all_turn_metrics: list[TurnMetrics] = []
+
+        if reasoning_parser_cls is None:
+            raise ValueError("reasoning_parser_cls must be provided.")
+
+        self.parser = get_responses_parser_for_simple_context(
+            tokenizer=tokenizer,
+            reasoning_parser_cls=reasoning_parser_cls,
+            response_messages=response_messages,
+            request=request,
+        )
+
+        self._tool_sessions: dict[str, ClientSession | Tool] = {}
+        self.called_tools: set[str] = set()
+
+        self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+
+    def append_output(self, output: RequestOutput) -> None:
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        self.parser.process(output.outputs[0])
+
+    def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
+        raise NotImplementedError("Should not be called.")
+
+    def need_builtin_tool_call(self) -> bool:
+        """Return true if the last message is a MCP tool call"""
+        return False
+
+    async def call_tool(self) -> list[ResponseInputOutputItem]:
+        raise NotImplementedError("Should not be called.")
+
+    def render_for_completion(self):
+        raise NotImplementedError("Should not be called.")
+
+    async def init_tool_sessions(
+        self,
+        tool_server: ToolServer | None,
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ):
+        pass
+
+    async def cleanup_session(self, *args, **kwargs) -> None:
+        """Can be used as coro to used in __aexit__"""
         raise NotImplementedError("Should not be called.")
 
 
