@@ -129,7 +129,8 @@ class HFConfigParser(ConfigParserBase):
                 else model_type
             )
         # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
-        model_type = kwargs.pop("hf_overrides", {}).get("model_type", model_type)
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            model_type = hf_overrides.get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
