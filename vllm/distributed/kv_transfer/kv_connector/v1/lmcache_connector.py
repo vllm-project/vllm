@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -69,13 +70,14 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         return f"<LMCacheKVEvents events={self.get_all_events()}>"
 
 
-class LMCacheConnectorV1(KVConnectorBase_V1):
+class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
+        vllm_config.kv_cache_config = kv_cache_config
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
@@ -310,7 +312,20 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        raise ValueError("YIFAN: should not be called")
         return self._lmcache_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self._lmcache_engine.request_finished(request, block_ids)
+        # print(
+        #     f"YIFAN: request_finished_all_groups called with request {request.request_id} and blocks {block_ids}"
+        # )
+        # raise NotImplementedError("YIFAN: request_finished_all_groups not implemented")
+        # return False, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
