@@ -397,7 +397,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
-        processor_kwargs: dict[str, Any] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -411,8 +411,11 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
+                # Create a copy to avoid modifying the original dict
                 processor_kwargs = (
-                    processor_kwargs if processor_kwargs is not None else {}
+                    tokenization_kwargs.copy()
+                    if tokenization_kwargs is not None
+                    else {}
                 )
                 processor_kwargs.update(
                     {
