@@ -8,6 +8,7 @@ import json
 import re
 from typing import Any
 
+# flake8: noqa: E501
 TOOLS_SYSTEM_TEMPLATE = """## Tools
 You have access to a set of tools you can use to answer the user's question.
 You can invoke functions by writing a "<{dsml_token}function_calls>" block like the following as part of your reply to the user:
@@ -45,7 +46,7 @@ user_msg_template: str = "<｜User｜>{content}<｜Assistant｜>"
 assistant_msg_template: str = "{reasoning}{content}{tool_calls}<｜end▁of▁sentence｜>"
 thinking_template = "{reasoning_content}"
 
-response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"  # noqa: E501
+response_format_template: str = "## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{schema}"
 tool_call_template: str = (
     '<{dsml_token}invoke name="{name}">\n{arguments}\n</{dsml_token}invoke>'
 )
@@ -59,7 +60,7 @@ tool_output_template: str = "\n<result>{content}</result>"
 def to_json(value: Any) -> str:
     try:
         return json.dumps(value, ensure_ascii=False)
-    except:
+    except Exception:
         return json.dumps(value, ensure_ascii=True)
 
 
@@ -91,7 +92,7 @@ def tool_calls_to_openai_format(tool_calls):
 
 
 def encode_arguments_to_dsml(tool_call: dict[str, str]) -> str:
-    p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""  # noqa: E501
+    p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""
     P_dsml_strs = []
 
     arguments = json.loads(tool_call["arguments"])
@@ -262,7 +263,7 @@ def render_message(
 
         if thinking_mode == "thinking" and index > last_user_idx:
             assert reasoning_content or tool_calls, (
-                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"  # noqa: E501
+                f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"
             )
             thinking_part = (
                 thinking_template.format(reasoning_content=reasoning_content or "")
