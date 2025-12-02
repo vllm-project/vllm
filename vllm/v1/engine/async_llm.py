@@ -750,8 +750,8 @@ class AsyncLLM(EngineClient):
         self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self) -> None:
-        await self.engine_core.reset_prefix_cache_async()
+    async def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+        return await self.engine_core.reset_prefix_cache_async(reset_running_requests)
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
