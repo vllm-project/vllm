@@ -144,7 +144,7 @@ class CacheConfig:
 
     kv_offloading_backend: KVOffloadingBackend | None = None
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
     together with kv_offloading_size."""
 
     def compute_hash(self) -> str:
@@ -167,8 +167,6 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            # `cpu_offload_gb` does not use `torch.compile` yet.
-            "cpu_offload_gb",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             # Post-init/derived counters

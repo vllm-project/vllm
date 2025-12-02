@@ -847,7 +847,7 @@ struct VecTypeTrait<c10::BFloat16> {
 };
 #endif
 
-#if !defined(__powerpc__)
+#if !defined(__powerpc__) && !defined(__s390x__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
