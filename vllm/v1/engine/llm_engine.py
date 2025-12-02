@@ -329,8 +329,8 @@ class LLMEngine:
         self.input_processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self):
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+        return self.engine_core.reset_prefix_cache(reset_running_requests)
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)

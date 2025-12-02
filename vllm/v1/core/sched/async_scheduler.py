@@ -45,6 +45,12 @@ class AsyncScheduler(Scheduler):
         request: Request,
         new_token_ids: list[int],
     ) -> tuple[list[int], bool]:
+        if request.discard_latest_async_tokens:
+            # If the request is force preempted in reset_prefix_cache, we
+            # should discard the latest async token.
+            request.discard_latest_async_tokens = False
+            return [], False
+
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
