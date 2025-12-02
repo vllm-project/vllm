@@ -16,11 +16,6 @@ logger = init_logger(__name__)
 class DeepSeekV32ToolParser(MinimaxM2ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         self.prev_tool_call_arr: list[dict] = []
-        # the index of the tool call that is currently being parsed
-        self.current_tool_id: int = -1
-        self.current_tool_name_sent: bool = False
-        self.streamed_args_for_tool: list[str] = []
-
         self.model_tokenizer = tokenizer
 
         # Sentinel tokens
@@ -63,10 +58,10 @@ class DeepSeekV32ToolParser(MinimaxM2ToolParser):
             r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
         )
         self.invoke_complete_regex = re.compile(
-            r"<｜DSML｜invoke name=(.*?)</｜DSML｜invoke>", re.DOTALL
+            r'<｜DSML｜invoke\s+name="([^"]+)"</｜DSML｜invoke>', re.DOTALL
         )
         self.parameter_complete_regex = re.compile(
-            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string=".*?"\s*>(.*?)</｜DSML｜parameter>'
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(?:true|false)"\s*>(.*?)</｜DSML｜parameter>'
         )
 
         self.tool_call_start_token_id = None
