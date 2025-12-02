@@ -2,17 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from functools import lru_cache
-from typing import TYPE_CHECKING, Any
-
-from typing_extensions import assert_never
+from typing import Any
 
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike, get_tokenizer
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
-
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -28,18 +21,54 @@ def __getattr__(name: str):
         )
 
         return TokenizerLike
-    if name == "get_cached_tokenizer":
-        from vllm.tokenizers.hf import get_cached_tokenizer
+    if name == "get_tokenizer":
+        from vllm.tokenizers import get_tokenizer
 
         warnings.warn(
-            "`vllm.transformers_utils.tokenizer.get_cached_tokenizer` "
-            "has been moved to `vllm.tokenizers.hf.get_cached_tokenizer`. "
+            "`vllm.transformers_utils.tokenizer.get_tokenizer` "
+            "has been moved to `vllm.tokenizers.get_tokenizer`. "
             "The old name will be removed in v0.13.",
             DeprecationWarning,
             stacklevel=2,
         )
 
-        return get_cached_tokenizer
+        return get_tokenizer
+    if name == "cached_get_tokenizer":
+        from vllm.tokenizers import cached_get_tokenizer
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.cached_get_tokenizer` "
+            "has been moved to `vllm.tokenizers.cached_get_tokenizer`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return cached_get_tokenizer
+    if name == "cached_tokenizer_from_config":
+        from vllm.tokenizers import cached_tokenizer_from_config
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.cached_tokenizer_from_config` "
+            "has been moved to `vllm.tokenizers.cached_tokenizer_from_config`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return cached_tokenizer_from_config
+    if name == "init_tokenizer_from_configs":
+        from vllm.tokenizers import init_tokenizer_from_config
+
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.init_tokenizer_from_configs` "
+            "has been moved to `vllm.tokenizers.init_tokenizer_from_config`. "
+            "The old name will be removed in v0.13.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return init_tokenizer_from_config
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -92,37 +121,3 @@ def encode_tokens(
         kw_args["add_special_tokens"] = add_special_tokens
 
     return tokenizer.encode(text, **kw_args)
-
-
-cached_get_tokenizer = lru_cache(get_tokenizer)
-
-
-def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
-    **kwargs: Any,
-):
-    return cached_get_tokenizer(
-        model_config.tokenizer,
-        tokenizer_mode=model_config.tokenizer_mode,
-        revision=model_config.tokenizer_revision,
-        trust_remote_code=model_config.trust_remote_code,
-        **kwargs,
-    )
-
-
-def init_tokenizer_from_configs(model_config: "ModelConfig"):
-    runner_type = model_config.runner_type
-    if runner_type == "generate" or runner_type == "draft":
-        truncation_side = "left"
-    elif runner_type == "pooling":
-        truncation_side = "right"
-    else:
-        assert_never(runner_type)
-
-    return get_tokenizer(
-        model_config.tokenizer,
-        tokenizer_mode=model_config.tokenizer_mode,
-        trust_remote_code=model_config.trust_remote_code,
-        revision=model_config.tokenizer_revision,
-        truncation_side=truncation_side,
-    )

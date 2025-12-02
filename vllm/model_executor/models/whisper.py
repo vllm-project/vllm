@@ -48,7 +48,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.transformers_utils.processor import cached_get_processor
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -850,7 +850,7 @@ class WhisperForConditionalGeneration(
     def get_speech_to_text_config(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
-        processor = cached_get_processor(model_config.model)
+        processor = cached_processor_from_config(model_config)
 
         return SpeechToTextConfig(
             max_audio_clip_s=processor.feature_extractor.chunk_length,
@@ -864,7 +864,7 @@ class WhisperForConditionalGeneration(
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
     ) -> int | None:
-        processor = cached_get_processor(model_config.model)
+        processor = cached_processor_from_config(model_config)
         hop_length = processor.feature_extractor.hop_length
         assert hop_length is not None
         # NOTE(NickLucche) user can't pass encoder
