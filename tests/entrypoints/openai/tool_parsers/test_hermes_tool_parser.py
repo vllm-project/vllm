@@ -271,7 +271,7 @@ async def test_streaming_product_tool_call():
 
 @pytest.fixture
 def qwen_tokenizer() -> TokenizerLike:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     return get_tokenizer("Qwen/Qwen3-32B")
 

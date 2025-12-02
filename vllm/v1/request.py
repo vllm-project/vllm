@@ -93,7 +93,12 @@ class Request:
             if self.prompt_token_ids is not None
             else [0] * self.num_prompt_tokens
         )
-        self.num_output_placeholders = 0  # Used in async scheduling.
+
+        # Used in async scheduling.
+        self.num_output_placeholders = 0
+        # Used in forced preemption (reset_prefix_cache) with async scheduling.
+        self.discard_latest_async_tokens = False
+
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
