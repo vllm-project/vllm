@@ -1039,11 +1039,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # We take the max then dequant and requant each expert.
             if self.quant_config.is_mx:
                 # MX format already has single scale per expert
-                # weight = layer.w13_weight
-                # weight_scale = layer.w13_weight_scale
-                # from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
-                # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
-                # layer.w13_weight = Parameter(dq_weight.data, requires_grad=False)
+                weight = layer.w13_weight
+                weight_scale = layer.w13_weight_scale
+                from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
+                dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+                layer.w13_weight = Parameter(dq_weight.data, requires_grad=False)
+                
+                
+                weight = layer.w2_weight
+                weight_scale = layer.w2_weight_scale
+                dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+                layer.w2_weight = Parameter(dq_weight.data, requires_grad=False)
                 return
             
             assert layer.w13_weight_scale is not None

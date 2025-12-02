@@ -576,7 +576,6 @@ def invoke_fused_moe_kernel(
         
         # Dequantize A and B from MXFP8 to BF16
         A = dequant_mxfp8_to_bf16(A, A_scale)
-        B = dequant_mxfp8_to_bf16(B, B_scale)
 
         # Clear the scales since now kernel just works with BF16 tensors
         A_scale = None
