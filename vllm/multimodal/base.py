@@ -18,6 +18,9 @@ class MediaWithBytes(Generic[_T]):
 
     This ensures the raw bytes and media object remain synchronized,
     preventing cache corruption from in-place modifications.
+
+    The wrapper delegates attribute access to the underlying media object,
+    making it behave transparently like the wrapped type (e.g., PIL.Image).
     """
 
     media: _T
@@ -26,6 +29,11 @@ class MediaWithBytes(Generic[_T]):
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
         return np.array(self.media, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        """Delegate attribute access to the underlying media object."""
+        # This is only called when the attribute is not found on self
+        return getattr(self.media, name)
 
 
 class MediaIO(ABC, Generic[_T]):
