@@ -35,6 +35,19 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
@@ -79,19 +92,6 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
-
-    max_model_len: InitVar[int] = 8192
-    """Maximum length of a sequence (including prompt and generated text).
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    provide fallbacks and validate other attributes."""
-
-    is_encoder_decoder: InitVar[bool] = False
-    """True if the model is an encoder-decoder model.
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
@@ -156,6 +156,17 @@ class SchedulerConfig:
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
+
+    @staticmethod
+    def default_factory(**kwargs):
+        """
+        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
@@ -338,8 +349,3 @@ class SchedulerConfig:
             )
 
         return self
-
-    def __getattribute__(self, name: str) -> Any:
-        if name == "max_model_len" or name == "is_encoder_decoder":
-            raise AttributeError(f"{name} is an init-only parameter. ")
-        return object.__getattribute__(self, name)

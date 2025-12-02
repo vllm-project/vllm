@@ -6,12 +6,14 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PoolerConfig,
+    SchedulerConfig,
     VllmConfig,
     update_config,
 )
@@ -1095,3 +1097,14 @@ def test_vllm_config_explicit_overrides():
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_scheduler_config_init():
+    with pytest.raises(ValidationError):
+        # Positional InitVars missing
+        # (InitVars cannot have defaults otherwise they will become attributes)
+        SchedulerConfig()
+
+    with pytest.raises(AttributeError):
+        # InitVar does not become an attribute
+        print(SchedulerConfig.default_factory().max_model_len)

@@ -170,7 +170,9 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(
+        default_factory=SchedulerConfig.default_factory,
+    )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
