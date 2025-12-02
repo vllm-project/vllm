@@ -170,7 +170,9 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(
+        default_factory=SchedulerConfig.default_factory,
+    )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
@@ -265,10 +267,6 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
-            # LoRA creates static buffers based on max_num_batched_tokens.
-            # The tensor sizes and strides get captured in the torch.compile
-            # graph explicitly.
-            vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
