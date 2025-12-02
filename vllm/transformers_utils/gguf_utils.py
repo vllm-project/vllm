@@ -61,11 +61,9 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
         parts = model.rsplit(":", 1)
         return (parts[0], parts[1])
     raise ValueError(
-        "Wrong GGUF model or invalid GGUF quant type: %s.\n"
+        f"Wrong GGUF model or invalid GGUF quant type: {model}.\n"
         "- It should be in repo_id:quant_type format.\n"
-        "- Valid GGMLQuantizationType values: %s",
-        model,
-        GGMLQuantizationType._member_names_,
+        f"- Valid GGMLQuantizationType values: {GGMLQuantizationType._member_names_}",
     )
 
 
