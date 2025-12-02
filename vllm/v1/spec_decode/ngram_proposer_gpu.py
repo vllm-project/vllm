@@ -28,7 +28,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 @support_torch_compile(
     dynamic_arg_dims={
         "num_tokens_no_spec": 0,
-        "token_ids_gpu": [0, 1],
+        "token_ids_gpu": 0,
         "combined_mask": 0,
     }
 )
@@ -196,7 +196,7 @@ class NgramGPUKernel(nn.Module):
         results = torch.where(
             has_any_match.unsqueeze(1),
             extracted_sequences,
-            torch.full_like(extracted_sequences, 0),   # TODO:(patchy): Use -1 instead of 0.
+            torch.full_like(extracted_sequences, 0),
         )
 
         return results
@@ -248,7 +248,7 @@ class NgramGPUKernel(nn.Module):
         mask = combined_mask.unsqueeze(1).expand(-1, self.k)
         draft_tokens = torch.where(mask, results, draft_tokens)
 
-        is_empty_draft_tokens = (draft_tokens == 0).all(dim=1)   # TODO:(patchy): Use -1 instead of 0.
+        is_empty_draft_tokens = (draft_tokens == 0).all(dim=1)
 
         return draft_tokens, is_empty_draft_tokens
 
@@ -296,6 +296,9 @@ class NgramProposerGPU:
         self.kernel.to(device)
         self.kernel.eval()
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
+
+        # TODO(patchy): Remove this buffer, use
+        # token_ids_gpu_tensor in gpu_model_runner.py instead.
         self.backup_next_token_ids = CpuGpuBuffer(
             max_batch_size,
             dtype=torch.int32,
@@ -309,7 +312,7 @@ class NgramProposerGPU:
     def _dummy_run(self):
         token_ids, num_tokens, sampled_flags, valid_mask = self._generate_dummy_data(
             batch_size=self.max_num_seqs,
-            max_seq_len=min(self.max_model_len, 1024),
+            max_seq_len=self.max_model_len,
             vocab_size=self.vocab_size,
             pattern_len=self.k,
             repetition_rate=0.5,
@@ -354,32 +357,17 @@ class NgramProposerGPU:
             valid_mask: [batch_size] bool tensor
         """
         # Generate random token IDs
-        token_ids = torch.randint(
-            0, vocab_size, (batch_size, max_seq_len), dtype=torch.int32, device=device
+        token_ids = torch.zeros(
+            batch_size,
+            max_seq_len,
+            dtype=torch.int32,
+            device=device,
         )
 
         # Generate random sequence lengths
-        min_len = max(pattern_len * 2 + 3, max_seq_len // 2)
         num_tokens = torch.randint(
-            min_len, max_seq_len, (batch_size,), dtype=torch.int32, device=device
+            pattern_len, max_seq_len, (batch_size,), dtype=torch.int32, device=device
         )
-
-        # Inject n-gram repetitions using the tail pattern of each sequence
-        for i in range(batch_size):
-            seq_len = num_tokens[i].item()
-            if seq_len > pattern_len * 2:
-                # Pattern is the last pattern_len tokens of the valid sequence
-                src_pos = seq_len - pattern_len
-                num_reps = int(seq_len * repetition_rate / pattern_len)
-                for _ in range(num_reps):
-                    # Place the copied tail pattern somewhere before the tail
-                    tgt_pos = torch.randint(0, seq_len - pattern_len, (1,)).item()
-                    if tgt_pos == src_pos:
-                        continue
-
-                    token_ids[i, tgt_pos : tgt_pos + pattern_len] = token_ids[
-                        i, src_pos : src_pos + pattern_len
-                    ].clone()
 
         # All sequences have sampled tokens and are valid
         sampled_flags = torch.ones(batch_size, dtype=torch.bool, device=device)
@@ -401,10 +389,7 @@ class NgramProposerGPU:
 
         with set_forward_context(None, self.vllm_config):
             combined_mask = (
-                sampled_flags
-                & valid_mask
-                & (num_tokens_no_spec < self.max_model_len)
-                & (num_tokens_no_spec >= self.min_n)
+                sampled_flags & valid_mask & (num_tokens_no_spec >= self.min_n)
             )
 
             draft_tokens, is_empty_draft_tokens = self.kernel(
@@ -414,36 +399,6 @@ class NgramProposerGPU:
             )
 
             return draft_tokens, is_empty_draft_tokens
-
-    def prepare_next_token_ids_cpu(
-        self,
-        sampled_token_ids: list[np.ndarray],
-        requests: dict[str, CachedRequestState],
-        gpu_input_batch: InputBatch,
-        num_scheduled_tokens: dict[str, int],
-    ) -> torch.Tensor:
-        """
-        This function is used to prepare the inputs for speculative decoding.
-        It calculates the next token ids for each request based on the sampled
-        token ids from the CPU. If a request has no sampled token ids (e.g.,
-        during the initial decoding steps), it falls back to using the request
-        state to get the next token id.
-        """
-        req_ids = gpu_input_batch.req_ids
-        next_token_ids: list[int] = []
-        for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids.shape[0] > 0:
-                # Common case.
-                next_token_id = token_ids[-1]
-            else:
-                # Partial prefill (rare case).
-                # Get the next token id from the request state.
-                req_id = req_ids[i]
-                req_state = requests[req_id]
-                seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
-                next_token_id = req_state.get_token_id(seq_len)
-            next_token_ids.append(next_token_id)
-        return torch.tensor(next_token_ids, dtype=torch.int32, device=self.device)
 
     def prepare_next_token_ids_padded(
         self,
@@ -463,8 +418,6 @@ class NgramProposerGPU:
         This function must use device functions to operate on the inputs, and
         should not introduce any blocking CPU-GPU synchronization.
         """
-        # TODO(Ben): Combine this into a custom fused kernel
-        # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         # Batch convert seq_lens to avoid multiple .item() calls
         seq_lens_list = common_attn_metadata.seq_lens_cpu[:num_reqs].tolist()
