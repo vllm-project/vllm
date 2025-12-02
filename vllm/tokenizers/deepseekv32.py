@@ -39,22 +39,17 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return DeepseekV32Tokenizer(tokenizer)
 
     def apply_chat_template(self, messages, tools=None, **kwargs):
-        thinking = kwargs.get("thinking", True)
+        thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
-
-        encode_config = dict(
-            thinking_mode=thinking_mode, drop_thinking=False, add_default_bos_token=True
-        )
-        messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": "You are a helpful Assistant.",
-                "tools": tools if tools is not None else [],
-            },
-        )
+        messages = messages.copy()
+        drop_thinking = True
+        if tools is not None and len(tools) > 0:
+            messages.insert(0, {"role": "system"})
+            messages[0]["tools"] = tools
+            drop_thinking = False
+        encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
 
