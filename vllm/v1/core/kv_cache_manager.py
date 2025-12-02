@@ -230,6 +230,9 @@ class KVCacheManager:
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
+            num_encoder_tokens: The number of encoder tokens to allocate for
+                cross-attention in encoder-decoder models(e.g., Whisper).
+                For decoder-only models, this should be 0.
 
         Blocks layout:
         ```
