@@ -37,7 +37,12 @@ def _run_test(
     dtype: str,
 ) -> None:
     with vllm_runner(
-        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=64
+        model,
+        runner="pooling",
+        dtype=dtype,
+        enforce_eager=True,
+        max_model_len=64,
+        gpu_memory_utilization=0.7,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
@@ -134,6 +139,7 @@ def test_models_text_image_no_crash(
         dtype=dtype,
         enforce_eager=True,
         max_model_len=64,
+        gpu_memory_utilization=0.7,
     ) as vllm_model:
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)
