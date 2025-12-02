@@ -94,7 +94,6 @@ print(f"✅ Prompt token count: {len(tokenizer(final_prompt).input_ids)}")
 print(f"📝 Prompt preview:\n{final_prompt[:1000]}")
  
 CUDA_GRAPH_MODE = str(os.environ.get("CUDA_GRAPH_MODE", "PIECEWISE"))
-# https://code.amazon.com/packages/SFAI-VLLM/blobs/44ddda9bc54b97537d3f5b279577a8184372c7e7/--/vllm/config/compilation.py#L41
 COMPILE_SIZES_LIST = os.environ.get("COMPILE_SIZES_LIST", None)
 USE_DUMMY_WEIGHT = str(os.environ.get("USE_DUMMY_WEIGHT", "False")).lower() in ["true", "t", "1"]
 USE_NEOLITE_MODEL = str(os.environ.get("USE_NEOLITE_MODEL", "False")).lower() in ["true", "t", "1"]
