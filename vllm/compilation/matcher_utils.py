@@ -6,6 +6,7 @@ import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -19,10 +20,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Quant,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.mrope import (
+    MRotaryEmbedding,
+)
 from vllm.platforms import current_platform
+
+_USE_AITER_RMS_NORM = current_platform.is_rocm() and rocm_aiter_ops.is_rmsnorm_enabled()
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+if _USE_AITER_RMS_NORM:
+    RMS_OP = rocm_aiter_ops.rms_norm
+    RMS_ADD_OP = rocm_aiter_ops.rms_norm2d_with_add
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
@@ -143,6 +152,108 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         )
 
 
+class MatcherMRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        mrope_section: list[int],
+        mrope_interleaved: bool,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = MRotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
+        self.rotary_op = ROTARY_OP
+        self.mrotary_emb = MRotaryEmbedding(
+            head_size,
+            rotary_dim=head_size,
+            max_position_embeddings=4096,
+            base=10000,
+            is_neox_style=is_neox,
+            dtype=self.model_dtype,
+            mrope_section=mrope_section,
+            mrope_interleaved=mrope_interleaved,
+        )
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(3, 5)
+        query = self.empty(5, self.q_size)
+        key = self.empty(5, self.kv_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # need custom op for mrope so that pattern match can be applied
+        # see https://github.com/vllm-project/vllm/issues/28042
+        result = auto_functionalized(
+            self.rotary_op,
+            positions=positions,
+            query=query,
+            key=key,
+            head_size=self.head_size,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+        )
+        query_out = result[1]
+        key_out = result[2] if len(result) > 2 else None
+        return query_out, key_out
+        # # Currently MRoPE custom implementation uses a triton kernel,
+        # # but pattern match failed
+        # assert positions.ndim == 2
+        # assert key is not None
+
+        # cos_sin = cos_sin_cache[positions]
+        # cos, sin = cos_sin.chunk(2, dim=-1)
+        # query_shape = query.shape
+        # key_shape = key.shape
+        # if positions.ndim == 2:
+
+        #     q, k = triton_mrope(
+        #         query,
+        #         key,
+        #         cos,
+        #         sin,
+        #         self.mrope_section,
+        #         self.head_size,
+        #         self.rotary_dim,
+        #         self.mrope_interleaved,
+        #     )
+
+        #     return q.reshape(query_shape), k.reshape(key_shape)
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.mrotary_emb.forward_native(
+            positions,
+            query,
+            key,
+        )
+
+
 class MatcherRMSNorm(MatcherCustomOp):
     def __init__(self, epsilon: float, enabled: bool | None = None):
         if enabled is None:
@@ -161,16 +272,19 @@ class MatcherRMSNorm(MatcherCustomOp):
         input: torch.Tensor,
         weight: torch.Tensor,
     ) -> torch.Tensor:
-        result = torch.empty_like(input)
-        _, result = auto_functionalized(
-            RMS_OP,
-            result=result,
-            input=input,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
+        if _USE_AITER_RMS_NORM:
+            return RMS_OP(input, weight, self.epsilon)
+        else:
+            result = torch.empty_like(input)
+            _, result = auto_functionalized(
+                RMS_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
 
-        return result
+            return result
 
     def forward_native(
         self,
@@ -202,15 +316,18 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        _, result, residual = auto_functionalized(
-            RMS_ADD_OP,
-            input=input,
-            residual=residual,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
+        if _USE_AITER_RMS_NORM:
+            return RMS_ADD_OP(input, residual, weight, self.epsilon)
+        else:
+            _, result, residual = auto_functionalized(
+                RMS_ADD_OP,
+                input=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
 
-        return result, residual
+            return result, residual
 
     def forward_native(
         self,
