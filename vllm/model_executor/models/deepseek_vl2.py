@@ -41,13 +41,13 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
     MlpProjectorConfig,
     VisionEncoderConfig,
 )
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 

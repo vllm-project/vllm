@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
 from collections.abc import Callable
+from functools import lru_cache
 from pathlib import Path
-from typing import TypeVar, overload
+from typing import TYPE_CHECKING, TypeVar, overload
 
 import huggingface_hub
+from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -20,6 +22,9 @@ from vllm.transformers_utils.utils import (
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -195,3 +200,34 @@ def get_tokenizer(
         )
 
     return tokenizer
+
+
+cached_get_tokenizer = lru_cache(get_tokenizer)
+
+
+def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
+    return cached_get_tokenizer(
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        revision=model_config.tokenizer_revision,
+        trust_remote_code=model_config.trust_remote_code,
+        **kwargs,
+    )
+
+
+def init_tokenizer_from_config(model_config: "ModelConfig"):
+    runner_type = model_config.runner_type
+    if runner_type == "generate" or runner_type == "draft":
+        truncation_side = "left"
+    elif runner_type == "pooling":
+        truncation_side = "right"
+    else:
+        assert_never(runner_type)
+
+    return get_tokenizer(
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.tokenizer_revision,
+        truncation_side=truncation_side,
+    )
