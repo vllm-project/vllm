@@ -3,6 +3,7 @@
 
 """Eagle3 speculative decoding model for DeepseekV2/V3 with MLP (no MoE)."""
 
+import copy
 from collections.abc import Iterable
 from typing import Any
 
@@ -10,22 +11,13 @@ import torch
 import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -36,8 +28,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
+    DeepseekV2MLAAttention,
     DeepseekV2MLP,
-    yarn_get_mscale,
 )
 from vllm.multimodal.inputs import NestedTensors
 
@@ -51,10 +43,11 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class DeepseekV2Eagle3Attention(nn.Module):
+class DeepseekV2Eagle3Attention(DeepseekV2MLAAttention):
     """
     Eagle3-modified MLA attention for Deepseek.
     The first layer accepts 2*hidden_size input (embeds + hidden_states concat).
+    Inherits from DeepseekV2MLAAttention and uses the MLA attention wrapper.
     """
 
     def __init__(
@@ -76,103 +69,41 @@ class DeepseekV2Eagle3Attention(nn.Module):
         prefix: str = "",
         layer_idx: int = 0,
     ) -> None:
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        self.v_head_dim = v_head_dim
-
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-
-        self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % tp_size == 0
-        self.num_local_heads = num_heads // tp_size
-
-        self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
         self.layer_idx = layer_idx
+        self.rope_theta = rope_theta
 
+        # Compute input size based on layer index
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
         # Subsequent layers use hidden_size (only hidden_states)
-        qkv_input_size = 2 * hidden_size if layer_idx == 0 else hidden_size
+        input_size = 2 * hidden_size if layer_idx == 0 else hidden_size
 
-        if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                qkv_input_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
-            )
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(
-                self.q_lora_rank,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj",
-            )
+        # Convert rope config to rope_parameters format for parent
+        config = copy.copy(config)
+        if rope_scaling:
+            rope_params = rope_scaling.copy()
+            rope_params["rope_type"] = "deepseek_yarn"
         else:
-            self.q_proj = ColumnParallelLinear(
-                qkv_input_size,
-                self.num_heads * self.qk_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_proj",
-            )
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                qkv_input_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa",
-            )
+            rope_params = {"rope_type": "default"}
+        config.rope_parameters = rope_params
 
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        if rope_scaling:
-            rope_scaling["rope_type"] = "deepseek_yarn"
-        self.rotary_emb = get_rope(
-            qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
-            max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-            is_neox_style=False,
-        )
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
-            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
-            self.scaling = self.scaling * mscale * mscale
-
-        self.attn = Attention(
-            self.num_local_heads,
-            self.qk_head_dim,
-            self.scaling,
-            num_kv_heads=self.num_local_heads,
+        # Call parent init - this sets up projections, rotary embeddings,
+        # and the MLA attention wrapper
+        super().__init__(
+            vllm_config=vllm_config,
+            config=config,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+            prefix=prefix,
+            topk_indices_buffer=None,
+            input_size=input_size,
         )
 
     def forward(
@@ -180,53 +111,8 @@ class DeepseekV2Eagle3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self.q_lora_rank is not None:
-            qkv_a, _ = self.fused_qkv_a_proj(hidden_states)
-            q_a, kv_a_with_rope = qkv_a.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
-            )
-            q_a = self.q_a_layernorm(q_a)
-            q = self.q_b_proj(q_a)[0].view(-1, self.num_local_heads, self.qk_head_dim)
-            kv_a, k_pe = kv_a_with_rope.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-        else:
-            q = self.q_proj(hidden_states)[0].view(
-                -1, self.num_local_heads, self.qk_head_dim
-            )
-            kv_a_with_rope = self.kv_a_proj_with_mqa(hidden_states)[0]
-            kv_a, k_pe = kv_a_with_rope.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-            )
-
-        q_nope, q_pe = q.split(
-            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        kv_a = self.kv_a_layernorm(kv_a)
-        kv = self.kv_b_proj(kv_a)[0]
-        kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = k_pe.unsqueeze(1)
-
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-
-        q[..., self.qk_nope_head_dim:] = q_pe
-        k = torch.empty_like(q)
-        k[..., :self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim:] = k_pe
-
-        # Padding value to qk_head_dim for alignment
-        v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim], value=0
-        ).view(-1, self.num_local_heads * self.qk_head_dim)
-
-        attn_output = self.attn(q, k, v)
-        attn_output = attn_output.view(-1, self.num_local_heads, self.qk_head_dim)[
-            ..., :self.v_head_dim
-        ].reshape(-1, self.num_local_heads * self.v_head_dim)
-
-        output, _ = self.o_proj(attn_output)
-        return output
+        # Use MLA attention from parent, without llama_4_scaling
+        return self.mla_attn(positions, hidden_states, llama_4_scaling=None)
 
 
 class DeepseekV2Eagle3DecoderLayer(nn.Module):
@@ -601,4 +487,3 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
 # Aliases for compatibility
 Eagle3DeepseekV3ForCausalLM = Eagle3DeepseekV2ForCausalLM
-
