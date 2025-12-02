@@ -863,6 +863,8 @@ class GPUModelRunner(
         valid_sampled_token_count = []
         if not self.use_gpu_async_sps:
             valid_sampled_token_count = self._get_valid_sampled_token_count()
+        else:
+            self.async_spec_reqs_to_fix.clear()
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -895,8 +897,7 @@ class GPUModelRunner(
                     if self.use_gpu_async_sps:
                         num_accepted = req_state.prev_num_draft_len
                         num_rejected = 0
-                        if num_accepted > 0:
-                            self.async_spec_reqs_to_fix.add(req_id)
+                        self.async_spec_reqs_to_fix.add(req_id)
                     else:
                         assert self.input_batch.prev_req_id_to_index is not None
                         prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
@@ -1008,7 +1009,7 @@ class GPUModelRunner(
             # we clear the spec_decoding info in scheduler_output and
             # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
-                if self.use_gpu_async_sps:
+                if self.use_gpu_async_sps and req_id in self.async_spec_reqs_to_fix:
                     req_state.pending_prev_num_draft_len = num_spec_tokens
                 else:
                     req_state.prev_num_draft_len = num_spec_tokens
@@ -1078,74 +1079,35 @@ class GPUModelRunner(
         if not self.use_gpu_async_sps:
             return
 
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
+        assert self.parallel_config.pipeline_parallel_size == 1, (
+            "GPU async SPS is only supported without pipeline parallelism."
+        )
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         req_ids_to_fix = list(self.async_spec_reqs_to_fix)
-        valid_counts: list[int] = []
 
-        if (
-            req_ids_to_fix
-            and self.valid_sampled_token_count_event is not None
-            and prev_req_id_to_index
-        ):
-            valid_counts = self._get_valid_sampled_token_count()
+        if req_ids_to_fix:
+            valid_sampled_token_count = self._get_valid_sampled_token_count()
 
-        if valid_counts:
-            max_counts = len(valid_counts)
             for req_id in req_ids_to_fix:
                 prev_index = prev_req_id_to_index.get(req_id)
-                if prev_index is None or prev_index >= max_counts:
-                    continue
-
                 req_state = self.requests.get(req_id)
-                if req_state is None:
-                    continue
 
-                prev_draft_len = req_state.prev_num_draft_len
-                if prev_draft_len == 0:
-                    continue
+                prev_draft_len = req_state.prev_num_draft_len  
+                req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
+                req_state.pending_prev_num_draft_len = 0
 
-                num_accepted = max(valid_counts[prev_index] - 1, 0)
-                num_accepted = min(num_accepted, prev_draft_len)
+                num_accepted = valid_sampled_token_count[prev_index] - 1
+                assert num_accepted >= 0 and num_accepted <= prev_draft_len
                 num_rejected = prev_draft_len - num_accepted
+                if num_rejected == 0:
+                    continue
+                req_state.num_computed_tokens -= num_rejected
+           
+                assert len(req_state.output_token_ids) >= num_rejected
+                del req_state.output_token_ids[-num_rejected:]
 
-                if num_rejected > 0:
-                    req_state.num_computed_tokens = max(
-                        req_state.num_computed_tokens - num_rejected,
-                        req_state.num_prompt_tokens,
-                    )
-
-                    if len(req_state.output_token_ids) >= num_rejected:
-                        del req_state.output_token_ids[-num_rejected:]
-                    else:
-                        req_state.output_token_ids.clear()
-
-                    req_index = self.input_batch.req_id_to_index.get(req_id)
-                    if req_index is not None:
-                        self.input_batch.num_computed_tokens_cpu[req_index] = max(
-                            self.input_batch.num_computed_tokens_cpu[req_index]
-                            - num_rejected,
-                            self.input_batch.num_prompt_tokens[req_index],
-                        )
-                        self.input_batch.num_tokens_no_spec[req_index] = max(
-                            self.input_batch.num_tokens_no_spec[req_index]
-                            - num_rejected,
-                            self.input_batch.num_prompt_tokens[req_index],
-                        )
-                        self.input_batch.num_tokens[req_index] = max(
-                            self.input_batch.num_tokens[req_index] - num_rejected,
-                            self.input_batch.num_prompt_tokens[req_index],
-                        )
-
-                        new_len = self.input_batch.num_tokens_no_spec[req_index]
-                        end = new_len + num_rejected
-                        self.input_batch.token_ids_cpu[req_index, new_len:end] = 0
-                        self.input_batch.is_token_ids[req_index, new_len:end] = False
-
-        self.async_spec_reqs_to_fix.clear()
-
-        for req_state in self.requests.values():
-            req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
-            req_state.pending_prev_num_draft_len = 0
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1454,8 +1416,6 @@ class GPUModelRunner(
         diff_per_token = diff_all_reqs[req_indices_flat_gpu]
         self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
 
-        # Adjust M-RoPE positions if used, and it has 3 dimensions,
-        # each needs the same position adjustment
         if self.uses_mrope:
             for dim in range(3):
                 self.mrope_positions.gpu[
