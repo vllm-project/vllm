@@ -203,3 +203,63 @@ def test_is_reasoning_end_full_prompt(
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+def test_glm45_streaming_reasoning_no_think_leak_with_misaligned_ids(glm45_tokenizer):
+    """
+    Regression test for GLM-4.5 reasoning parser bug in streaming mode.
+
+    This simulates a scenario where the *text* of a delta contains
+    <think>...</think>, but the associated token IDs do not contain the
+    think_start/think_end token IDs (e.g., due to prompt/template handling
+    or other upstream mismatches).
+
+    The parser must still:
+      - route the text between <think> and </think> to 'reasoning'
+      - route the text after </think> to 'content'
+      - never expose <think> or </think> in the content field
+    """
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
+
+    delta_text = "<think>The user is thinking</think>So 42 is great."
+    previous_text = ""
+    previous_token_ids: list[int] = []
+    current_text = delta_text
+
+    # Choose a fake token id that is guaranteed NOT to be the think start/end.
+    # We access the underlying GLM parser attributes here; if the implementation
+    # changes, this test should be updated accordingly.
+    think_start_id = getattr(parser, "think_start_token_id", None)
+    think_end_id = getattr(parser, "think_end_token_id", None)
+
+    # Default fake id; adjust if it accidentally matches one of the special ones.
+    fake_id = 0
+    if fake_id in (think_start_id, think_end_id):
+        fake_id = (think_end_id or 0) + 1
+
+    delta_token_ids = [fake_id]
+    current_token_ids = delta_token_ids.copy()
+
+    msg = parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
+        delta_text=delta_text,
+        previous_token_ids=previous_token_ids,
+        current_token_ids=current_token_ids,
+        delta_token_ids=delta_token_ids,
+    )
+
+    # With the fixed parser we expect proper separation.
+    assert msg is not None, "Expected a DeltaMessage from streaming parser."
+    assert msg.reasoning is not None, "Expected reasoning to be populated."
+    assert "The user is thinking" in msg.reasoning
+
+    assert msg.content is not None, "Expected content to be populated."
+    assert "So 42 is great." in msg.content
+
+    # And crucially, no <think> tags should appear in content.
+    assert "<think>" not in msg.content
+    assert "</think>" not in msg.content
