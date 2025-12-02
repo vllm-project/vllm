@@ -4,12 +4,14 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_gather_indices,
     split_decodes_and_prefills,
 )
 
@@ -48,7 +50,13 @@ class ShortConvAttentionMetadataBuilder(
     ) -> ShortConvAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            state_indices_tensor = mamba_gather_indices(
+                common_attn_metadata,
+                self.kv_cache_spec,
+            )[:, 0]
+        else:    
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None

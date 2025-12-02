@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
+    mamba_gather_indices,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -94,7 +95,10 @@ class Mamba1AttentionMetadataBuilder(
             )
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+            state_indices_tensor = mamba_gather_indices(
+                common_attn_metadata,
+                self.kv_cache_spec,
+            )[:, 0]
             if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
                 state_indices_tensor = state_indices_tensor.contiguous()
             block_idx_last_scheduled_token = None

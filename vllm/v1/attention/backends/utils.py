@@ -35,7 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
@@ -1114,3 +1114,19 @@ def get_dcp_local_seq_lens(
     )
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)
+
+# For Lighter Mamba Prefix-Caching
+@torch.compile
+def mamba_gather_indices(
+    common_attn_metadata: CommonAttentionMetadata,
+    kv_cache_spec: MambaSpec,
+    num_blocks: int = 1,
+) -> torch.Tensor:
+    assert isinstance(kv_cache_spec, MambaSpec)
+    block_table_tensor = common_attn_metadata.block_table_tensor
+    if not kv_cache_spec.enable_caching:
+        return block_table_tensor
+    start_indices = (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size
+    offsets = torch.arange(num_blocks, device=block_table_tensor.device)
+    indices_to_gather = start_indices.unsqueeze(1) + offsets
+    return torch.gather(block_table_tensor, 1, indices_to_gather)

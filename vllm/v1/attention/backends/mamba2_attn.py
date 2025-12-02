@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_gather_indices,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -193,12 +194,11 @@ class Mamba2AttentionMetadataBuilder(
             )
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
-            if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-                # NOTE: With Mamba prefix-caching support, a request can consist of
-                # multiple blocks. This makes the state_indices non-contiguous, so
-                # we must explicitly make them contiguous here.
-                state_indices_tensor = state_indices_tensor.contiguous()
+            state_indices_tensor = mamba_gather_indices(
+                common_attn_metadata,
+                self.kv_cache_spec,
+            )[:, 0]
+
             # Additional cache-related varaiables:
             block_idx_last_scheduled_token = None
             block_idx_last_computed_token = None
