@@ -70,8 +70,8 @@ torchgeo==0.7.0
 mteb==2.1.2
 
 # Data processing
-xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@eafd4db51b78acc64b3f0764ef27dfd206c28628
-    # Test async scheduling
+xgrammar==0.1.27
+# Test async scheduling
 
 # Utilities
 num2words==0.5.14
@@ -83,7 +83,3 @@ pqdm==0.2.0
 arctic-inference == 0.1.1
 # Required for Nemotron test
 open-clip-torch==2.32.0
-# Required for Standard Multi-Modal test
-galileo==1.34.0
-# Required for Qwen-VL test
-qwen-vl-utils==0.0.14
