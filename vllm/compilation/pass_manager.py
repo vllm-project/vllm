@@ -17,6 +17,8 @@ if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
     from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
+    from .qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
@@ -24,7 +26,6 @@ if current_platform.is_cuda():
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -109,6 +110,9 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_attn_fusion:
                 self.passes += [AttnFusionPass(config)]
 
+            if self.pass_config.enable_qk_norm_rope_fusion:
+                self.passes += [QKNormRoPEFusionPass(config)]
+
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
@@ -123,7 +127,7 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.uuid(), "passes": []}
+        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())

@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
@@ -68,9 +68,9 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         self.h2d_stream = torch.cuda.Stream()
 
         # job_id -> transfer cuda event
-        self.transfer_events: dict[int, torch.cuda.Event] = {}
+        self.transfer_events: dict[int, torch.Event] = {}
         # list of cuda events available for re-use
-        self.events_pool: list[torch.cuda.Event] = []
+        self.events_pool: list[torch.Event] = []
 
         pin_memory = is_pin_memory_available()
 
@@ -83,10 +83,18 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
             self.gpu_tensors.append(gpu_tensor)
 
             gpu_shape = gpu_tensor.shape
-            test_shape = attn_backends[layer_name].get_kv_cache_shape(
+            attn_backend = attn_backends[layer_name]
+            test_shape = attn_backend.get_kv_cache_shape(
                 num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
             )
-            if test_shape[0] == 1234:
+
+            if len(gpu_shape) != len(test_shape):
+                # cross-layers tensor
+                # shape is (num_blocks, ...)
+                assert len(gpu_shape) == len(test_shape) + 1
+                num_blocks_idx = 0
+                self.kv_dim_before_num_blocks.append(False)
+            elif test_shape[0] == 1234:
                 # shape is (num_blocks, ...)
                 num_blocks_idx = 0
                 self.kv_dim_before_num_blocks.append(False)
@@ -135,25 +143,23 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         assert src_blocks.ndim == 1
         assert dst_blocks.ndim == 1
 
-        dst_sub_blocks_to_skip = -src_blocks.size % dst_block_size_factor
         src_sub_block_count = src_blocks.size * src_block_size_factor
+        dst_sub_block_count = dst_blocks.size * dst_block_size_factor
+        src_sub_blocks_to_skip = -dst_blocks.size % src_block_size_factor
 
-        assert (
-            src_sub_block_count
-            == dst_blocks.size * dst_block_size_factor - dst_sub_blocks_to_skip
-        )
+        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-        src_to_dst = np.empty((src_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(src_blocks, src_block_size_factor, src_to_dst[:, 0])
+        src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
         expand_block_ids(
-            dst_blocks,
-            dst_block_size_factor,
-            src_to_dst[:, 1],
-            skip_count=dst_sub_blocks_to_skip,
+            src_blocks,
+            src_block_size_factor,
+            src_to_dst[:, 0],
+            skip_count=src_sub_blocks_to_skip,
         )
+        expand_block_ids(dst_blocks, dst_block_size_factor, src_to_dst[:, 1])
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        event = self.events_pool.pop() if self.events_pool else torch.cuda.Event()
+        event = self.events_pool.pop() if self.events_pool else torch.Event()
         with torch.cuda.stream(stream):
             for src_tensor, dst_tensor, kv_dim in zip(
                 src_tensors, dst_tensors, self.kv_dim_before_num_blocks

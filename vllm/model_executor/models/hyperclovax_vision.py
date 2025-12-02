@@ -732,7 +732,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self,
         **kwargs: object,
     ) -> MultiModalEmbeddings:

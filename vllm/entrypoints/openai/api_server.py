@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
-import gc
 import hashlib
 import importlib
 import inspect
@@ -16,11 +14,12 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
+import model_hosting_container_standards.sagemaker as sagemaker_standards
 import prometheus_client
 import pydantic
 import regex as re
@@ -40,7 +39,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import Device, EngineClient
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicError,
     AnthropicErrorResponse,
@@ -55,55 +54,44 @@ from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ClassificationRequest,
-    ClassificationResponse,
     CompletionRequest,
     CompletionResponse,
     DetokenizeRequest,
     DetokenizeResponse,
-    EmbeddingBytesResponse,
-    EmbeddingRequest,
-    EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
-    IOProcessorResponse,
-    LoadLoRAAdapterRequest,
-    PoolingBytesResponse,
-    PoolingRequest,
-    PoolingResponse,
-    RerankRequest,
-    RerankResponse,
+    GenerateRequest,
+    GenerateResponse,
     ResponsesRequest,
     ResponsesResponse,
-    ScoreRequest,
-    ScoreResponse,
     StreamingResponsesResponse,
     TokenizeRequest,
     TokenizeResponse,
     TranscriptionRequest,
-    TranscriptionResponse,
+    TranscriptionResponseVariant,
     TranslationRequest,
-    TranslationResponse,
-    UnloadLoRAAdapterRequest,
+    TranslationResponseVariant,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
+from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -118,6 +106,7 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -153,8 +142,7 @@ async def lifespan(app: FastAPI):
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
+        freeze_gc_heap()
         try:
             yield
         finally:
@@ -254,15 +242,6 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
-async def validate_json_request(raw_request: Request):
-    content_type = raw_request.headers.get("content-type", "").lower()
-    media_type = content_type.split(";", maxsplit=1)[0]
-    if media_type != "application/json":
-        raise RequestValidationError(
-            errors=["Unsupported Media Type: Only 'application/json' is allowed"]
-        )
-
-
 router = APIRouter()
 
 
@@ -324,26 +303,6 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
     return request.app.state.openai_serving_completion
 
 
-def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.openai_serving_pooling
-
-
-def embedding(request: Request) -> OpenAIServingEmbedding | None:
-    return request.app.state.openai_serving_embedding
-
-
-def score(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
-
-
-def classify(request: Request) -> ServingClassification | None:
-    return request.app.state.openai_serving_classification
-
-
-def rerank(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
-
-
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -358,6 +317,10 @@ def translation(request: Request) -> OpenAIServingTranslation:
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+
+def generate_tokens(request: Request) -> ServingTokens | None:
+    return request.app.state.serving_tokens
 
 
 @router.get("/health", response_class=Response)
@@ -389,11 +352,82 @@ async def get_server_load_metrics(request: Request):
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
-@router.get("/ping", response_class=Response)
-@router.post("/ping", response_class=Response)
-async def ping(raw_request: Request) -> Response:
-    """Ping check. Endpoint required for SageMaker"""
-    return await health(raw_request)
+@router.post("/pause")
+async def pause_generation(
+    raw_request: Request,
+    wait_for_inflight_requests: bool = Query(False),
+    clear_cache: bool = Query(True),
+) -> JSONResponse:
+    """Pause generation requests to allow weight updates.
+
+    Args:
+        wait_for_inflight_requests: When ``True`` waits for in-flight
+            requests to finish before pausing. When ``False`` (default),
+            aborts any in-flight requests immediately.
+        clear_cache: Whether to clear KV/prefix caches after draining.
+    """
+
+    engine = engine_client(raw_request)
+
+    try:
+        await engine.pause_generation(
+            wait_for_inflight_requests=wait_for_inflight_requests,
+            clear_cache=clear_cache,
+        )
+        return JSONResponse(
+            content={"status": "paused"},
+            status_code=HTTPStatus.OK.value,
+        )
+
+    except ValueError as err:
+        return JSONResponse(
+            content={"error": str(err)},
+            status_code=HTTPStatus.BAD_REQUEST.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to pause generation")
+        return JSONResponse(
+            content={"error": f"Failed to pause generation: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
+@router.post("/resume")
+async def resume_generation(raw_request: Request) -> JSONResponse:
+    """Resume generation after a pause."""
+
+    engine = engine_client(raw_request)
+
+    try:
+        await engine.resume_generation()
+        return JSONResponse(
+            content={"status": "resumed"},
+            status_code=HTTPStatus.OK.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to resume generation")
+        return JSONResponse(
+            content={"error": f"Failed to resume generation: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
+@router.get("/is_paused")
+async def is_paused(raw_request: Request) -> JSONResponse:
+    """Return the current pause status."""
+
+    engine = engine_client(raw_request)
+
+    try:
+        paused = await engine.is_paused()
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to fetch pause status")
+        return JSONResponse(
+            content={"error": f"Failed to fetch pause status: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+    return JSONResponse(content={"is_paused": paused})
 
 
 @router.post(
@@ -743,166 +777,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @router.post(
-    "/v1/embeddings",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_embedding(
-    request: EmbeddingRequest,
-    raw_request: Request,
-):
-    handler = embedding(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API"
-        )
-
-    try:
-        generator = await handler.create_embedding(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, EmbeddingResponse):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, EmbeddingBytesResponse):
-        return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
-
-
-@router.post(
-    "/pooling",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_pooling(request: PoolingRequest, raw_request: Request):
-    handler = pooling(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Pooling API"
-        )
-    try:
-        generator = await handler.create_pooling(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, PoolingBytesResponse):
-        return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
-
-
-@router.post("/classify", dependencies=[Depends(validate_json_request)])
-@with_cancellation
-@load_aware_call
-async def create_classify(request: ClassificationRequest, raw_request: Request):
-    handler = classify(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Classification API"
-        )
-
-    try:
-        generator = await handler.create_classify(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, ClassificationResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_score(request: ScoreRequest, raw_request: Request):
-    handler = score(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Score API"
-        )
-
-    try:
-        generator = await handler.create_score(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, ScoreResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/v1/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_score_v1(request: ScoreRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that Score API is not part of standard OpenAI API, we "
-        "have moved it to `/score`. Please update your client accordingly."
-    )
-
-    return await create_score(request, raw_request)
-
-
-@router.post(
     "/v1/audio/transcriptions",
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
@@ -935,7 +809,7 @@ async def create_transcriptions(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranscriptionResponse):
+    elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -974,74 +848,10 @@ async def create_translations(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranslationResponse):
+    elif isinstance(generator, TranslationResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def do_rerank(request: RerankRequest, raw_request: Request):
-    handler = rerank(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Rerank (Score) API"
-        )
-    try:
-        generator = await handler.do_rerank(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, RerankResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/v1/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def do_rerank_v1(request: RerankRequest, raw_request: Request):
-    logger.warning_once(
-        "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client "
-        "accordingly. (Note: Conforms to JinaAI rerank API)"
-    )
-
-    return await do_rerank(request, raw_request)
-
-
-@router.post(
-    "/v2/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def do_rerank_v2(request: RerankRequest, raw_request: Request):
-    return await do_rerank(request, raw_request)
 
 
 if envs.VLLM_SERVER_DEV_MODE:
@@ -1067,17 +877,15 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
-    async def reset_prefix_cache(raw_request: Request):
+    async def reset_prefix_cache(
+        raw_request: Request, reset_running_requests: bool = Query(default=False)
+    ):
         """
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
-        device = None
-        device_str = raw_request.query_params.get("device")
-        if device_str is not None:
-            device = Device[device_str.upper()]
-        logger.info("Resetting prefix cache with specific %s...", str(device))
-        await engine_client(raw_request).reset_prefix_cache(device)
+        logger.info("Resetting prefix cache...")
+        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")
@@ -1214,69 +1022,39 @@ async def is_scaling_elastic_ep(raw_request: Request):
     return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
 
 
-# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
-# (requires typing_extensions >= 4.13)
-RequestType = Any
-GetHandlerFn = Callable[[Request], OpenAIServing | None]
-EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
-
-# NOTE: Items defined earlier take higher priority
-INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
-    (ChatCompletionRequest, (chat, create_chat_completion)),
-    (CompletionRequest, (completion, create_completion)),
-    (EmbeddingRequest, (embedding, create_embedding)),
-    (ClassificationRequest, (classify, create_classify)),
-    (ScoreRequest, (score, create_score)),
-    (RerankRequest, (rerank, do_rerank)),
-    (PoolingRequest, (pooling, create_pooling)),
-]
-
-# NOTE: Construct the TypeAdapters only once
-INVOCATION_VALIDATORS = [
-    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
-    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
-]
-
-
 @router.post(
-    "/invocations",
+    "/inference/v1/generate",
     dependencies=[Depends(validate_json_request)],
     responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def invocations(raw_request: Request):
-    """For SageMaker, routes requests based on the request type."""
+@with_cancellation
+@load_aware_call
+async def generate(request: GenerateRequest, raw_request: Request):
+    handler = generate_tokens(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support generate tokens API"
+        )
     try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
+        generator = await handler.serve_tokens(request, raw_request)
+    except Exception as e:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value, detail=f"JSON decode error: {e}"
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
         ) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
 
-    valid_endpoints = [
-        (validator, endpoint)
-        for validator, (get_handler, endpoint) in INVOCATION_VALIDATORS
-        if get_handler(raw_request) is not None
-    ]
+    elif isinstance(generator, GenerateResponse):
+        return JSONResponse(content=generator.model_dump())
 
-    for request_validator, endpoint in valid_endpoints:
-        try:
-            request = request_validator.validate_python(body)
-        except pydantic.ValidationError:
-            continue
-
-        return await endpoint(request, raw_request)
-
-    type_names = [
-        t.__name__ if isinstance(t := validator._type, type) else str(t)
-        for validator, _ in valid_endpoints
-    ]
-    msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
-    res = base(raw_request).create_error_response(message=msg)
-    return JSONResponse(content=res.model_dump(), status_code=res.error.code)
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1304,39 +1082,6 @@ if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
         await engine_client(raw_request).stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
-
-
-if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-    logger.warning(
-        "LoRA dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!"
-    )
-
-    @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
-
-    @router.post(
-        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
-    )
-    async def unload_lora_adapter(
-        request: UnloadLoRAAdapterRequest, raw_request: Request
-    ):
-        handler = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -1608,10 +1353,28 @@ def build_app(args: Namespace) -> FastAPI:
         )
     else:
         app = FastAPI(lifespan=lifespan)
+
+    if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        logger.warning(
+            "LoRA dynamic loading & unloading is enabled in the API server. "
+            "This should ONLY be used for local development!"
+        )
+        from vllm.entrypoints.dynamic_lora import register_dynamic_lora_routes
+
+        register_dynamic_lora_routes(router)
+
+    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
+
+    register_sagemaker_routes(router)
     app.include_router(router)
+
     app.root_path = args.root_path
 
     mount_metrics(app)
+
+    from vllm.entrypoints.pooling import register_pooling_api_routers
+
+    register_pooling_api_routers(app)
 
     app.add_middleware(
         CORSMiddleware,
@@ -1697,6 +1460,33 @@ def build_app(args: Namespace) -> FastAPI:
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    app = sagemaker_standards.bootstrap(app)
+    # Optional endpoints
+    if args.tokens_only:
+
+        @app.post("/abort_requests")
+        async def abort_requests(raw_request: Request):
+            """
+            Abort one or more requests. To be used in a
+            Disaggregated Everything setup.
+            """
+            try:
+                body = await raw_request.json()
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail=f"JSON decode error: {e}",
+                ) from e
+            request_ids = body.get("request_ids")
+            if request_ids is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail="Missing 'request_ids' in request body",
+                )
+            # Abort requests in background
+            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            return Response(status_code=200)
 
     return app
 
@@ -1852,6 +1642,9 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
@@ -1912,6 +1705,20 @@ async def init_app_state(
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
+    state.serving_tokens = (
+        ServingTokens(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            log_error_stack=args.log_error_stack,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_log_outputs=args.enable_log_outputs,
+            force_no_detokenize=args.tokens_only,
         )
         if "generate" in supported_tasks
         else None

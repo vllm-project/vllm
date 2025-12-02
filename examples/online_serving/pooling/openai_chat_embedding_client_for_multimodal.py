@@ -21,7 +21,7 @@ from PIL import Image
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8000/v1"
 
-image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
 
 def create_chat_embeddings(
