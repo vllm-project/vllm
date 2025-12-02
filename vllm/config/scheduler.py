@@ -141,6 +141,13 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    @staticmethod
+    def default_factory():
+        """
+        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """
+        return SchedulerConfig(max_model_len=8192, is_encoder_decoder=False)
+
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.async_scheduling:

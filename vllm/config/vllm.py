@@ -154,8 +154,6 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
     OptimizationLevel.O3: OPTIMIZATION_LEVEL_03,
 }
 
-SCHEDULER_CONFIG_FACTORY = lambda: SchedulerConfig(8192, False)
-
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -172,7 +170,9 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = Field(default_factory=SCHEDULER_CONFIG_FACTORY)
+    scheduler_config: SchedulerConfig = Field(
+        default_factory=SchedulerConfig.default_factory,
+    )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
