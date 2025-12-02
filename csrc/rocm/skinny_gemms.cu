@@ -1357,8 +1357,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 }
 
 #if defined(__gfx950__)  // TODO: Add NAVI support
-// This version targets big A[] cases, where it is much larger than LDS capacity
-
+  // This version targets big A[] cases, where it is much larger than LDS
+  // capacity
+  #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 
@@ -1371,7 +1372,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Use upper half of glbl buffer for atomic reduce counting
   int* cntr = (int*)(&glbl[M * N]);
 
-  constexpr bool FAST_UNSAFE_RDC_INIT = false;
   constexpr int GrpsShrB = 2;
   constexpr int NTILE = 16;
   constexpr int WVLDS_ = (NTILE * THRDS * A_CHUNK);
@@ -1405,15 +1405,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
   __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
+  #ifndef WVSPLITKRC_1KPASS
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
   constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
   constexpr uint32_t kFit_ = (kFit__ * ASTRD) / (APAD + ASTRD);
   uint32_t kFit = kFit_ - (kFit_ % TUC_);
   uint32_t kfitsPerRdc = (K + kFit - 1) / kFit;
-  uint32_t numCuWithFullK =
-      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
-  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
 
   // find best k split to fill the CUs
   if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
@@ -1434,8 +1432,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       else
         break;
     }
+  #else
+  int constexpr kFit = 512;
+  int constexpr kfitsPerRdc = 1;
+  #endif
 
   bool doRdc = (kfitsPerRdc * kFit < K);
+  uint32_t numCuWithFullK =
+      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
+  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
 
   // given above k-split, find this wave's position
   uint32_t kFitPdd = kFit + (kFit / ASTRD) * APAD;
@@ -1449,12 +1454,52 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   scalar8 sum4[N / NTILE / GrpsShrB][1];
   bigType bigB_[YTILE / GrpsShrB][UNRL];
-  bool noreloada = false;
   const uint32_t bLoader = (threadIdx.y % GrpsShrB);
   uint32_t kBase = 0;
   if (k_str >= K) return;
 
+  bool noreloada = false;
+  constexpr bool FAST_UNSAFE_RDC_INIT = false;
+
+  #ifdef WVSPLITKRC_1KPASS
+  // Early glbl init, B[] loading, if 1KPASS
+  if constexpr (FAST_UNSAFE_RDC_INIT) {
+    if (m + (threadIdx.x % 16) < M)
+      if (doRdc)
+        if (k_str == 0) {
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              const int adr = m + (threadIdx.x % 16) +
+                              (j + (threadIdx.x / 16) * 4) * M +
+                              nt * NTILE * M +
+                              (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
+
+              __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                 __HIP_MEMORY_SCOPE_AGENT);
+              __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED,
+                                 __HIP_MEMORY_SCOPE_AGENT);
+            }
+          }
+        }
+  }
+    // Load first B[] chunk
+    #pragma unroll
+  for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+    uint32_t k = k_str + k2 * THRDS * A_CHUNK;
+    uint32_t k_ = k + threadIdx.x * A_CHUNK;
+    const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
+      bigB_[y][k2].h8 = (loadnt(
+          (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
+  }
+  if (m < Mmod) {
+  #else
   while (m < Mmod) {
+  #endif
+
+  #ifndef WVSPLITKRC_1KPASS
+    constexpr bool FAST_UNSAFE_RDC_INIT = false;
     if constexpr (FAST_UNSAFE_RDC_INIT) {
       if (m + (threadIdx.x % 16) < M)
         if (doRdc)
@@ -1474,19 +1519,22 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             }
           }
     }
-    // Load first B[] chunk
-  #pragma unroll
+
+      // Load first B[] chunk
+    #pragma unroll
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
       uint32_t k = k_str + k2 * THRDS * A_CHUNK;
       uint32_t k_ = k + threadIdx.x * A_CHUNK;
       const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
-  #pragma unroll
+    #pragma unroll
       for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
         bigB_[y][k2].h8 = (loadnt(
             (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
     }
+  #endif
 
     for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
+  #ifdef WVSPLITKRC_1KPASS
       const bool reloada = (!noreloada) &&
                            ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
                            (k1 < k_end);
@@ -1496,10 +1544,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         __syncthreads();
         constexpr int sprdN = 4;
         const uint32_t thrd = ((threadIdx.y / sprdN) * THRDS + threadIdx.x);
-  #pragma unroll
+    #pragma unroll
         for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
-          unsigned int kOff = min__(kFit - 1, k + (thrd * A_CHUNK));
-          if (kBase + kOff < K) {
+          unsigned int kOff = k + (thrd * A_CHUNK);
+          {  // if (((unsigned int)(kBase + kOff)) < K) {
             constexpr int unrl = 8;
             for (int nt = 0; nt < N / sprdN; nt += NTILE) {
               for (int n8 = 0; n8 < NTILE / unrl; n8++) {
@@ -1520,6 +1568,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
+  #endif
 
       // Stage loaded B[] to LDS for MFMA swizzling...
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -1541,19 +1590,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
 
       // Fire load of next B[] chunk...
-      if (k1 + THRDS * A_CHUNK * UNRL < k_end)
-        if (k1 + THRDS * A_CHUNK * UNRL < K)
+      if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
+          (k1 + THRDS * A_CHUNK * UNRL < K))
   #pragma unroll
-          for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-            uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
-            uint32_t k_ = k + threadIdx.x * A_CHUNK;
-            const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+        for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+          uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
+          uint32_t k_ = k + threadIdx.x * A_CHUNK;
+          const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
   #pragma unroll
-            for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
-              bigB_[y][k2].h8 = (loadnt(
-                  (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) *
-                                 K])));
-          }
+          for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
+            bigB_[y][k2].h8 = (loadnt(
+                (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
+        }
 
       // B[] staging is cooperative across GrpsShrB, so sync here before reading
       // back
@@ -1709,8 +1757,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m = (m0 + m1) % Mmod;
     k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
     k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  #ifndef WVSPLITKRC_1KPASS
     if (k_str >= K) break;
-
+  #endif
     kBase = 0;
   }
 }
@@ -1778,6 +1827,8 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
     auto glbl = axl_glbl.data_ptr<float>();
     switch (N_in) {
+      case 16:
+        WVSPLITKrc(4, 16, 1, 16) break;
       case 32:
         WVSPLITKrc(4, 16, 1, 32) break;
       case 64:
