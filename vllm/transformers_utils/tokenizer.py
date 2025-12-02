@@ -20,9 +20,14 @@ from vllm.tokenizers import (
     TokenizerRegistry,
 )
 
-from .gguf_utils import get_gguf_file_path_from_hf
+from .gguf_utils import (
+    check_gguf_file,
+    get_gguf_file_path_from_hf,
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
+)
 from .repo_utils import list_filtered_repo_files
-from .utils import check_gguf_file, is_gguf, is_remote_gguf, split_remote_gguf
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

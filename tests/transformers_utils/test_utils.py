@@ -134,7 +134,7 @@ class TestSplitRemoteGGUF:
 class TestIsGGUF:
     """Test is_gguf utility function."""
 
-    @patch("vllm.transformers_utils.utils.check_gguf_file", return_value=True)
+    @patch("vllm.transformers_utils.gguf_utils.check_gguf_file", return_value=True)
     def test_is_gguf_with_local_file(self, mock_check_gguf):
         """Test is_gguf with local GGUF file."""
         assert is_gguf("/path/to/model.gguf")
@@ -151,7 +151,7 @@ class TestIsGGUF:
         assert not is_gguf("repo/model:quant")
         assert not is_gguf("repo/model:INVALID")
 
-    @patch("vllm.transformers_utils.utils.check_gguf_file", return_value=False)
+    @patch("vllm.transformers_utils.gguf_utils.check_gguf_file", return_value=False)
     def test_is_gguf_false(self, mock_check_gguf):
         """Test is_gguf returns False for non-GGUF models."""
         assert not is_gguf("unsloth/Qwen3-0.6B")
