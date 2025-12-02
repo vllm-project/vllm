@@ -864,6 +864,19 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     assert len(response.input_messages) > 0
     assert len(response.output_messages) > 0
 
+    # Regression test for github.com/openai/harmony/issues/78 (empty content)
+    is_query_returned: bool = False
+    for _message in [*response.input_messages, *response.output_messages]:
+        for _item in _message.get("content"):
+            assert isinstance(_item, dict), _message
+            assert len(_item) > 0, _message
+
+            # Ensure original input is returned
+            _item_text = _item.get("text")
+            if _item_text and "South Korea" in _item_text:
+                is_query_returned = True
+
+    assert is_query_returned
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
