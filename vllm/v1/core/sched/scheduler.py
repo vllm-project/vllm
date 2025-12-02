@@ -347,25 +347,6 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running.pop()
 
-                    self.kv_cache_manager.free(preempted_req)
-                    self.encoder_cache_manager.free(preempted_req)
-
-                    # The hidden_states_cache is used in requests that
-                    # use all pooling + chunked prefill.
-                    # If the request is preempted, the hidden_states_cache
-                    # needs to be cleared and recalculated.
-                    if preempted_req.pooling_params is not None:
-                        preempted_req.pooling_params.hidden_states_cache.clear()
-
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    preempted_req.num_preemptions += 1
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp
-                        )
-
-                    self.waiting.prepend_request(preempted_req)
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
                     if preempted_req == request:
@@ -783,6 +764,14 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         request.num_preemptions += 1
+
+        # The hidden_states_cache is used in requests that
+        # use all pooling + chunked prefill.
+        # If the request is preempted, the hidden_states_cache
+        # needs to be cleared and recalculated.
+        if request.pooling_params is not None:
+            request.pooling_params.hidden_states_cache.clear()
+
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
