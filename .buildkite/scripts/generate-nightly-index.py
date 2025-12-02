@@ -15,8 +15,8 @@ from urllib.parse import quote
 
 import regex as re
 
-if not sys.version_info >= (3, 10):
-    raise RuntimeError("This script requires Python 3.10 or higher.")
+if not sys.version_info >= (3, 12):
+    raise RuntimeError("This script requires Python 3.12 or higher.")
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>

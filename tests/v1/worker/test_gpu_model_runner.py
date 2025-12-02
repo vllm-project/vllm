@@ -79,15 +79,16 @@ def initialize_kv_cache(runner: GPUModelRunner):
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         dtype="float16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
@@ -784,14 +785,15 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     initialize_model_parallel(tensor_model_parallel_size=1)
     torch.set_default_dtype(torch.float16)
 
+    model_config = ModelConfig(
+        model="ibm-granite/granite-4.0-tiny-preview",
+        dtype="float16",
+    )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
         max_num_batched_tokens=512,
         max_model_len=512,
-    )
-    model_config = ModelConfig(
-        model="ibm-granite/granite-4.0-tiny-preview",
-        dtype="float16",
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
