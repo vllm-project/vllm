@@ -132,7 +132,9 @@ class TestParameterSweepItem:
             assert '100' not in cmd
         else:
             # Boolean flag
-            cmd = item.apply_to_cmd(['vllm', 'serve', '--enable-prefix-caching', 'model'])
+            cmd = item.apply_to_cmd([
+                'vllm', 'serve', '--enable-prefix-caching', 'model'
+            ])
             assert expected_key in cmd
             assert '--enable-prefix-caching' not in cmd
 
