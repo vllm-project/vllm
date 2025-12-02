@@ -27,9 +27,7 @@ steps:
     # Shard slow subset of standard language models tests. Only run when model
     # source is modified, or when specified test files are modified
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test' \
-             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
-             --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
 
 - label: Language Models Tests (Hybrid) %N
@@ -45,10 +43,7 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     # Shard hybrid language model tests
-    - pytest -v -s models/language/generation \
-                   -m hybrid_model \
-                   --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
-                   --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
 
 - label: Language Models Test (Extended Generation) # 80min

@@ -40,7 +40,7 @@ steps:
       DOCKER_BUILDKIT: '1'
   - block: 'Run :docker: Build CUDA 11.8 image'
     depends_on: []
-    key: block--docker--build-cuda-11.8-image
+    key: block--docker--build-cuda-11-8-image
   - label: ':docker: Build CUDA 11.8 image'
     key: image-build-cu118
     agents:
@@ -48,7 +48,7 @@ steps:
     commands:
     - .buildkite/image_build/image_build_cu118.sh public.ecr.aws/q9t5s3a7 vllm-ci-test-repo
       123
-    depends_on: block--docker--build-cuda-11.8-image
+    depends_on: block--docker--build-cuda-11-8-image
     soft_fail: false
     retry:
       automatic:
@@ -96,32 +96,37 @@ steps:
   steps:
   - label: V1 attention (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - label: V1 attention (H100)
     agents:
-      queue: gpu_1_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s v1/attention
     depends_on:
     - image-build
@@ -130,14 +135,15 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -174,6 +180,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s basic_correctness/test_cumem.py
     - pytest -v -s basic_correctness/test_basic_correctness.py
@@ -183,10 +192,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -203,16 +211,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/.buildkite
     - bash scripts/run-benchmarks.sh
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -227,16 +237,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s benchmarks/
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -253,6 +265,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     depends_on:
@@ -260,10 +275,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -278,16 +292,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s cuda/test_cuda_context.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -305,116 +321,111 @@ steps:
     key: block-fusion-e2e-2-gpusb200
   - label: Fusion E2E (2 GPUs)(B200)
     agents:
-      queue: gpu_4_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - nvidia-smi
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
     depends_on: block-fusion-e2e-2-gpusb200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - label: Fusion and Compile Tests (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - nvidia-smi
     - pytest -v -s tests/compile/test_fusion_attn.py
     - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
-      -k 'True and not +quant_fp8 and not +rms_norm'
+      -k "True and not +quant_fp8 and not +rms_norm"
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: Distributed
   steps:
   - label: 2 Node Test (4 GPUs)
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d
-      --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node
-      test passed'
+      --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep "Same node
+      test passed"
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10
-      distributed/test_node_count.py | grep 'Node count test passed'
+      distributed/test_node_count.py | grep "Node count test passed"
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1
       --node-size=2 --node-rank=0 --master-addr=192.168.10.10 --master-port=12345
       --enforce-eager --trust-remote-code
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
     - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d
-      --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node
-      test passed'
+      --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep "Same node
+      test passed"
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10
-      distributed/test_node_count.py | grep 'Node count test passed'
+      distributed/test_node_count.py | grep "Node count test passed"
     - python3 ../examples/offline_inference/data_parallel.py --dp-size=2 --tp-size=1
       --node-size=2 --node-rank=1 --master-addr=192.168.10.10 --master-port=12345
       --enforce-eager --trust-remote-code
     depends_on:
     - image-build
     soft_fail: false
-    plugins:
-    - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
-        environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        volumes:
-        - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
   - label: Distributed (2 GPUs)
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export NCCL_CUMEM_HOST_ENABLE=0
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+    - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
     - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
     - pytest -v -s entrypoints/llm/test_collective_rpc.py
     - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
     - pytest -v -s ./compile/test_wrapper.py
     - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py
-      | grep 'Same node test passed'
+      | grep "Same node test passed"
     - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4
-      distributed/test_same_node.py | grep 'Same node test passed'
+      distributed/test_same_node.py | grep "Same node test passed"
     - pytest -v -s distributed/test_sequence_parallel.py
     - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
     - pytest -v -s v1/worker/test_worker_memory_snapshot.py
@@ -423,10 +434,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -441,6 +451,9 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_comm_ops.py
     - pytest -v -s distributed/test_shm_broadcast.py
     - pytest -v -s distributed/test_shm_buffer.py
@@ -450,10 +463,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -468,6 +480,9 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
     depends_on:
@@ -475,10 +490,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -494,8 +508,11 @@ steps:
     key: block-distributed-tests-2-gpusb200
   - label: Distributed Tests (2 GPUs)(B200)
     agents:
-      queue: gpu_4_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -503,32 +520,35 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - block: Run Distributed Tests (2 GPUs)(H200)
     depends_on: image-build
     key: block-distributed-tests-2-gpush200
   - label: Distributed Tests (2 GPUs)(H200)
     agents:
-      queue: gpu_4_queue
+      queue: skylab-h200
     commands:
-    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py
+      -k "not Llama-4"
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1
       VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py
@@ -538,24 +558,27 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         gpus: all
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - label: Distributed Tests (4 GPUs)
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export NCCL_CUMEM_HOST_ENABLE=0
     - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
     - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -565,6 +588,7 @@ steps:
     - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
     - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
     - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+    - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
     - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
     - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
     - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
@@ -583,10 +607,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -602,11 +625,14 @@ steps:
     key: block-distributed-tests-4-gpusa100
   - label: Distributed Tests (4 GPUs)(A100)
     agents:
-      queue: gpu_4_queue
+      queue: a100_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_custom_all_reduce.py
     - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-    - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+    - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m "distributed(num_gpus=2)"
     - pytest -v -s -x lora/test_mixtral.py
     depends_on: block-distributed-tests-4-gpusa100
     soft_fail: false
@@ -615,14 +641,15 @@ steps:
         podSpec:
           priorityClassName: ci
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -653,28 +680,34 @@ steps:
             hostPath:
               path: /mnt/hf-cache
               type: DirectoryOrCreate
+  - block: Run Distributed Tests (8 GPUs)(H100)
+    depends_on: image-build
+    key: block-distributed-tests-8-gpush100
   - label: Distributed Tests (8 GPUs)(H100)
     agents:
-      queue: gpu_1_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export NCCL_CUMEM_HOST_ENABLE=0
     - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py
       --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
-    depends_on:
-    - image-build
+    depends_on: block-distributed-tests-8-gpush100
     soft_fail: false
     plugins:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -709,6 +742,9 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_pp_cudagraph.py
     - pytest -v -s distributed/test_pipeline_parallel.py
     depends_on:
@@ -716,10 +752,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -737,8 +772,11 @@ steps:
     key: block-deepseek-v2-lite-accuracy
   - label: DeepSeek V2-Lite Accuracy
     agents:
-      queue: gpu_4_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace
     - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh
       0.25 200 8010
     depends_on: block-deepseek-v2-lite-accuracy
@@ -747,14 +785,15 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -792,15 +831,17 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace
     - bash .buildkite/scripts/run-prime-rl-test.sh
     depends_on: block-prime-rl-integration-2-gpus
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -816,8 +857,11 @@ steps:
     key: block-qwen3-30b-a3b-fp8-block-accuracy
   - label: Qwen3-30B-A3B-FP8-block Accuracy
     agents:
-      queue: gpu_4_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace
     - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh
       0.8 200 8020
     depends_on: block-qwen3-30b-a3b-fp8-block-accuracy
@@ -826,14 +870,15 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -870,17 +915,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
-    - pytest -v -s tokenization
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -895,6 +941,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
     depends_on:
@@ -902,10 +951,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -922,6 +970,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py
     - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py
@@ -934,10 +985,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -952,6 +1002,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
     - pytest -v -s entrypoints/llm/test_generate.py
@@ -961,10 +1014,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -979,6 +1031,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s entrypoints/pooling
     depends_on:
@@ -986,10 +1041,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1004,6 +1058,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s entrypoints/openai/tool_parsers
     - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai
       --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
@@ -1012,10 +1069,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1030,16 +1086,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s v1/entrypoints
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1054,16 +1112,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -s entrypoints/openai/correctness/
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1080,16 +1140,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_eplb_algo.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1104,6 +1166,9 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s distributed/test_eplb_execute.py
     - pytest -v -s distributed/test_eplb_spec_decode.py
     depends_on:
@@ -1111,10 +1176,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1129,16 +1193,19 @@ steps:
   steps:
   - label: Kernels (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
     - pytest -v -s tests/kernels/attention/test_attention_selector.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k "not num_heads2"
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k "fp8"
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
@@ -1155,34 +1222,35 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - label: Kernels Attention Test %N
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1193,20 +1261,23 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
   - label: Kernels Core Operation Test
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/core kernels/test_top_k_per_row.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1219,8 +1290,11 @@ steps:
         mount_buildkite_agent: true
   - label: Kernels DeepGEMM Test (H100)
     agents:
-      queue: gpu_1_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
@@ -1232,14 +1306,15 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1274,16 +1349,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/mamba
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1298,16 +1375,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1318,20 +1397,23 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
   - label: Kernels Quantization Test %N
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1342,6 +1424,7 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
 - group: LM Eval
   steps:
   - block: Run LM Eval Large Models (4 GPUs)(A100)
@@ -1349,8 +1432,11 @@ steps:
     key: block-lm-eval-large-models-4-gpusa100
   - label: LM Eval Large Models (4 GPUs)(A100)
     agents:
-      queue: gpu_4_queue
+      queue: a100_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/.buildkite/lm-eval-harness
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
       --tp-size=4
@@ -1361,14 +1447,15 @@ steps:
         podSpec:
           priorityClassName: ci
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1404,8 +1491,11 @@ steps:
     key: block-lm-eval-large-models-4-gpush100
   - label: LM Eval Large Models (4 GPUs)(H100)
     agents:
-      queue: gpu_4_queue
+      queue: mithril-h100-pool
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/.buildkite/lm-eval-harness
     - export VLLM_USE_DEEP_GEMM=0
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
       --tp-size=4
@@ -1415,14 +1505,15 @@ steps:
     - kubernetes:
         podSpec:
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_USE_DEEP_GEMM=0
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_USE_DEEP_GEMM=0 && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large-hopper.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4
@@ -1457,6 +1548,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
       --tp-size=1
     depends_on:
@@ -1464,10 +1558,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1483,34 +1576,39 @@ steps:
     key: block-lm-eval-small-models-b200
   - label: LM Eval Small Models (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
       --tp-size=1
     depends_on: block-lm-eval-small-models-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: LoRA
   steps:
   - label: LoRA %N
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s lora \ --shard-id=$$BUILDKITE_PARALLEL_JOB \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       \ --ignore=lora/test_chatglm3_tp.py \ --ignore=lora/test_llama_tp.py \ --ignore=lora/test_llm_with_multi_loras.py
       \ --ignore=lora/test_olmoe_tp.py \ --ignore=lora/test_deepseekv2_tp.py \ --ignore=lora/test_gptoss_tp.py
@@ -1520,10 +1618,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1534,10 +1631,14 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 4
   - label: LoRA TP (Distributed)
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
@@ -1549,10 +1650,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1569,17 +1669,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pytest -v -s -m 'not cpu_test' multimodal
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s -m "not cpu_test" multimodal
     - pytest -v -s utils_
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1594,10 +1696,14 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - python3 standalone_tests/lazy_imports.py
     - pytest -v -s test_inputs.py
     - pytest -v -s test_outputs.py
-    - pytest -v -s -m 'cpu_test' multimodal
+    - pytest -v -s -m "cpu_test" multimodal
+    - pytest -v -s tokenizers_
     - pytest -v -s transformers_utils
     - pytest -v -s config
     depends_on:
@@ -1605,10 +1711,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1623,6 +1728,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/examples
     - pip install tensorizer
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf
@@ -1653,10 +1761,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1672,45 +1779,49 @@ steps:
     key: block-gpt-oss-eval-b200
   - label: GPT-OSS Eval (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
-    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
+    - uv pip install --system "gpt-oss[eval]==0.0.5"
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b
       --metric 0.58
     depends_on: block-gpt-oss-eval-b200
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
   - label: Metrics, Tracing (2 GPUs)
     agents:
       queue: gpu_4_queue
     commands:
-    - pip install 'opentelemetry-sdk>=1.26.0' 'opentelemetry-api>=1.26.0' 'opentelemetry-exporter-otlp>=1.26.0'
-      'opentelemetry-semantic-conventions-ai>=0.4.1'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pip install "opentelemetry-sdk>=1.26.0" "opentelemetry-api>=1.26.0" "opentelemetry-exporter-otlp>=1.26.0"
+      "opentelemetry-semantic-conventions-ai>=0.4.1"
     - pytest -v -s v1/tracing
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1725,16 +1836,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - bash standalone_tests/python_only_compile.sh
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1749,6 +1862,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install modelscope
     - pytest -v -s test_regression.py
     depends_on:
@@ -1756,10 +1872,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1774,16 +1889,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - pytest -v -s -m 'not cpu_test' v1/core
+    - pytest -v -s -m "not cpu_test" v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
     - pytest -v -s v1/spec_decode
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-    - pytest -v -s -m 'not cpu_test' v1/metrics
+    - pytest -v -s -m "not cpu_test" v1/kv_connector/unit
+    - pytest -v -s -m "not cpu_test" v1/metrics
     - pytest -v -s v1/test_oracle.py
     - pytest -v -s v1/test_request.py
     - pytest -v -s v1/test_outputs.py
@@ -1794,10 +1912,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1812,20 +1929,22 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - pytest -v -s -m 'cpu_test' v1/core
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s -m "cpu_test" v1/core
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/test_serial_utils.py
-    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
-    - pytest -v -s -m 'cpu_test' v1/metrics
+    - pytest -v -s -m "cpu_test" v1/kv_connector/unit
+    - pytest -v -s -m "cpu_test" v1/metrics
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1842,6 +1961,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s model_executor
@@ -1851,10 +1973,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1871,16 +1992,18 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s models/test_utils.py models/test_vision.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1895,17 +2018,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pytest -v -s models/test_initialization.py \ -k 'not test_can_initialize_small_subset'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s models/test_initialization.py \ -k "not test_can_initialize_small_subset"
       \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \ --shard-id=$$BUILDKITE_PARALLEL_JOB
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1916,20 +2041,23 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
   - label: Basic Models Tests (Initialization)
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1944,16 +2072,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s models/test_transformers.py models/test_registry.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -1971,24 +2101,25 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py -k 'not (Ultravox or Phi4Multimodal
-      or MiniCPMO or Lfm2Moe or RobertaForSequenceClassification or Ovis2_5 or DeepseekOCR
-      or KimiVL)'
+    - pytest -v -s tests/models/test_initialization.py
     - pytest -v -s tests/models/test_transformers.py
+    - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py
     - python3 examples/offline_inference/basic/chat.py
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py
       --model-type whisper
     depends_on: block-transformers-nightly-models
-    soft_fail: false
+    soft_fail: true
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2005,22 +2136,24 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
-    - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - TARGET_TEST_SUITE=L4 pytest basic_correctness/ -v -s -m "distributed(num_gpus=2)"
     - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py
-    - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
-    - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-    - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
+    - pytest models/test_transformers.py -v -s -m "distributed(num_gpus=2)"
+    - pytest models/language -v -s -m "distributed(num_gpus=2)"
+    - pytest models/multimodal -v -s -m "distributed(num_gpus=2)" --ignore models/multimodal/generation/test_whisper.py
     - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py
-      -v -s -m 'distributed(num_gpus=2)'
+      -v -s -m "distributed(num_gpus=2)"
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2040,17 +2173,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
+    - uv pip install --system --no-build-isolation "git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2"
+    - pytest -v -s models/language/generation -m "(not core_model) and (not hybrid_model)"
     depends_on: block-language-models-test-extended-generation
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2068,15 +2203,17 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pytest -v -s models/language/pooling -m 'not core_model'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s models/language/pooling -m "not core_model"
     depends_on: block-language-models-test-extended-pooling
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2094,15 +2231,17 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s models/language/pooling_mteb_test
     depends_on: block-language-models-test-mteb
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2120,15 +2259,17 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s models/language/generation_ppl_test
     depends_on: block-language-models-test-ppl
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2143,18 +2284,20 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test' \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pip freeze | grep -E "torch"
+    - pytest -v -s models/language -m "core_model and slow_test" \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       \ --shard-id=$$BUILDKITE_PARALLEL_JOB
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2165,12 +2308,16 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
   - label: Language Models Tests (Hybrid) %N
     agents:
       queue: gpu_1_queue
     commands:
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
-    - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
+    - uv pip install --system --no-build-isolation "git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2"
     - pytest -v -s models/language/generation \ -m hybrid_model \ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
       \ --shard-id=$$BUILDKITE_PARALLEL_JOB
     depends_on:
@@ -2178,10 +2325,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2192,21 +2338,24 @@ steps:
         - /dev/shm:/dev/shm
         - /fsx/hf_cache:/fsx/hf_cache
         mount_buildkite_agent: true
+    parallelism: 2
   - label: Language Models Tests (Standard)
     agents:
       queue: gpu_1_queue
     commands:
-    - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and (not slow_test)'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pip freeze | grep -E "torch"
+    - pytest -v -s models/language -m "core_model and (not slow_test)"
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2226,15 +2375,17 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - echo 'Testing custom models...'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - echo "Testing custom models..."
     depends_on: block-custom-models
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2249,6 +2400,9 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/.buildkite/lm-eval-harness
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt
       --tp-size=1
     depends_on:
@@ -2256,10 +2410,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2277,17 +2430,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - pytest -v -s models/multimodal -m "not core_model" --ignore models/multimodal/generation/test_common.py
       --ignore models/multimodal/processing
     depends_on: block-multi-modal-models-extended-1
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2305,17 +2460,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0)
-      and not core_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m "split(group=0)
+      and not core_model"
     depends_on: block-multi-modal-models-extended-2
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2333,17 +2490,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1)
-      and not core_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m "split(group=1)
+      and not core_model"
     depends_on: block-multi-modal-models-extended-3
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2358,8 +2517,11 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pip freeze | grep -E 'torch'
+    - pip freeze | grep -E "torch"
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py
       --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py
@@ -2369,10 +2531,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2387,17 +2548,46 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
+        environment:
+        - VLLM_USAGE_SOURCE=ci-test
+        - NCCL_CUMEM_HOST_ENABLE=0
+        - HF_HOME=/fsx/hf_cache
+        - HF_TOKEN
+        - CODECOV_TOKEN
+        volumes:
+        - /dev/shm:/dev/shm
+        - /fsx/hf_cache:/fsx/hf_cache
+        mount_buildkite_agent: true
+  - label: Multi-Modal Processor Test (CPU)
+    agents:
+      queue: cpu_queue_premerge_us_east_1
+    commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+    depends_on:
+    - image-build
+    soft_fail: false
+    plugins:
+    - docker#v5.2.0:
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2414,6 +2604,9 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pip install -e ./plugins/vllm_add_dummy_platform
     - pytest -v -s plugins_tests/test_platform_plugins.py
     - pip uninstall vllm_add_dummy_platform -y
@@ -2434,10 +2627,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2454,16 +2646,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\;
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - find compile/ -maxdepth 1 -name "test_*.py" -exec pytest -s -v {} \\;
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2478,18 +2672,20 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
-    - pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8
-      and not Llama-4'
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s compile/fullgraph/test_full_graph.py -k "not test_fp8_kv_scale_compile"
+    - pytest -v -s compile/distributed/test_fusions_e2e.py -k "TRITON and not +quant_fp8
+      and not Llama-4"
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2504,17 +2700,19 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - find compile/fullgraph/ -name "test_*.py" -not -name "test_full_graph.py" -exec
       pytest -s -v {} \\;
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2529,16 +2727,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - bash standalone_tests/pytorch_nightly_dependency.sh
     depends_on:
     - image-build
     soft_fail: true
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2555,17 +2755,20 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - uv pip install --system torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129
+    - uv pip install --system conch-triton-kernels
     - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2578,34 +2781,39 @@ steps:
         mount_buildkite_agent: true
   - label: Quantized MoE Test (B200)
     agents:
-      queue: gpu_1_queue
+      queue: B200
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/
     - pytest -s -v tests/quantization/test_blackwell_moe.py
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/fsx/hf_cache
+        - HF_HOME=/benchmark-hf-cache
         - HF_TOKEN
         - CODECOV_TOKEN
         volumes:
         - /dev/shm:/dev/shm
-        - /fsx/hf_cache:/fsx/hf_cache
-        mount_buildkite_agent: true
+        - /data/benchmark-hf-cache:/benchmark-hf-cache
+        - /data/benchmark-vllm-cache:/root/.cache/vllm
 - group: Samplers
   steps:
   - label: Samplers Test
     agents:
       queue: gpu_1_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
     depends_on:
@@ -2613,10 +2821,9 @@ steps:
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2633,16 +2840,18 @@ steps:
     agents:
       queue: gpu_1_queue
     commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s -m "not cpu_test" tool_use
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2657,16 +2866,18 @@ steps:
     agents:
       queue: cpu_queue_premerge_us_east_1
     commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
+    - pytest -v -s -m "cpu_test" tool_use
     depends_on:
     - image-build
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2686,15 +2897,17 @@ steps:
     agents:
       queue: gpu_4_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
     depends_on: block-weight-loading-multiple-gpu
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
-        always_pull: true
-        propagate_environment: true
-        gpus: all
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        always-pull: true
+        propagate-environment: true
         environment:
         - VLLM_USAGE_SOURCE=ci-test
         - NCCL_CUMEM_HOST_ENABLE=0
@@ -2710,8 +2923,11 @@ steps:
     key: block-weight-loading-multiple-gpu---large-models
   - label: Weight Loading Multiple GPU - Large Models
     agents:
-      queue: gpu_4_queue
+      queue: a100_queue
     commands:
+    - (command nvidia-smi || true)
+    - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
+    - cd /vllm-workspace/tests
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
     depends_on: block-weight-loading-multiple-gpu---large-models
     soft_fail: false
@@ -2720,14 +2936,15 @@ steps:
         podSpec:
           priorityClassName: ci
           containers:
-          - image: public.ecr.aws/q9t5s3a7:vllm-ci-test-repo:123
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
             command:
             - bash
             - -c
             - (command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
-              && cd /vllm-workspace/.buildkite/lm-eval-harness && export VLLM_WORKER_MULTIPROC_METHOD=spawn
-              && pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt
-              --tp-size=4
+              && cd /vllm-workspace/.buildkite/lm-eval-harness && (command nvidia-smi
+              || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd /vllm-workspace/.buildkite/lm-eval-harness
+              && export VLLM_WORKER_MULTIPROC_METHOD=spawn && pytest -s -v test_lm_eval_correctness.py
+              --config-list-file=configs/models-large.txt --tp-size=4
             resources:
               limits:
                 nvidia.com/gpu: 4

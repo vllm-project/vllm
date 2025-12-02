@@ -8,16 +8,7 @@ steps:
   - vllm/lora
   - tests/lora
   commands:
-    - pytest -v -s lora \
-      --shard-id=$$BUILDKITE_PARALLEL_JOB \
-      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
-      --ignore=lora/test_chatglm3_tp.py \
-      --ignore=lora/test_llama_tp.py \
-      --ignore=lora/test_llm_with_multi_loras.py \
-      --ignore=lora/test_olmoe_tp.py \
-      --ignore=lora/test_deepseekv2_tp.py \
-      --ignore=lora/test_gptoss_tp.py \
-      --ignore=lora/test_qwen3moe_tp.py
+    - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py
   parallelism: 4
 
 

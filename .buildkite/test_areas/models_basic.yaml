@@ -24,10 +24,7 @@ steps:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
     # test.) Also run if model initialization test file is modified
-    - pytest -v -s models/test_initialization.py \
-             -k 'not test_can_initialize_small_subset' \
-             --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
-             --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
 
 - label: Basic Models Tests (Other)
