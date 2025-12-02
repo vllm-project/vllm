@@ -885,12 +885,13 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default
     # configuration
-    logger.warning(
+    logger.warning_once(
         (
             "Using default MoE config. Performance might be sub-optimal! "
-            "Config file not found at %s"
+            "Config file not found at %s",
         ),
         config_file_paths,
+        scope="local",
     )
     return None
 
