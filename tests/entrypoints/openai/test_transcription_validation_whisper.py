@@ -220,6 +220,8 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
         temperature=0.0,
     )
     out = json.loads(transcription)["text"]
+    # Might cause timeout if the file is not seekable.
+    mary_had_lamb.seek(0)
     assert prefix in out
     transcription_wprompt = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
