@@ -76,8 +76,7 @@ def find_op_nodes(
 
     assert isinstance(op, OpOverload)
 
-    for n in graph.find_nodes(op="call_function", target=op):
-        yield n
+    yield from graph.find_nodes(op="call_function", target=op)
 
     for n in graph.find_nodes(op="call_function", target=auto_functionalized):
         if n.args[0] == op:
