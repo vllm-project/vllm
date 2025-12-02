@@ -23,6 +23,7 @@ from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler
+from .base import MediaWithBytes
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -84,6 +85,12 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         """Get all data items."""
         return [self.get(idx) for idx in range(self.get_count())]
 
+    def get_item_for_hash(self, index: int) -> object:
+        return self.get(index)
+
+    def get_all_items_for_hash(self) -> list[object]:
+        return [self.get_item_for_hash(idx) for idx in range(self.get_count())]
+
     @abstractmethod
     def get_processor_data(self) -> Mapping[str, object]:
         """Get the data to pass to the HF processor."""
@@ -98,10 +105,18 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
 class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
     """Base class for data items that are arranged in a list."""
 
+    def _unwrap(self, item: _T | MediaWithBytes[_T]) -> _T:
+        """Extract media from wrapper if present."""
+        return item.media if isinstance(item, MediaWithBytes) else item
+
     def get_count(self) -> int:
         return len(self.data)
 
     def get(self, index: int) -> _T:
+        return self._unwrap(self.data[index])
+
+    def get_item_for_hash(self, index: int) -> _T | MediaWithBytes[_T]:
+        # Return raw item for hashing (preserves original_bytes if present)
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
