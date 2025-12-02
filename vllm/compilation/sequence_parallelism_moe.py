@@ -62,15 +62,10 @@ class AllReduceMoePattern(_SequenceParallelMOEPatternHelper):
 
         def replacement(input: torch.Tensor):
             seq_len = input.size(0)
-            remainder = seq_len % self.tp_size
-            if remainder != 0:
-                pad_len = self.tp_size - remainder
-                y = nn.functional.pad(input, (0, 0, 0, pad_len))
-            else:
-                y = input
-            reduce_scatter = self._reduce_scatter(y)
+            pad_len = (-seq_len) % self.tp_size
+            y = nn.functional.pad(input, (0, 0, 0, pad_len))
 
-            return reduce_scatter
+            return y
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
