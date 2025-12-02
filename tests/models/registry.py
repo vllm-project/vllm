@@ -879,6 +879,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         max_model_len=10240,
     ),
+    "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-3-675B-Instruct-2512",
+        speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
+        is_available_online=False,
+    ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         trust_remote_code=True,
