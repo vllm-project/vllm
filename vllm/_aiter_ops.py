@@ -511,6 +511,52 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_2rmsnorm_1fp8_group_quant_impl(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    weight1: torch.Tensor,
+    variance_epsilon1: float,
+    weight2: torch.Tensor,
+    variance_epsilon2: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, x2_out, _ = fused_rms_fp8_group_quant(
+        x1,
+        weight1,
+        variance_epsilon1,
+        x2,
+        weight2,
+        variance_epsilon2,
+        group_size=group_size,
+        dtype_quant=AITER_FP8_DTYPE,
+        res1=None,
+    )
+    return (x_quant, x_quant_scales, x2_out)
+
+
+def _rocm_aiter_2rmsnorm_1fp8_group_quant_fake(
+    x1: torch.Tensor,
+    x2: torch.Tensor,
+    weight1: torch.Tensor,
+    variance_epsilon1: float,
+    weight2: torch.Tensor,
+    variance_epsilon2: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = x1.shape
+    scale_shape = (
+        M,
+        (N + group_size - 1) // group_size,
+    )
+    return (
+        torch.empty_like(x1, dtype=AITER_FP8_DTYPE, device=x1.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x1.device),
+        torch.empty_like(x2, dtype=x2.dtype, device=x1.device),
+    )
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -766,6 +812,14 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_rmsnorm_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_2rmsnorm_1fp8_group_quant",
+                op_func=_rocm_aiter_2rmsnorm_1fp8_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_2rmsnorm_1fp8_group_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(

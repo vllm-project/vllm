@@ -28,12 +28,15 @@ AITER_RMS_ADD_GROUP_QUANT_OP = (
 )
 
 AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
+AITER_2RMS_1GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_2rmsnorm_1fp8_group_quant.default
 AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
 
 AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
 TRITON_GROUP_FP8_QUANT_OP = torch.ops.vllm.triton_per_token_group_quant_fp8.default
 
 FUSED_SILU_MUL_QUANT_OP = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+SPLIT_WITH_SIZES_OP = torch.ops.aten.split_with_sizes.default
 
 
 class AiterRMSFp8GroupQuantPattern:
@@ -74,6 +77,87 @@ class AiterRMSFp8GroupQuantPattern:
         inputs = [
             empty_bf16(5, 4),  # input
             empty_bf16(1, 5),  # weight
+        ]
+
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
+
+
+class Aiter2RMS1GroupQuantFP8Pattern:
+    """
+    This pattern fuses aiter rms_norm & group fp8 quant custom for input1 and
+    rms_norm for input2
+    ops into an aiter rms_norm_group_fp8_quant op.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        quant_op: OpOverload,
+        hidden_size1: int,
+        hidden_size2: int,
+        hidden_size3: int,
+    ):
+        self.epsilon = epsilon
+        self.quant_dtype = quant_dtype
+        self.quant_op = quant_op
+        self.hidden_size1 = hidden_size1
+        self.hidden_size2 = hidden_size2
+        self.hidden_size3 = hidden_size3
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(
+            input: torch.Tensor,
+            weight1: torch.Tensor,
+            weight2: torch.Tensor,
+        ):
+            input1, input_split_0 = SPLIT_WITH_SIZES_OP(
+                input,
+                [self.hidden_size1, self.hidden_size2 + self.hidden_size3],
+                dim=-1,
+            )
+            input2, at4 = SPLIT_WITH_SIZES_OP(
+                input_split_0, [self.hidden_size2, self.hidden_size3], dim=-1
+            )
+
+            at1 = AITER_RMS_OP(x=input1, weight=weight1, variance_epsilon=self.epsilon)
+            at2 = self.quant_op(at1, 128)
+            at3 = AITER_RMS_OP(x=input2, weight=weight2, variance_epsilon=self.epsilon)
+
+            return at2[0], at2[1], at3, at4
+
+        def replacement(
+            input: torch.Tensor,
+            weight1: torch.Tensor,
+            weight2: torch.Tensor,
+        ):
+            input1, input_split_0 = SPLIT_WITH_SIZES_OP(
+                input,
+                [self.hidden_size1, self.hidden_size2 + self.hidden_size3],
+                dim=-1,
+            )
+            input2, at4 = SPLIT_WITH_SIZES_OP(
+                input_split_0, [self.hidden_size2, self.hidden_size3], dim=-1
+            )
+
+            at = AITER_2RMS_1GROUP_QUANT_OP(
+                x1=input1,
+                x2=input2,
+                weight1=weight1,
+                variance_epsilon1=self.epsilon,
+                weight2=weight2,
+                variance_epsilon2=self.epsilon,
+                group_size=128,
+            )
+
+            return at[0], at[1], at[2], at4
+
+        inputs = [
+            empty_bf16(
+                5, self.hidden_size1 + self.hidden_size2 + self.hidden_size3
+            ),  # input
+            empty_bf16(1, self.hidden_size1),  # weight1
+            empty_bf16(1, self.hidden_size2),  # weight2
         ]
 
         pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
@@ -152,6 +236,16 @@ class RocmAiterRMSNormFp8GroupQuantFusionPass(VllmPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             # Fuse rms_norm + dynamic group fp8 quant
             for quant_op in [AITER_GROUP_FP8_QUANT_OP, TRITON_GROUP_FP8_QUANT_OP]:
+                for hidden_size1, hidden_size2, hidden_size3 in [(1536, 512, 64)]:
+                    Aiter2RMS1GroupQuantFP8Pattern(
+                        epsilon,
+                        FP8_DTYPE,
+                        quant_op,
+                        hidden_size1,
+                        hidden_size2,
+                        hidden_size3,
+                    ).register(self.patterns)
+
                 AiterRMSFp8GroupQuantPattern(epsilon, FP8_DTYPE, quant_op).register(
                     self.patterns
                 )
@@ -169,6 +263,7 @@ class RocmAiterRMSNormFp8GroupQuantFusionPass(VllmPatternMatcherPass):
 
     def uuid(self) -> Any:
         fusion_patterns = [
+            Aiter2RMS1GroupQuantFP8Pattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
         ]
