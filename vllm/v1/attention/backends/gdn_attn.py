@@ -57,11 +57,11 @@ class GDNAttentionMetadata:
 
     # Decode-side APC metadata
     state_indices_tensor_d: torch.Tensor | None = None
-    state_indices_tensor_p: torch.Tensor | None = None
     block_idx_last_computed_token_d: torch.Tensor | None = None
     block_idx_last_scheduled_token_d: torch.Tensor | None = None
 
     # Prefill-side APC metadata
+    state_indices_tensor_p: torch.Tensor | None = None
     block_idx_first_scheduled_token_p: torch.Tensor | None = None
     block_idx_last_computed_token_p: torch.Tensor | None = None
     block_idx_last_scheduled_token_p: torch.Tensor | None = None
