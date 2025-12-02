@@ -1684,7 +1684,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
-                for i, item in enumerate(items):
+                for i, item in enumerate(items.get_all_items_for_hash()):
                     item_uuid = mm_uuids_per_modality[i]
 
                     # NOTE: Even if a item_uuid is provided, we still compute a
