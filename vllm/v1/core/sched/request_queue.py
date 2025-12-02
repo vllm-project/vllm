@@ -7,8 +7,8 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
 
-from vllm.v1.request import Request
 from vllm.v1.core.sched.policy.weighted_score_softer import WeightedScoreSorter
+from vllm.v1.request import Request
 
 
 class SchedulingPolicy(Enum):
@@ -203,7 +203,7 @@ class PriorityRequestQueue(RequestQueue):
 class SJFRequestQueue(RequestQueue):
     """
     A SJF queue that supports heap operations.
- 
+
     Requests with a larger value of weighted score value are processed first.
     """
 
@@ -212,8 +212,15 @@ class SJFRequestQueue(RequestQueue):
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to SJF policy."""
-        heapq.heappush(self._heap,
-                       (WeightedScoreSorter(len(request.prompt_token_ids), request.arrival_time), request))
+        heapq.heappush(
+            self._heap,
+            (
+                WeightedScoreSorter(
+                    len(request.prompt_token_ids), request.arrival_time
+                ),
+                request,
+            ),
+        )
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to SJF policy."""
@@ -231,14 +238,14 @@ class SJFRequestQueue(RequestQueue):
 
     def prepend_request(self, request: Request) -> None:
         """Add a request to the queue according to SJF policy.
- 
+
         Note: In a SJF queue, there is no concept of prepending to the
         front. Requests are ordered by (priority, arrival_time)."""
         self.add_request(request)
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         """Add all requests from another queue according to SJF policy.
- 
+
         Note: In a SJF queue, there is no concept of prepending to the
         front. Requests are ordered by weighted score."""
         for request in requests:
@@ -252,8 +259,7 @@ class SJFRequestQueue(RequestQueue):
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = set(requests)
-        self._heap = [(ws, r) for ws , r in self._heap
-                      if r not in requests_to_remove]
+        self._heap = [(ws, r) for ws, r in self._heap if r not in requests_to_remove]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
@@ -273,7 +279,7 @@ class SJFRequestQueue(RequestQueue):
 
     def __reversed__(self) -> Iterator[Request]:
         """Iterate over the queue in reverse SJF order."""
-        return reversed(list(self))    
+        return reversed(list(self))
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
