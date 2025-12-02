@@ -95,6 +95,7 @@ MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 - `data_parallel`: [default: 1]
 - `always_compat_sampling`: [true, false], default: false (If true, use vLLM's full LogitProcessor+Sampler pipeline instead of custom sampling even when not required by the batch)
 - `optimizations`: ["accuracy", "performance"], default: None
+- `register_test_models`: [true, false], default: false (If true, register non-production models for testing infrastructure)
 
 **Note 2 (Llama70B)**: To run Llama70B on Galaxy, set `MESH_DEVICE=TG`.
 
