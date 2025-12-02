@@ -223,42 +223,42 @@ class PassConfig:
             self,
             "enable_fusion",
             ["fuse_norm_quant", "fuse_act_quant"],
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         handle_deprecated(
             self,
             "enable_attn_fusion",
             "fuse_attn_quant",
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         handle_deprecated(
             self,
             "enable_sequence_parallelism",
             "enable_sp",
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         handle_deprecated(
             self,
             "enable_async_tp",
             "fuse_gemm_comms",
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         handle_deprecated(
             self,
             "enable_fi_allreduce_fusion",
             "fuse_allreduce_rms",
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         handle_deprecated(
             self,
             "enable_noop",
             "eliminate_noops",
-            "v0.13.0",
+            "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
         # Force old flags to None to ensure they are not used

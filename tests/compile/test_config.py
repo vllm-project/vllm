@@ -193,7 +193,7 @@ def test_splitting_ops_dynamic():
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -208,7 +208,7 @@ def test_splitting_ops_dynamic():
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
+                pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 # work around for accessing all attntion ops
@@ -221,7 +221,7 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -357,12 +357,12 @@ def test_cudagraph_sizes_post_init(
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
-            pass_config={
-                "enable_sp": enable_sp,
-                "fuse_norm_quant": True,
-                "fuse_act_quant": True,
-                "eliminate_noops": True,
-            },
+            pass_config=PassConfig(
+                enable_sp=enable_sp,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+            ),
             cudagraph_mode=cudagraph_mode,
         )
         engine_args = EngineArgs(
@@ -380,55 +380,51 @@ def test_cudagraph_sizes_post_init(
         )
 
 
-def test_pass_config_deprecation(caplog):
-    # Enable propagation for vllm logger so caplog can capture it
-    vllm_logger = logging.getLogger("vllm")
-    vllm_logger.propagate = True
-
-    caplog.set_level(logging.WARNING)
+def test_pass_config_deprecation(caplog_vllm):
+    caplog_vllm.set_level(logging.WARNING)
 
     # Clear cache to ensure warnings are re-issued
     _print_warning_once.cache_clear()
 
     # Test enable_fusion -> fuse_norm_quant, fuse_act_quant
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_fusion=True)
-    assert "enable_fusion is deprecated" in caplog.text
+    assert "enable_fusion is deprecated" in caplog_vllm.text
     assert config.fuse_norm_quant is True
     assert config.fuse_act_quant is True
     assert config.enable_fusion is None
 
     # Test enable_attn_fusion -> fuse_attn_quant
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_attn_fusion=True)
-    assert "enable_attn_fusion is deprecated" in caplog.text
+    assert "enable_attn_fusion is deprecated" in caplog_vllm.text
     assert config.fuse_attn_quant is True
     assert config.enable_attn_fusion is None
 
     # Test enable_noop -> eliminate_noops
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_noop=True)
-    assert "enable_noop is deprecated" in caplog.text
+    assert "enable_noop is deprecated" in caplog_vllm.text
     assert config.eliminate_noops is True
     assert config.enable_noop is None
 
     # Test enable_sequence_parallelism -> enable_sp
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_sequence_parallelism=True)
-    assert "enable_sequence_parallelism is deprecated" in caplog.text
+    assert "enable_sequence_parallelism is deprecated" in caplog_vllm.text
     assert config.enable_sp is True
     assert config.enable_sequence_parallelism is None
 
     # Test enable_async_tp -> fuse_gemm_comms
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_async_tp=True)
-    assert "enable_async_tp is deprecated" in caplog.text
+    assert "enable_async_tp is deprecated" in caplog_vllm.text
     assert config.fuse_gemm_comms is True
     assert config.enable_async_tp is None
 
     # Test enable_fi_allreduce_fusion -> fuse_allreduce_rms
-    caplog.clear()
+    caplog_vllm.clear()
     config = PassConfig(enable_fi_allreduce_fusion=True)
-    assert "enable_fi_allreduce_fusion is deprecated" in caplog.text
+    assert "enable_fi_allreduce_fusion is deprecated" in caplog_vllm.text
     assert config.fuse_allreduce_rms is True
     assert config.enable_fi_allreduce_fusion is None

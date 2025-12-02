@@ -194,7 +194,6 @@ def test_sequence_parallelism_pass(
     hidden_size: int,
     dtype: torch.dtype,
     fuse_norm_quant: bool,
-    fuse_act_quant: bool,
     dynamic: bool,
 ):
     num_processes = 2
@@ -213,7 +212,6 @@ def test_sequence_parallelism_pass(
                 hidden_size,
                 dtype,
                 fuse_norm_quant,
-                fuse_act_quant,
                 dynamic,
             ),
             nprocs=nprocs,
@@ -232,7 +230,6 @@ def sequence_parallelism_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     fuse_norm_quant: bool,
-    fuse_act_quant: bool,
     dynamic: bool,
 ):
     current_platform.seed_everything(0)
@@ -265,7 +262,6 @@ def sequence_parallelism_pass_on_test_model(
         pass_config=PassConfig(
             enable_sp=True,
             fuse_norm_quant=fuse_norm_quant,
-            fuse_act_quant=fuse_act_quant,
             eliminate_noops=True,
         ),
     )  # NoOp needed for fusion
@@ -301,7 +297,7 @@ def sequence_parallelism_pass_on_test_model(
             sequence_parallelism_pass,
         ]
 
-        if fuse_norm_quant or fuse_act_quant:
+        if fuse_norm_quant:
             fusion_pass = RMSNormQuantFusionPass(vllm_config)
             passes_for_backend.append(fusion_pass)
 

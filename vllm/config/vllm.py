@@ -84,19 +84,20 @@ IS_DENSE = False
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Returns True if both RMS norm and quant FP8 custom ops are enabled.
-    RMSNormQuantFusionPass requires both."""
+    """Enable if either RMS norm or quant FP8 custom op is active;
+    otherwise Inductor handles fusion."""
+
     return cfg.compilation_config.is_custom_op_enabled(
         "rms_norm"
-    ) and cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """Returns True if quant FP8 custom op is enabled.
-    ActivationQuantFusionPass (SiLU+Mul+Quant) requires quant_fp8."""
+    """Enable if either SiLU+Mul or quant FP8 custom op is active;
+    otherwise Inductor handles fusion."""
     return cfg.compilation_config.is_custom_op_enabled(
         "silu_and_mul"
-    ) and cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
 OPTIMIZATION_LEVEL_00 = {
