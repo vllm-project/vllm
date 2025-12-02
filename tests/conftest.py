@@ -495,7 +495,7 @@ class HfRunner:
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
-            output_ids = self.model.generate(
+            output_ids: torch.Tensor = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
@@ -505,8 +505,7 @@ class HfRunner:
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
-            output_ids = output_ids.cpu().tolist()
-            outputs.append((output_ids, output_str))
+            outputs.append((output_ids.cpu().tolist(), output_str))
         return outputs
 
     def generate_greedy(
@@ -572,9 +571,11 @@ class HfRunner:
             prompts, images=images, videos=videos, audios=audios
         )
 
+        from transformers.generation.utils import GenerateOutput
+
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: GenerateOutput = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
