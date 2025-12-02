@@ -12,7 +12,6 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
@@ -79,12 +78,11 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
-        raise OSError(
-            "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
-            "Please set it to a valid path to use torch profiler."
-        )
     engine_args = EngineArgs.from_cli_args(args)
+    if args.profile and not engine_args.profiler_config.profiler == "torch":
+        raise ValueError(
+            "The torch profiler is not enabled. Please provide profiler_config."
+        )
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
     from vllm import LLM, SamplingParams
@@ -144,7 +142,7 @@ def main(args: argparse.Namespace):
         run_to_completion(profile_dir=None)
 
     if args.profile:
-        profile_dir = envs.VLLM_TORCH_PROFILER_DIR
+        profile_dir = engine_args.profiler_config.torch_profiler_dir
         print(f"Profiling (results will be saved to '{profile_dir}')...")
         run_to_completion(profile_dir=profile_dir)
         return

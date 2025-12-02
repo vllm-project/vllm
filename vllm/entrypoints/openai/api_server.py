@@ -37,7 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from typing_extensions import assert_never
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ProfilerConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
@@ -511,6 +511,31 @@ def maybe_register_tokenizer_info_endpoint(args):
                 if isinstance(result, ErrorResponse)
                 else 200,
             )
+
+
+def maybe_register_profiler_endpoints(args):
+    """Conditionally add profiler start/stop endpoints if enabled."""
+    profiler_config = args.profiler_config
+    assert isinstance(profiler_config, ProfilerConfig)
+    if profiler_config.profiler != "none":
+        logger.warning_once(
+            f"Profiler with mode '{profiler_config.profiler}' is enabled in the "
+            "API server. This should ONLY be used for local development!"
+        )
+
+        @router.post("/start_profile")
+        async def start_profile(raw_request: Request):
+            logger.info("Starting profiler...")
+            await engine_client(raw_request).start_profile()
+            logger.info("Profiler started.")
+            return Response(status_code=200)
+
+        @router.post("/stop_profile")
+        async def stop_profile(raw_request: Request):
+            logger.info("Stopping profiler...")
+            await engine_client(raw_request).stop_profile()
+            logger.info("Profiler stopped.")
+            return Response(status_code=200)
 
 
 @router.get("/v1/models")
@@ -1055,33 +1080,6 @@ async def generate(request: GenerateRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning_once(
-        "Torch Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!"
-    )
-elif envs.VLLM_TORCH_CUDA_PROFILE:
-    logger.warning_once(
-        "CUDA Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!"
-    )
-if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
-
-    @router.post("/start_profile")
-    async def start_profile(raw_request: Request):
-        logger.info("Starting profiler...")
-        await engine_client(raw_request).start_profile()
-        logger.info("Profiler started.")
-        return Response(status_code=200)
-
-    @router.post("/stop_profile")
-    async def stop_profile(raw_request: Request):
-        logger.info("Stopping profiler...")
-        await engine_client(raw_request).stop_profile()
-        logger.info("Profiler stopped.")
-        return Response(status_code=200)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -1840,6 +1838,7 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
+        maybe_register_profiler_endpoints(args)
         app = build_app(args)
 
         await init_app_state(engine_client, app.state, args)

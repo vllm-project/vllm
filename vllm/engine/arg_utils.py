@@ -49,6 +49,7 @@ from vllm.config import (
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
+    ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -529,6 +530,8 @@ class EngineArgs:
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
+    profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
+
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
@@ -730,6 +733,12 @@ class EngineArgs:
         structured_outputs_group.add_argument(
             "--reasoning-parser-plugin",
             **structured_outputs_kwargs["reasoning_parser_plugin"],
+        )
+
+        # Profiler arguments
+        parser.add_argument_group(
+            title="ProfilerConfig",
+            description=ProfilerConfig.__doc__,
         )
 
         # Parallel arguments
@@ -1137,7 +1146,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
-
+        vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1758,6 +1767,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
         )

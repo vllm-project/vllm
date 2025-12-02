@@ -1085,8 +1085,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use Torch Profiler. profiler_config must be provided on the server side.",
     )
     parser.add_argument(
         "--save-result",
