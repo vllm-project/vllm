@@ -193,8 +193,8 @@ class VllmConfig:
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, one can append compilation arguments via 
-    -0.parameter=argument such as `-O.mode=3` (same as `-O='{"mode":3}'`).
+    As a shorthand, one can append compilation arguments via
+    -cc.parameter=argument such as `-cc.mode=3` (same as `-cc='{"mode":3}'`).
 
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
@@ -721,65 +721,27 @@ class VllmConfig:
                 "correctness and to realize prefill savings. "
             )
 
-        disable_chunked_prefill_reasons: list[str] = []
+        if self.model_config and self.model_config.is_encoder_decoder:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
 
-        if self.model_config:
-            if self.model_config.pooler_config:
-                pooling_type = self.model_config.pooler_config.pooling_type
-                if pooling_type is None or pooling_type.lower() != "last":
-                    disable_chunked_prefill_reasons.append(
-                        'Only "last" pooling supports chunked '
-                        "prefill and prefix caching; disabling both."
-                    )
-                if not getattr(self.model_config.hf_config, "is_causal", True):
-                    disable_chunked_prefill_reasons.append(
-                        "Only models using causal attention support chunked "
-                        "prefill and prefix caching; disabling both."
-                    )
-            elif self.model_config.is_encoder_decoder:
-                from vllm.multimodal import MULTIMODAL_REGISTRY
-
-                self.scheduler_config.max_num_encoder_input_tokens = (
-                    MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
-                )
-                logger.debug(
-                    "Encoder-decoder model detected: setting "
-                    "`max_num_encoder_input_tokens` to encoder length (%s)",
-                    self.scheduler_config.max_num_encoder_input_tokens,
-                )
-                if (
-                    self.model_config.architecture == "WhisperForConditionalGeneration"
-                    and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
-                ):
-                    logger.warning(
-                        "Whisper is known to have issues with "
-                        "forked workers. If startup is hanging, "
-                        "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                        "to 'spawn'."
-                    )
-
-        # Final off-switch for CP/APC:
-        # Disable for (a) collected blockers, (b) encoder–decoder, or
-        # (c) explicit CP=False when APC wasn't requested.
-        # Do NOT disable merely because the resolved CP flag is False.
-        apc_requested = (
-            self.cache_config is not None and self.cache_config.enable_prefix_caching
-        )
-        if (
-            disable_chunked_prefill_reasons
-            or (self.model_config is not None and self.model_config.is_encoder_decoder)
-            or (
-                self.scheduler_config.enable_chunked_prefill is False
-                and not apc_requested
+            self.scheduler_config.max_num_encoder_input_tokens = (
+                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
             )
-        ):
-            for reason in disable_chunked_prefill_reasons:
-                logger.info(reason)
-            self.scheduler_config.enable_chunked_prefill = False
-            self.scheduler_config.long_prefill_token_threshold = 0
-
-            if self.cache_config is not None:
-                self.cache_config.enable_prefix_caching = False
+            logger.debug(
+                "Encoder-decoder model detected: setting "
+                "`max_num_encoder_input_tokens` to encoder length (%s)",
+                self.scheduler_config.max_num_encoder_input_tokens,
+            )
+            if (
+                self.model_config.architecture == "WhisperForConditionalGeneration"
+                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+            ):
+                logger.warning(
+                    "Whisper is known to have issues with "
+                    "forked workers. If startup is hanging, "
+                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                    "to 'spawn'."
+                )
 
         if (
             self.kv_events_config is not None
@@ -835,8 +797,7 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1()
 
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             # With pipeline parallelism or dynamo partitioning,
@@ -844,6 +805,13 @@ class VllmConfig:
             # Use custom rms norm to unblock. In the future,
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
+            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                logger.warning(
+                    "Sequence parallelism is enabled, but running in wrong "
+                    "vllm compile mode: %s.",
+                    self.compilation_config.mode,
+                )
+
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
                 or len(self.compilation_config.splitting_ops) == 0

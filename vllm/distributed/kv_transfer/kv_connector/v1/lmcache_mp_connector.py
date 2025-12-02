@@ -806,7 +806,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> Optional["KVConnectorPromMetrics"]:
         """
         Create a KVConnectorPromMetrics subclass which should register

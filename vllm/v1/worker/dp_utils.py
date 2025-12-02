@@ -93,13 +93,16 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 # This just pads the second ubatch slice out to the total number of tokens
 # (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
-def _pad_out_ubatch_slice(ubatch_slices: UBatchSlices, num_total_tokens: int):
-    padded_second_ubatch_slice = slice(
+def _pad_out_ubatch_slice(
+    ubatch_slices: UBatchSlices, num_total_tokens: int
+) -> UBatchSlices:
+    padded_second_token_slice = slice(
         ubatch_slices[1].token_slice.start, num_total_tokens
     )
     ubatch_slices[1] = UBatchSlice(
-        padded_second_ubatch_slice, padded_second_ubatch_slice
+        ubatch_slices[1].request_slice, padded_second_token_slice
     )
+    return ubatch_slices
 
 
 def _synchronize_dp_ranks(

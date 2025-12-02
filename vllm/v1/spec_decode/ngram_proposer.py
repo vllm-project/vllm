@@ -269,7 +269,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
                 prev_lps = lps[max_ngram - 1]
             i += 1
         elif prev_lps != 0:
-            # Token mismatch: try the second longest prefix
+            # Token mismatch: try the second-longest prefix
             # among all suffix of tokens[:i],
             # which is the longest prefix of tokens[:prev_lps]
             prev_lps = lps[prev_lps - 1]

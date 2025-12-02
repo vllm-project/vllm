@@ -9,7 +9,8 @@ from gguf.constants import Keys, VisionProjectorType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import list_filtered_repo_files
+
+from .repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
