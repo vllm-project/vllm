@@ -265,10 +265,6 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
-            # LoRA creates static buffers based on max_num_batched_tokens.
-            # The tensor sizes and strides get captured in the torch.compile
-            # graph explicitly.
-            vllm_factors.append(str(self.scheduler_config.max_num_batched_tokens))
         else:
             vllm_factors.append("None")
         if self.speculative_config:
