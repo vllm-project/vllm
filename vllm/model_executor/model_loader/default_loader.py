@@ -30,6 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.model_executor.model_loader.shared_backbone import wrap_shared_backbone
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -274,14 +275,28 @@ class DefaultModelLoader(BaseModelLoader):
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
         )
-        yield from self._get_weights_iterator(primary_weights)
+
+        # Wrap with shared backbone support
+        primary_iterator = self._get_weights_iterator(primary_weights)
+        yield from wrap_shared_backbone(
+            primary_iterator,
+            model_config.model,
+            self.load_config.shared_backbone,
+            logger,
+        )
 
         secondary_weights = cast(
             Iterable[DefaultModelLoader.Source],
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
-            yield from self._get_weights_iterator(source)
+            secondary_iterator = self._get_weights_iterator(source)
+            yield from wrap_shared_backbone(
+                secondary_iterator,
+                model_config.model,
+                self.load_config.shared_backbone,
+                logger,
+            )
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(

@@ -22,6 +22,35 @@ logger = init_logger(__name__)
 
 @config
 @dataclass
+class SharedBackboneConfig:
+    """Description of a shared backbone checkpoint to reuse across models."""
+
+    model: str = ""
+    """Model ID, local file path, or GGUF reference that acts as the shared
+    backbone. For GGUF this can be `repo_id:quantization` or
+    `repo_id/filename.gguf`."""
+    revision: str | None = None
+    """Optional revision/tag for the shared backbone checkpoint."""
+    tensor_prefixes: list[str] = Field(default_factory=list)
+    """Parameter prefixes (Hugging Face tensor names) that belong to the shared
+    backbone. Any tensor whose name starts with one of these prefixes will be
+    cached and reused."""
+    identifier: str | None = None
+    """Optional explicit cache key. Defaults to `model` when not provided."""
+
+    def backbone_key(self) -> str | None:
+        key = self.identifier or self.model
+        return key or None
+
+    def is_backbone_model(self, model_name: str) -> bool:
+        return bool(self.model) and self.model == model_name
+
+    def matches_tensor(self, tensor_name: str) -> bool:
+        return any(tensor_name.startswith(prefix) for prefix in self.tensor_prefixes)
+
+
+@config
+@dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
 
@@ -79,6 +108,11 @@ class LoadConfig:
     """Whether to enable tqdm for showing progress bar when loading model
     weights."""
     pt_load_map_location: str | dict[str, str] = "cpu"
+    shared_backbone: SharedBackboneConfig | None = None
+    """Optional description of a shared backbone checkpoint. When provided,
+    model loaders can cache tensors whose names match
+    `shared_backbone.tensor_prefixes` and reuse them across subsequent loads."""
+
     """
     pt_load_map_location: the map location for loading pytorch checkpoint, to
     support loading checkpoints can only be loaded on certain devices like

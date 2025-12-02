@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 import os
 from collections.abc import Generator
 
@@ -13,6 +14,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.shared_backbone import wrap_shared_backbone
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -292,15 +294,29 @@ class GGUFModelLoader(BaseModelLoader):
         hf_config = model_config.hf_config
         is_multimodal = hasattr(hf_config, "vision_config")
 
+        iterators: list[Generator[tuple[str, torch.Tensor], None, None]] = []
+
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
                 "Could not find mm_proj file for multimodal GGUF model"
             )
-            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
+            iterators.append(
+                gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
+            )
 
-        yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
+        iterators.append(
+            gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
+        )
+
+        combined = itertools.chain.from_iterable(iterators)
+        yield from wrap_shared_backbone(
+            combined,
+            model_config.model,
+            self.load_config.shared_backbone,
+            logger,
+        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
