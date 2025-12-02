@@ -1084,6 +1084,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import (
             BatchedDeepGemmExperts,
             BatchedTritonExperts,
+            TritonExperts,
             TritonOrDeepGemmExperts,
         )
 
@@ -1116,7 +1117,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
             )
-
+        elif self.moe.is_lora_enabled:
+            return TritonExperts(quant_config=self.moe_quant_config)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             # Select GEMM experts with block-scale when weights are block-quantized
             experts = select_cutlass_fp8_gemm_impl(
