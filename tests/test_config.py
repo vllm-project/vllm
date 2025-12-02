@@ -716,7 +716,7 @@ def test_is_chunked_prefill_supported(
 ):
     model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
-    with caplog_vllm.at_level(level=logging.DEBUG):
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_chunked_prefill_supported == expected_result
     assert reason in caplog_vllm.text
 
@@ -835,7 +835,7 @@ def test_is_prefix_caching_supported(
 ):
     model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
-    with caplog_vllm.at_level(level=logging.DEBUG):
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_prefix_caching_supported == expected_result
     assert reason in caplog_vllm.text
 
