@@ -21,6 +21,7 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 import vllm.envs as envs
 from vllm.benchmarks.datasets import SampleRequest, get_samples
@@ -405,19 +406,47 @@ def main(args: argparse.Namespace) -> None:
         selected_percentiles = [
             float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
         ]
+        mm_data = []
         for stage, metrics in result["mm_processor_stats"].items():
-            print(f"  {stage}:")
-            print(f"    Mean: {metrics['mean']:.2f}")
-            print(f"    Median: {metrics['median']:.2f}")
-            print(f"    Std: {metrics['std']:.2f}")
+            row = {
+                "Stage": stage,
+                "Mean": f"{metrics['mean']:.2f}",
+                "Median": f"{metrics['median']:.2f}",
+                "Std": f"{metrics['std']:.2f}",
+            }
             for p in selected_percentiles:
-                print(f"    P{p}: {metrics.get(f'p{p}', 0.0):.2f}")
+                row[f"P{p}"] = f"{metrics.get(f'p{p}', 0.0):.2f}"
+            mm_data.append(row)
+
+        mm_df = pd.DataFrame(mm_data)
+        print(mm_df.to_string(index=False))
 
     if "mean_e2el_ms" in result:
         print("\nEnd-to-End Latency (ms):")
-        print(f"  Mean: {result['mean_e2el_ms']:.2f}")
-        print(f"  Median: {result['median_e2el_ms']:.2f}")
-        print(f"  Std: {result['std_e2el_ms']:.2f}")
+        selected_percentiles = [
+            float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
+        ]
+
+        e2el_data = [
+            {"Metric": "Mean", "Value (ms)": f"{result['mean_e2el_ms']:.2f}"},
+            {"Metric": "Median", "Value (ms)": f"{result['median_e2el_ms']:.2f}"},
+            {"Metric": "Std", "Value (ms)": f"{result['std_e2el_ms']:.2f}"},
+        ]
+
+        for p in selected_percentiles:
+            percentile_value = next(
+                (val for pct, val in result["percentiles_e2el_ms"] if pct == p),
+                0.0,
+            )
+            e2el_data.append(
+                {
+                    "Metric": f"P{p}",
+                    "Value (ms)": f"{percentile_value:.2f}",
+                }
+            )
+
+        e2el_df = pd.DataFrame(e2el_data)
+        print(e2el_df.to_string(index=False))
 
     if args.output_json:
         result["config"] = {
