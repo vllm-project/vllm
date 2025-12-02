@@ -334,7 +334,7 @@ run_serving_tests() {
   # Iterate over serving tests
   jq -c '
     if type == "array" then
-      # Old format: each element is a test
+      # Plain format: test cases array
       .[]
     elif (type == "object" and has("tests")) then
       # merge the default parameters into each test cases
