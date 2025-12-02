@@ -10,10 +10,10 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.config import VllmConfig
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
 else:
     VllmConfig = object
-    AnyTokenizer = object
+    TokenizerLike = object
 
 
 class StructuredOutputOptions(enum.Enum):
@@ -100,7 +100,7 @@ class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
 
     vllm_config: VllmConfig
-    tokenizer: AnyTokenizer
+    tokenizer: TokenizerLike
     vocab_size: int
 
     @abstractmethod

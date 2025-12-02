@@ -155,23 +155,6 @@ def dummy_model_gate_up() -> nn.Module:
 
 
 @pytest.fixture(scope="session")
-def llama_2_7b_base_huggingface_id():
-    # used as a base model for testing with sql lora adapter
-    return "meta-llama/Llama-2-7b-hf"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_huggingface_id():
-    # huggingface repo id is used to test lora runtime downloading.
-    return "yard1/llama-2-7b-sql-lora-test"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
-
-
-@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
@@ -256,8 +239,14 @@ def qwen3_lora_files():
 
 
 @pytest.fixture(scope="session")
-def llama32_lora_files():
-    return snapshot_download(repo_id="jeeejeee/llama32-3b-text2sql-spider")
+def llama32_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "jeeejeee/llama32-3b-text2sql-spider"
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files(llama32_lora_huggingface_id):
+    return snapshot_download(repo_id=llama32_lora_huggingface_id)
 
 
 @pytest.fixture

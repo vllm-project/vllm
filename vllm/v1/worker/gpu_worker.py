@@ -141,6 +141,16 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        # If the KV cache has just been woken up,
+        # the internal state of cache_engine must be reset,
+        # especially the FP8 scaling factor.
+        if (
+            (tags is None or "kv_cache" in tags)
+            and self.cache_config.cache_dtype.startswith("fp8")
+            and hasattr(self.model_runner, "init_fp8_kv_scales")
+        ):
+            self.model_runner.init_fp8_kv_scales()
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator

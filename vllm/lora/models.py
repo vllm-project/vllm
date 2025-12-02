@@ -103,7 +103,6 @@ class LoRAModel:
     def check_lora_name(self, lora_name: str) -> bool:
         return lora_name in self.loras
 
-    # (yard1): TODO see if we can derive target_embedding_padding automatically
     @classmethod
     def from_lora_tensors(
         cls,
@@ -112,9 +111,7 @@ class LoRAModel:
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: torch.dtype | None = None,
-        target_embedding_padding: int | None = None,
-        embedding_modules: dict[str, str] | None = None,
-        embedding_padding_modules: list[str] | None = None,
+        model_vocab_size: int | None = None,
         weights_mapper: WeightsMapper | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
@@ -132,22 +129,21 @@ class LoRAModel:
                 )
 
             if is_lora_a:
+                if (
+                    "lora_embedding_A" in tensor_name
+                    and model_vocab_size is not None
+                    and model_vocab_size != tensor.shape[1]
+                ):
+                    raise RuntimeError(
+                        f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
+                        f" with the base model's vocabulary size({model_vocab_size})."
+                    )
                 loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
                 if pin_memory:
                     loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
             else:
                 loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
-                assert embedding_padding_modules is not None
-                if (
-                    any(name in module_name for name in embedding_padding_modules)
-                    and target_embedding_padding is not None
-                ):
-                    lora_b = loras[module_name].lora_b
-                    assert target_embedding_padding >= lora_b.shape[0]
-                    addition = target_embedding_padding - lora_b.shape[0]
-                    loras[module_name].lora_b = torch.nn.functional.pad(
-                        lora_b, (0, 0, 0, addition)
-                    )
+
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
@@ -163,9 +159,7 @@ class LoRAModel:
         lora_model_id: int | None = None,
         device: str = "cuda",
         dtype: torch.dtype | None = None,
-        target_embedding_padding: int | None = None,
-        embedding_modules: dict[str, str] | None = None,
-        embedding_padding_modules: list[str] | None = None,
+        model_vocab_size: int | None = None,
         weights_mapper: WeightsMapper | None = None,
         tensorizer_config_dict: dict | None = None,
     ) -> "LoRAModel":
@@ -287,9 +281,7 @@ class LoRAModel:
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,
-            target_embedding_padding=target_embedding_padding,
-            embedding_modules=embedding_modules,
-            embedding_padding_modules=embedding_padding_modules,
+            model_vocab_size=model_vocab_size,
             weights_mapper=weights_mapper,
         )
 

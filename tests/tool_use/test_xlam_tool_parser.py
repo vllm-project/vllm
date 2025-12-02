@@ -13,8 +13,8 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers.xlam_tool_parser import xLAMToolParser
-from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 pytestmark = pytest.mark.cpu_test
 
@@ -49,7 +49,7 @@ def assert_tool_calls(
 
 def stream_delta_message_generator(
     xlam_tool_parser: xLAMToolParser,
-    xlam_tokenizer: AnyTokenizer,
+    xlam_tokenizer: TokenizerLike,
     model_output: str,
     request: ChatCompletionRequest | None = None,
 ) -> Generator[DeltaMessage, None, None]:

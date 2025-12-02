@@ -12,8 +12,8 @@ from vllm.logprobs import (
     create_prompt_logprobs,
     create_sample_logprobs,
 )
-from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer,
+from vllm.tokenizers.detokenizer_utils import (
+    TokenizerLike,
     convert_ids_list_to_tokens,
 )
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
@@ -28,7 +28,7 @@ NONES = itertools.repeat(None)
 class LogprobsProcessor:
     # Tokenizer for this request,
     # None if detokenization is disabled.
-    tokenizer: AnyTokenizer | None
+    tokenizer: TokenizerLike | None
 
     # Logprobs for this request
     logprobs: SampleLogprobs | None
@@ -40,7 +40,7 @@ class LogprobsProcessor:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
     ) -> "LogprobsProcessor":
         sampling_params = request.sampling_params

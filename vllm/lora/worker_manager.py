@@ -34,12 +34,10 @@ class WorkerLoRAManager:
         vllm_config: VllmConfig,
         device: torch.device,
         embedding_modules: dict[str, str],
-        embedding_padding_modules: list[str],
         lora_model_cls: type[LoRAModel] = LoRAModel,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
-        self.embedding_padding_modules = embedding_padding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
@@ -121,9 +119,7 @@ class WorkerLoRAManager:
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
-                target_embedding_padding=self.vocab_size,
-                embedding_modules=self.embedding_modules,
-                embedding_padding_modules=self.embedding_padding_modules,
+                model_vocab_size=self.vocab_size,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
             )

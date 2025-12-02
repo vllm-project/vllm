@@ -8,7 +8,7 @@ import pytest_asyncio
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
@@ -20,7 +20,6 @@ def server():
         "--max-model-len",
         "8192",
         "--enforce-eager",
-        # lora config below
         "--max-num-seqs",
         "128",
         "--enable-chunked-prefill",

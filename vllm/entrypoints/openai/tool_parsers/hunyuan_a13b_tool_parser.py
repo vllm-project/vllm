@@ -22,14 +22,14 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
 )
 from vllm.entrypoints.openai.tool_parsers.utils import consume_space
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 class HunyuanA13BToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         # Initialize state for streaming mode

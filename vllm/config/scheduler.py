@@ -175,9 +175,19 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
+
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        factors.append(self.max_num_batched_tokens)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
@@ -274,3 +284,8 @@ class SchedulerConfig:
             )
 
         return self
+
+    def __getattribute__(self, name: str) -> Any:
+        if name == "max_model_len" or name == "is_encoder_decoder":
+            raise AttributeError(f"{name} is an init-only parameter. ")
+        return object.__getattribute__(self, name)
