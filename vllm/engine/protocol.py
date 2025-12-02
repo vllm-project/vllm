@@ -116,7 +116,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def reset_prefix_cache(self) -> None:
+    async def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
         """Reset the prefix cache"""
         ...
 
