@@ -24,9 +24,10 @@ logger = init_logger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
-class CUDAGraphStats:
+class CUDAGraphStat:
     num_unpadded_tokens: int
     num_padded_tokens: int
+    num_paddings: int
     runtime_mode: str
 
 
@@ -39,43 +40,79 @@ class CUDAGraphLogging:
         self.cg_capture_sizes = str(cg_capture_sizes or [])
 
     def reset(self):
-        self.rows: list[tuple[int, int, int, str]] = []
+        self.stats = []
 
-    def observe(self, cudagraph_stats: CUDAGraphStats):
-        self.rows.append(
-            (
-                cudagraph_stats.num_padded_tokens,
-                cudagraph_stats.num_unpadded_tokens,
-                cudagraph_stats.num_padded_tokens - cudagraph_stats.num_unpadded_tokens,
-                cudagraph_stats.runtime_mode,
-            )
-        )
+    def observe(self, cudagraph_stat: CUDAGraphStat):
+        self.stats.append(cudagraph_stat)
 
     def generate_metric_table(self) -> str:
         # Count occurrences of each unique row
-        row_counts = Counter(self.rows)
+        stats_counts = Counter(self.stats)
 
         # Create header
         header = (
-            "CUDAGraph Config Settings:\n"
-            f"Mode: {self.cg_mode}\n"
-            f"Capture sizes: {self.cg_capture_sizes}\n\n"
-            "CUDAGraph Stats:\n"
-            f"{'Padded Tokens':<15}\t{'Unpadded Tokens':<17}\t"
-            f"{'Num Padding':<12}\t{'Runtime Mode':<15}\t{'Count':<6}"
+            "**CUDAGraph Config Settings:**\n\n"
+            f"- Mode: {self.cg_mode}\n"
+            f"- Capture sizes: {self.cg_capture_sizes}\n\n"
+            "**CUDAGraph Stats:**\n\n"
         )
 
-        # Create data rows
-        data_rows = []
-        for row, count in sorted(row_counts.items()):
-            data_rows.append(
-                f"{row[0]:<15}\t{row[1]:<17}\t{row[2]:<12}\t{row[3]:<15}\t{count:<6}"
+        # Column headers
+        headers = [
+            "Unpadded Tokens",
+            "Padded Tokens",
+            "Num Paddings",
+            "Runtime Mode",
+            "Count",
+        ]
+
+        # Convert stats to rows of strings, in descending order of observed frequencies
+        rows = []
+        for stat, count in sorted(
+            stats_counts.items(), key=lambda item: item[1], reverse=True
+        ):
+            rows.append(
+                [
+                    str(stat.num_unpadded_tokens),
+                    str(stat.num_padded_tokens),
+                    str(stat.num_paddings),
+                    stat.runtime_mode,
+                    str(count),
+                ]
             )
 
-        return header + "\n" + "\n".join(data_rows) + "\n"
+        # Calculate column widths (max of header and data)
+        col_widths = []
+        for i, header_text in enumerate(headers):
+            max_width = len(header_text)
+            for row in rows:
+                max_width = max(max_width, len(row[i]))
+            col_widths.append(max_width)
+
+        # Create table header with centered headers
+        table_header = (
+            "| " + " | ".join(h.ljust(w) for h, w in zip(headers, col_widths)) + " |\n"
+        )
+
+        # Create separator
+        table_separator = "|" + "|".join("-" * (w + 2) for w in col_widths) + "|\n"
+
+        # Create data rows with proper alignment
+        data_rows = []
+        for row in rows:
+            formatted_row = []
+            for i, (val, width) in enumerate(zip(row, col_widths)):
+                # Right-align numbers, left-align Runtime Mode
+                if i == 3:  # Runtime Mode column
+                    formatted_row.append(val.ljust(width))
+                else:  # Numeric columns
+                    formatted_row.append(val.rjust(width))
+            data_rows.append("| " + " | ".join(formatted_row) + " |")
+
+        return header + table_header + table_separator + "\n".join(data_rows) + "\n"
 
     def log(self, log_fn=logger.info):
-        if not self.rows:
+        if not self.stats:
             return
         log_fn(self.generate_metric_table())
         self.reset()

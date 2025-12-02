@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from vllm import envs
-from vllm.compilation.cuda_graph import CUDAGraphStats
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
@@ -1424,7 +1424,7 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
-        cudagraph_stats: CUDAGraphStats | None = None,
+        cudagraph_stats: CUDAGraphStat | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None

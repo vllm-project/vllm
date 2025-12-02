@@ -27,7 +27,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphStats, CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -257,7 +257,7 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
-    cudagraph_stats: CUDAGraphStats | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class GPUModelRunner(
@@ -2763,7 +2763,7 @@ class GPUModelRunner(
         BatchDescriptor,
         UBatchSlices | None,
         torch.Tensor | None,
-        CUDAGraphStats,
+        CUDAGraphStat,
     ]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         uniform_decode = (
@@ -2828,9 +2828,10 @@ class GPUModelRunner(
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
-        cudagraph_stats = CUDAGraphStats(
+        cudagraph_stats = CUDAGraphStat(
             num_unpadded_tokens=num_tokens,
             num_padded_tokens=batch_descriptor.num_tokens,
+            num_paddings=batch_descriptor.num_tokens - num_tokens,
             runtime_mode=str(cudagraph_mode),
         )
 

@@ -108,7 +108,7 @@ class LoggingStatLogger(StatLoggerBase):
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.cudagraph_logging = None
-        if self.vllm_config.compilation_config.log_cudagraph_info:
+        if self.vllm_config.observability_config.cudagraph_metrics:
             self.cudagraph_logging = CUDAGraphLogging(
                 self.vllm_config.compilation_config.cudagraph_mode,
                 self.vllm_config.compilation_config.cudagraph_capture_sizes,
