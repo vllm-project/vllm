@@ -504,14 +504,19 @@ def resolve_hf_chat_template(
             return chat_template
 
     # 3rd priority: AutoTokenizer chat template
-    try:
-        return tokenizer.get_chat_template(chat_template, tools=tools)
-    except Exception:
-        logger.debug(
-            "Failed to load AutoTokenizer chat template for %s",
-            tokenizer.name_or_path,
-            exc_info=True,
-        )
+    from vllm.transformers_utils.chat_templates.registry import (
+        _SKIP_TOKENIZER_CHAT_TEMPLATE,
+    )
+
+    if model_config.hf_config.model_type not in _SKIP_TOKENIZER_CHAT_TEMPLATE:
+        try:
+            return tokenizer.get_chat_template(chat_template, tools=tools)
+        except Exception:
+            logger.debug(
+                "Failed to load AutoTokenizer chat template for %s",
+                tokenizer.name_or_path,
+                exc_info=True,
+            )
 
     # 4th priority: Predefined fallbacks
     path = get_chat_template_fallback_path(
