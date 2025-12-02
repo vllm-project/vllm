@@ -4,24 +4,18 @@ r"""Benchmark multimodal processor latency.
 
 This benchmark measures the latency of the multimodal processor module.
 
-On the server side, run:
-    vllm serve <your_model> --enable-mm-processor-stats <engine arguments>
-    # Or use environment variable:
-    # VLLM_ENABLE_MM_PROCESSOR_STATS=1 vllm serve <your_model> <engine arguments>
-
-On the client side, run:
+Run:
     vllm bench multimodal-processor \
         --model <your_model> \
         --dataset-name <dataset_name> \
         --dataset-path <dataset_path> \
-        --max-concurrency <concurrency>
+        --enable-mm-processor-stats
 """
 
 import argparse
-import asyncio
-import aiohttp
+import dataclasses
 import json
-import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -30,11 +24,12 @@ import numpy as np
 
 import vllm.envs as envs
 from vllm.benchmarks.datasets import SampleRequest, get_samples
-from vllm.benchmarks.lib.endpoint_request_func import OPENAI_COMPATIBLE_BACKENDS
-from vllm.benchmarks.serve import TaskType, benchmark
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.engine.arg_utils import EngineArgs
+from vllm.multimodal.processing import (
+    clear_timing_stats_from_engine_client,
+    get_timing_stats_from_engine_client,
+)
 from vllm.utils.gc_utils import freeze_gc_heap
-from vllm.utils.network_utils import join_host_port
 
 
 @dataclass
@@ -52,98 +47,31 @@ class MultimodalProcessorBenchmarkMetrics:
     mm_processor_stats: dict[str, dict[str, float]]
 
 
-def _get_instance_urls(
-    args: argparse.Namespace | None,
-    base_url: str | None,
-) -> list[str]:
-    """
-    Get the instance URL for stats collection.
-    
-    Args:
-        args: Command-line arguments (may be None)
-        base_url: Base URL for the server (may be None)
-    
-    Returns:
-        List containing a single instance URL
-    """
-    if base_url:
-        return [base_url]
-    
-    host = getattr(args, "host", "127.0.0.1") if args else "127.0.0.1"
-    port = getattr(args, "port", 8000) if args else 8000
-    return [f"http://{host}:{port}"]
-
-
-async def _clear_mm_processor_stats_registry(
-    instance_urls: list[str],
+def clear_mm_processor_stats(
+    llm_engine: Any,
     debug: bool = False,
 ) -> int:
     """
-    Clear MM processor stats registry from all instances via HTTP. 
-    Makes POST requests on the client-side across all instances to the /clear_mm_processor_stats endpoint.
-    
-    Args:
-        instance_urls: List of base URLs for vLLM instances
-        debug: Enable debug logging
-    
-    Returns:
-        Total number of stats cleared across all instances
+    Clear MM processor stats registry.
+    Returns the number of stats cleared.
     """
-    
-    
-    clear_session = aiohttp.ClientSession()
-    try:
-        clear_tasks = []
-        for instance_url in instance_urls:
-            clear_url = f"{instance_url}/clear_mm_processor_stats"
-            clear_tasks.append(
-                clear_session.post(clear_url, timeout=aiohttp.ClientTimeout(total=10))
-            )
-        
-        clear_responses = await asyncio.gather(*clear_tasks, return_exceptions=True)
-        total_cleared = 0
-        for i, response in enumerate(clear_responses):
-            if isinstance(response, Exception):
-                if debug:
-                    print(f"Warning: Failed to clear stats from {instance_urls[i]}: {response}")
-            else:
-                try:
-                    result = await response.json()
-                    count = result.get("count", 0)
-                    total_cleared += count
-                except Exception:
-                    pass  # Ignore parsing errors
-        
-        if total_cleared > 0 and not debug:
-            print(f"Cleared {total_cleared} MM processor stats from registry (removed test run stats)")
-        
-        return total_cleared
-    finally:
-        await clear_session.close()
+    count = clear_timing_stats_from_engine_client(llm_engine)
+    if count > 0 and not debug:
+        print(
+            f"Cleared {count} MM processor stats from registry (removed test run stats)"
+        )
+    return count
 
 
-async def collect_mm_processor_stats(
-    instance_urls: list[str],
-    session: Any | None = None,
+def collect_mm_processor_stats(
+    llm_engine: Any,
     debug: bool = False,
 ) -> dict[str, list[float]]:
     """
-    Collect multimodal processor timing stats from vLLM server(s). 
-    Queries the /mm-processor-stats endpoint from each instance and collects stats.
-
-    Args:
-        instance_urls: List of base URLs for vLLM instances (required)
-        session: aiohttp session (required)
-        debug: Enable minimal debug logging
-
-    Returns:
-        Dictionary mapping stage names to lists of timing values (in seconds)
+    Collect multimodal processor timing stats.
+    Returns a dictionary mapping stage names to lists of timing values (in seconds).
     """
-    if session is None:
-        raise ValueError("session is required for collecting MM processor stats")
-    
-    if not instance_urls:
-        raise ValueError("instance_urls must be provided")
+    all_stats = get_timing_stats_from_engine_client(llm_engine)
 
     stats_by_stage = {
         "hf_processor_time": [],
@@ -152,18 +80,6 @@ async def collect_mm_processor_stats(
         "prompt_update_time": [],
         "total_time": [],
     }
-
-    all_stats = {}
-    for instance_url in instance_urls:
-        stats_url = f"{instance_url}/mm-processor-stats"
-        try:
-            async with session.get(stats_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if "stats" in data:
-                            all_stats.update(data["stats"])
-        except Exception as e:
-            print(f"Warning: Failed to query stats from {instance_url}: {e}")
 
     for stats_dict in all_stats.values():
         stats_by_stage["hf_processor_time"].append(
@@ -179,7 +95,9 @@ async def collect_mm_processor_stats(
         stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
 
     if debug and not any(stats_by_stage.values()):
-        print("Warning: No MM processor stats found. Ensure VLLM_ENABLE_MM_PROCESSOR_STATS=1 on server.")
+        print(
+            "Warning: No MM processor stats found. Ensure --enable-mm-processor-stats is set."
+        )
 
     return stats_by_stage
 
@@ -216,80 +134,51 @@ def calculate_mm_processor_metrics(
     return metrics
 
 
-async def benchmark_multimodal_processor(
+def benchmark_multimodal_processor(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     """
     Run the multimodal processor benchmark.
     """
+    from vllm import LLM, SamplingParams
 
-    model_id = args.model
-    model_name = getattr(args, "served_model_name", None)
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
-    tokenizer_mode = getattr(args, "tokenizer_mode", "auto")
+    engine_args = EngineArgs.from_cli_args(args)
 
-    if args.base_url is not None:
-        api_url = f"{args.base_url}{args.endpoint}"
-        base_url = args.base_url
-    else:
-        host_port = join_host_port(args.host, args.port)
-        api_url = f"http://{host_port}{args.endpoint}"
-        base_url = f"http://{host_port}"
+    llm = LLM(**dataclasses.asdict(engine_args))
 
-    tokenizer = get_tokenizer(
-        tokenizer_id,
-        tokenizer_mode=tokenizer_mode,
-        trust_remote_code=args.trust_remote_code,
-    )
-
+    tokenizer = llm.get_tokenizer()
     input_requests = get_samples(args, tokenizer)
 
-    task_type = (
-        TaskType.POOLING
-        if "embeddings" in args.backend or "rerank" in args.backend
-        else TaskType.GENERATION
+    assert all(
+        llm.llm_engine.model_config.max_model_len
+        >= (request.prompt_len + request.expected_output_len)
+        for request in input_requests
+    ), (
+        "Please ensure that max_model_len is greater than the sum of "
+        "prompt_len and expected_output_len for all requests."
     )
 
-    if task_type == TaskType.GENERATION:
-        sampling_params = {
-            k: v
-            for k, v in {
-                "top_p": getattr(args, "top_p", None),
-                "top_k": getattr(args, "top_k", None),
-                "min_p": getattr(args, "min_p", None),
-                "temperature": getattr(args, "temperature", None),
-                "frequency_penalty": getattr(args, "frequency_penalty", None),
-                "presence_penalty": getattr(args, "presence_penalty", None),
-                "repetition_penalty": getattr(args, "repetition_penalty", None),
-            }.items()
-            if v is not None
-        }
+    prompts = []
+    sampling_params: list[SamplingParams] = []
 
-        if sampling_params and args.backend not in OPENAI_COMPATIBLE_BACKENDS:
-            raise ValueError(
-                "Sampling parameters are only supported by openai-compatible backends."
+    for request in input_requests:
+        prompts.append(request.prompt)
+        sampling_params.append(
+            SamplingParams(
+                n=1,
+                temperature=getattr(args, "temperature", 0.0),
+                top_p=getattr(args, "top_p", None),
+                top_k=getattr(args, "top_k", None),
+                min_p=getattr(args, "min_p", None),
+                frequency_penalty=getattr(args, "frequency_penalty", None),
+                presence_penalty=getattr(args, "presence_penalty", None),
+                repetition_penalty=getattr(args, "repetition_penalty", None),
+                ignore_eos=getattr(args, "ignore_eos", False),
+                max_tokens=request.expected_output_len,
+                detokenize=True,
             )
+        )
 
-        if "temperature" not in sampling_params:
-            sampling_params["temperature"] = 0.0
-    else:
-        sampling_params = {}
-
-    extra_body = getattr(args, "extra_body", {}) or {}
-    extra_body = {**sampling_params, **extra_body}
-
-    headers = None
-    if hasattr(args, "header") and args.header:
-        headers = {}
-        for item in args.header:
-            if "=" in item:
-                kvstring = item.split("=", 1)
-                headers[kvstring[0].strip()] = kvstring[1].strip()
-            else:
-                raise ValueError("Invalid header format. Please use KEY=VALUE format.")
-
-    percentile_metrics = getattr(args, "percentile_metrics", None) or "e2el"
-    selected_percentile_metrics = percentile_metrics.split(",")
     selected_percentiles = [
         float(p) for p in getattr(args, "metric_percentiles", "99").split(",")
     ]
@@ -299,60 +188,37 @@ async def benchmark_multimodal_processor(
     if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
         print(
             "Warning: VLLM_ENABLE_MM_PROCESSOR_STATS is not enabled. "
-            "MM processor timing stats will not be collected."
+            "MM processor timing stats will not be collected. "
+            "Set --enable-mm-processor-stats to enable."
         )
 
     debug = getattr(args, "debug_mm_stats", False)
-    instance_urls = _get_instance_urls(args, base_url)
     should_clear_registry = not getattr(args, "no_clear_mm_stats_registry", False)
-    if should_clear_registry:
-        await _clear_mm_processor_stats_registry(instance_urls, debug=debug)
 
-    benchmark_result = await benchmark(
-        task_type=task_type,
-        endpoint_type=args.backend,
-        api_url=api_url,
-        base_url=base_url,
-        model_id=model_id,
-        model_name=model_name,
-        tokenizer=tokenizer,
-        input_requests=input_requests,
-        logprobs=None,
-        request_rate=args.request_rate,
-        burstiness=args.burstiness,
-        disable_tqdm=args.disable_tqdm,
-        num_warmups=args.num_warmups,
-        profile=False,
-        selected_percentile_metrics=selected_percentile_metrics,
-        selected_percentiles=selected_percentiles,
-        ignore_eos=args.ignore_eos,
-        goodput_config_dict={},
-        max_concurrency=args.max_concurrency,
-        lora_modules=getattr(args, "lora_modules", None),
-        extra_headers=headers,
-        extra_body=extra_body,
-        ramp_up_strategy=None,
-        ramp_up_start_rps=None,
-        ramp_up_end_rps=None,
-        ready_check_timeout_sec=getattr(args, "ready_check_timeout_sec", 600),
+    if should_clear_registry:
+        clear_mm_processor_stats(llm.llm_engine, debug=debug)
+
+    print(f"Processing {len(prompts)} requests...")
+    start_time = time.perf_counter()
+
+    outputs = llm.chat(
+        prompts, sampling_params, use_tqdm=not getattr(args, "disable_tqdm", False)
     )
 
-    session = aiohttp.ClientSession()
-    try:
-        mm_stats_by_stage = await collect_mm_processor_stats(
-            instance_urls=instance_urls,
-            session=session,
-            debug=debug,
-        )
-    finally:
-        await session.close()
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+
+    mm_stats_by_stage = collect_mm_processor_stats(
+        llm.llm_engine,
+        debug=debug,
+    )
 
     if not any(mm_stats_by_stage.values()):
         if not envs.VLLM_ENABLE_MM_PROCESSOR_STATS:
             print(
                 "\n⚠️  Warning: VLLM_ENABLE_MM_PROCESSOR_STATS is not enabled.\n"
                 "   MM processor timing stats will not be collected.\n"
-                "   Set VLLM_ENABLE_MM_PROCESSOR_STATS=1 when starting the server.\n"
+                "   Set --enable-mm-processor-stats to enable.\n"
             )
         else:
             print(
@@ -365,19 +231,74 @@ async def benchmark_multimodal_processor(
     mm_processor_metrics = calculate_mm_processor_metrics(
         mm_stats_by_stage, selected_percentiles
     )
-    benchmark_result["mm_processor_stats"] = mm_processor_metrics
+
+    completed = len([o for o in outputs if o.finished])
+    failed = len(outputs) - completed
+
+    e2el_times = []
+    for output in outputs:
+        if output.finished and output.metrics is not None:
+            if hasattr(output.metrics, "finished_time") and hasattr(
+                output.metrics, "arrival_time"
+            ):
+                if (
+                    output.metrics.finished_time is not None
+                    and output.metrics.arrival_time is not None
+                ):
+                    e2el_times.append(
+                        (output.metrics.finished_time - output.metrics.arrival_time)
+                        * 1000
+                    )
+            elif hasattr(output.metrics, "last_token_time") and hasattr(
+                output.metrics, "arrival_time"
+            ):
+                if (
+                    output.metrics.last_token_time is not None
+                    and output.metrics.arrival_time is not None
+                ):
+                    e2el_times.append(
+                        (output.metrics.last_token_time - output.metrics.arrival_time)
+                        * 1000
+                    )
+
+    if not e2el_times and completed > 0:
+        avg_time_per_request = total_time / completed
+        e2el_times = [avg_time_per_request * 1000] * completed
+
+    if e2el_times:
+        mean_e2el_ms = float(np.mean(e2el_times))
+        median_e2el_ms = float(np.median(e2el_times))
+        std_e2el_ms = float(np.std(e2el_times))
+        percentiles_e2el_ms = [
+            (p, float(np.percentile(e2el_times, p))) for p in selected_percentiles
+        ]
+    else:
+        mean_e2el_ms = 0.0
+        median_e2el_ms = 0.0
+        std_e2el_ms = 0.0
+        percentiles_e2el_ms = [(p, 0.0) for p in selected_percentiles]
+
+    benchmark_result = {
+        "completed": completed,
+        "failed": failed,
+        "mean_e2el_ms": mean_e2el_ms,
+        "median_e2el_ms": median_e2el_ms,
+        "std_e2el_ms": std_e2el_ms,
+        "percentiles_e2el_ms": percentiles_e2el_ms,
+        "mm_processor_stats": mm_processor_metrics,
+    }
 
     return benchmark_result
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
-    from vllm.benchmarks import serve
+    from vllm.benchmarks.datasets import add_dataset_parser
+    from vllm.engine.arg_utils import EngineArgs
 
-    serve.add_cli_args(parser)
+    add_dataset_parser(parser)
 
-    parser.set_defaults(endpoint="/v1/chat/completions")
-    parser.set_defaults(backend="openai-chat")
+    EngineArgs.add_cli_args(parser)
 
     parser.add_argument(
         "--output-json",
@@ -396,11 +317,71 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Enable debug logging for MM processor stats collection.",
     )
+    parser.add_argument(
+        "--metric-percentiles",
+        type=str,
+        default="99",
+        help="Comma-separated list of percentiles to calculate (e.g., '50,90,99').",
+    )
+    parser.add_argument(
+        "--disable-tqdm",
+        action="store_true",
+        help="Disable tqdm progress bar.",
+    )
+
+    # Sampling parameters
+    sampling_group = parser.add_argument_group("sampling parameters")
+    sampling_group.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Temperature sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Top-p sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="Top-k sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--min-p",
+        type=float,
+        default=None,
+        help="Min-p sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--frequency-penalty",
+        type=float,
+        default=None,
+        help="Frequency penalty sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Presence penalty sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=None,
+        help="Repetition penalty sampling parameter.",
+    )
+    sampling_group.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Ignore EOS token during generation.",
+    )
 
 
 def main(args: argparse.Namespace) -> None:
     """Main entry point for the multimodal processor benchmark."""
-    import asyncio
     from datetime import datetime
 
     if args.dataset_name is None:
@@ -413,7 +394,7 @@ def main(args: argparse.Namespace) -> None:
         )
 
     print("Starting multimodal processor benchmark...")
-    result = asyncio.run(benchmark_multimodal_processor(args))
+    result = benchmark_multimodal_processor(args)
 
     print("\n" + "=" * 80)
     print("Multimodal Processor Benchmark Results")
@@ -441,8 +422,6 @@ def main(args: argparse.Namespace) -> None:
     if args.output_json:
         result["config"] = {
             "model": args.model,
-            "max_concurrency": args.max_concurrency,
-            "request_rate": args.request_rate,
             "dataset_name": args.dataset_name,
             "dataset_path": args.dataset_path,
         }
