@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -60,6 +60,43 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+
+
+def test_abort_request_with_kv_connector():
+    # `use_kv_connector=True` will expose a kv_connector to the scheduler, but
+    # we will need to mimick the delay_freed since the default kv_connector is
+    # too simple
+    scheduler = create_scheduler(use_kv_connector=True)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    with patch.object(
+        scheduler,
+        "_connector_finished",
+        side_effect=lambda req: (
+            req.status == RequestStatus.FINISHED_LENGTH_CAPPED,
+            {"fake_kv_params": False},
+        ),
+    ):
+        for i, request in enumerate(requests):
+            scheduler.finish_requests(
+                request.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+            )
+            assert request.request_id in scheduler.requests  # since delayed
+            assert len(scheduler.waiting) == 9 - i
+
+        assert not scheduler.waiting and not scheduler.running
+        assert len(scheduler.requests) == 10
+
+        for i, request in enumerate(requests):
+            scheduler.finish_requests(
+                request.request_id, RequestStatus.FINISHED_ABORTED
+            )
+            assert request.request_id not in scheduler.requests  # since aborted
+
+        assert not scheduler.waiting and not scheduler.running
+        assert not scheduler.requests
 
 
 def test_get_num_unfinished_requests():

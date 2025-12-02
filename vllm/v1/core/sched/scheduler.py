@@ -1326,11 +1326,31 @@ class Scheduler(SchedulerInterface):
         waiting_requests_to_remove = []
         valid_requests = []
 
+        # this is only required only if we have a kv connector
+        should_force_abort = (
+            finished_status == RequestStatus.FINISHED_ABORTED
+            and self.get_kv_connector() is not None
+        )
+        forced_aborted_requests = []
+
         # First pass: collect requests to remove from queues
         for req_id in request_ids:
             request = self.requests.get(req_id)
-            if request is None or request.is_finished():
-                # Invalid request ID.
+            if request is None:
+                continue  # Invalid request ID.
+            elif request.is_finished():
+                if (
+                    should_force_abort
+                    and request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+                ):
+                    # we need to force the status to FINISHED_ABORTED to avoid
+                    # the request being delayed freed. The kv_connector will
+                    # delay the free if it the status is FINISHED_LENGTH_CAPPED
+                    logger.info(
+                        "Request %s is finished but will get forced aborted.",
+                        req_id,
+                    )
+                    forced_aborted_requests.append(request)
                 continue
 
             valid_requests.append(request)
@@ -1347,6 +1367,11 @@ class Scheduler(SchedulerInterface):
 
         # Second pass: set status and free requests
         for request in valid_requests:
+            request.status = finished_status
+            self._free_request(request)
+
+        # Free the requests that are being delayed
+        for request in forced_aborted_requests:
             request.status = finished_status
             self._free_request(request)
 
