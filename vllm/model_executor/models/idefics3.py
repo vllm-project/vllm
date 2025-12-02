@@ -183,7 +183,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         resized_height, resized_width = self._get_resize_output_image_size(
             image_width=image_width,
             image_height=image_height,
-            resolution_max_side=size,
+            resolution_max_side=max_image_size,
         )
         if resized_height > max_image_size or resized_width > max_image_size:
             grid_h = math.ceil(resized_height / max_image_size)
