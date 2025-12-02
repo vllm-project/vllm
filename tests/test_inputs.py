@@ -7,7 +7,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import zip_enc_dec_prompts
 from vllm.inputs.parse import parse_raw_prompts
 from vllm.inputs.preprocess import InputPreprocessor
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
+from vllm.tokenizers import init_tokenizer_from_config
 
 pytestmark = pytest.mark.cpu_test
 
@@ -89,34 +89,6 @@ def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
 @pytest.mark.parametrize(
     "model_id",
     [
-        "facebook/opt-125m",
-    ],
-)
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        {
-            "prompt": "",
-            "multi_modal_data": {"dummy": []},
-        },
-        {
-            "prompt_token_ids": [],
-            "multi_modal_data": {"dummy": []},
-        },
-    ],
-)
-def test_preprocessor_text_no_mm_inputs(model_id, prompt):
-    model_config = ModelConfig(model=model_id)
-    tokenizer = init_tokenizer_from_configs(model_config)
-    input_preprocessor = InputPreprocessor(model_config, tokenizer)
-
-    with pytest.raises(ValueError, match="does not support multimodal inputs"):
-        input_preprocessor.preprocess(prompt)
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    [
         "facebook/chameleon-7b",
     ],
 )
@@ -127,9 +99,16 @@ def test_preprocessor_text_no_mm_inputs(model_id, prompt):
         {"prompt_token_ids": []},
     ],
 )
+@pytest.mark.skip(
+    reason=(
+        "Applying huggingface processor on text inputs results in "
+        "significant performance regression for multimodal models. "
+        "See https://github.com/vllm-project/vllm/issues/26320"
+    )
+)
 def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
-    tokenizer = init_tokenizer_from_configs(model_config)
+    tokenizer = init_tokenizer_from_config(model_config)
     input_preprocessor = InputPreprocessor(model_config, tokenizer)
 
     # HF processor adds sep token

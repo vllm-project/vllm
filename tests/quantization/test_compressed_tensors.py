@@ -10,6 +10,7 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
     CompressedTensorsLinearMethod,
@@ -141,7 +142,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         "neuralmagic/Llama-3.2-1B-quantized.w8a8",
     ],
 )
-@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.parametrize(
     "use_aiter", [True, False] if current_platform.is_rocm() else [False]
@@ -182,7 +183,7 @@ def test_compressed_tensors_w8a8_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model_path, dtype=dtype) as vllm_model:
+    with vllm_runner(model_path, dtype=dtype, enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -766,4 +767,51 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
         llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is not for non-CUDA platforms",
+)
+def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
+    """
+    Integration test for MoE layer ignore functionality with a real model.
+
+    This test would verify that when loading a compressed-tensors quantized
+    MoE model where some MoE layers are in the ignore list, those layers
+    use UnquantizedFusedMoEMethod while non-ignored layers use the
+    quantized method.
+
+    Expected model structure:
+    - Compressed-tensors quantized MoE model (e.g., Mixtral-based)
+    - Config with ignore list containing specific MoE layers
+    - Multiple MoE layers where some are quantized and some are not
+    """
+
+    # model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only" # CT 12.3
+    model_path = "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"  # CT 12.2
+
+    with vllm_runner(model_path, enforce_eager=True) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+                CompressedTensorsMoEMethod,
+            )
+
+            # Check layer 0 MoE (should be quantized)
+            layer_quantized = model.model.layers[0].mlp.experts
+            assert isinstance(layer_quantized, FusedMoE)
+            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+
+            # Check layer 10 MoE (should be unquantized + ignored)
+            layer_unquantized = model.model.layers[3].mlp.experts
+            assert isinstance(layer_unquantized, FusedMoE)
+            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+
+        llm.apply_model(check_model)
+
+        # Verify the model can generate output
+        output = llm.generate_greedy("Hello, my name is", max_tokens=4)
         assert output

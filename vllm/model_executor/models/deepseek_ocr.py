@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -53,7 +54,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     DeepseekOCRProcessor,
     count_tiles,
 )
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
@@ -161,7 +161,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             )
 
     def is_argmax_invariant(self) -> bool:
-        return True
+        return False
 
     def new_req_logits_processor(
         self,
@@ -417,18 +417,10 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
-        if self.text_config.topk_method == "noaux_tc":
-            architectures = ["DeepseekV3ForCausalLM"]
-        elif not self.text_config.use_mla:
-            architectures = ["DeepseekForCausalLM"]
-        else:
-            architectures = ["DeepseekV2ForCausalLM"]
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=architectures,
         )
 
         self.make_empty_intermediate_tensors = (
@@ -565,9 +557,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

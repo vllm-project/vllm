@@ -104,7 +104,7 @@ class GptOssReasoningParser(ReasoningParser):
             return []
         return self.model_tokenizer.encode(content)
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -131,9 +131,9 @@ class GptOssReasoningParser(ReasoningParser):
                 content_delta = cur_content
         if reasoning_delta is None and content_delta is None:
             return None
-        return DeltaMessage(reasoning_content=reasoning_delta, content=content_delta)
+        return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest,

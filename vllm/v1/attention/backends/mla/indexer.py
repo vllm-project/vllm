@@ -7,12 +7,12 @@ import torch
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
-    AttentionMetadata,
     MultipleOf,
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
+from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -25,8 +25,8 @@ logger = init_logger(__name__)
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return DeepseekV32IndexerMetadata
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [1 if current_platform.is_rocm() else 64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -48,12 +48,12 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (0, 1, 2, 3)
         return (0, 1, 2)
-
-    @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return [64]
 
 
 @dataclass
@@ -213,7 +213,7 @@ def split_prefill_chunks(
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
@@ -335,10 +335,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-
-            self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
-                seq_lens, self.kv_cache_spec.block_size, self.num_sms
-            )
+            if is_deep_gemm_supported():
+                self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                    seq_lens, self.kv_cache_spec.block_size, self.num_sms
+                )
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=common_attn_metadata.block_table_tensor[:num_decodes, ...],
                 seq_lens=common_attn_metadata.seq_lens[:num_decodes],
