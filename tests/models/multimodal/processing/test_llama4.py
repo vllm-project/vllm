@@ -47,7 +47,7 @@ def test_processor_override(
         ]
     }
     if tokenized_prompt:
-        prompt = tokenizer.encode(tokenizer, prompt)
+        prompt = tokenizer.encode(prompt)
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
     mm_data = processed_inputs["mm_kwargs"].get_data()
