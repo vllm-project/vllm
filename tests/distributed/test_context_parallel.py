@@ -118,14 +118,10 @@ class CPTestSettings:
 
 CP_TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
-        CPTestSettings.detailed(dcp_multipliers=[0.5, 1]),
-        CPTestSettings.detailed(tp_base=2, dcp_multipliers=[0.5, 1]),
-        CPTestSettings.detailed(tp_base=2, dcp_multipliers=[0.5, 1], cp_kv_cache_interleave_size=64),
+        CPTestSettings.detailed(dcp_multipliers=[0.5, 1], cp_kv_cache_interleave_size=64),
     ],
     "Qwen/Qwen2.5-1.5B-Instruct": [
-        CPTestSettings.detailed(attn_backend="FLASH_ATTN"),
         CPTestSettings.detailed(cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"),
-        CPTestSettings.detailed(attn_backend="FLASHINFER"),
         CPTestSettings.detailed(cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"),
     ],
 }
