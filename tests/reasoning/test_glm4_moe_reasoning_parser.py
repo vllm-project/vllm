@@ -221,10 +221,10 @@ def test_glm45_streaming_reasoning_no_think_leak_with_misaligned_ids(glm45_token
     think_start_id = getattr(parser, "think_start_token_id", None)
     think_end_id = getattr(parser, "think_end_token_id", None)
 
-    # Default fake id; adjust if it accidentally matches one of the special ones.
+    # Choose a fake token id that is guaranteed NOT to be the think start/end.
     fake_id = 0
-    if fake_id in (think_start_id, think_end_id):
-        fake_id = (think_end_id or 0) + 1
+    while fake_id in (think_start_id, think_end_id):
+        fake_id += 1
 
     delta_token_ids = [fake_id]
     current_token_ids = delta_token_ids.copy()
