@@ -94,7 +94,9 @@ fp8_types = [torch.float8_e4m3fn]
 fp8_bf16_types = [torch.float8_e4m3fn, torch.bfloat16]
 
 # Use filters for testing specific classes.
-# 'None' allows all possible object types.
+# The filters can be 'None', which allows all possible object types.
+# Otherwise they can be lists of string class names, e.g.
+# ["DeepEPHybridPrepareFinalize"] or ["TritonExperts", "CutlassExpertsFp8"]
 PREPARE_FINALIZE_FILTER = None
 EXPERTS_FILTER = None
 

@@ -332,9 +332,6 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
     def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
         extra_kwargs = dict(
             group=self.cpu_group,
-            # num_sms_dispatch_api=32,
-            # num_sms_combine_api=32,
-            # num_sms_preprocessing_api=128,
         )
         return {**kwargs, **extra_kwargs}
 

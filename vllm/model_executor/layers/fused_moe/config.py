@@ -754,7 +754,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_deepep_hybrid_kernels(self):
-        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid"
+        return self.use_all2all_kernels and self.all2all_backend == "deepep_hybrid"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
