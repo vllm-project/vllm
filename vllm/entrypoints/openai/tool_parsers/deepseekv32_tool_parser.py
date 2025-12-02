@@ -41,6 +41,7 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls><｜end▁of▁sentence｜>
 
     """
+
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
@@ -53,10 +54,17 @@ class DeepSeekV32ToolParser(ToolParser):
 
         self.tool_calls_start_token: str = "<｜DSML｜function_calls>"
         self.tool_calls_end_token: str = "</｜DSML｜function_calls>"
-        self.tool_calls_regex: str = r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>"
+        self.tool_calls_regex: str = (
+            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>"
+        )
+        self.invoke_regex: str = (
+            r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>'
+        )
         self.invoke_name_regex: str = r'<｜DSML｜invoke\s+name="([^"]+)"\s*>'
         self.invoke_end_token: str = "</｜DSML｜invoke>"
-        self.invoke_parameter_regex : str = r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*?)</｜DSML｜parameter>'
+        self.invoke_parameter_regex: str = (
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="([^"]+)"\s*>(.*?)</｜DSML｜parameter>'
+        )
 
     def extract_tool_calls(
         self,
@@ -68,39 +76,53 @@ class DeepSeekV32ToolParser(ToolParser):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
+        
+        try:
+            # Extract content between function_calls tags
+            function_calls_content = re.search(
+                r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>",
+                model_output,
+                re.DOTALL,
+            )
+            if not function_calls_content:
+                return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
-        else:
-            try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
+            function_calls_content = function_calls_content.group(1)
 
-                tool_calls = []
-                for match in function_call_tuples:
-                    function_name, function_args = match
-                    tool_calls.append(
-                        ToolCall(
-                            type="function",
+            invoke_matches = re.findall(
+                self.invoke_regex, function_calls_content, re.DOTALL
+            )
+
+            tool_calls = []
+            for function_name, invoke_content in invoke_matches:
+                tool_params_matches = re.findall(
+                    self.invoke_parameter_regex, invoke_content, re.DOTALL
+                )
+                function_args = dict()
+                for param_name, param_val in tool_params_matches:
+                    function_args[param_name] = param_val
+                tool_calls.append(
+                    ToolCall(
+                        type="function",
                             function=FunctionCall(
                                 name=function_name, arguments=function_args
                             ),
                         )
                     )
+            content = model_output[: model_output.find(self.tool_calls_start_token)]
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=content if content else None,
+            )
 
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=content if content else None,
-                )
-
-            except Exception:
-                logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
+        except Exception:
+            logger.exception("Error in extracting tool call from response.")
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
 
     def extract_tool_calls_streaming(
         self,
