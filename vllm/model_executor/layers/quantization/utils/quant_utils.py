@@ -207,7 +207,7 @@ def scaled_dequantize(
     x_s: torch.Tensor,
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     if group_shape is not None:
         group_shape = _normalize_quant_group_shape(x_q, group_shape)
 

@@ -216,10 +216,8 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    LinearBase,
-    UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -1151,24 +1149,18 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
             )
 
-        def get_and_maybe_dequant_weights(layer: LinearBase):
-            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
-                # NOTE: This should only be used offline, since it's O(N^3)
-                eye = torch.eye(
-                    layer.input_size_per_partition,
-                    dtype=act_dtype,
-                    device=get_layer_weight(layer).device,
-                )
-                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
-                del eye
-                # standardize to (output, input)
-                return dequant_weights.T
-            return layer.weight
-
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        kv_b_proj_weight = scaled_dequantize(
+            get_layer_weight(self.kv_b_proj),
+            self.kv_b_proj.weight_scale,
+            self.kv_b_proj.weight_block_size,
+            out_dtype=act_dtype,
+        )
+        if self.kv_b_proj.weight_block_size is not None:
+            kv_b_proj_weight = kv_b_proj_weight.T
+
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -1561,42 +1553,17 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
             )
 
-        def get_and_maybe_dequant_weights(layer: LinearBase):
-            if (
-                isinstance(layer.quant_method, Fp8LinearMethod)
-                and layer.quant_method.quant_config.activation_scheme == "static"
-            ):
-                # NOTE: We need a special path for static scaling, we can't send
-                # of bunch of ones with `eye`, it might overflow.
-                weight = layer.weight.data.to(act_dtype)
-                weight_scale = layer.weight_scale.data
-                m, n = weight.shape
-                if weight_scale.ndim < 2:
-                    m_scale, n_scale = weight_scale.view(1, -1).shape
-                else:
-                    assert weight_scale.ndim == 2
-                    m_scale, n_scale = weight_scale.shape
-                weight = weight.view(m // m_scale, m_scale, n // n_scale, n_scale)
-                weight *= weight_scale.view(1, m_scale, 1, n_scale)
-                dequant_weights = weight.view(m, n)
-                return dequant_weights.T
-            elif not isinstance(layer.quant_method, UnquantizedLinearMethod):
-                # NOTE: This should only be used offline, since it's O(N^3)
-                eye = torch.eye(
-                    layer.input_size_per_partition,
-                    dtype=act_dtype,
-                    device=get_layer_weight(layer).device,
-                )
-                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
-                del eye
-                # standardize to (output, input)
-                return dequant_weights.T
-            return layer.weight
-
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        kv_b_proj_weight = scaled_dequantize(
+            get_layer_weight(self.kv_b_proj),
+            self.kv_b_proj.weight_scale,
+            self.kv_b_proj.weight_block_size,
+            out_dtype=act_dtype,
+        )
+        if self.kv_b_proj.weight_block_size is not None:
+            kv_b_proj_weight = kv_b_proj_weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
