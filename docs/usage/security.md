@@ -108,6 +108,77 @@ networks.
 Consult your operating system or application platform documentation for specific
 firewall configuration instructions.
 
+## API Key Authentication Limitations
+
+### Overview
+
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+
+**Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
+
+### Protected Endpoints (Require API Key)
+
+When `--api-key` is configured, the following `/v1` endpoints require Bearer token authentication:
+
+- `/v1/models` - List available models
+- `/v1/chat/completions` - Chat completions
+- `/v1/completions` - Text completions
+- `/v1/embeddings` - Generate embeddings
+- `/v1/audio/transcriptions` - Audio transcription
+- `/v1/audio/translations` - Audio translation
+- `/v1/messages` - Anthropic-compatible messages API
+- `/v1/responses` - Response management
+- `/v1/score` - Scoring API
+- `/v1/rerank` - Reranking API
+
+### Unprotected Endpoints (No API Key Required)
+
+The following endpoints **do not require authentication** even when `--api-key` is configured:
+
+**Inference endpoints:**
+- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
+- `/inference/v1/generate` - Generate completions
+- `/pooling` - Pooling API
+- `/classify` - Classification API
+- `/score` - Scoring API (non-`/v1` variant)
+- `/rerank` - Reranking API (non-`/v1` variant)
+
+**Operational control endpoints:**
+- `/pause` - Pause generation (causes denial of service)
+- `/resume` - Resume generation
+- `/scale_elastic_ep` - Trigger scaling operations
+- `/reset_prefix_cache` - Reset prefix cache
+- `/reset_mm_cache` - Reset multimodal cache
+- `/sleep` - Put engine to sleep
+- `/wake_up` - Wake engine from sleep
+- `/collective_rpc` - Internal RPC endpoint
+
+**Utility endpoints:**
+- `/tokenize` - Tokenize text
+- `/detokenize` - Detokenize tokens
+- `/tokenizer_info` - Get tokenizer information
+- `/health` - Health check
+- `/ping` - SageMaker health check
+- `/version` - Version information
+- `/load` - Server load metrics
+
+**Note:** The `/invocations` endpoint is particularly concerning as it provides unauthenticated access to the same inference capabilities as the protected `/v1` endpoints.
+
+### Security Implications
+
+An attacker who can reach the vLLM HTTP server can:
+
+1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
+2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
+3. **Access operational controls** to manipulate server state via `/reset_prefix_cache`, `/sleep`, and other management endpoints
+
+### Recommended Security Practices
+
+One effective approach is to deploy vLLM behind a reverse proxy (such as nginx, Envoy, or a Kubernetes Gateway) that:
+
+- Explicitly allowlists only the endpoints you want to expose to end users
+- Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).
