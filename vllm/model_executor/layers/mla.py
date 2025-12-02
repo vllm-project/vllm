@@ -111,7 +111,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        llama_4_scaling: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None

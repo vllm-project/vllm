@@ -1188,7 +1188,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-        llama_4_scaling: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
