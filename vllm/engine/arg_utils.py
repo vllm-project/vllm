@@ -1576,6 +1576,7 @@ class EngineArgs:
                 "Disabling NCCL for DP synchronization when using async scheduling."
             )
             self.disable_nccl_for_dp_synchronization = True
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
