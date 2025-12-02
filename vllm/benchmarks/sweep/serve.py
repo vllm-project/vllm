@@ -138,9 +138,9 @@ def _get_comb_base_path(
 ):
     parts = list[str]()
     if serve_comb:
-        parts.extend(("SERVE-", serve_comb.as_text(sep="-")))
+        parts.extend(("SERVE-", serve_comb.name))
     if bench_comb:
-        parts.extend(("BENCH-", bench_comb.as_text(sep="-")))
+        parts.extend(("BENCH-", bench_comb.name))
 
     return output_dir / sanitize_filename("-".join(parts))
 
@@ -345,8 +345,9 @@ class SweepServeArgs:
             "--serve-params",
             type=str,
             default=None,
-            help="Path to JSON file containing a list of parameter combinations "
-            "for the `vllm serve` command. "
+            help="Path to JSON file containing parameter combinations "
+            "for the `vllm serve` command. Can be either a list of dicts or a dict "
+            "where keys are benchmark names. "
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
@@ -354,8 +355,9 @@ class SweepServeArgs:
             "--bench-params",
             type=str,
             default=None,
-            help="Path to JSON file containing a list of parameter combinations "
-            "for the `vllm bench serve` command. "
+            help="Path to JSON file containing parameter combinations "
+            "for the `vllm bench serve` command. Can be either a list of dicts or "
+            "a dict where keys are benchmark names. "
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
