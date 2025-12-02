@@ -206,20 +206,6 @@ def test_is_reasoning_end_full_prompt(
 
 
 def test_glm45_streaming_reasoning_no_think_leak_with_misaligned_ids(glm45_tokenizer):
-    """
-    Regression test for GLM-4.5 reasoning parser bug in streaming mode.
-
-    This simulates a scenario where the *text* of a delta contains
-    <think>...</think>, but the associated token IDs do not contain the
-    think_start/think_end token IDs (e.g., due to prompt/template handling
-    or other upstream mismatches).
-
-    The parser must still:
-      - route the text between <think> and </think> to 'reasoning'
-      - route the text after </think> to 'content'
-      - never expose <think> or </think> in the content field
-    """
-
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         glm45_tokenizer
     )
