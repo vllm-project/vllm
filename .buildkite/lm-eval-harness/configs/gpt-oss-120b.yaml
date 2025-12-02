@@ -1,0 +1,12 @@
+model_name: "openai/gpt-oss-120b"
+trust_remote_code: true
+tasks:
+- name: "aime25"
+  metrics:
+  - name: "exact_match,none"
+    value: 0.80
+limit: 1000
+num_fewshot: 0
+max_model_len: 131072
+gen_kwargs: "temperature=1.0,top_p=1.0,top_k=0"
+apply_chat_template: True

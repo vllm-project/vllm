@@ -1034,6 +1034,14 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
+- label: Blackwell GPT-OSS Eval After Merge 
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  commands:
+    - pytest -s -v .buildkite/lm-eval-harness/test_lm_eval_correctness.py --config-list-file=.buildkite/lm-eval-harness/configs/models-gpt-oss.txt --tp-size=1
+  branches: if: build.branch == "main" && env("BUILDKITE_PULL_REQUEST") == "false"
+
 - label: Blackwell Quantized MoE Test
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
