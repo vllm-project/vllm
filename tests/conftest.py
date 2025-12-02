@@ -201,10 +201,7 @@ def dynamo_reset():
 
 @pytest.fixture
 def example_prompts() -> list[str]:
-    prompts = []
-    for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture
@@ -223,10 +220,7 @@ class DecoderPromptType(Enum):
 
 @pytest.fixture
 def example_long_prompts() -> list[str]:
-    prompts = []
-    for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -352,10 +346,13 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
-            model = auto_cls.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
-                **model_kwargs,
+            model = cast(
+                nn.Module,
+                auto_cls.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                    **model_kwargs,
+                ),
             )
 
             # in case some unquantized custom models are not in same dtype
@@ -372,11 +369,15 @@ class HfRunner:
 
             self.model = model
 
+        from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+
         if not skip_tokenizer_init:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
+            self.tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast = (
+                AutoTokenizer.from_pretrained(
+                    model_name,
+                    dtype=dtype,
+                    trust_remote_code=trust_remote_code,
+                )
             )
 
         # don't put this import at the top level
@@ -654,8 +655,10 @@ class HfRunner:
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
 
+        from transformers.generation.utils import GenerateOutput
+
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: GenerateOutput = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
