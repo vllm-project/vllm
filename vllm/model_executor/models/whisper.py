@@ -16,8 +16,8 @@ from transformers import (
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
-from vllm.attention import Attention, AttentionType
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -791,6 +791,7 @@ class WhisperForConditionalGeneration(
 
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
+    supports_segment_timestamp = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod

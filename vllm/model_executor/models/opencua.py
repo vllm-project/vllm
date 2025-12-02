@@ -31,7 +31,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .qwen2_5_vl import (
     Qwen2_5_VisionTransformer as OpenCUAVisionTransformer,
@@ -79,7 +79,7 @@ class OpenCUAProcessor(Qwen2VLProcessor):
     def __init__(
         self,
         vision_config: dict,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         **kwargs,
     ):
         image_processor = Qwen2VLImageProcessor(**vision_config)

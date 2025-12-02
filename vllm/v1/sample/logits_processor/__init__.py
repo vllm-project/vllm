@@ -313,7 +313,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
                 if (len(inspect.signature(req_lp).parameters) == 3)
                 else [output_ids]
             )
-            return partial(req_lp, *args)
+            return partial(req_lp, *args)  # type: ignore[misc]
         return None
 
     def update_state(self, batch_update: BatchUpdate | None):
