@@ -143,6 +143,7 @@ class PriorityRequestQueue(RequestQueue):
     """
 
     def __init__(self) -> None:
+        # int priority, float arrival_time, str request_id, int id(request), Request
         self._heap: list[tuple[int, float, str, int, Request]] = []
 
     def add_request(self, request: Request) -> None:
