@@ -337,7 +337,7 @@ run_serving_tests() {
       # Old format: each element is a test
       .[]
     elif (type == "object" and has("tests")) then
-      # New format: merge defaults into each test
+      # merge the default parameters into each test cases
       . as $root
       | ($root.defaults // {}) as $d
       | ($root.tests // [])[]
