@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    mamba_gather_indices,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
@@ -57,7 +58,12 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            state_indices_tensor = state_indices_tensor.contiguous()
+            state_indices_tensor = mamba_gather_indices(
+                common_attn_metadata,
+                self.kv_cache_spec,
+            )[:, 0]
+        else:
+            state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(

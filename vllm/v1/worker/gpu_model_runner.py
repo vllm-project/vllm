@@ -1472,7 +1472,6 @@ class GPUModelRunner(
 
     def _build_attention_metadata(
         self,
-        scheduler_output: "SchedulerOutput",
         total_num_scheduled_tokens: int,
         max_num_scheduled_tokens: int,
         num_reqs: int,
@@ -2895,7 +2894,6 @@ class GPUModelRunner(
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
-                        scheduler_output=scheduler_output,
                         total_num_scheduled_tokens=total_num_scheduled_tokens,
                         max_num_scheduled_tokens=max_num_scheduled_tokens,
                         num_reqs=num_reqs,

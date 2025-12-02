@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
+    mamba_gather_indices,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from vllm.logger import init_logger
@@ -59,16 +60,6 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
-
-# TODO: need to move, and called by all mamba builders
-def mamba_gather_indices(common_attn_metadata: CommonAttentionMetadata,
-                         block_size: int,
-                         num_blocks: int):
-    block_table_tensor = common_attn_metadata.block_table_tensor
-    start_indices = (common_attn_metadata.seq_lens - 1) // block_size
-    offsets = torch.arange(num_blocks, device=block_table_tensor.device)
-    indices_to_gather = start_indices.unsqueeze(1) + offsets
-    return torch.gather(block_table_tensor, 1, indices_to_gather)
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -159,9 +150,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens_tensor = context_lens.to(query_start_loc.device)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            block_table_tensor = mamba_gather_indices(common_attn_metadata,
-                                                      self.kv_cache_spec.block_size,
-                                                      1 + self.num_spec)
+            block_table_tensor = mamba_gather_indices(
+                common_attn_metadata,
+                self.kv_cache_spec,
+                1 + self.num_spec,
+            )
             if is_global_first_rank():
                 logger.info(f"{block_table_tensor=}")
         else:
