@@ -867,7 +867,7 @@ async def test_output_messages_enabled(client: OpenAI, model_name: str, server):
     # Regression test for github.com/openai/harmony/issues/78 (empty content)
     is_query_returned: bool = False
     for _message in [*response.input_messages, *response.output_messages]:
-        for _item in _message.get("content"):
+        for _item in _message["content"]:
             assert isinstance(_item, dict), _message
             assert len(_item) > 0, _message
 
