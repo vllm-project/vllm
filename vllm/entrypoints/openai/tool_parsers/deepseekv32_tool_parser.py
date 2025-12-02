@@ -12,6 +12,7 @@ from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
+
 class DeepSeekV32ToolParser(MinimaxM2ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         self.prev_tool_call_arr: list[dict] = []
