@@ -600,14 +600,20 @@ class FusedMoE(CustomOp):
             # Avoid circular import
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod,
+                ModelOptNvFp4FusedMoE,
             )
 
             if not isinstance(
-                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method,
+                (
+                    UnquantizedFusedMoEMethod,
+                    ModelOptFp8MoEMethod,
+                    ModelOptNvFp4FusedMoE,
+                ),
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    "and ModelOpt FP8 moe for now"
+                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
@@ -1277,7 +1283,7 @@ class FusedMoE(CustomOp):
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
-                        param=param,
+                        param=expert_data,
                         tp_rank=self.tp_rank,
                     )
                     return True if return_success else None
@@ -1422,7 +1428,7 @@ class FusedMoE(CustomOp):
                 # do nothing.
                 return p
 
-            # Do not update the layer paramater as the layer's MoE operations would
+            # Do not update the layer parameter as the layer's MoE operations would
             # expect the parameter's tensor to the same shape / stride. Instead,
             # make a new torch.nn.Parameter that is used just in the context of
             # EPLB.
@@ -1690,10 +1696,6 @@ class FusedMoE(CustomOp):
             )
 
         def reduce_output(states: torch.Tensor) -> torch.Tensor:
-            # Slice before all_reduce to enable possible fusion
-            if self.hidden_size != og_hidden_states:
-                states = states[..., :og_hidden_states]
-
             if (
                 not self.is_sequence_parallel
                 and not self.use_dp_chunking
@@ -1716,12 +1718,11 @@ class FusedMoE(CustomOp):
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(fused_output, tuple)
                 fused_output, zero_expert_result = fused_output
-                return (
-                    reduce_output(fused_output)
-                    + zero_expert_result[..., :og_hidden_states]
-                )
+                return (reduce_output(fused_output) + zero_expert_result)[
+                    ..., :og_hidden_states
+                ]
             else:
-                return reduce_output(fused_output)
+                return reduce_output(fused_output)[..., :og_hidden_states]
         else:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -1734,8 +1735,8 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.layer_name
                 )
             return (
-                reduce_output(shared_output),
-                reduce_output(fused_output),
+                reduce_output(shared_output)[..., :og_hidden_states],
+                reduce_output(fused_output)[..., :og_hidden_states],
             )
 
     def forward_cuda(
