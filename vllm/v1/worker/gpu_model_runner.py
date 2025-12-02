@@ -25,7 +25,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -320,7 +320,7 @@ class GPUModelRunner(
 
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
-        self.hidden_size = model_config.get_hidden_size()
+        self.inputs_embeds_size = model_config.get_inputs_embeds_size()
         self.attention_chunk_size = model_config.attention_chunk_size
         # Only relevant for models using ALiBi (e.g, MPT)
         self.use_alibi = model_config.uses_alibi
@@ -485,7 +485,7 @@ class GPUModelRunner(
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
         self.inputs_embeds = self._make_buffer(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, numpy=False
+            self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
         )
         self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
@@ -601,6 +601,50 @@ class GPUModelRunner(
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
+
+    @torch.inference_mode()
+    def init_fp8_kv_scales(self) -> None:
+        """
+        Re-initialize the KV cache and FP8 scales after waking from sleep.
+        1. Zero out the KV cache tensors to remove garbage data from re-allocation.
+        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
+          If these are left at 0.0 (default after wake_up), all KV cache values
+          become effectively zero, causing gibberish output.
+        """
+        if not self.cache_config.cache_dtype.startswith("fp8"):
+            return
+
+        kv_caches = getattr(self, "kv_caches", [])
+        for cache_tensor in kv_caches:
+            if cache_tensor is not None:
+                cache_tensor.zero_()
+
+        k_attr_names = ("_k_scale", "k_scale")
+        v_attr_names = ("_v_scale", "v_scale")
+
+        attn_layers = self.compilation_config.static_forward_context
+        for name, module in attn_layers.items():
+            if isinstance(module, (Attention, MLAAttention)):
+                # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
+                # kvcache quant. However, to get better accuracy, compression
+                # frameworks like llm-compressors allow users to tune the
+                # scale. We may need to restore the specific calibrated scales
+                # here in the future.
+                k_scale_val, v_scale_val = 1.0, 1.0
+
+                # Processing K Scale
+                for attr in k_attr_names:
+                    if hasattr(module, attr):
+                        param = getattr(module, attr)
+                        if isinstance(param, torch.Tensor):
+                            param.fill_(k_scale_val)
+
+                # Processing V Scale
+                for attr in v_attr_names:
+                    if hasattr(module, attr):
+                        param = getattr(module, attr)
+                        if isinstance(param, torch.Tensor):
+                            param.fill_(v_scale_val)
 
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
@@ -730,7 +774,14 @@ class GPUModelRunner(
         # they will be scheduled again sometime in the future.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
-        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        # NOTE(zhuohan): cached_req_ids and resumed_req_ids are usually disjoint,
+        # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids` holds
+        # apart from the forced-preemption case in reset_prefix_cache. And in
+        # that case we include the resumed_req_ids in the unscheduled set so
+        # that they get cleared from the persistent batch before being re-scheduled
+        # in the normal resumed request path.
+        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
@@ -2388,16 +2439,13 @@ class GPUModelRunner(
     ]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
+        is_encoder_decoder = self.model_config.is_encoder_decoder
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         ec_connector_output = None
 
-        if (
-            self.supports_mm_inputs
-            and is_first_rank
-            and not self.model_config.is_encoder_decoder
-        ):
+        if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
             # Run the multimodal encoder if any.
             with self.maybe_get_ec_connector_output(
                 scheduler_output,
@@ -2475,10 +2523,7 @@ class GPUModelRunner(
                 num_input_tokens, intermediate_tensors, True
             )
 
-        if (
-            self.model_config.is_encoder_decoder
-            and scheduler_output.scheduled_encoder_inputs
-        ):
+        if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Run the encoder, just like we do with other multimodal inputs.
             # For an encoder-decoder model, our processing here is a bit
             # simpler, because the outputs are just passed to the decoder.
