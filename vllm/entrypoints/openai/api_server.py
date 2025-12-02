@@ -1769,7 +1769,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    logger.debug_once("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
