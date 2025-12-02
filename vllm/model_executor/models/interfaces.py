@@ -32,11 +32,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
     MultiModalFeatureSpec = object
+    _ProcessorFactories = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -85,6 +87,11 @@ class SupportsMultiModal(Protocol):
     multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
     """
     A set indicating CPU-only multimodal fields.
+    """
+
+    _processor_factory: ClassVar[_ProcessorFactories]
+    """
+    Set internally by `MultiModalRegistry.register_processor`.
     """
 
     @classmethod
@@ -340,7 +347,6 @@ class SupportsLoRA(Protocol):
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: dict[str, list[str]] = {}
 
 
@@ -352,7 +358,6 @@ class _SupportsLoRAType(Protocol):
 
     packed_modules_mapping: dict[str, list[str]]
     embedding_modules: dict[str, str]
-    embedding_padding_modules: list[str]
 
 
 @overload
@@ -372,7 +377,6 @@ def supports_lora(
         lora_attrs = (
             "packed_modules_mapping",
             "embedding_modules",
-            "embedding_padding_modules",
         )
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
@@ -832,6 +836,10 @@ class SupportsTranscription(Protocol):
     """
     Transcription models can opt out of text generation by setting this to
     `True`.
+    """
+    supports_segment_timestamp: ClassVar[bool] = False
+    """
+    Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
     def __init_subclass__(cls, **kwargs):

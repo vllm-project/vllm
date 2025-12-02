@@ -68,7 +68,9 @@ class NewRequestData:
         )
 
     def __repr__(self) -> str:
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
@@ -88,7 +90,9 @@ class NewRequestData:
         prompt_token_ids_len = (
             len(self.prompt_token_ids) if self.prompt_token_ids is not None else None
         )
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
