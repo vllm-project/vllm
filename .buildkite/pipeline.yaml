@@ -2649,13 +2649,13 @@ steps:
     - (command nvidia-smi || true)
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
-    - find compile/ -maxdepth 1 -name "test_*.py" -exec pytest -s -v {} \\;
+    - find compile/ -maxdepth 1 -name "test_*.py" -exec pytest -s -v {} \\\\;
     depends_on:
-    - image-build
+    - []
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:52ef28ad15b328f5b6b3edb3f8b8904528a183f6
         always-pull: true
         propagate-environment: true
         environment:
@@ -2704,13 +2704,13 @@ steps:
     - export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1
     - cd /vllm-workspace/tests
     - find compile/fullgraph/ -name "test_*.py" -not -name "test_full_graph.py" -exec
-      pytest -s -v {} \\;
+      pytest -s -v {} \\\\;
     depends_on:
-    - image-build
+    - []
     soft_fail: false
     plugins:
     - docker#v5.2.0:
-        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:123
+        image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:52ef28ad15b328f5b6b3edb3f8b8904528a183f6
         always-pull: true
         propagate-environment: true
         environment:
