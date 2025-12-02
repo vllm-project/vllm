@@ -89,6 +89,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_text="Step3TextConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
+    tarsier2="Tarsier2Config",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -127,6 +128,9 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            model_type = hf_overrides.get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -310,7 +314,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             config.rope_parameters["rope_theta"] = rope_theta
 
     # No RoPE parameters to patch
-    if not hasattr(config, "rope_parameters"):
+    if getattr(config, "rope_parameters", None) is None:
         return
 
     # Add original_max_position_embeddings if present
@@ -351,7 +355,10 @@ def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
         rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
     elif rope_parameters["rope_type"] == "mrope":
-        assert "mrope_section" in rope_parameters
+        if "mrope_section" not in rope_parameters:
+            raise ValueError(
+                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
+            )
         rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
@@ -584,6 +591,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
+        hf_overrides=hf_overrides_kw,
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
@@ -915,11 +923,13 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
-    if text_config is not config:
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(text_config, "num_attention_heads")
+    if text_config is not config and not hasattr(text_config, "num_attention_heads"):
+        raise ValueError(
+            "The text_config extracted from the model config does not have "
+            "`num_attention_heads` attribute. This indicates a mismatch "
+            "between the model config and vLLM's expectations. Please "
+            "ensure that the model config is compatible with vLLM."
+        )
 
     return text_config
 

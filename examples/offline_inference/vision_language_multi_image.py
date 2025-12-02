@@ -1222,7 +1222,10 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=32768,
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
     )
 
     prompt = (
