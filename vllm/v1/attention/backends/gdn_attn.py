@@ -384,30 +384,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_computed_tokens_cpu_non_spec = m.num_computed_tokens_cpu
 
             if num_decodes > 0:
-                state_indices_tensor_d = non_spec_block_table[:num_decodes].contiguous()
+                state_indices_tensor_d = non_spec_block_table[:num_decodes]
                 block_idx_last_computed_token_d = block_idx_last_computed_non_spec[
                     :num_decodes
-                ].contiguous()
+                ]
                 block_idx_last_scheduled_token_d = block_idx_last_scheduled_non_spec[
                     :num_decodes
-                ].contiguous()
+                ]
 
             if num_prefills > 0:
                 start = num_decodes
                 end = start + num_prefills
-                state_indices_tensor_p = non_spec_block_table[start:end].contiguous()
+                state_indices_tensor_p = non_spec_block_table[start:end]
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_non_spec[
                     start:end
-                ].contiguous()
+                ]
                 block_idx_last_computed_token_p = block_idx_last_computed_non_spec[
                     start:end
-                ].contiguous()
+                ]
                 block_idx_last_scheduled_token_p = block_idx_last_scheduled_non_spec[
                     start:end
-                ].contiguous()
-                num_computed_tokens_p = num_computed_tokens_non_spec[
-                    start:end
-                ].contiguous()
+                ]
+                num_computed_tokens_p = num_computed_tokens_non_spec[start:end]
 
                 if spec_sequence_masks is None:
                     num_computed_tokens_p_cpu = m.num_computed_tokens_cpu[
