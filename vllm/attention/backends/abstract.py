@@ -6,11 +6,10 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
-from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -178,8 +177,6 @@ class AttentionBackend(ABC):
         By default, only supports decoder attention.
         Backends should override this to support other attention types.
         """
-        from vllm.attention.backends.abstract import AttentionType
-
         return attn_type == AttentionType.DECODER
 
     @classmethod
@@ -360,7 +357,7 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -412,7 +409,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
+        kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
     ) -> None:
         raise NotImplementedError

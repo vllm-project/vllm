@@ -8,6 +8,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -36,6 +38,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
@@ -82,8 +87,21 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     if not current_platform.is_cuda():
         return Mxfp4Backend.NONE
 
-    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
-    return Mxfp4Backend.MARLIN
+    # If FlashInfer is not available, try either Marlin or Triton
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and is_torch_equal_or_newer("2.8.0")
+        # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+        # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+        # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+        and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+    )
+    if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+        return Mxfp4Backend.MARLIN
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+    return Mxfp4Backend.TRITON
 
 
 def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
@@ -184,8 +202,6 @@ class Mxfp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,
@@ -206,7 +222,9 @@ class Mxfp4Config(QuantizationConfig):
             if current_platform.is_xpu():
                 return IpexMxfp4MoEMethod(layer.moe_config)
             else:
-                return Mxfp4MoEMethod(layer.moe_config)
+                quant_method = Mxfp4MoEMethod(layer.moe_config)
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                return quant_method
         elif isinstance(layer, Attention):
             # TODO: Add support for MXFP4 Attention.
             logger.debug_once(
@@ -221,6 +239,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+
+        self.marlin_input_dtype = None
         self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
@@ -386,7 +406,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         elif (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -855,6 +875,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
+                if self.moe.is_lora_enabled:
+                    return UnfusedOAITritonExperts(self.moe_quant_config)
                 return OAITritonExperts(self.moe_quant_config)
             else:
                 raise NotImplementedError(
@@ -915,6 +937,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 activation=activation,
                 expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype,
             )
 
         assert _can_support_mxfp4(
