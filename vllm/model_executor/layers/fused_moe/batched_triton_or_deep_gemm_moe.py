@@ -18,85 +18,52 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         max_num_tokens: int,
         num_dispatchers: int,
         quant_config: FusedMoEQuantConfig,
-        allow_deep_gemm: bool = False,
+        use_deep_gemm: bool = False,
     ):
         super().__init__(quant_config)
 
-        self.batched_triton_experts = BatchedTritonExperts(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
-            quant_config=self.quant_config,
-        )
-
-        self.allow_deep_gemm = (
-            allow_deep_gemm
-            and self.quant_config.use_fp8_w8a8
-            and self.block_shape == get_mk_alignment_for_contiguous_layout()
-        )
-
-        self.batched_deep_gemm_experts = (
-            BatchedDeepGemmExperts(
+        if use_deep_gemm:
+            # Validate DeepGEMM requirements upfront
+            if not self.quant_config.use_fp8_w8a8:
+                raise ValueError(
+                    "DeepGEMM requires FP8 W8A8 quantization, but "
+                    f"quant_config.use_fp8_w8a8={self.quant_config.use_fp8_w8a8}"
+                )
+            expected_block_shape = get_mk_alignment_for_contiguous_layout()
+            if self.block_shape != expected_block_shape:
+                raise ValueError(
+                    "DeepGEMM requires block_shape to match contiguous layout "
+                    f"alignment. Got block_shape={self.block_shape}, "
+                    f"expected {expected_block_shape}"
+                )
+            self.experts: BatchedDeepGemmExperts | BatchedTritonExperts = (
+                BatchedDeepGemmExperts(
+                    max_num_tokens=max_num_tokens,
+                    num_dispatchers=num_dispatchers,
+                    quant_config=self.quant_config,
+                )
+            )
+        else:
+            self.experts = BatchedTritonExperts(
                 max_num_tokens=max_num_tokens,
                 num_dispatchers=num_dispatchers,
                 quant_config=self.quant_config,
             )
-            if self.allow_deep_gemm
-            else None
-        )
-
-        assert (
-            self.batched_deep_gemm_experts is not None
-            or self.batched_triton_experts is not None
-        )
 
     @property
     def activation_formats(
         self,
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        if self.batched_triton_experts is not None:
-            assert (
-                self.batched_deep_gemm_experts is None
-                or self.batched_deep_gemm_experts.activation_formats
-                == self.batched_triton_experts.activation_formats
-            )
-            return self.batched_triton_experts.activation_formats
-        else:
-            assert self.batched_deep_gemm_experts is not None
-            return self.batched_deep_gemm_experts.activation_formats
+        return self.experts.activation_formats
 
     def supports_chunking(self) -> bool:
-        bdge = self.batched_deep_gemm_experts
-        bte = self.batched_triton_experts
-        return (bdge is None or bdge.supports_chunking()) and (
-            bte is None or bte.supports_chunking()
-        )
+        return self.experts.supports_chunking()
 
     def supports_expert_map(self) -> bool:
-        bdge = self.batched_deep_gemm_experts
-        bte = self.batched_triton_experts
-        return (bdge is None or bdge.supports_expert_map()) and (
-            bte is None or bte.supports_expert_map()
-        )
+        return self.experts.supports_expert_map()
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        bdge = self.batched_deep_gemm_experts
-        bte = self.batched_triton_experts
-        bdge_war = bdge.finalize_weight_and_reduce_impl() if bdge else None
-        bte_war = bte.finalize_weight_and_reduce_impl() if bte else None
-        is_bdge_war = bdge_war is not None
-        is_bte_war = bte_war is not None
-
-        if is_bdge_war and is_bte_war:
-            assert bdge_war == bte_war, (
-                "Both implementations should agree on WeightAndReduce impls. "
-                f"Got bdge_war: {bdge_war}, and bte_war: {bte_war}"
-            )
-
-        if bdge_war is not None:
-            return bdge_war
-
-        assert bte_war is not None
-        return bte_war
+        return self.experts.finalize_weight_and_reduce_impl()
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         return act_dtype
@@ -111,31 +78,15 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         local_num_experts: int,
         expert_tokens_metadata: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # Note: the deep gemm workspaces are strictly larger than the triton
-        # workspaces so we can be pessimistic here and allocate for DeepGemm
-        # even if we fall back to triton later, e.g. if expert maps are set.
-        if self.allow_deep_gemm:
-            assert self.batched_deep_gemm_experts is not None
-            return self.batched_deep_gemm_experts.workspace_shapes(
-                M,
-                N,
-                K,
-                topk,
-                global_num_experts,
-                local_num_experts,
-                expert_tokens_metadata,
-            )
-        else:
-            assert self.batched_triton_experts is not None
-            return self.batched_triton_experts.workspace_shapes(
-                M,
-                N,
-                K,
-                topk,
-                global_num_experts,
-                local_num_experts,
-                expert_tokens_metadata,
-            )
+        return self.experts.workspace_shapes(
+            M,
+            N,
+            K,
+            topk,
+            global_num_experts,
+            local_num_experts,
+            expert_tokens_metadata,
+        )
 
     def apply(
         self,
@@ -155,13 +106,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        experts = (
-            self.batched_deep_gemm_experts
-            if self.allow_deep_gemm
-            else self.batched_triton_experts
-        )
-        assert experts is not None
-        experts.apply(
+        self.experts.apply(
             output,
             hidden_states,
             w1,
