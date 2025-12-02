@@ -17,8 +17,9 @@ from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
 from vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
-from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 
@@ -104,7 +105,7 @@ def assert_tool_calls(
 
 def stream_delta_message_generator(
     qwen3_tool_parser,
-    qwen3_tokenizer: AnyTokenizer,
+    qwen3_tokenizer: TokenizerLike,
     model_output: str,
     request: ChatCompletionRequest | None = None,
 ) -> Generator[DeltaMessage, None, None]:

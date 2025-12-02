@@ -14,9 +14,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
-    get_hf_file_bytes,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -301,7 +301,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             quant_config = vllm_config.quant_config
 
             self.score = ReplicatedLinear(
-                model_config.hidden_size,
+                model_config.get_hidden_size(),
                 text_config.num_labels,
                 bias=False,
                 params_dtype=vllm_config.model_config.head_dtype,

@@ -19,7 +19,7 @@
 # This code is based off the following work:
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/modeling_stablelm_epoch.py
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
-"""Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
+"""Inference-only StableLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable

@@ -33,7 +33,7 @@ class AsyncScheduler(Scheduler):
                 # in this scheduling step.
                 request.num_output_placeholders += 1 + cur_num_spec_tokens
                 # Add placeholders for the new tokens in spec_token_ids.
-                # Wwe will update the actual spec token ids in the worker process.
+                # We will update the actual spec token ids in the worker process.
                 request.spec_token_ids = [-1] * self.num_spec_tokens
 
         scheduler_output.pending_structured_output_tokens = (
