@@ -75,7 +75,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
@@ -454,14 +453,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     @property
@@ -1179,14 +1176,12 @@ class NemotronH_Nano_VL_V2(
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
