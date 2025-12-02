@@ -160,7 +160,7 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 ## Experimental Feature
 
-### Heterogenuous KV Layout support
+### Heterogeneous KV Layout support
 
 Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
 

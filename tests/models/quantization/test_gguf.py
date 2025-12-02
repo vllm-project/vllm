@@ -78,6 +78,12 @@ DOLPHIN_CONFIG = GGUFTestConfig(
     gguf_filename="tinydolphin-2.8-1.1b.Q6_K.gguf",
 )
 
+GEMMA3_CONFIG = GGUFTestConfig(
+    original_model="google/gemma-3-270m-it",
+    gguf_repo="ggml-org/gemma-3-270m-it-qat-GGUF",
+    gguf_filename="gemma-3-270m-it-qat-Q4_0.gguf",
+)
+
 MODELS = [
     # LLAMA_CONFIG, # broken: https://github.com/vllm-project/vllm/issues/19458
     QWEN2_CONFIG,
@@ -85,6 +91,7 @@ MODELS = [
     GPT2_CONFIG,
     STABLELM_CONFIG,
     DOLPHIN_CONFIG,
+    GEMMA3_CONFIG,
     # STARCODER_CONFIG, # broken
 ]
 
@@ -148,7 +155,7 @@ def check_model_outputs(
     "model",
     [pytest.param(test_config, marks=test_config.marks) for test_config in MODELS],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tp_size", [1])
