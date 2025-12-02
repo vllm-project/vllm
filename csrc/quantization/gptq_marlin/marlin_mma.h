@@ -151,7 +151,7 @@ __device__ inline void mma_trans(
 
   if constexpr (k_size == 16) {
     if constexpr (std::is_same<scalar_t, half>::value && !use_fp16_accum) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750 || true
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
       float* c = reinterpret_cast<float*>(&frag_c);
       asm volatile(
           "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
