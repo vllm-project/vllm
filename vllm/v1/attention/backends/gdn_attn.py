@@ -109,7 +109,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         ):
             raise ValueError(
                 "GDN prefix caching requires the mamba block size to be a "
-                "multiple of the kernel chunk size."
+                f"multiple of the kernel chunk size ({self.chunk_size})."
+            )
+
+        if self.vllm_config.cache_config.enable_prefix_caching and self.use_spec_decode:
+            raise NotImplementedError(
+                "GDN prefix caching is currently supported only for decode-only "
+                "workloads; speculative decoding with APC will be added separately."
             )
 
         self.use_full_cuda_graph = (
