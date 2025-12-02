@@ -24,9 +24,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
 )
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
@@ -286,12 +288,27 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         self.activation(activation, act_out, mm1_out.view(-1, N))
 
-        a2q_scale: torch.Tensor | None = None
-        a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
-            act_out,
-            self.block_shape[1],
-            out_q=quant_out,
-        )
+        # quantize activations for the second GEMM.
+        block_k = self.block_shape[1]
+        scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+
+        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+            # Blackwell: packed UE8M0 int32 scales.
+            a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+                act_out,
+                block_k,
+                out_q=quant_out,
+            )
+        else:
+            # Hopper / non-E8M0: float32 scales, with optional E8M0-style ceil.
+            use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+            a2q, a2q_scale = per_token_group_quant_fp8(
+                act_out,
+                block_k,
+                out_q=quant_out,
+                use_ue8m0=use_ue8m0,
+            )
+
         m_grouped_fp8_gemm_nt_contiguous(
             (a2q, a2q_scale), (w2, self.w2_scale), mm2_out, expert_ids
         )
