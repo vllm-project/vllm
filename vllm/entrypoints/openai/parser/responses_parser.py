@@ -90,11 +90,6 @@ def get_responses_parser_for_simple_context(
     """Factory function to create a ResponsesParser with
     optional reasoning parser.
 
-    Args:
-        tokenizer: The tokenizer to use for decoding tokens
-        reasoning_parser: Optional reasoning parser class
-          (e.g., MiniMaxM2ReasoningParser)
-
     Returns:
         ResponsesParser instance configured with the provided parser
     """
