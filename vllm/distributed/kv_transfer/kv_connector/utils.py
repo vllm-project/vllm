@@ -131,7 +131,6 @@ class KVOutputAggregator:
                 )
                 worker_kv_cache_events = kv_cache_events.get_all_events()
                 combined_kv_cache_events.add_events(worker_kv_cache_events)
-                combined_kv_cache_events.increment_workers()
 
             invalid_block_ids |= kv_output.invalid_block_ids
 
@@ -142,6 +141,7 @@ class KVOutputAggregator:
         # This operation needs to be done post worker processing so that we have all
         # events for all workers.
         if combined_kv_cache_events is not None:
+            combined_kv_cache_events.set_workers(self._expected_finished_count)
             combined_kv_cache_events = combined_kv_cache_events.aggregate()
 
         assert output is not None

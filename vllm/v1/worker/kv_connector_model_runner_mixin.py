@@ -137,15 +137,9 @@ class KVConnectorModelRunnerMixin:
             )
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
 
-            if has_kv_transfer_group():
-                output.kv_connector_stats = (
-                    get_kv_transfer_group().get_kv_connector_stats()
-                )
-                output.kv_cache_events = (
-                    get_kv_transfer_group().get_kv_connector_kv_cache_events()
-                )
-            else:
-                output.kv_connector_stats = output.kv_cache_events = None
+            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+
             kv_connector.clear_connector_metadata()
 
     @staticmethod
