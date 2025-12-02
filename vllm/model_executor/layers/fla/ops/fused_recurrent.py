@@ -41,7 +41,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     scale,
     N: tl.int64,  # num of sequences
     T: tl.int64,  # num of tokens
-    NP2_T: tl.constexpr,
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
@@ -122,23 +121,15 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
         p_h0 = p_h0 + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    if IS_EAGLE_TREE:
-        token_indices = tl.arange(0, NP2_T)
-        mask_retrieve = token_indices < T
-        retrieve_parent_token_base = (
-            retrieve_parent_token
-            + (i_n * stride_indices_seq)
-            + token_indices * stride_indices_tok
-        )
-        parent_idx_tokens = tl.load(retrieve_parent_token_base, mask_retrieve)
-
     for i_t in range(0, T):
         # i_t = 0 should use the b_h from USE_INITIAL_STATE
         if IS_EAGLE_TREE:  # noqa: SIM102
             if i_t != 0:
                 # when calculating current step's attention, load the state from the parent token
-                parent_step_idx = tl.sum(
-                    tl.where(token_indices == i_t, parent_idx_tokens, 0)
+                parent_step_idx = tl.load(
+                    retrieve_parent_token
+                    + (i_n * stride_indices_seq)
+                    + i_t * stride_indices_tok
                 )
                 p_h0 = (
                     ht
@@ -242,7 +233,13 @@ def fused_recurrent_gated_delta_rule_fwd(
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride(0), 1
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
-    NP2_T = triton.next_power_of_2(stride_indices_seq)
+
+    if retrieve_parent_token is not None:
+        assert retrieve_parent_token.stride() == (
+            stride_indices_seq,
+            stride_indices_tok,
+        ), "retrieve_parent_token and ssm_state_indices must have the same stride"
+
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
@@ -260,7 +257,6 @@ def fused_recurrent_gated_delta_rule_fwd(
         scale=scale,
         N=N,
         T=T,
-        NP2_T=NP2_T,
         B=B,
         H=H,
         HV=HV,

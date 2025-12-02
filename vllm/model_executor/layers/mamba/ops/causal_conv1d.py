@@ -790,7 +790,6 @@ def _causal_conv1d_update_kernel(
     IS_APC_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
-    NP2_SEQLEN: tl.constexpr,
     USE_PAD_SLOT: tl.constexpr,
     BLOCK_N: tl.constexpr,
     IS_EAGLE_TREE: tl.constexpr,
@@ -973,16 +972,6 @@ def _causal_conv1d_update_kernel(
     x_base_1d = x_base  # starting of chunk [BLOCK_N]
     mask_x_1d = idx_feats < dim
 
-    if IS_EAGLE_TREE:
-        token_indices = tl.arange(0, NP2_SEQLEN)
-        mask_retrieve = token_indices < seqlen
-        retrieve_parent_token_base = (
-            retrieve_parent_token_ptr
-            + (idx_seq * stride_retrieve_parent_token_seq)
-            + token_indices * stride_retrieve_parent_token_token
-        )
-        parent_idx_tokens = tl.load(retrieve_parent_token_base, mask_retrieve)
-
     # STEP 5: compute each token
     for idx_token in tl.range(seqlen):
         acc = acc_preload
@@ -995,7 +984,6 @@ def _causal_conv1d_update_kernel(
             for j in tl.static_range(KERNEL_WIDTH):
                 if KERNEL_WIDTH == 2:
                     matrix_w = w_col1 if j == 0 else w_col0
-
                 elif KERNEL_WIDTH == 3:
                     if j == 0:
                         matrix_w = w_col2
@@ -1017,11 +1005,12 @@ def _causal_conv1d_update_kernel(
 
                 # move to parent for next iteration
                 if _idx_token > 0:
-                    _idx_token = tl.sum(
-                        tl.where(idx_tokens == _idx_token, parent_idx_tokens, 0).to(
-                            tl.int64
-                        )
-                    )
+                    _idx_token = tl.load(
+                        retrieve_parent_token_ptr
+                        + idx_seq * stride_retrieve_parent_token_seq
+                        + _idx_token * stride_retrieve_parent_token_token,
+                        mask=_idx_token < seqlen,
+                    ).to(tl.int64)
                     x_ptrs_1d = x_base_1d + _idx_token * stride_x_token  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
                 else:
@@ -1253,7 +1242,6 @@ def causal_conv1d_update(
     else:
         state_len = width - 1
     np2_statelen = triton.next_power_of_2(state_len)
-    np2_seqlen = triton.next_power_of_2(seqlen)
 
     # prepare retrieve_parent_token buffer strides if provided
     if retrieve_parent_token is not None:
@@ -1314,7 +1302,6 @@ def causal_conv1d_update(
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
-        NP2_SEQLEN=np2_seqlen,
         USE_PAD_SLOT=pad_slot_id is not None,
         BLOCK_N=256,
         IS_EAGLE_TREE=retrieve_parent_token is not None,
