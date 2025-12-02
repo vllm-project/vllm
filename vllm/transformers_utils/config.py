@@ -26,21 +26,22 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.repo_utils import (
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+
+from .config_parser_base import ConfigParserBase
+from .gguf_utils import (
+    check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
+)
+from .repo_utils import (
     _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
     list_repo_files,
     try_get_local_file,
     with_retry,
-)
-from vllm.transformers_utils.utils import (
-    check_gguf_file,
-    is_gguf,
-    is_remote_gguf,
-    parse_safetensors_file_metadata,
-    split_remote_gguf,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -299,25 +300,10 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    # Patch rope_parameters differently based on Transformers version
-    if Version(version("transformers")) >= Version("5.0.0.dev0"):
-        from transformers.modeling_rope_utils import (
-            rope_config_validation,
-            standardize_rope_params,
-        )
-
-        # When Transformers v5 is installed, legacy rope_theta may be present
-        # when using custom code models written for Transformers v4
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
-            standardize_rope_params(config, rope_theta=rope_theta)
-            rope_config_validation(config)
-            # Delete rope_theta to avoid confusion in downstream code
-            del config.rope_theta
-    else:
-        # When Transformers v4 is installed, legacy rope_scaling may be present
+    if Version(version("transformers")) < Version("5.0.0.dev0"):
+        # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
-        # When Transformers v4 is installed, legacy rope_theta may be present
         if (rope_theta := getattr(config, "rope_theta", None)) is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}

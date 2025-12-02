@@ -168,7 +168,9 @@ class VllmConfig:
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
     """Parallel configuration."""
-    scheduler_config: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    scheduler_config: SchedulerConfig = Field(
+        default_factory=SchedulerConfig.default_factory,
+    )
     """Scheduler configuration."""
     device_config: DeviceConfig = Field(default_factory=DeviceConfig)
     """Device configuration."""
@@ -753,8 +755,7 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1()
 
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             # With pipeline parallelism or dynamo partitioning,
@@ -762,6 +763,13 @@ class VllmConfig:
             # Use custom rms norm to unblock. In the future,
             # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
+            if self.compilation_config.mode != CompilationMode.VLLM_COMPILE:
+                logger.warning(
+                    "Sequence parallelism is enabled, but running in wrong "
+                    "vllm compile mode: %s.",
+                    self.compilation_config.mode,
+                )
+
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
                 or len(self.compilation_config.splitting_ops) == 0

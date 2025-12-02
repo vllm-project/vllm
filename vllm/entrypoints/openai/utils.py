@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TypeVar
 
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
@@ -35,3 +38,12 @@ def maybe_filter_parallel_tool_calls(
         ]
 
     return choice
+
+
+async def validate_json_request(raw_request: Request):
+    content_type = raw_request.headers.get("content-type", "").lower()
+    media_type = content_type.split(";", maxsplit=1)[0]
+    if media_type != "application/json":
+        raise RequestValidationError(
+            errors=["Unsupported Media Type: Only 'application/json' is allowed"]
+        )
