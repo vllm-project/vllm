@@ -183,7 +183,7 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         resized_height, resized_width = self._get_resize_output_image_size(
             image_width=image_width,
             image_height=image_height,
-            resolution_max_side=max_image_size,
+            resolution_max_side=size,
         )
         if resized_height > max_image_size or resized_width > max_image_size:
             grid_h = math.ceil(resized_height / max_image_size)
@@ -338,6 +338,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
+        mm_kwargs["input_data_format"] = "channels_last"
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
