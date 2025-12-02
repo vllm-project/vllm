@@ -14,12 +14,18 @@ if TYPE_CHECKING:
     )
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
     from transformers import BatchEncoding
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as TransformersMistralTokenizer,
-    )
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
     from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+
+    try:
+        # Transformers v5
+        from transformers.tokenization_mistral_common import MistralCommonBackend
+    except ImportError:
+        # Transformers v4
+        from transformers.tokenization_mistral_common import (
+            MistralCommonTokenizer as MistralCommonBackend,
+        )
 
 logger = init_logger(__name__)
 
@@ -208,11 +214,17 @@ class MistralTokenizer(TokenizerLike):
         **kwargs,
     ) -> "MistralTokenizer":
         from mistral_common.protocol.instruct.validator import ValidationMode
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as TransformersMistralTokenizer,
-        )
 
-        tokenizer = TransformersMistralTokenizer.from_pretrained(
+        try:
+            # Transformers v5
+            from transformers.tokenization_mistral_common import MistralCommonBackend
+        except ImportError:
+            # Transformers v4
+            from transformers.tokenization_mistral_common import (
+                MistralCommonTokenizer as MistralCommonBackend,
+            )
+
+        tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
             mode=ValidationMode.test,
@@ -223,7 +235,7 @@ class MistralTokenizer(TokenizerLike):
 
         return cls(tokenizer)
 
-    def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
+    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
         super().__init__()
 
         from mistral_common.protocol.instruct.validator import ValidationMode
