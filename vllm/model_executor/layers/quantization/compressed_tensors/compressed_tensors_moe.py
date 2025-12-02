@@ -146,6 +146,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # are supported + check if the layer is being ignored.
         weight_quant = scheme_dict.get("weights")
         input_quant = scheme_dict.get("input_activations")
+        format = scheme_dict.get("format")
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
@@ -153,17 +154,19 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
             valid_format_and_bits = (
                 weight_quant.num_bits in WNA16_SUPPORTED_BITS
-                and scheme_dict.get("format") == CompressionFormat.pack_quantized.value
+                and format == CompressionFormat.pack_quantized.value
             )
 
             if not valid_format_and_bits:
                 raise ValueError(
-                    "For Fused MoE layers, only ",
+                    "For Fused MoE layers, only format: ",
                     f"{CompressionFormat.pack_quantized.value} ",
-                    "is supported for the following bits: ",
-                    f"{WNA16_SUPPORTED_BITS}",
+                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
+                    f"but got format: {CompressionFormat.pack_quantized.value} "
+                    f" and bits: {weight_quant.num_bits}",
                 )
 
+            # Prefer to use the MarlinMoE kernel when it is supported.
             if (
                 not check_moe_marlin_supports_layer(layer, group_size)
                 or current_platform.is_rocm()
@@ -1441,15 +1444,16 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_quant
         self.input_quant = input_quant
+        assert weight_quant.symmetric, (
+            "Only symmetric quantization is supported for MoE"
+        )
         # Extract properties from weight_quant
         self.num_bits = weight_quant.num_bits
         self.packed_factor = 32 // weight_quant.num_bits
         self.strategy = weight_quant.strategy
         self.group_size = weight_quant.group_size
         self.actorder = weight_quant.actorder
-        assert weight_quant.symmetric, (
-            "Only symmetric quantization is supported for MoE"
-        )
+
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.use_marlin = True
         self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
