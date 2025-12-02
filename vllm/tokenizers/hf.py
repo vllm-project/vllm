@@ -24,7 +24,6 @@ def get_cached_tokenizer(
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
-
     cached_tokenizer = copy.copy(tokenizer)
 
     tokenizer_all_special_ids = tokenizer.all_special_ids

@@ -141,7 +141,8 @@ class ModelConfig:
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
-    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`."""
+    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+    - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
