@@ -351,7 +351,10 @@ def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
         rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
     elif rope_parameters["rope_type"] == "mrope":
-        assert "mrope_section" in rope_parameters
+        if "mrope_section" not in rope_parameters:
+            raise ValueError(
+                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
+            )
         rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
@@ -915,11 +918,13 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
-    if text_config is not config:
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(text_config, "num_attention_heads")
+    if text_config is not config and not hasattr(text_config, "num_attention_heads"):
+        raise ValueError(
+            "The text_config extracted from the model config does not have "
+            "`num_attention_heads` attribute. This indicates a mismatch "
+            "between the model config and vLLM's expectations. Please "
+            "ensure that the model config is compatible with vLLM."
+        )
 
     return text_config
 
