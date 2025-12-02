@@ -17,7 +17,10 @@ import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.compilation.helion.benchmark import DistributedKernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+
+logger = init_logger(__name__)
 
 # Try to import Helion - it's an optional dependency
 try:
@@ -228,13 +231,10 @@ def copy_engine_all_reduce_w_progress_fake(
 
 # Only define the Helion kernel if Helion is available
 if HELION_AVAILABLE:
-
-    @torch.library.custom_op(
-        "my_helion_lib::allreduce_add_rmsnorm",
-        mutates_args=(),
-        device_types="cuda",
-    )
+    # Pure Helion kernel for autotuning - this has the autotune method
     @helion.kernel(
+        autotune_baseline_atol=0.0,
+        autotune_baseline_rtol=0.0,
         config=helion.Config(
             block_sizes=[2],
             indexing=[
@@ -273,7 +273,7 @@ if HELION_AVAILABLE:
         ),
         static_shapes=True,
     )
-    def _allreduce_add_rmsnorm_helion_kernel(
+    def _allreduce_add_rmsnorm_pure_helion_kernel(
         allreduce_buf: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -342,6 +342,41 @@ if HELION_AVAILABLE:
             out[tile_m, :] = normalized
 
         return out, residual_out
+
+    # PyTorch custom op wrapper - calls the pure Helion kernel
+    @torch.library.custom_op(
+        "my_helion_lib::allreduce_add_rmsnorm",
+        mutates_args=(),
+        device_types="cuda",
+    )
+    def _allreduce_add_rmsnorm_helion_kernel(
+        allreduce_buf: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        progress: torch.Tensor,
+        rms_eps: float,
+        SPLITS_PER_RANK: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        PyTorch custom op wrapper for Helion AllReduce+Add+RMSNorm kernel.
+
+        Operation: RMSNorm(AllReduce(input) + residual), returns both normalized
+        and residual
+
+        Args:
+            allreduce_buf: Buffer being filled by AllReduce [M, K]
+            residual: Residual tensor to add [M, K]
+            rms_gamma: RMSNorm gamma weights [K]
+            progress: Progress tracking tensor [SPLITS_PER_RANK]
+            rms_eps: Epsilon for numerical stability
+            SPLITS_PER_RANK: Number of splits per rank
+
+        Returns:
+            Tuple of (normalized_output, updated_residual) both [M, K]
+        """
+        return _allreduce_add_rmsnorm_pure_helion_kernel(
+            allreduce_buf, residual, rms_gamma, progress, rms_eps, SPLITS_PER_RANK
+        )
 
     @_allreduce_add_rmsnorm_helion_kernel.register_fake
     def _allreduce_add_rmsnorm_helion_kernel_fake(
@@ -521,6 +556,140 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
         return helion_allreduce_add_rmsnorm(
             input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
         )
+
+    def get_autotune_inputs(self) -> dict[str, tuple]:
+        """
+        Generate autotune inputs for hidden_size + splits combinations.
+
+        Returns:
+            Dictionary mapping config keys to input tuples
+        """
+        inputs = {}
+        hidden_sizes = [4096, 8192]  # Only larger models use distributed
+        splits_per_rank_options = [4, 8]
+        batch_size = 256
+
+        for hidden_size in hidden_sizes:
+            for splits in splits_per_rank_options:
+                # Create symmetric memory tensors for distributed
+                allreduce_buf = torch.randn(
+                    batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+                )
+                residual = torch.randn(
+                    batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+                )
+                rms_gamma = torch.randn(
+                    hidden_size, dtype=torch.bfloat16, device="cuda"
+                )
+
+                # Progress tensor for tracking AllReduce completion
+                progress = torch.zeros(splits, dtype=torch.uint32, device="cuda")
+                rms_eps = 1e-6
+
+                # Key includes both hidden_size and splits
+                key = f"h{hidden_size}_s{splits}"
+                inputs[key] = (
+                    allreduce_buf,
+                    residual,
+                    rms_gamma,
+                    progress,
+                    rms_eps,
+                    splits,
+                )
+
+        return inputs
+
+    def get_best_config(
+        self, model_config, available_configs: dict[str, "helion.Config"]
+    ):
+        """
+        Select config using hidden_size + splits_per_rank with fallback.
+
+        Args:
+            model_config: vLLM ModelConfig instance
+            available_configs: Dictionary mapping config keys to loaded Helion configs
+
+        Returns:
+            Best matching Helion config from available_configs, or None if no suitable match
+        """
+        if not available_configs:
+            return None
+
+        target_hidden_size = model_config.get_hidden_size()
+        splits = getattr(self, "splits_per_rank", 4)
+
+        # Try exact match first
+        exact_key = f"h{target_hidden_size}_s{splits}"
+        if exact_key in available_configs:
+            return available_configs[exact_key]
+
+        # Fallback: try different splits for same hidden_size
+        for fallback_splits in [4, 8]:
+            if fallback_splits != splits:
+                fallback_key = f"h{target_hidden_size}_s{fallback_splits}"
+                if fallback_key in available_configs:
+                    logger.warning(
+                        f"No config for splits={splits}, using splits={fallback_splits}"
+                    )
+                    return available_configs[fallback_key]
+
+        # Fallback: try closest hidden_size from available configs
+        try:
+            # Parse available hidden sizes from config keys (format: h{size}_s{splits})
+            available_sizes = []
+            for key in available_configs:
+                try:
+                    if key.startswith("h") and "_s" in key:
+                        size_str = key.split("_s")[0][1:]  # Remove 'h' prefix
+                        size = int(size_str)
+                        available_sizes.append((size, key))
+                except (ValueError, IndexError):
+                    continue  # Skip malformed keys
+
+            if not available_sizes:
+                # If no parseable keys, just return first available config
+                return next(iter(available_configs.values()))
+
+            # Find closest hidden size, preferring exact splits match
+            best_match = None
+            best_distance = float("inf")
+
+            for size, key in available_sizes:
+                distance = abs(size - target_hidden_size)
+
+                # Prefer configs with matching splits, then by distance
+                key_splits = int(key.split("_s")[1]) if "_s" in key else 4
+                splits_match = key_splits == splits
+
+                if distance < best_distance or (
+                    distance == best_distance and splits_match and (
+                        best_match is None or not best_match[2]
+                    )
+                ):
+                    best_match = (size, key, splits_match)
+                    best_distance = distance
+
+            if best_match:
+                closest_size, best_key, _ = best_match
+                if closest_size != target_hidden_size:
+                    logger.warning(
+                        f"No config for hidden_size={target_hidden_size}, "
+                        f"using closest match: {closest_size}"
+                    )
+                return available_configs[best_key]
+
+        except Exception:
+            # If parsing fails, just return the first available config
+            return next(iter(available_configs.values()))
+
+        return None
+
+    @property
+    def helion_kernel(self):
+        """The Helion kernel function for autotuning."""
+        if HELION_AVAILABLE:
+            return _allreduce_add_rmsnorm_pure_helion_kernel
+        return None
 
 
 class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):

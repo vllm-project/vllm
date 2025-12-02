@@ -8,7 +8,10 @@ import torch
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+
+logger = init_logger(__name__)
 
 # Try to import Helion - it's an optional dependency
 try:
@@ -22,13 +25,10 @@ except ImportError:
 
 # Only define the kernel if Helion is available
 if HELION_AVAILABLE:
-
-    @torch.library.custom_op(
-        "my_helion_lib::rms_norm_fp8",
-        mutates_args=(),
-        device_types="cuda",
-    )
+    # Pure Helion kernel for autotuning - this has the autotune method
     @helion.kernel(
+        autotune_baseline_atol=0.0,
+        autotune_baseline_rtol=0.0,
         config=helion.Config(
             block_sizes=[1],
             indexing=[
@@ -54,7 +54,7 @@ if HELION_AVAILABLE:
         ),
         static_shapes=False,
     )
-    def _rms_norm_fp8_helion_kernel(
+    def _rms_norm_fp8_pure_helion_kernel(
         input: torch.Tensor,
         weight: torch.Tensor,
         scale: torch.Tensor,
@@ -109,6 +109,34 @@ if HELION_AVAILABLE:
             out[tile_m, :] = result_scaled.to(out.dtype)
 
         return out
+
+    # PyTorch custom op wrapper - calls the pure Helion kernel
+    @torch.library.custom_op(
+        "my_helion_lib::rms_norm_fp8",
+        mutates_args=(),
+        device_types="cuda",
+    )
+    def _rms_norm_fp8_helion_kernel(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """
+        PyTorch custom op wrapper for Helion RMSNorm-FP8 kernel.
+
+        Operation: quantize_fp8(RMSNorm(input, weight, epsilon))
+
+        Args:
+            input (Tensor): Input tensor with shape [batch, hidden_size]
+            weight (Tensor): Weight tensor with shape [hidden_size]
+            scale (Tensor): Scalar scale factor for FP8 quantization
+            epsilon (float): Epsilon value for numerical stability
+
+        Returns:
+            Tensor: Output tensor with same shape as input and dtype float8_e4m3fn
+        """
+        return _rms_norm_fp8_pure_helion_kernel(input, weight, scale, epsilon)
 
     @_rms_norm_fp8_helion_kernel.register_fake
     def _rms_norm_fp8_helion_kernel_fake(
@@ -181,6 +209,87 @@ class RMSNormFp8Helion(HelionCustomOp):
                 "Alternatively, use the CUDA baseline implementation."
             )
         return torch.ops.my_helion_lib.rms_norm_fp8(input, weight, scale, epsilon)
+
+    def get_autotune_inputs(self) -> dict[str, tuple]:
+        """
+        Generate autotune inputs for common hidden_size values.
+
+        Returns:
+            Dictionary mapping hidden_size strings to input tuples
+        """
+        inputs = {}
+        hidden_sizes = [2048, 4096, 5120, 8192]
+        batch_size = 512  # Slightly larger batch for RMS norm
+
+        for hidden_size in hidden_sizes:
+            input_tensor = torch.randn(
+                batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            weight = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
+            scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+
+            inputs[str(hidden_size)] = (input_tensor, weight, scale, 1e-5)
+
+        return inputs
+
+    def get_best_config(
+        self, model_config, available_configs: dict[str, "helion.Config"]
+    ):
+        """
+        Select config with closest match fallback.
+
+        Args:
+            model_config: vLLM ModelConfig instance
+            available_configs: Dictionary mapping config keys to loaded Helion configs
+
+        Returns:
+            Best matching Helion config from available_configs, or None if no suitable match
+        """
+        if not available_configs:
+            return None
+
+        target_hidden_size = model_config.get_hidden_size()
+
+        # Try exact match first
+        exact_key = str(target_hidden_size)
+        if exact_key in available_configs:
+            return available_configs[exact_key]
+
+        # Find closest match from available configs
+        try:
+            # Parse hidden sizes from available config keys (assuming they're numeric strings)
+            available_sizes = []
+            for key in available_configs:
+                try:
+                    size = int(key)
+                    available_sizes.append((size, key))
+                except ValueError:
+                    continue  # Skip non-numeric keys
+
+            if not available_sizes:
+                return None
+
+            # Find closest size
+            closest_size, closest_key = min(
+                available_sizes, key=lambda x: abs(x[0] - target_hidden_size)
+            )
+
+            logger.warning(
+                f"No exact config for hidden_size={target_hidden_size}, "
+                f"using closest match: {closest_size}"
+            )
+            return available_configs[closest_key]
+
+        except Exception:
+            # If parsing fails, just return the first available config
+            return next(iter(available_configs.values()))
+
+    @property
+    def helion_kernel(self):
+        """The Helion kernel function for autotuning."""
+        if HELION_AVAILABLE:
+            return _rms_norm_fp8_pure_helion_kernel
+        return None
 
 
 class RMSNormFp8Benchmark(KernelBenchmark):
