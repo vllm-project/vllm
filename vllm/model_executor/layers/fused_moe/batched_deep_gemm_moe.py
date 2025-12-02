@@ -200,8 +200,9 @@ def persistent_masked_m_silu_mul_quant(
     ).to_int()
 
     if cuda_arch >= 80:
+        num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
         torch.ops._C.persistent_masked_m_silu_mul_quant(
-            y, tokens_per_expert, y_q, y_s, ceil_ue8m0
+            y, tokens_per_expert, y_q, y_s, ceil_ue8m0, num_sms
         )
     else:
         stride_cnt_e = tokens_per_expert.stride()[0]
