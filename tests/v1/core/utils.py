@@ -69,6 +69,13 @@ def create_scheduler(
     Returns:
       {class}`Scheduler` instance
     """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=skip_tokenizer_init,
+    )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -79,13 +86,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=skip_tokenizer_init,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

@@ -1508,6 +1508,12 @@ def create_scheduler_with_priority(
     Returns:
       {class}`Scheduler` instance with priority scheduling
     """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+    )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -1517,13 +1523,8 @@ def create_scheduler_with_priority(
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
+        is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

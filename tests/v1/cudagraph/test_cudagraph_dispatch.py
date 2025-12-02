@@ -40,7 +40,9 @@ def _create_vllm_config(
 ) -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.compilation_config = compilation_config
-    mock_config.scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
+    mock_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs,
+    )
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
     if not lora_config:
