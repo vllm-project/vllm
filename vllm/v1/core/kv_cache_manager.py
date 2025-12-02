@@ -209,6 +209,7 @@ class KVCacheManager:
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: KVCacheBlocks | None = None,
+        num_external_computed_tokens: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
@@ -217,13 +218,13 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_new_tokens: The number of tokens to allocate, including external
-                tokens. Note that this does not include tokens that have
-                already been computed locally (i.e. new_computed_blocks).
+            num_new_tokens: The number of tokens to be computed.
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed
                 tokens.
+            num_external_computed_tokens: The number of tokens that their
+                KV caches are not cached by vLLM but cached by the connector.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
@@ -236,17 +237,55 @@ class KVCacheManager:
 
         Blocks layout:
         ```
-        -----------------------------------------------------------------------
-        | < computed > | < new computed > |    < new >    | < pre-allocated > |
-        -----------------------------------------------------------------------
-        |                  < required >                   |
-        --------------------------------------------------
-        |                    < full >                  |
-        ------------------------------------------------
-                                          | <new full> |
-                                          --------------
+        ---------------------------------------------------------------------
+        | < comp > | < new_comp > | < connector > | < new > | < lookahead > |
+        ---------------------------------------------------------------------
+                                                  |  < to be computed >     |
+        ---------------------------------------------------------------------
+                                  |           < to be allocated >           |
+        ---------------------------------------------------------------------
+                                  |     < to be cached >    |
+        ---------------------------------------------------------------------
+        | Prefix-cached tokens from both vLLM     |
+        | and connector. Can be safely removed if |
+        | they are outside sliding window.        |
+        ---------------------------------------------------------------------
+                                  | not cached by |
+                                  | vLLM, but     |
+                                  | cached by     |
+                                  | connector     |
+        ---------------------------------------------------------------------
+        |   < cached by vLLM >    |
+        ---------------------------------------------------------------------
+        | ref_cnt  |
+        | increased|
+        ---------------------------------------------------------------------
+                   | ref_cnt not  |
+                   | increased yet|
+        ---------------------------------------------------------------------
+
         ```
-        The following *_blocks are illustrated in this layout.
+
+        Abbrivations:
+
+        ```
+        comp      = request.num_computed_tokens
+        new_comp  = num_new_computed_tokens
+                  = len(new_computed_blocks) * block_size
+        connector = num_external_computed_tokens
+        new       = num_new_tokens
+        lookahead = num_lookahead_tokens
+        ```
+
+
+        The allocation has three stages:
+        - Free unnecessary blocks in `comp` and check
+           if we have sufficient free blocks (return None if not).
+        - Handle prefix tokens (`comp + new_comp + connector`):
+            - Free unnecessary blocks (e.g. outside sliding window)
+            - Allocate new blocks for `connector` tokens inside
+              sliding window
+        - Allocate new blocks for tokens to be computed (`new + lookahead`)
 
         Returns:
             A list of new allocated blocks.
@@ -273,7 +312,10 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = request.num_computed_tokens + num_new_computed_tokens
         num_tokens_need_slot = min(
-            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
+            num_computed_tokens
+            + num_new_tokens
+            + num_lookahead_tokens
+            + num_external_computed_tokens,
             self.max_model_len,
         )
 
@@ -282,6 +324,7 @@ class KVCacheManager:
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=num_computed_tokens + num_external_computed_tokens,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -302,6 +345,12 @@ class KVCacheManager:
             self.coordinator.save_new_computed_blocks(
                 request.request_id, new_computed_block_list
             )
+
+        if num_external_computed_tokens > 0:
+            self.coordinator.allocate_new_blocks_for_connector(
+                request.request_id, num_computed_tokens + num_external_computed_tokens
+            )
+            # TODO: merge the new blocks for connector with new_blocks below
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot, num_encoder_tokens

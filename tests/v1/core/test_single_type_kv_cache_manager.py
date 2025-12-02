@@ -332,10 +332,12 @@ def test_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1) == 20
+        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2) == 15
+        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        == 15
     )
 
 
@@ -359,8 +361,10 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1) == 20
+        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2) == 15
+        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        == 15
     )

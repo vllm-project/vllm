@@ -254,6 +254,10 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
+            if blk.is_null:
+                # May happen when both sparse attention (e.g., sliding
+                # window) and connector are enabled.
+                continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
