@@ -356,8 +356,8 @@ class SweepServeArgs:
             type=str,
             default=None,
             help="Path to JSON file containing parameter combinations "
-            "for the `vllm bench serve` command. Can be either a list of dicts or a dict "
-            "where keys are benchmark names. "
+            "for the `vllm bench serve` command. Can be either a list of dicts or "
+            "a dict where keys are benchmark names. "
             "If both `serve_params` and `bench_params` are given, "
             "this script will iterate over their Cartesian product.",
         )
