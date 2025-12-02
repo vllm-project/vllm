@@ -1120,7 +1120,9 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: str | list[int]
-
+        print(
+            f"--------{isinstance(tokenizer, DeepseekV32Tokenizer)}--{type(tokenizer)}-----------"
+        )
         if tokenizer is None:
             request_prompt = "placeholder"
         elif isinstance(tokenizer, MistralTokenizer):

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .hf import HfTokenizer
+from .hf import HfTokenizer, TokenizerLike
 from .registry import TokenizerRegistry
 
 TOOLS_SYSTEM_TEMPLATE = """## Tools
