@@ -59,30 +59,6 @@ constexpr inline dnnl::memory::data_type get_dnnl_type() {
   return DNNLType<std::decay_t<T>>::type;
 }
 
-class DNNLScratchPadManager {
- public:
-  static constexpr size_t allocation_unit = 4 * 1024 * 1024;  // 4KB
-
-  static DNNLScratchPadManager* get_dnnl_scratchpad_manager();
-
-  DNNLScratchPadManager();
-
-  template <typename T>
-  T* get_data() {
-    return reinterpret_cast<T*>(ptr_);
-  }
-
-  static size_t round(size_t size) {
-    return ((size + allocation_unit - 1) / allocation_unit) * allocation_unit;
-  }
-
-  void realloc(size_t new_size);
-
- private:
-  size_t size_;
-  void* ptr_;
-};
-
 class DNNLMatMulPrimitiveHandler {
  public:
   virtual ~DNNLMatMulPrimitiveHandler() = default;
@@ -101,7 +77,7 @@ class DNNLMatMulPrimitiveHandler {
  protected:
   DNNLMatMulPrimitiveHandler(const Args& args, dnnl::memory::data_type b_type);
 
-  void prepack_weight(void* original_b_ptr,
+  void prepack_weight(void* original_b_ptr, dnnl::memory::desc original_b_md,
                       dnnl::memory::desc b_target_mem_desc);
 
   void set_runtime_memory_ptr(size_t index, dnnl_memory* memory_ptr);
@@ -199,6 +175,7 @@ class MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
   struct ClassMatmulCacheKey {
     dnnl_dim_t b_n_size;
     dnnl_dim_t b_k_size;
+    dnnl::memory::data_type b_type;
 
     friend bool operator==(const ClassMatmulCacheKey& l,
                            const ClassMatmulCacheKey& r);
