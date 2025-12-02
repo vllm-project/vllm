@@ -32,7 +32,7 @@ from ....conftest import (
 from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
-from .vlm_utils.case_filtering import get_parametrized_options
+from .vlm_utils.case_filtering import get_model_type_cases, get_parametrized_options
 from .vlm_utils.types import (
     CustomTestOptions,
     ExpandableVLMTestArgs,
@@ -137,7 +137,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
@@ -152,7 +152,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen3_vl": VLMTestInfo(
@@ -173,7 +173,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
         ],
@@ -350,7 +350,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
-        image_size_factors=[(), (1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -707,7 +707,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
-        image_size_factors=[(), (0.25,)],
+        image_size_factors=[(0.25,)],
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
@@ -760,7 +760,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
     "skywork_r1v": VLMTestInfo(
@@ -812,7 +812,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
@@ -941,12 +941,32 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 
 ### Test wrappers
 # Wrappers around the core test running func for:
+# - model initialization & weights loading
 # - single image
 # - multi-image
 # - image embeddings
 # - video
 # - audio
 # - custom inputs
+@pytest.mark.parametrize("model_type", list(VLM_TEST_SETTINGS.keys()))
+def test_models_initialization(
+    model_type: str,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+):
+    model_test_info = VLM_TEST_SETTINGS[model_type]
+    test_cases = get_model_type_cases(
+        model_type, model_test_info, VLMTestType.NO_INPUTS
+    )
+    assert len(test_cases) == 1, "There should be only one initialization test case"
+    runners.run_model_initialization_test(
+        model_test_info=model_test_info,
+        test_case=test_cases[0],
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+    )
+
+
 @pytest.mark.parametrize(
     "model_type,test_case",
     get_parametrized_options(
