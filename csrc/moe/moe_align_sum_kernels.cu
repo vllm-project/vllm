@@ -109,7 +109,7 @@ __global__ void moe_align_block_size_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     int expert_id = topk_ids[i];
-    if (expert_id >= num_experts) {
+    if (expert_id < 0 || expert_id >= num_experts) {
       continue;
     }
     int warp_idx = expert_id / experts_per_warp;
@@ -162,18 +162,23 @@ __global__ void moe_align_block_size_kernel(
 template <typename scalar_t>
 __global__ void count_and_sort_expert_tokens_kernel(
     const scalar_t* __restrict__ topk_ids,
-    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
-    size_t numel, int32_t num_experts) {
+    int32_t* __restrict__ sorted_token_ids,
+    int32_t* __restrict__ expert_offsets,
+    const int32_t* __restrict__ expert_limits, size_t numel,
+    int32_t num_experts) {
   const size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.x;
 
   for (size_t i = tid; i < numel; i += stride) {
     int32_t expert_id = topk_ids[i];
-    if (expert_id >= num_experts) {
+    if (expert_id < 0 || expert_id >= num_experts) {
       continue;
     }
-    int32_t rank_post_pad = atomicAdd(&cumsum_buffer[expert_id], 1);
-    sorted_token_ids[rank_post_pad] = i;
+    int32_t rank_post_pad = atomicAdd(&expert_offsets[expert_id], 1);
+    int32_t expert_limit = expert_limits[expert_id + 1];
+    if (rank_post_pad < expert_limit) {
+      sorted_token_ids[rank_post_pad] = i;
+    }
   }
 }
 
@@ -216,7 +221,10 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
   }
 
   for (size_t i = tid; i < numel; i += stride) {
-    ++tokens_cnts[(threadIdx.x + 1) * num_experts + topk_ids[i]];
+    int32_t expert_id = topk_ids[i];
+    if (expert_id >= 0 && expert_id < num_experts) {
+      ++tokens_cnts[(threadIdx.x + 1) * num_experts + expert_id];
+    }
   }
 
   __syncthreads();
@@ -260,9 +268,16 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     int32_t expert_id = topk_ids[i];
+    if (expert_id < 0 || expert_id >= num_experts) {
+      continue;
+    }
+    int32_t base_offset = cumsum[expert_id];
     int32_t rank_post_pad =
-        tokens_cnts[threadIdx.x * num_experts + expert_id] + cumsum[expert_id];
-    sorted_token_ids[rank_post_pad] = i;
+        tokens_cnts[threadIdx.x * num_experts + expert_id] + base_offset;
+    int32_t expert_limit = cumsum[expert_id + 1];
+    if (rank_post_pad < expert_limit) {
+      sorted_token_ids[rank_post_pad] = i;
+    }
     ++tokens_cnts[threadIdx.x * num_experts + expert_id];
   }
 }
@@ -295,6 +310,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
             torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
         torch::Tensor cumsum_buffer =
             torch::empty({num_experts + 1}, options_int);
+        torch::Tensor expert_offsets;
         bool small_batch_expert_mode =
             (topk_ids.numel() < 1024) && (num_experts <= 64);
 
@@ -329,6 +345,11 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
               topk_ids.numel(), cumsum_buffer.data_ptr<int32_t>(),
               sorted_token_ids.size(0));
 
+          expert_offsets = torch::empty({num_experts}, options_int);
+          if (num_experts > 0) {
+            expert_offsets.copy_(cumsum_buffer.narrow(0, 0, num_experts));
+          }
+
           const int block_threads = std::min(256, (int)threads);
           const int num_blocks =
               (topk_ids.numel() + block_threads - 1) / block_threads;
@@ -340,6 +361,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
           sort_kernel<<<actual_blocks, block_threads, 0, stream>>>(
               topk_ids.data_ptr<scalar_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
+              expert_offsets.data_ptr<int32_t>(),
               cumsum_buffer.data_ptr<int32_t>(), topk_ids.numel(), num_experts);
         }
       });
