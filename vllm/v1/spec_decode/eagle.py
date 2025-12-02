@@ -1016,6 +1016,10 @@ class EagleProposer:
                 "Qwen3VLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
+            elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.vision_config.image_token_id
+                )
             else:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
