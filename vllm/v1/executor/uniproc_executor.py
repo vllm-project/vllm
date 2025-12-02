@@ -102,11 +102,11 @@ class UniProcExecutor(Executor):
         )
 
     def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, num_reject_spec_tokens: dict[str, int] | None = None, non_block: bool = False
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self.collective_rpc(
             "sample_tokens",
-            args=(grammar_output, num_reject_spec_tokens),
+            args=(grammar_output,),
             non_block=non_block,
             single_value=True,
         )

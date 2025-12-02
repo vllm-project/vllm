@@ -88,8 +88,22 @@ class SchedulerInterface(ABC):
     def update_draft_token_ids(
         self,
         draft_token_ids: "DraftTokenIds",
+        update_requests: bool = True,
+        update_scheduler_output: "SchedulerOutput | None" = None,
+        pad_filtered_draft_tokens: bool = False,
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            update_requests: If True, update the scheduler's `self.requests` state
+            with the draft token ids.
+            update_scheduler_output: If provided, update the given scheduler_output
+            with the corresponding draft token ids.
+            pad_filtered_draft_tokens: If True, pad the draft token ids so that
+            the length does not change after filtering invalid draft tokens.
+        """
         raise NotImplementedError
 
     @abstractmethod

@@ -1277,6 +1277,9 @@ class Scheduler(SchedulerInterface):
     def update_draft_token_ids(
         self,
         draft_token_ids: DraftTokenIds,
+        update_requests: bool = True,
+        update_scheduler_output: SchedulerOutput | None = None,
+        pad_filtered_draft_tokens: bool = False,
     ) -> None:
         for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
@@ -1287,15 +1290,25 @@ class Scheduler(SchedulerInterface):
                 # The request may have been finished. Skip.
                 continue
 
-
-            # Add newly generated spec token ids to the request.
+            # Filter out spec tokens which do not adhere to the grammar.
+            orig_num_spec_tokens = len(spec_token_ids)
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
+                assert metadata.grammar is not None
+                spec_token_ids = metadata.grammar.validate_tokens(
+                    spec_token_ids,
+                )
+                if pad_filtered_draft_tokens:
+                    num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
+                    spec_token_ids.extend([-1] * num_invalid_tokens)
+
+            # Update the scheduler state.
+            if update_requests:
+                request.spec_token_ids = spec_token_ids
+            if update_scheduler_output is not None:
+                update_scheduler_output.scheduled_spec_decode_tokens[req_id] = (
                     spec_token_ids
                 )
-            else:
-                request.spec_token_ids = spec_token_ids
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

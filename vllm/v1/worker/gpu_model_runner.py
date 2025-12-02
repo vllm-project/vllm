@@ -3096,11 +3096,11 @@ class GPUModelRunner(
 
     @torch.inference_mode
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None", num_reject_spec_tokens: dict[str, int] | None = None
+        self,
+        grammar_output: "GrammarOutput | None",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
-        # logger.info(f"GPU MR RUNNING SAMPLE WITH INCOMING DRAFT TOKEN IDS {self._draft_token_ids}")
         self._draft_token_ids = None
         self._draft_token_req_ids = None
 
@@ -3141,12 +3141,17 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        if num_reject_spec_tokens is not None:
+        if (
+            grammar_output is not None
+            and grammar_output.num_invalid_tokens_per_req is not None
+            and self.use_async_scheduling
+        ):
+            num_invalid_tokens_per_req = grammar_output.num_invalid_tokens_per_req
             num_reqs, num_sampled_toks = sampler_output.sampled_token_ids.shape
-            num_invalid_spec_tokens_cpu = torch.zeros(
-                (num_reqs,), dtype=torch.int32
-            )
-            for req_id, num_invalid_toks in num_reject_spec_tokens.items():
+            num_invalid_spec_tokens_cpu = torch.zeros((num_reqs,), dtype=torch.int32)
+            for req_id, num_invalid_toks in zip(
+                grammar_output.structured_output_request_ids, num_invalid_tokens_per_req
+            ):
                 req_index = self.input_batch.req_id_to_index[req_id]
                 num_invalid_spec_tokens_cpu[req_index] = num_invalid_toks
             col_indices = torch.arange(num_sampled_toks, dtype=torch.int32)
@@ -3293,6 +3298,7 @@ class GPUModelRunner(
         if self._draft_token_ids is None:
             return None
         req_ids = self._draft_token_req_ids
+        assert req_ids is not None
         draft_token_ids = self._get_draft_token_ids_cpu(len(req_ids))
         return DraftTokenIds(req_ids, draft_token_ids)
 
@@ -3312,12 +3318,14 @@ class GPUModelRunner(
                 draft_token_ids, non_blocking=True
             )
             self.draft_token_ids_event.record()
-    
+
     def _get_draft_token_ids_cpu(self, num_reqs: int) -> list[list[int]]:
         if isinstance(self._draft_token_ids, list):
             return self._draft_token_ids
         if self.draft_token_ids_event is None:
-            return []
+            if self._draft_token_ids is None:
+                return []
+            return self._draft_token_ids.tolist()
         self.draft_token_ids_event.synchronize()
         return self.draft_token_ids_cpu[0:num_reqs].tolist()
 

@@ -448,39 +448,40 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # Make sure we have the draft token ids
-            # self.model_executor.take_draft_token_ids()
+            # If we are doing speculative decoding with structured output,
+            # we need to get the draft token ids from the prior step before
+            # we can compute the grammar bitmask for the deferred request.
             draft_token_ids = self.model_executor.take_draft_token_ids()
-            num_reject_spec_tokens = {}
-            assert draft_token_ids is not None, "Draft token ids must be available"
-            for req_id, spec_token_ids in zip(
-                draft_token_ids.req_ids,
-                draft_token_ids.draft_token_ids,
-            ):
-                request = self.scheduler.requests.get(req_id)
-                if request is None or request.is_finished():
-                    # The request may have been finished. Skip.
-                    assert request not in deferred_scheduler_output.scheduled_spec_decode_tokens
-                    continue
-                orig_num_draft_tokens = len(spec_token_ids)
-                if self.scheduler.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                        spec_token_ids
-                    )
-                num_reject_spec_tokens[req_id] = orig_num_draft_tokens - len(spec_token_ids)
-                while len(spec_token_ids) < orig_num_draft_tokens:
-                    spec_token_ids.append(-2)
-                    # Now, we delegate a clear meaning to token -2:
-                    # this is a padding token that should be ignored.
-                deferred_scheduler_output.scheduled_spec_decode_tokens[req_id] = spec_token_ids
+            num_invalid_spec_tokens = None
+            if draft_token_ids is not None:
+                # Update the draft token ids on the scheduler output
+                # to filter out the invalid spec tokens, which will be padded with -1
+                # and ignored by the grammar bitmask computation.
+                self.scheduler.update_draft_token_ids(
+                    draft_token_ids,
+                    update_requests=False,
+                    update_scheduler_output=deferred_scheduler_output,
+                    pad_filtered_draft_tokens=True,
+                )
+                scheduled_spec_tokens = (
+                    deferred_scheduler_output.scheduled_spec_decode_tokens
+                )
+                num_invalid_spec_tokens = {
+                    req_id: sum(token_id == -1 for token_id in spec_token_ids)
+                    for req_id, spec_token_ids in scheduled_spec_tokens.items()
+                }
 
-            # We now have the tokens needed to compute the bitmask for the
-            # deferred request. Get the bitmask and call sample tokens.
+            # Compute the grammar bitmask using the draft tokens (if any),
+            # and then unblock the model executor.
             grammar_output = self.scheduler.get_grammar_bitmask(
                 deferred_scheduler_output
             )
-            future = self.model_executor.sample_tokens(grammar_output, num_reject_spec_tokens, non_block=True)
+            if num_invalid_spec_tokens and grammar_output is not None:
+                grammar_output.num_invalid_tokens_per_req = [
+                    num_invalid_spec_tokens.get(req_id, 0)
+                    for req_id in grammar_output.structured_output_request_ids
+                ]
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
