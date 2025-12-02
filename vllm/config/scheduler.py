@@ -28,6 +28,19 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
@@ -72,19 +85,6 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
-
-    max_model_len: InitVar[int] = 8192
-    """Maximum length of a sequence (including prompt and generated text).
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    provide fallbacks and validate other attributes."""
-
-    is_encoder_decoder: InitVar[bool] = False
-    """True if the model is an encoder-decoder model.
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
@@ -274,8 +274,3 @@ class SchedulerConfig:
             )
 
         return self
-
-    def __getattribute__(self, name: str) -> Any:
-        if name == "max_model_len" or name == "is_encoder_decoder":
-            raise AttributeError(f"{name} is an init-only parameter. ")
-        return object.__getattribute__(self, name)
