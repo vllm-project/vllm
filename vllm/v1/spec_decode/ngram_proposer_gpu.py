@@ -7,7 +7,6 @@ This version uses a fully vectorized approach with unfold and argmax for
 finding the first match across all sequences in parallel.
 """
 
-import numpy as np
 import torch
 from torch import nn
 
@@ -17,12 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.forward_context import set_forward_context
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
-)
-from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 @support_torch_compile(
@@ -295,17 +289,6 @@ class NgramProposerGPU:
         self.device = device
         self.kernel.to(device)
         self.kernel.eval()
-        max_batch_size = vllm_config.scheduler_config.max_num_seqs
-
-        # TODO(patchy): Remove this buffer, use
-        # token_ids_gpu_tensor in gpu_model_runner.py instead.
-        self.backup_next_token_ids = CpuGpuBuffer(
-            max_batch_size,
-            dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
-            device=device,
-            with_numpy=True,
-        )
 
         self._dummy_run()
 
@@ -400,14 +383,14 @@ class NgramProposerGPU:
 
             return draft_tokens, is_empty_draft_tokens
 
-    def prepare_next_token_ids_padded(
+    def update_token_ids_ngram(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: torch.Tensor,
-        requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         discard_request_indices: torch.Tensor,
         num_discarded_requests: int,
+        token_ids_gpu: torch.Tensor,
+        num_tokens_no_spec: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -419,17 +402,14 @@ class NgramProposerGPU:
         should not introduce any blocking CPU-GPU synchronization.
         """
         num_reqs = gpu_input_batch.num_reqs
-        # Batch convert seq_lens to avoid multiple .item() calls
-        seq_lens_list = common_attn_metadata.seq_lens_cpu[:num_reqs].tolist()
 
-        # Now use the pre-converted list to avoid .item() calls in the loop
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
-                for i in range(num_reqs)
-            ]
-        )
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        # Extract backup_next_token_ids from token_ids_gpu using vectorized gather
+        # For each request i, get token_ids_gpu[i, num_tokens_no_spec[i] - 1]
+        # This is the last valid token before speculative tokens
+        backup_indices = (num_tokens_no_spec[:num_reqs] - 1).clamp(min=0).long()
+        backup_next_token_ids = torch.gather(
+            token_ids_gpu[:num_reqs], dim=1, index=backup_indices.unsqueeze(1)
+        ).squeeze(1)
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[
@@ -459,12 +439,11 @@ class NgramProposerGPU:
             valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
         ).squeeze(1)
 
-        # Use last token if valid, pre-computed backup if not
-        batch_size = valid_sampled_token_ids_gpu.shape[0]
+        # Use last token if valid, vectorized backup from token_ids_gpu if not
         next_token_ids = torch.where(
             last_valid_indices != -1,
             selected_tokens,
-            self.backup_next_token_ids.gpu[:batch_size],
+            backup_next_token_ids,
         )
 
         return next_token_ids, valid_sampled_tokens_count, valid_sampled_token_ids_gpu

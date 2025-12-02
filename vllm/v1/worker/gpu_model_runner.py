@@ -1026,7 +1026,8 @@ class GPUModelRunner(
 
         # Incrementally update ngram_gpu tensors after batch is stable
         if is_ngram_gpu:
-            self._update_ngram_gpu_tensors_incremental(ngram_gpu_new_reqs)
+            with record_function_or_nullcontext("update_ngram_gpu_tensors_incremental"):
+                self._update_ngram_gpu_tensors_incremental(ngram_gpu_new_reqs)
 
     def _update_ngram_gpu_tensors_incremental(
         self,
@@ -3264,13 +3265,13 @@ class GPUModelRunner(
             elif self.valid_sampled_token_count_event is not None:
                 assert spec_decode_common_attn_metadata is not None
                 next_token_ids, valid_sampled_tokens_count, _ = (
-                    self.drafter.prepare_next_token_ids_padded(
-                        spec_decode_common_attn_metadata,
+                    self.drafter.update_token_ids_ngram(
                         sampled_token_ids,
-                        self.requests,
                         self.input_batch,
                         self.discard_request_indices.gpu,
                         self.num_discarded_requests,
+                        self.token_ids_gpu_tensor,
+                        self.num_tokens_no_spec_gpu,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -3426,15 +3427,17 @@ class GPUModelRunner(
             assert isinstance(sampled_token_ids, torch.Tensor), (
                 "sampled_token_ids should be a torch.Tensor for ngram_gpu"
             )
-            next_token_ids, valid_sampled_tokens_count, valid_sampled_token_ids_gpu = (
-                self.drafter.prepare_next_token_ids_padded(
-                    common_attn_metadata,
-                    sampled_token_ids,
-                    self.requests,
-                    self.input_batch,
-                    self.discard_request_indices.gpu,
-                    self.num_discarded_requests,
-                )
+            (
+                next_token_ids,
+                valid_sampled_tokens_count,
+                valid_sampled_token_ids_gpu,
+            ) = self.drafter.update_token_ids_ngram(
+                sampled_token_ids,
+                self.input_batch,
+                self.discard_request_indices.gpu,
+                self.num_discarded_requests,
+                self.token_ids_gpu_tensor,
+                self.num_tokens_no_spec_gpu,
             )
             self._copy_valid_sampled_token_count(
                 next_token_ids, valid_sampled_tokens_count
