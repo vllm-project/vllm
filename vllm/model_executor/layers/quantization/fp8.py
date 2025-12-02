@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
+    mxfp8_fake_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -75,9 +76,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp,
+    MXFp8LinearOp,
     all_close_1d,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
@@ -194,6 +197,7 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
+        is_mx: bool = False,
     ) -> None:
         super().__init__()
 
@@ -220,6 +224,7 @@ class Fp8Config(QuantizationConfig):
                     "dynamic activation scheme for now, but got "
                     f"{activation_scheme} activation scheme."
                 )
+        self.is_mx = is_mx
         self.weight_block_size = weight_block_size
 
     @classmethod
@@ -249,6 +254,7 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
+        is_mx = cls.get_from_keys_or(config, ["is_mx"], False)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -258,6 +264,7 @@ class Fp8Config(QuantizationConfig):
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
+            is_mx=is_mx,
         )
 
     def get_xpu_quant_method(
@@ -397,6 +404,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
+        elif quant_config.is_mx:
+            self.weight_block_size = [1, 32]
+            self.fp8_linear = MXFp8LinearOp()
         else:
             self.fp8_linear = Fp8LinearOp(
                 act_quant_static=self.act_q_static,
@@ -458,7 +468,18 @@ class Fp8LinearMethod(LinearMethodBase):
         # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            if not self.block_quant:
+            if self.quant_config.is_mx:
+                scale = create_fp8_scale_parameter(
+                    BlockQuantScaleParameter,
+                    output_partition_sizes,
+                    input_size_per_partition,
+                    [1, 32],
+                    weight_loader,
+                    dtype=torch.uint8,
+                )
+                set_weight_attrs(scale, {"scale_type": "weight_scale"})
+                layer.register_parameter("weight_scale", scale)
+            elif not self.block_quant:
                 scale = create_fp8_scale_parameter(
                     PerTensorScaleParameter,
                     output_partition_sizes,
@@ -518,7 +539,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
             # If using w8a8, torch._scaled_mm needs per tensor, so
             # requantize the logical shards as a single weight.
-            if not self.use_marlin:
+            if not (self.use_marlin or self.quant_config.is_mx):
                 weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
                     weight,
                     weight_scale,
@@ -528,7 +549,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 if self.act_q_static:
                     assert input_scale is not None
                     input_scale = input_scale.max()
-            weight = weight.t()
+            if not self.quant_config.is_mx:
+                weight = weight.t()
 
         # Update layer with new values.
         layer.weight = Parameter(weight.data, requires_grad=False)
@@ -538,7 +560,13 @@ class Fp8LinearMethod(LinearMethodBase):
             if input_scale is not None
             else None
         )
-
+        if self.quant_config.is_mx:
+            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
+            # from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
+            # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+            # layer.weight = Parameter(dq_weight.data, requires_grad=False)
+         
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
             # Activations not quantized for marlin.
@@ -612,6 +640,14 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
+        if self.quant_config.is_mx:
+            return self.fp8_linear.apply(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                out_dtype=self.out_dtype,
+                bias=bias,
+            )
         return self.fp8_linear.apply(
             input=x,
             weight=layer.weight,
@@ -707,12 +743,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"{intermediate_size_per_partition} is not divisible by "
                     f"weight quantization block_k = {block_k}."
                 )
-
+        numu_shards = 2 if layer.is_gated else 1
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                numu_shards * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -734,7 +770,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         # WEIGHT_SCALES
-        if not self.block_quant:
+        if self.quant_config.is_mx:
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    numu_shards * intermediate_size_per_partition,
+                    hidden_size // 32,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition // 32,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_scale", w13_weight_scale)
+            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            
+        elif not (self.block_quant):
             # Allocate 2 scales for w1 and w3 respectively.
             # They will be combined to a single scale after weight loading.
             w13_weight_scale = torch.nn.Parameter(
@@ -749,7 +807,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                    numu_shards * ((intermediate_size_per_partition + block_n - 1) // block_n),
                     (hidden_size + block_k - 1) // block_k,
                     dtype=torch.float32,
                 ),
@@ -979,6 +1037,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
+            if self.quant_config.is_mx:
+                # MX format already has single scale per expert
+                # weight = layer.w13_weight
+                # weight_scale = layer.w13_weight_scale
+                # from vllm.model_executor.layers.quantization.utils.mxfp8_utils import dequant_mxfp8_to_bf16
+                # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+                # layer.w13_weight = Parameter(dq_weight.data, requires_grad=False)
+                return
+            
             assert layer.w13_weight_scale is not None
             shard_size = layer.intermediate_size_per_partition
             max_w13_scales = layer.w13_weight_scale.max(dim=1).values
@@ -1116,6 +1183,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             return None
 
+        if self.quant_config.is_mx:
+            return mxfp8_fake_w8a8_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+ 
         return fp8_w8a8_moe_quant_config(
             w1_scale=(
                 layer.w13_weight_scale_inv

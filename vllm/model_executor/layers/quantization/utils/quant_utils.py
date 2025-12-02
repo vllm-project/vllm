@@ -647,7 +647,7 @@ def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     torch.Tensor
         The swizzled tensor with the same logical shape as *scale*.
     """
-    assert scale.dtype == torch.float8_e4m3fn, (
+    assert scale.dtype in [torch.float8_e4m3fn, torch.uint8], (
         "swizzle_blockscale expects the input tensor to be in "
         "torch.float8_e4m3fn format."
     )
