@@ -57,7 +57,7 @@ def test_default_vllm_root_logger_configuration(monkeypatch):
     _configure_vllm_root_logger()
 
     logger = logging.getLogger("vllm")
-    assert logger.level == logging.DEBUG
+    assert logger.level == logging.INFO
     assert not logger.propagate
 
     handler = logger.handlers[0]
@@ -524,7 +524,7 @@ def mp_function(**kwargs):
 
 
 def test_caplog_mp_fork(caplog_vllm, caplog_mp_fork):
-    with caplog_vllm.at_level(logging.DEBUG), caplog_mp_fork():
+    with caplog_vllm.at_level(logging.DEBUG, logger="vllm"), caplog_mp_fork():
         import multiprocessing
 
         ctx = multiprocessing.get_context("fork")
