@@ -402,7 +402,10 @@ def test_eagle_correctness(
             # Scout requires default backend selection
             # because vision encoder has head_dim 88 being incompatible
             #  with FLASH_ATTN and needs to fall back to Flex Attn
-            pass
+
+            # pass if not ROCm
+            if current_platform.is_rocm():
+                pytest.skip("Flex Attn not supported on ROCm")
         else:
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
