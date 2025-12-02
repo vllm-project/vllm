@@ -877,13 +877,15 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
-    async def reset_prefix_cache(raw_request: Request):
+    async def reset_prefix_cache(
+        raw_request: Request, reset_running_requests: bool = Query(default=False)
+    ):
         """
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
         logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
+        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")
