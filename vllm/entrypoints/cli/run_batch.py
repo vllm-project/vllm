@@ -11,7 +11,7 @@ from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = argparse.ArgumentParser
 

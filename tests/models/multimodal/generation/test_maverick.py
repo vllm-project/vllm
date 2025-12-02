@@ -186,6 +186,8 @@ def create_reduced_config(
     if "text_config" in config_dict:
         original_text_layers = config_dict["text_config"]["num_hidden_layers"]
         config_dict["text_config"]["num_hidden_layers"] = text_layers
+        original_layer_types = config_dict["text_config"]["layer_types"]
+        config_dict["text_config"]["layer_types"] = original_layer_types[:text_layers]
         print(f"Reduced text layers from {original_text_layers} to {text_layers}")
 
         original_num_experts = config_dict["text_config"]["num_local_experts"]

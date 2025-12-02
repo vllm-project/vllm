@@ -22,10 +22,9 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -62,13 +61,12 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
-def _is_pre_v11_tokeniser(model_tokenizer: AnyTokenizer) -> bool:
+def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     return not (
         isinstance(model_tokenizer, MistralTokenizer) and model_tokenizer.version >= 11
     )
 
 
-@ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with
@@ -78,7 +76,7 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         if not isinstance(self.model_tokenizer, MistralTokenizer):
@@ -103,7 +101,7 @@ class MistralToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
         if not _is_pre_v11_tokeniser(self.model_tokenizer):
             self.fn_name_regex = re.compile(
-                r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)", re.DOTALL
+                r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)?", re.DOTALL
             )
         else:
             self.fn_name_regex = None
@@ -115,6 +113,7 @@ class MistralToolParser(ToolParser):
             )
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if (
             not isinstance(self.model_tokenizer, MistralTokenizer)
             and request.tools

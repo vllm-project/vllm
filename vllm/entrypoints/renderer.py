@@ -16,8 +16,8 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.asyncio import AsyncMicrobatchTokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,7 @@ class RenderConfig:
     `0` yields an empty list (and skips embeds).
     `-1` maps to `model_config.max_model_len`."""
 
-    add_special_tokens: bool | None = True
+    add_special_tokens: bool = True
     """Whether to add model-specific special tokens during tokenization."""
 
     cache_salt: str | None = None
@@ -85,7 +85,7 @@ class BaseRenderer(ABC):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None = None,
+        tokenizer: TokenizerLike | None = None,
     ):
         super().__init__()
         self.model_config = model_config
@@ -156,14 +156,17 @@ class BaseRenderer(ABC):
         """
         raise NotImplementedError
 
-    @classmethod
     def load_prompt_embeds(
-        cls,
+        self,
         prompt_embeds: bytes | list[bytes],
         truncate_prompt_tokens: Annotated[int, Field(ge=0)] | None = None,
         cache_salt: str | None = None,
     ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
             tensor = torch.load(
@@ -197,8 +200,8 @@ class CompletionRenderer(BaseRenderer):
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None = None,
-        async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer]
+        tokenizer: TokenizerLike | None = None,
+        async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer]
         | None = None,
     ):
         super().__init__(model_config, tokenizer)
@@ -312,7 +315,7 @@ class CompletionRenderer(BaseRenderer):
         text: str,
         max_length: int | None,
         truncate_prompt_tokens: int | None,
-        add_special_tokens: bool | None,
+        add_special_tokens: bool,
         cache_salt: str | None,
     ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""
@@ -370,7 +373,7 @@ class CompletionRenderer(BaseRenderer):
             return async_tokenizer
 
         tokenizer = self.tokenizer
-        if self.tokenizer is None:
+        if tokenizer is None:
             raise ValueError("No tokenizer available for text input processing")
 
         if self.async_tokenizer_pool is None:

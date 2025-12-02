@@ -8,10 +8,19 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnMLABackend
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.cpu_gpu import CpuGpuOffloadingHandler
+
+BACKENDS_TO_TEST = [FlashAttentionBackend]
+
+if not current_platform.is_rocm():
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    BACKENDS_TO_TEST.append(FlashInferBackend)
+
+    from vllm.v1.attention.backends.mla.flashattn_mla import FlashAttnMLABackend
+
+    BACKENDS_TO_TEST.append(FlashAttnMLABackend)
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
@@ -55,8 +64,8 @@ def test_transfer(
 ) -> None:
     current_platform.seed_everything(seed)
 
-    # create per-layer GPU KV caches
-    attn_backends_list = [FlashAttentionBackend, FlashInferBackend, FlashAttnMLABackend]
+    # create per-layer GPU KV caches based on available attn_backends
+    attn_backends_list = BACKENDS_TO_TEST
 
     gpu_caches = {}
     attn_backends = {}
@@ -94,8 +103,8 @@ def test_transfer(
         for i in range(gpu_blocks_per_cpu_block):
             cpu_blocks_in_gpu_block_size.append(i + base_block_id)
 
-    # maybe skip a GPU block to test writing to the middle of a CPU block
-    if gpu_to_cpu:
+    # maybe skip a GPU block to test reading from the middle of a CPU block
+    if not gpu_to_cpu:
         gpu_blocks = gpu_blocks[gpu_blocks_per_cpu_block - 1 :]
         cpu_blocks_in_gpu_block_size = cpu_blocks_in_gpu_block_size[
             gpu_blocks_per_cpu_block - 1 :

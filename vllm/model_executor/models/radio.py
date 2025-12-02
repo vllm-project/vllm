@@ -43,32 +43,6 @@ to_4tuple = _ntuple(4)
 to_ntuple = _ntuple
 
 
-class InputConditioner(nn.Module):
-    def __init__(
-        self,
-        input_scale: float,
-        norm_mean: norm_t,
-        norm_std: norm_t,
-        dtype: torch.dtype = None,
-    ):
-        super().__init__()
-
-        self.dtype = dtype
-
-        self.register_buffer("norm_mean", _to_tensor(norm_mean) / input_scale)
-        self.register_buffer("norm_std", _to_tensor(norm_std) / input_scale)
-
-    def forward(self, x: torch.Tensor):
-        y = (x - self.norm_mean) / self.norm_std
-        if self.dtype is not None:
-            y = y.to(self.dtype)
-        return y
-
-
-def _to_tensor(v: norm_t):
-    return torch.as_tensor(v, dtype=torch.float32).view(-1, 1, 1)
-
-
 class ClsToken(nn.Module):
     def __init__(
         self,
@@ -507,11 +481,6 @@ class RadioModel(nn.Module):
         super().__init__()
 
         self.config = config
-        self.input_conditioner = InputConditioner(
-            input_scale=1.0,
-            norm_mean=config.norm_mean,
-            norm_std=config.norm_std,
-        )
         self.model = RadioInternVisionModel(
             config=config,
             quant_config=quant_config,
@@ -525,8 +494,7 @@ class RadioModel(nn.Module):
         pixel_values: torch.Tensor | None = None,
         pixel_embeds: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
-        x = self.input_conditioner(pixel_values)
-        y = self.model(x)
+        y = self.model(pixel_values)
         return self._extract_final(y)
 
     def load_weights(self, weights) -> set[str]:
@@ -547,6 +515,10 @@ class RadioModel(nn.Module):
 
             # Skip buffers not used in vLLM
             if sub in {"summary_idxs"}:
+                continue
+            if sub.startswith("input_conditioner."):
+                # we normalize in the input processor,
+                # based on norm and std values from the config
                 continue
 
             vllm_key = None
