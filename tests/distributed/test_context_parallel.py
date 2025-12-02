@@ -16,12 +16,12 @@ from typing import Literal, NamedTuple
 import pytest
 import torch
 
+from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
-from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 
 logger = init_logger("test_context_parallel")
 
@@ -43,7 +43,7 @@ MIN_ACCURACY = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
-} 
+}
 
 
 class ParallelSetup(NamedTuple):
@@ -72,13 +72,17 @@ class CPTestSettings:
         *,
         tp_base: int = 4,
         pp_base: int = 1,
-        dcp_multipliers: list[float] = [0.5,],
+        dcp_multipliers: list[float] | None = None,
         cp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         attn_backend: str | None = None,
     ):
         parallel_setups = []
+        if dcp_multipliers is None:
+            dcp_multipliers = [
+                0.5,
+            ]
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
                 for dcp_multiplier in dcp_multipliers:
@@ -116,15 +120,23 @@ class CPTestSettings:
                     opts,
                 )
 
+
 CP_TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
-        CPTestSettings.detailed(dcp_multipliers=[0.5, 1], cp_kv_cache_interleave_size=64),
+        CPTestSettings.detailed(
+            dcp_multipliers=[0.5, 1], cp_kv_cache_interleave_size=64
+        ),
     ],
     "Qwen/Qwen2.5-1.5B-Instruct": [
-        CPTestSettings.detailed(cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"),
-        CPTestSettings.detailed(cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(
+            cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
+        ),
+        CPTestSettings.detailed(
+            cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+        ),
     ],
 }
+
 
 def _test_cp_gsm8k(
     model_id: str,
@@ -189,27 +201,25 @@ def _test_cp_gsm8k(
     if hf_overrides:
         server_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
-    server_args.extend([
-        "--tensor-parallel-size",
-        str(tp_size),
-        "--pipeline-parallel-size",
-        str(pp_size),
-        "--decode-context-parallel-size",
-        str(dcp_size),
-        "--dcp-kv-cache-interleave-size",
-        str(cp_kv_cache_interleave_size),
-        "--distributed-executor-backend",
-        distributed_backend,
-    ])
+    server_args.extend(
+        [
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--pipeline-parallel-size",
+            str(pp_size),
+            "--decode-context-parallel-size",
+            str(dcp_size),
+            "--dcp-kv-cache-interleave-size",
+            str(cp_kv_cache_interleave_size),
+            "--distributed-executor-backend",
+            distributed_backend,
+        ]
+    )
 
-    if not attn_backend:
-        server_env = {}
-    else:
-        server_env = {
-            "VLLM_ATTENTION_BACKEND": attn_backend,
-        }
+    server_env = {}
+    if attn_backend:
+        server_env["VLLM_ATTENTION_BACKEND"] = attn_backend
 
-    
     with RemoteOpenAIServer(
         model_id,
         server_args,
@@ -231,9 +241,9 @@ def _test_cp_gsm8k(
         accuracy = results["accuracy"]
         min_accuracy = MIN_ACCURACY[model_id]
         assert accuracy >= min_accuracy, (
-            f"TP+DCP accuracy too low: "
-            f"{accuracy:.3f} < {min_accuracy:.3f}"
+            f"TP+DCP accuracy too low: {accuracy:.3f} < {min_accuracy:.3f}"
         )
+
 
 @pytest.mark.parametrize(
     (
