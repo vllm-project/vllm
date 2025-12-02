@@ -42,6 +42,12 @@ class DeepseekV32Tokenizer(HfTokenizer):
         encode_config = dict(
             thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True
         )
+        messages.append(
+            {
+                "role": "system",
+                "tools": tools if tools is not None else [],
+            }
+        )
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
 
