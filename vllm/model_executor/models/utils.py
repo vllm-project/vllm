@@ -590,24 +590,43 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
+    offloader_kwargs: dict | None = None,
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
+
+    Args:
+        num_hidden_layers: Total number of hidden layers in the model.
+        layer_fn: Function to create a layer given its index.
+        prefix: Prefix for layer names.
+        offloader_kwargs: Optional kwargs for offloader (submodule_accessor,
+            whitelist_param_names_creator).
+
+    Returns:
+        Tuple of (start_layer, end_layer, modules).
     """
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
+    from vllm.model_executor.offloader import get_offloader
 
     start_layer, end_layer = get_pp_indices(
         num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
     )
+
+    logger.debug(f"{offloader_kwargs=}")
+
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)]
-        + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ]
+        + get_offloader().wrap_modules(
+            (
+                layer_fn(prefix=f"{prefix}.{idx}")
+                for idx in range(start_layer, end_layer)
+            ),
+            **(offloader_kwargs or {}),
+        )
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+
     return start_layer, end_layer, modules
 
 

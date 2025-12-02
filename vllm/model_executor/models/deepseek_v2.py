@@ -1275,6 +1275,31 @@ class DeepseekV2Model(nn.Module):
                 vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
             ),
             prefix=f"{prefix}.layers",
+            offloader_kwargs=dict(
+                # Extract the MLP submodule - for MoE layers, go deeper to the experts
+                submodule_accessor=lambda layer: (
+                    layer.mlp.experts
+                    if isinstance(layer.mlp, DeepseekV2MoE)
+                    else layer.mlp
+                ),
+                # Specify which parameters to offload
+                whitelist_param_names_creator=lambda module: (
+                    [
+                        # Core MoE expert weights
+                        "w13_weight",
+                        "w2_weight",
+                        # NVFP4 quantization scales (if present)
+                        *(
+                            ["w13_blockscale_swizzled", "w2_blockscale_swizzled"]
+                            if hasattr(module, "w13_blockscale_swizzled")
+                            else []
+                        ),
+                    ]
+                    # Only offload from MoE experts (SharedFusedMoE/FusedMoE)
+                    if hasattr(module, "w13_weight")
+                    else []
+                ),
+            ),
         )
 
         if get_pp_group().is_last_rank:

@@ -278,9 +278,38 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
+        # Set up offloader based on configuration
+        # For backward compatibility, still support legacy set_cpu_offload_max_bytes
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        from vllm.model_executor.offloader import (
+            NoopOffloader,
+            OffloaderV2,
+            UVAOffloader,
+            set_offloader,
+        )
 
-        set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
+        # Priority: V2 offloading if configured, else UVA, else noop
+        if self.cache_config.offload_group_size > 0:
+            # Use V2 offloading
+            offloader = OffloaderV2(
+                group_size=self.cache_config.offload_group_size,
+                num_in_group=self.cache_config.offload_num_in_group,
+                prefetch_step=self.cache_config.offload_prefetch_step,
+                mode="cpu",
+            )
+            set_offloader(offloader)
+        elif self.cache_config.cpu_offload_gb > 0:
+            # Use UVA offloading (legacy)
+            offloader = UVAOffloader(
+                cpu_offload_max_bytes=int(self.cache_config.cpu_offload_gb * 1024**3)
+            )
+            set_offloader(offloader)
+            # Also set legacy global state for backward compatibility
+            set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
+        else:
+            # No offloading
+            set_offloader(NoopOffloader())
+            set_cpu_offload_max_bytes(0)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -3613,6 +3642,11 @@ class GPUModelRunner(
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
+
+        # Initialize offloader after model is loaded
+        from vllm.model_executor.offloader import get_offloader
+
+        get_offloader().post_init()
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.

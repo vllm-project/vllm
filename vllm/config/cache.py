@@ -89,6 +89,16 @@ class CacheConfig:
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
     """
+    offload_group_size: int = Field(default=0, ge=0)
+    """Advanced CPU offloading: Group every N layers together. Offload last
+    `offload_num_in_group` layers of each group. Default is 0 (disabled).
+    Example: group_size=8, num_in_group=2 offloads layers 6,7,14,15,22,23,...
+    """
+    offload_num_in_group: int = Field(default=1, ge=1)
+    """Advanced CPU offloading: Number of layers to offload per group. Default is 1."""
+    offload_prefetch_step: int = Field(default=1, ge=0)
+    """Advanced CPU offloading: Number of layers to prefetch ahead. Higher values hide
+    more latency but use more GPU memory. Default is 1."""
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
