@@ -40,6 +40,7 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
+from .afd import AFDConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config
 
@@ -205,6 +206,8 @@ class VllmConfig:
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
     """The configurations for distributed EC cache transfer."""
+    afd_config: AFDConfig | None = None
+    """AFD (Attention FFN Disaggregation) configuration."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -288,6 +291,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.ec_transfer_config:
             vllm_factors.append(self.ec_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.afd_config:
+            vllm_factors.append(self.afd_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -851,13 +858,14 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
-            )
+            if self.afd_config is None:
+                assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+                    "Microbatching currently only supports the deepep_low_latency and "
+                    f"deepep_high_throughput all2all backend. {a2a_backend} is not "
+                    "supported. To fix use --all2all-backend=deepep_low_latency or "
+                    "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                    " kernels."
+                )
 
             if not self.model_config.disable_cascade_attn:
                 self.model_config.disable_cascade_attn = True

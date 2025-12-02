@@ -494,7 +494,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
 
-
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
 
