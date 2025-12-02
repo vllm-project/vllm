@@ -50,6 +50,7 @@ class CachedRequestState:
 
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
+    pending_prev_num_draft_len: int = 0
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
@@ -260,6 +261,7 @@ class InputBatch:
         # Cached reference to the GPU tensor of previously sampled tokens
         self.prev_sampled_token_ids: torch.Tensor | None = None
         self.prev_req_id_to_index: dict[str, int] | None = None
+        self.pre_valid_sampled_token_count: torch.Tensor | None = None
         # These are used to update output_token_ids with real sampled
         # ids from prior step, if required by current sampling params
         # (e.g. penalties).

@@ -594,6 +594,14 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         )
 
+        self.use_gpu_async_sps = (
+            self.use_async_scheduling
+            and self.num_spec_tokens > 0
+            and self.dcp_world_size == 1
+            and not self.cascade_attn_enabled
+        )
+        self.async_spec_reqs_to_fix: set[str] = set()
+
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
@@ -852,7 +860,9 @@ class GPUModelRunner(
 
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
-        valid_sampled_token_count = self._get_valid_sampled_token_count()
+        valid_sampled_token_count = []
+        if not self.use_gpu_async_sps:
+            valid_sampled_token_count = self._get_valid_sampled_token_count()
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -879,11 +889,20 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    assert self.input_batch.prev_req_id_to_index is not None
-                    prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
-                    num_accepted = valid_sampled_token_count[prev_req_index] - 1
-                    num_rejected = req_state.prev_num_draft_len - num_accepted
-                    num_computed_tokens -= num_rejected
+                    # If use_gpu_async_sps, assume all tokens are accepted, and will
+                    # adjust the inputs correctly in _adjust_inputs_on_gpu to avoid
+                    # cpu sync, which may cause gpu bubble in async scheduling.
+                    if self.use_gpu_async_sps:
+                        num_accepted = req_state.prev_num_draft_len
+                        num_rejected = 0
+                        if num_accepted > 0:
+                            self.async_spec_reqs_to_fix.add(req_id)
+                    else:
+                        assert self.input_batch.prev_req_id_to_index is not None
+                        prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
+                        num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                        num_rejected = req_state.prev_num_draft_len - num_accepted
+                        num_computed_tokens -= num_rejected
                     req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
@@ -989,7 +1008,11 @@ class GPUModelRunner(
             # we clear the spec_decoding info in scheduler_output and
             # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
-                req_state.prev_num_draft_len = num_spec_tokens
+                if self.use_gpu_async_sps:
+                    req_state.pending_prev_num_draft_len = num_spec_tokens
+                else:
+                    req_state.prev_num_draft_len = num_spec_tokens
+                    req_state.pending_prev_num_draft_len = 0
                 if num_spec_tokens and self._draft_token_ids is None:
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
@@ -1011,12 +1034,17 @@ class GPUModelRunner(
     ) -> None:
         """Update the cached states after model execution.
 
-        This is used for MTP/EAGLE for hybrid models, as in linear attention,
-        only the last token's state is kept. In MTP/EAGLE, for draft tokens
-        the state are kept util we decide how many tokens are accepted for
-        each sequence, and a shifting is done during the next iteration
-        based on the number of accepted tokens.
+        This serves two purposes:
+        1. For async scheduling with speculative decoding (EAGLE SPS), fix the
+           CPU-side bookkeeping that optimistically assumed all draft tokens
+           were accepted to avoid earlier CPU synchronizations.
+        2. For hybrid models using MTP/EAGLE, keep track of how many draft
+           tokens were accepted so the next iteration can shift states.
         """
+
+        if self.use_gpu_async_sps:
+            self._finalize_async_spec_cpu_state()
+
         if not self.model_config.is_hybrid or not self.speculative_config:
             return
 
@@ -1043,6 +1071,81 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
+    def _finalize_async_spec_cpu_state(self) -> None:
+        """Synchronize CPU metadata after deferred speculative acceptance."""
+
+        if not self.use_gpu_async_sps:
+            return
+
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
+        req_ids_to_fix = list(self.async_spec_reqs_to_fix)
+        valid_counts: list[int] = []
+
+        if (
+            req_ids_to_fix
+            and self.valid_sampled_token_count_event is not None
+            and prev_req_id_to_index
+        ):
+            valid_counts = self._get_valid_sampled_token_count()
+
+        if valid_counts:
+            max_counts = len(valid_counts)
+            for req_id in req_ids_to_fix:
+                prev_index = prev_req_id_to_index.get(req_id)
+                if prev_index is None or prev_index >= max_counts:
+                    continue
+
+                req_state = self.requests.get(req_id)
+                if req_state is None:
+                    continue
+
+                prev_draft_len = req_state.prev_num_draft_len
+                if prev_draft_len == 0:
+                    continue
+
+                num_accepted = max(valid_counts[prev_index] - 1, 0)
+                num_accepted = min(num_accepted, prev_draft_len)
+                num_rejected = prev_draft_len - num_accepted
+
+                if num_rejected > 0:
+                    req_state.num_computed_tokens = max(
+                        req_state.num_computed_tokens - num_rejected,
+                        req_state.num_prompt_tokens,
+                    )
+
+                    if len(req_state.output_token_ids) >= num_rejected:
+                        del req_state.output_token_ids[-num_rejected:]
+                    else:
+                        req_state.output_token_ids.clear()
+
+                    req_index = self.input_batch.req_id_to_index.get(req_id)
+                    if req_index is not None:
+                        self.input_batch.num_computed_tokens_cpu[req_index] = max(
+                            self.input_batch.num_computed_tokens_cpu[req_index]
+                            - num_rejected,
+                            self.input_batch.num_prompt_tokens[req_index],
+                        )
+                        self.input_batch.num_tokens_no_spec[req_index] = max(
+                            self.input_batch.num_tokens_no_spec[req_index]
+                            - num_rejected,
+                            self.input_batch.num_prompt_tokens[req_index],
+                        )
+                        self.input_batch.num_tokens[req_index] = max(
+                            self.input_batch.num_tokens[req_index] - num_rejected,
+                            self.input_batch.num_prompt_tokens[req_index],
+                        )
+
+                        new_len = self.input_batch.num_tokens_no_spec[req_index]
+                        end = new_len + num_rejected
+                        self.input_batch.token_ids_cpu[req_index, new_len:end] = 0
+                        self.input_batch.is_token_ids[req_index, new_len:end] = False
+
+        self.async_spec_reqs_to_fix.clear()
+
+        for req_state in self.requests.values():
+            req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
+            req_state.pending_prev_num_draft_len = 0
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1283,6 +1386,87 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _maybe_adjust_inputs_on_gpu(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        """adjust inputs correctly on gpu for async scheduling with spec decode.
+
+        In async scheduling with spec decode, we assume all speculated tokens
+        are accepted in update_states to avoid cpu sync, and will adjust the
+        inputs correctly based on the actual accepted token count in GPU."""
+
+        if not self.use_gpu_async_sps:
+            return
+
+        pre_valid_sampled_token_count = self.input_batch.pre_valid_sampled_token_count
+        if pre_valid_sampled_token_count is None:
+            return
+
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        if not prev_req_id_to_index or not self.async_spec_reqs_to_fix:
+            return
+
+        req_indices_to_correct = []
+        prev_req_indices = []
+        tracked_req_ids = self.async_spec_reqs_to_fix
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if req_id not in tracked_req_ids:
+                continue
+            prev_index = prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            req_indices_to_correct.append(i)
+            prev_req_indices.append(prev_index)
+
+        if not req_indices_to_correct:
+            return
+
+        req_indices_tensor = torch.tensor(
+            req_indices_to_correct, dtype=torch.int64, device=self.device
+        )
+        prev_req_indices_tensor = torch.tensor(
+            prev_req_indices, dtype=torch.int64, device=self.device
+        )
+
+        actual_start_pos = pre_valid_sampled_token_count[prev_req_indices_tensor]
+        optimistic_start_pos = torch.tensor(
+            self.input_batch.num_computed_tokens_cpu[req_indices_to_correct],
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        diff = optimistic_start_pos - actual_start_pos
+        self.seq_lens.gpu[req_indices_tensor] -= diff.int()
+
+        num_reqs = self.input_batch.num_reqs
+        req_indices_flat_cpu = np.repeat(
+            self.arange_np[:num_reqs], num_scheduled_tokens
+        )
+        req_indices_flat_gpu = torch.from_numpy(req_indices_flat_cpu).to(
+            self.device, non_blocking=True
+        )
+
+        diff_all_reqs = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+        diff_all_reqs[req_indices_tensor] = diff
+
+        diff_per_token = diff_all_reqs[req_indices_flat_gpu]
+        self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
+
+        # Adjust M-RoPE positions if used, and it has 3 dimensions,
+        # each needs the same position adjustment
+        if self.uses_mrope:
+            for dim in range(3):
+                self.mrope_positions.gpu[
+                    dim, : req_indices_flat_gpu.shape[0]
+                ] -= diff_per_token
+
+        self.input_batch.block_table.compute_slot_mapping_gpu(
+            req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
+        )
+
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1430,6 +1614,11 @@ class GPUModelRunner(
             scheduler_output,
             total_num_scheduled_tokens,
             cu_num_tokens,
+        )
+
+        self._maybe_adjust_inputs_on_gpu(
+            scheduler_output,
+            num_scheduled_tokens,
         )
 
         if self.uses_mrope:
@@ -3119,6 +3308,7 @@ class GPUModelRunner(
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self.input_batch.prev_sampled_token_ids = None
+        self.input_batch.pre_valid_sampled_token_count = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -3262,6 +3452,7 @@ class GPUModelRunner(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
     ) -> None:
         if self.valid_sampled_token_count_event is None:
+            # Non async scheduling case. no need to copy.
             return
 
         default_stream = torch.cuda.current_stream()
@@ -3274,6 +3465,7 @@ class GPUModelRunner(
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 
+        self.input_batch.pre_valid_sampled_token_count = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     def _get_valid_sampled_token_count(self) -> list[int]:
