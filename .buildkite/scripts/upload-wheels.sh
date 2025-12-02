@@ -12,7 +12,7 @@ SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
 # detect if python3.10+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,10) else 0)")
+has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
 if [[ "$has_new_python" -eq 0 ]]; then
     # use new python from docker
     docker pull python:3-slim
