@@ -142,11 +142,15 @@ class SchedulerConfig:
     by batching multiple tokens before sending."""
 
     @staticmethod
-    def default_factory():
+    def default_factory(**kwargs):
         """
         Factory method to create `SchedulerConfig` with default values for `InitVar`s.
         """
-        return SchedulerConfig(max_model_len=8192, is_encoder_decoder=False)
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
