@@ -707,7 +707,7 @@ class WorkerProc:
                 except EOFError:
                     # Parent process has exited, terminate this worker
                     logger.info_once(
-                        "Parent process exited, terminating worker", scope="local"
+                        "Parent process exited, terminating worker"
                     )
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
