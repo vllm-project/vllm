@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GGUF utility functions."""
 
+from functools import cache
+from os import PathLike
 from pathlib import Path
 
 import gguf
+import regex as re
 from gguf.constants import Keys, VisionProjectorType
+from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
@@ -13,6 +17,73 @@ from vllm.logger import init_logger
 from .repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
+
+
+@cache
+def check_gguf_file(model: str | PathLike) -> bool:
+    """Check if the file is a GGUF model."""
+    model = Path(model)
+    if not model.is_file():
+        return False
+    elif model.suffix == ".gguf":
+        return True
+
+    try:
+        with model.open("rb") as f:
+            header = f.read(4)
+
+        return header == b"GGUF"
+    except Exception as e:
+        logger.debug("Error reading file %s: %s", model, e)
+        return False
+
+
+@cache
+def is_remote_gguf(model: str | Path) -> bool:
+    """Check if the model is a remote GGUF model."""
+    pattern = r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*:[A-Za-z0-9_+-]+$"
+    model = str(model)
+    if re.fullmatch(pattern, model):
+        _, quant_type = model.rsplit(":", 1)
+        return is_valid_gguf_quant_type(quant_type)
+    return False
+
+
+def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
+    """Check if the quant type is a valid GGUF quant type."""
+    return getattr(GGMLQuantizationType, gguf_quant_type, None) is not None
+
+
+def split_remote_gguf(model: str | Path) -> tuple[str, str]:
+    """Split the model into repo_id and quant type."""
+    model = str(model)
+    if is_remote_gguf(model):
+        parts = model.rsplit(":", 1)
+        return (parts[0], parts[1])
+    raise ValueError(
+        f"Wrong GGUF model or invalid GGUF quant type: {model}.\n"
+        "- It should be in repo_id:quant_type format.\n"
+        f"- Valid GGMLQuantizationType values: {GGMLQuantizationType._member_names_}",
+    )
+
+
+def is_gguf(model: str | Path) -> bool:
+    """Check if the model is a GGUF model.
+
+    Args:
+        model: Model name, path, or Path object to check.
+
+    Returns:
+        True if the model is a GGUF model, False otherwise.
+    """
+    model = str(model)
+
+    # Check if it's a local GGUF file
+    if check_gguf_file(model):
+        return True
+
+    # Check if it's a remote GGUF model (repo_id:quant_type format)
+    return is_remote_gguf(model)
 
 
 def detect_gguf_multimodal(model: str) -> Path | None:
