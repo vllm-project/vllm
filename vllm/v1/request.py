@@ -227,6 +227,19 @@ class Request:
         events, self.events = self.events, []
         return events
 
+    def __lt__(self, other: "Request") -> bool:
+        """
+        Compare two requests based on priority, arrival time, and request ID.
+        Used in priority scheduling.
+        """
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        if self.arrival_time != other.arrival_time:
+            return self.arrival_time < other.arrival_time
+        if self.request_id != other.request_id:
+            return self.request_id < other.request_id
+        return id(self) < id(other)
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
