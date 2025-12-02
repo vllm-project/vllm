@@ -57,14 +57,15 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
-  timeout_in_minutes: 10
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
+  timeout_in_minutes: 20
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -73,6 +74,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s tokenizers_
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -192,6 +194,7 @@ steps:
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
@@ -212,6 +215,7 @@ steps:
   timeout_in_minutes: 10
   gpu: h100
   num_gpus: 8
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
@@ -275,21 +279,18 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Engine Test # 25min
-  timeout_in_minutes: 40
+- label: Engine Test # 9min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/engine
-  - tests/tokenization
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
-  # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
@@ -345,6 +346,18 @@ steps:
     - tests/v1/attention
   commands:
     - pytest -v -s v1/attention
+
+- label: Batch Invariance Tests (H100) # 10min
+  timeout_in_minutes: 25
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
@@ -550,6 +563,25 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  commands:
+    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/moe/test_deepgemm.py
+    - pytest -v -s kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
@@ -600,6 +632,7 @@ steps:
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129
+  - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: LM Eval Small Models # 53min
@@ -660,6 +693,7 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
+  - vllm/transformers_utils/
   - tests/models/test_initialization.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
@@ -786,14 +820,24 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: Multi-Modal Processor Test # 44min
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  no_gpu: true
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+
+- label: Multi-Modal Processor Test
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
@@ -870,11 +914,12 @@ steps:
 - label: Transformers Nightly Models Test
   working_dir: "/vllm-workspace/"
   optional: true
+  soft_fail: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py -k 'not (Ultravox or Phi4Multimodal or MiniCPMO or Lfm2Moe or RobertaForSequenceClassification or Ovis2_5 or DeepseekOCR or KimiVL)'
+    - pytest -v -s tests/models/test_initialization.py
     - pytest -v -s tests/models/test_transformers.py
-    # - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py
     - python3 examples/offline_inference/basic/chat.py
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
@@ -921,6 +966,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
 
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
@@ -1083,6 +1129,7 @@ steps:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
@@ -1266,11 +1313,11 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -1307,11 +1354,20 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy
+- label: Qwen3-30B-A3B-FP8-block Accuracy (H100)
   timeout_in_minutes: 60
   gpu: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
   commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1

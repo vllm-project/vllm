@@ -114,7 +114,17 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
+flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
+silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
+)
+scaled_fp4_grouped_quantize = _lazy_import_wrapper(
+    "flashinfer", "scaled_fp4_grouped_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -167,6 +177,14 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl() -> bool:
+    """Return ``True`` if FlashInfer cutedsl module is available."""
+    return (
+        has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
+    )
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -178,6 +196,26 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         ("flashinfer", "fp4_quantize"),
         ("flashinfer", "nvfp4_block_scale_interleave"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
+def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
+    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
+        ("flashinfer", "scaled_fp4_grouped_quantize"),
+        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -472,7 +510,10 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
+    "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_fp4_quantize",
+    "silu_and_mul_scaled_nvfp4_experts_quantize",
+    "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -480,6 +521,7 @@ __all__ = [
     "has_flashinfer_comm",
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",

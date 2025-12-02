@@ -7,12 +7,14 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -77,6 +79,7 @@ class OAIAttention(nn.Module):
                 ],
                 "beta_fast": config.rope_parameters["beta_fast"],
                 "beta_slow": config.rope_parameters["beta_slow"],
+                "truncate": config.rope_parameters.get("truncate", True),
             },
             is_neox_style=True,
         )
@@ -322,10 +325,12 @@ class GptOssModel(nn.Module):
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
-        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size=get_tensor_model_parallel_world_size(),
             dp_size=get_dp_group().world_size,
             dp_rank=get_dp_group().rank_in_group,
+            pcp_size=get_pcp_group().world_size,
+            pcp_rank=get_pcp_group().rank_in_group,
         )
 
         intermediate_size = self.config.intermediate_size
@@ -507,10 +512,12 @@ class GptOssModel(nn.Module):
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
-        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp(
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
             tp_size=get_tensor_model_parallel_world_size(),
             dp_size=get_dp_group().world_size,
             dp_rank=get_dp_group().rank_in_group,
+            pcp_size=get_pcp_group().world_size,
+            pcp_rank=get_pcp_group().rank_in_group,
         )
 
         intermediate_size = self.config.intermediate_size
@@ -640,8 +647,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_start,
                 ep_rank_end,
+                ep_rank_start,
                 heads_per_rank,
                 head_start,
                 weights,
@@ -650,6 +657,7 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
+    is_3d_moe_weight: bool = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(

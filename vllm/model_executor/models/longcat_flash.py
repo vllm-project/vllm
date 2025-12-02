@@ -118,7 +118,7 @@ class FlashConfig(PretrainedConfig):
         router_dtype="float32",
         router_bias=False,
         topk_method=None,
-        routed_scaling_factor=None,
+        routed_scaling_factor=1.0,
         zero_expert_num=0,
         zero_expert_type=None,
         nextn_use_scmoe=False,

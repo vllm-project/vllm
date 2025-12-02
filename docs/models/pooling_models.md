@@ -1,15 +1,15 @@
 # Pooling Models
 
-vLLM also supports pooling models, such as embedding, classification and reward models.
+vLLM also supports pooling models, such as embedding, classification, and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
 These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract the final hidden states of the input
 before returning them.
 
 !!! note
-    We currently support pooling models primarily as a matter of convenience. This is not guaranteed to have any performance improvement over using HF Transformers / Sentence Transformers directly.
+    We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance improvements over using Hugging Face Transformers or Sentence Transformers directly.
 
-    We are now planning to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
+    We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## Configuration
 
@@ -19,7 +19,7 @@ Run a model in pooling mode via the option `--runner pooling`.
 
 !!! tip
     There is no need to set this option in the vast majority of cases as vLLM can automatically
-    detect the model runner to use via `--runner auto`.
+    detect the appropriate model runner via `--runner auto`.
 
 ### Model Conversion
 
@@ -78,7 +78,7 @@ When loading [Sentence Transformers](https://huggingface.co/sentence-transformer
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
 
 You can further customize this via the `--pooler-config` option,
-which takes priority over both the model's and Sentence Transformers's defaults.
+which takes priority over both the model's and Sentence Transformers' defaults.
 
 ## Offline Inference
 
@@ -168,11 +168,11 @@ The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 
     - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
     - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
-    - For similarity scores, use `LLM.score(...)`.  
+    - For similarity scores, use `LLM.score(...)`.
     - For rewards, use `LLM.reward(...)` or `pooling_task="token_classify"`.
     - For token classification, use `pooling_task="token_classify"`.
-    - For multi-vector retrieval, use `pooling_task="token_embed"`
-    - For IO Processor Plugins , use `pooling_task="plugin"`
+    - For multi-vector retrieval, use `pooling_task="token_embed"`.
+    - For IO Processor Plugins, use `pooling_task="plugin"`.
 
 ```python
 from vllm import LLM
@@ -194,15 +194,15 @@ Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides 
 - [Pooling API](../serving/openai_compatible_server.md#pooling-api) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
 !!! note
-    Please use one of the more specific methods or set the task directly when using  [Pooling API](../serving/openai_compatible_server.md#pooling-api) api.:
+    Please use one of the more specific endpoints or set the task directly when using the [Pooling API](../serving/openai_compatible_server.md#pooling-api):
 
     - For embeddings, use [Embeddings API](../serving/openai_compatible_server.md#embeddings-api) or `"task":"embed"`.
-    - For classification logits, use [Classification API](../serving/openai_compatible_server.md#classification-api) or `task":"classify"`.
-    - For similarity scores, use [Score API](../serving/openai_compatible_server.md#score-api).  
-    - For rewards, `task":"token_classify"`.
-    - For token classification, use `task":"token_classify"`.
-    - For multi-vector retrieval, use `task":"token_embed"`
-    - For IO Processor Plugins , use `task":"plugin"`
+    - For classification logits, use [Classification API](../serving/openai_compatible_server.md#classification-api) or `"task":"classify"`.
+    - For similarity scores, use [Score API](../serving/openai_compatible_server.md#score-api).
+    - For rewards, use `"task":"token_classify"`.
+    - For token classification, use `"task":"token_classify"`.
+    - For multi-vector retrieval, use `"task":"token_embed"`.
+    - For IO Processor Plugins, use `"task":"plugin"`.
 
 ```python
 # start a supported embeddings model server with `vllm serve`, e.g.
@@ -232,7 +232,7 @@ for output in response.json()["data"]:
 
 ## Matryoshka Embeddings
 
-[Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows user to trade off between performance and cost.
+[Matryoshka Embeddings](https://sbert.net/examples/sentence_transformer/training/matryoshka/README.html#matryoshka-embeddings) or [Matryoshka Representation Learning (MRL)](https://arxiv.org/abs/2205.13147) is a technique used in training embedding models. It allows users to trade off between performance and cost.
 
 !!! warning
     Not all embedding models are trained using Matryoshka Representation Learning. To avoid misuse of the `dimensions` parameter, vLLM returns an error for requests that attempt to change the output dimension of models that do not support Matryoshka Embeddings.
@@ -245,9 +245,9 @@ for output in response.json()["data"]:
 
 ### Manually enable Matryoshka Embeddings
 
-There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, if `is_matryoshka` is `True` in `config.json,` it is allowed to change the output to arbitrary dimensions. Using `matryoshka_dimensions` can control the allowed output dimensions.
+There is currently no official interface for specifying support for Matryoshka Embeddings. In vLLM, if `is_matryoshka` is `True` in `config.json`, you can change the output dimension to arbitrary values. Use `matryoshka_dimensions` to control the allowed output dimensions.
 
-For models that support Matryoshka Embeddings but not recognized by vLLM, please manually override the config using `hf_overrides={"is_matryoshka": True}`, `hf_overrides={"matryoshka_dimensions": [<allowed output dimensions>]}` (offline) or `--hf-overrides '{"is_matryoshka": true}'`,  `--hf-overrides '{"matryoshka_dimensions": [<allowed output dimensions>]}'`(online).
+For models that support Matryoshka Embeddings but are not recognized by vLLM, manually override the config using `hf_overrides={"is_matryoshka": True}` or `hf_overrides={"matryoshka_dimensions": [<allowed output dimensions>]}` (offline), or `--hf-overrides '{"is_matryoshka": true}'` or `--hf-overrides '{"matryoshka_dimensions": [<allowed output dimensions>]}'` (online).
 
 Here is an example to serve a model with Matryoshka Embeddings enabled.
 
@@ -278,7 +278,7 @@ A code example can be found here: [examples/offline_inference/pooling/embed_matr
 
 ### Online Inference
 
-Use the following command to start vllm server.
+Use the following command to start the vLLM server.
 
 ```bash
 vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
@@ -310,11 +310,11 @@ An OpenAI client example can be found here: [examples/online_serving/pooling/ope
 
 ### Encode task
 
-We have split the `encode` task into two more specific token wise tasks: `token_embed` and `token_classify`:
+We have split the `encode` task into two more specific token-wise tasks: `token_embed` and `token_classify`:
 
-- `token_embed` is the same as embed, using normalize as activation.
-- `token_classify` is the same as classify, default using softmax as activation.
+- `token_embed` is the same as `embed`, using normalization as the activation.
+- `token_classify` is the same as `classify`, by default using softmax as the activation.
 
 ### Remove softmax from PoolingParams
 
-We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, you should set `use_activation`, since we actually allow `classify` and `token_classify` to use any activation function.
+We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.

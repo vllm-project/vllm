@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from typing import Any, Literal
 
 from pydantic import model_validator
@@ -9,6 +8,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
+from vllm.utils.hashing import safe_hash
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -28,8 +28,10 @@ class StructuredOutputsConfig:
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
     disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during structured
-    outputs. This is only supported for xgrammar and guidance backends."""
+    """If `True`, json output will always be compact without any whitespace.
+    If `False`, the model may generate whitespace between JSON fields,
+    which is still valid JSON. This is only supported for xgrammar
+    and guidance backends."""
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
     in the JSON schema. This is only supported for the `guidance` backend and
@@ -58,7 +60,7 @@ class StructuredOutputsConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @model_validator(mode="after")

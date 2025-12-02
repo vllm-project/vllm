@@ -33,7 +33,8 @@ import torch
 from torch import nn
 from transformers import Qwen2Config
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -274,6 +275,38 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def qwen_2_model_invariants(
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+):
+    """Shape invariants for Qwen2Model Model, those are translated to
+    runtime assertions for unbacked dynamic shapes and are compiled away for
+    backed"""
+    # All these should be equal.
+    # input_ids.size()[0]
+    # positions.size()[-1]
+    # intermediate_tensors["hidden_states"].size()[0]
+    # inputs_embeds.size()[0]
+    torch._check(input_ids.size()[0] == positions.size()[-1])
+    if intermediate_tensors is not None:
+        torch._check(
+            input_ids.size()[0] == intermediate_tensors["hidden_states"].size()[0]
+        )
+
+    if inputs_embeds is not None:
+        torch._check(input_ids.size()[0] == inputs_embeds.size()[0])
+
+    # Hidden dimensions should match (hidden_size)
+    # intermediate_tensors["hidden_states"].size()[1]
+    # inputs_embeds.size()[1]
+    if inputs_embeds is not None and intermediate_tensors is not None:
+        torch._check(
+            inputs_embeds.size()[1] == intermediate_tensors["hidden_states"].size()[1]
+        )
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -282,7 +315,8 @@ class Qwen2DecoderLayer(nn.Module):
         "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
-    }
+    },
+    shape_invariants=qwen_2_model_invariants,
 )
 class Qwen2Model(nn.Module):
     def __init__(
