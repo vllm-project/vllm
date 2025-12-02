@@ -338,6 +338,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
 
         if enable_apc:
+            assert spec_sequence_masks is None
             block_table_tensor_full = m.block_table_tensor
             block_size = self.kv_cache_spec.block_size
             num_computed_tokens_device = m.num_computed_tokens_cpu.to(
@@ -357,31 +358,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 torch.int32
             )
 
-            if spec_sequence_masks is not None:
-                non_spec_mask = ~spec_sequence_masks
-                non_spec_block_table = block_table_tensor_full[non_spec_mask]
-                block_idx_last_computed_non_spec = block_idx_last_computed_all[
-                    non_spec_mask
-                ]
-                block_idx_last_scheduled_non_spec = block_idx_last_scheduled_all[
-                    non_spec_mask
-                ]
-                block_idx_first_scheduled_non_spec = block_idx_first_scheduled_all[
-                    non_spec_mask
-                ]
-                num_computed_tokens_non_spec = num_computed_tokens_device[non_spec_mask]
-                spec_sequence_masks_cpu = spec_sequence_masks.cpu()
-                non_spec_mask_cpu = ~spec_sequence_masks_cpu
-                num_computed_tokens_cpu_non_spec = m.num_computed_tokens_cpu[
-                    non_spec_mask_cpu
-                ]
-            else:
-                non_spec_block_table = block_table_tensor_full
-                block_idx_last_computed_non_spec = block_idx_last_computed_all
-                block_idx_last_scheduled_non_spec = block_idx_last_scheduled_all
-                block_idx_first_scheduled_non_spec = block_idx_first_scheduled_all
-                num_computed_tokens_non_spec = num_computed_tokens_device
-                num_computed_tokens_cpu_non_spec = m.num_computed_tokens_cpu
+            non_spec_block_table = block_table_tensor_full
+            block_idx_last_computed_non_spec = block_idx_last_computed_all
+            block_idx_last_scheduled_non_spec = block_idx_last_scheduled_all
+            block_idx_first_scheduled_non_spec = block_idx_first_scheduled_all
+            num_computed_tokens_non_spec = num_computed_tokens_device
+            num_computed_tokens_cpu_non_spec = m.num_computed_tokens_cpu
 
             if num_decodes > 0:
                 state_indices_tensor_d = non_spec_block_table[:num_decodes]
@@ -407,22 +389,14 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 ]
                 num_computed_tokens_p = num_computed_tokens_non_spec[start:end]
 
-                if spec_sequence_masks is None:
-                    num_computed_tokens_p_cpu = m.num_computed_tokens_cpu[
-                        m.num_reqs - num_prefills :
-                    ]
-                    query_start_loc_p_cpu = (
-                        m.query_start_loc_cpu[-num_prefills - 1 :] - num_decode_tokens
-                    )
-                else:
-                    num_computed_tokens_p_cpu = num_computed_tokens_cpu_non_spec[
-                        num_decodes:
-                    ]
-                    assert non_spec_query_start_loc_cpu is not None
-                    query_start_loc_p_cpu = (
-                        non_spec_query_start_loc_cpu[-num_prefills - 1 :]
-                        - num_decode_tokens
-                    )
+                num_computed_tokens_p_cpu = num_computed_tokens_cpu_non_spec[
+                    num_decodes:
+                ]
+                assert non_spec_query_start_loc_cpu is not None
+                query_start_loc_p_cpu = (
+                    non_spec_query_start_loc_cpu[-num_prefills - 1 :]
+                    - num_decode_tokens
+                )
 
                 cu_chunk_seqlen: list[int] = []
                 seq_idx_list: list[int] = []
