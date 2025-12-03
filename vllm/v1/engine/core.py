@@ -1044,7 +1044,10 @@ class EngineCoreProc(EngineCore):
                         request = generic_decoder.decode(data_frames)
 
                         if request_type == EngineCoreRequestType.ABORT:
-                            # Aborts are added to *both* queues.
+                            # Aborts are added to *both* queues, allows us to eagerly
+                            # process aborts while also ensuring ordering in the input
+                            # queue to avoid leaking requests. This is ok because
+                            # aborting in the scheduler is idempotent.
                             self.aborts_queue.put_nowait(request)
 
                     # Push to input queue for core busy loop.
