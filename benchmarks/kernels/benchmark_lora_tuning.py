@@ -510,8 +510,8 @@ def main(args: argparse.Namespace) -> None:
                 gpu_name = gpu_name.replace(" ", "_").replace("-", "_")
 
                 # Determine op name for JSON file
-                # NOTE: fused_moe_lora_* 使用单独的 *_shrink / *_expand 名称，不能依赖
-                # is_shrink_fn()（它只对 LORA_SHRINK 为 True），否则 shrink/expand 会写到同一个文件。
+                # NOTE: fused_moe_lora_* uses separate *_shrink / *_expand names and cannot rely on
+                # is_shrink_fn() (which only returns True for LORA_SHRINK), otherwise shrink/expand would write to the same file.
                 if op_type in (
                     OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
                     OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
