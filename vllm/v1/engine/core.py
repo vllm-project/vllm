@@ -607,14 +607,9 @@ class EngineCoreProc(EngineCore):
 
             self._init_data_parallel(vllm_config)
 
-            # Set vllm_config context before EngineCore initialization
-            # so that models can access the config during __init__
-            from vllm.config import set_current_vllm_config
-
-            with set_current_vllm_config(vllm_config):
-                super().__init__(
-                    vllm_config, executor_class, log_stats, executor_fail_callback
-                )
+            super().__init__(
+                vllm_config, executor_class, log_stats, executor_fail_callback
+            )
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
