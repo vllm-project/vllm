@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/offloader.py
-"""OffloaderV2: Advanced CPU offloading with async prefetching."""
+"""OffloaderV2: CPU offloading with async prefetching."""
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
@@ -17,7 +17,6 @@ from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
-# Type aliases
 _SubmoduleAccessor = Callable[[nn.Module], nn.Module]
 _WhitelistParamNamesCreator = Callable[[nn.Module], list[str]]
 
@@ -87,7 +86,6 @@ class OffloaderV2(BaseOffloader):
                     )
                 )
 
-        # Hook forward passes for all offloaded submodules
         for index, submodule in enumerate(offload_submodules):
             self._hook_module_forward(index, submodule)
 
@@ -124,11 +122,6 @@ class OffloaderV2(BaseOffloader):
 
         for i in range(min(self.prefetch_step, len(self.module_offloaders))):
             self.module_offloaders[i].start_onload()
-
-    @property
-    def forbid_copy_engine_usage(self) -> bool:
-        """CPU mode may conflict with copy engine in some scenarios."""
-        return self.mode == "cpu"
 
 
 class _ModuleOffloader:
@@ -180,16 +173,13 @@ class _ModuleOffloader:
 
     def start_onload(self):
         """Start async loading in alternate CUDA stream."""
-        # Synchronize with main stream before starting
         self.alt_stream.wait_stream(torch.cuda.current_stream())
 
         with torch.cuda.stream(self.alt_stream):
-            # Load all parameters to device
             self._device_tensors = {
                 name: offloader.create_device_tensor()
                 for name, offloader in self._param_offloaders.items()
             }
-            # Record completion event
             self._load_event = torch.cuda.Event()
             self._load_event.record()
 
@@ -203,7 +193,6 @@ class _ModuleOffloader:
         assert self._device_tensors is not None, (
             "Tensors not loaded (call start_onload first)"
         )
-        # Wait for loading event to complete
         if self._load_event is not None:
             self._load_event.wait()
         return self._device_tensors
@@ -245,8 +234,6 @@ class _CpuParamOffloader(_BaseParamOffloader):
 
     def __init__(self, module: nn.Module, param_name: str):
         super().__init__(module, param_name)
-
-        # Offload immediately to free GPU memory by moving param.data to CPU
         self._move_param_to_cpu()
 
     def _move_param_to_cpu(self):
@@ -254,10 +241,8 @@ class _CpuParamOffloader(_BaseParamOffloader):
         param = self._param
         pin_memory = is_pin_memory_available()
 
-        # Calculate memory size
         self.offloaded_bytes = param.data.numel() * param.data.element_size()
 
-        # Create pinned CPU tensor with same layout
         cpu_data = torch.empty_strided(
             size=param.data.size(),
             stride=param.data.stride(),
@@ -274,8 +259,6 @@ class _CpuParamOffloader(_BaseParamOffloader):
             f"size={self.offloaded_bytes / 1e9:.6f} GB, pinned={pin_memory}"
         )
 
-        # Modify param.data in-place to point to CPU memory
-        # This keeps the parameter in the module but with CPU data
         param.data = cpu_data
 
     def post_init(self):

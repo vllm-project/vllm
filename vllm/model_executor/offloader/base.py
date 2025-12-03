@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Adapted from
+# https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/offloader.py
 """Base classes for model parameter offloading."""
 
 from abc import ABC, abstractmethod
@@ -11,9 +13,20 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# Type aliases for clarity
 _SubmoduleAccessor = Callable[[nn.Module], nn.Module]
 _WhitelistParamNamesCreator = Callable[[nn.Module], list[str]]
+
+
+"""
+class relation:
+
+BaseOffloader (ABC)
+  * implemented by: UVAOffloader
+  * implemented by: OffloaderV2
+    * uses: _ModuleOffloader
+        * uses: _BaseParamOffloader (ABC)
+            * implemented by: _CpuParamOffloader
+"""
 
 
 class BaseOffloader(ABC):
@@ -52,16 +65,7 @@ class BaseOffloader(ABC):
         - Start initial prefetching
         - Allocate shared resources
         """
-        pass
-
-    @property
-    def forbid_copy_engine_usage(self) -> bool:
-        """Whether copy engine can be used (affects NCCL operations).
-
-        Some offloading modes may conflict with CUDA copy engine usage
-        in distributed operations.
-        """
-        return False
+        return
 
 
 class NoopOffloader(BaseOffloader):
@@ -84,7 +88,6 @@ _instance: BaseOffloader | None = NoopOffloader()
 def get_offloader() -> BaseOffloader:
     """Get the global offloader instance."""
     assert _instance is not None, "Offloader instance is None"
-    logger.debug(f"{_instance=}")
     return _instance
 
 

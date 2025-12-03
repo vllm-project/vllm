@@ -45,30 +45,34 @@ class UVAOffloader(BaseOffloader):
 
     def _maybe_offload_to_cpu(self, module: nn.Module) -> nn.Module:
         """Offload module parameters to CPU using UVA if budget allows."""
-        # Check if module has parameters
         if (params := next(module.parameters(), None)) is None:
             return module
 
         device = params.device
 
-        # Skip if already on CPU
         if device == torch.device("cpu"):
             return module
 
-        # Check budget
-        if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
+        global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
+        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             return module
 
         pin_memory = is_pin_memory_available()
+        uva_available = is_uva_available()
 
-        # Offload parameters to pinned CPU memory
+        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+        uva_offloading = True
+
+        # offload parameters to CPU
+        # use pin_memory if possible, which helps cudagraph capture speed
         offloaded_parameters = False
         for p in module.parameters():
-            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
-                # Per-parameter offloading: some params may be offloaded, others not
+            if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
+                # we use per-parameter offloading
+                # one module might have some parameters offloaded and some not
                 break
 
-            # Create pinned CPU tensor
+            # `torch.empty_like` does not support `pin_memory` argument
             cpu_data = torch.empty_strided(
                 size=p.data.size(),
                 stride=p.data.stride(),
@@ -78,13 +82,31 @@ class UVAOffloader(BaseOffloader):
                 pin_memory=pin_memory,
             )
             cpu_data.copy_(p.data)
-
-            # Keep CPU data alive and create CUDA view via UVA
-            p._vllm_offloaded_cpu_data = cpu_data
-            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
-
-            self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
+            if not uva_offloading:
+                p.data = cpu_data
+            else:
+                # keep the cpu data alive
+                p._vllm_offloaded_cpu_data = cpu_data
+                p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+            _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
             offloaded_parameters = True
+
+        if offloaded_parameters and not uva_offloading:
+            original_forward = module.forward
+
+            def forward(*args, **kwargs):
+                module.forward = original_forward
+                device_state = {
+                    # here we blindly call `to(device)`
+                    # if the parameter is already on the device, it will be a no-op
+                    k: v.to(device, non_blocking=True)
+                    for k, v in module.state_dict().items()
+                }
+                output = functional_call(module, device_state, args=args, kwargs=kwargs)
+                module.forward = forward
+                return output
+
+            module.forward = forward
 
         return module
 
@@ -102,74 +124,3 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
     _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
-
-
-def maybe_offload_to_cpu(module: nn.Module) -> nn.Module:
-    """Offload module to CPU using UVA (legacy function).
-
-    Deprecated: Use UVAOffloader class directly.
-    """
-    if (params := next(module.parameters(), None)) is None:
-        return module
-
-    device = params.device
-
-    if device == torch.device("cpu"):
-        return module
-
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-        return module
-
-    pin_memory = is_pin_memory_available()
-    uva_available = is_uva_available()
-
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
-
-    # offload parameters to CPU
-    # use pin_memory if possible, which helps cudagraph capture speed
-    offloaded_parameters = False
-    for p in module.parameters():
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # we use per-parameter offloading
-            # one module might have some parameters offloaded and some not
-            break
-
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(
-            size=p.data.size(),
-            stride=p.data.stride(),
-            dtype=p.data.dtype,
-            layout=p.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_data.copy_(p.data)
-        if not uva_offloading:
-            p.data = cpu_data
-        else:
-            # keep the cpu data alive
-            p._vllm_offloaded_cpu_data = cpu_data
-            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
-        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        offloaded_parameters = True
-
-    if offloaded_parameters and not uva_offloading:
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
-            output = functional_call(module, device_state, args=args, kwargs=kwargs)
-            module.forward = forward
-            return output
-
-        module.forward = forward
-
-    return module
