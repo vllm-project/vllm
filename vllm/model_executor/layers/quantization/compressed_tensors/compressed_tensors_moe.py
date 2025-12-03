@@ -1111,6 +1111,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
 
+            if use_deep_gemm and not has_deep_gemm():
+                    raise RuntimeError(
+                        "DeepGEMM requested for MoE layer but not installed."
+                    )
+            
             compatible_with_deep_gemm = (
                 self.moe_quant_config.use_fp8_w8a8
                 and self.moe_quant_config.block_shape
@@ -1120,17 +1125,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # If this MoE layer is compatible with DeepGEMM, the proper env
             # vars are set and DeepGEMM is not installed, throw an error.
             if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
-                if compatible_with_deep_gemm:
-                    raise RuntimeError(
-                        "DeepGEMM requested for MoE layer but not installed."
-                    )
-                else:
-                    raise RuntimeError(
-                        f"MoE layer incompatible with DeepGEMM, expected "
-                        f"fp8==True, got {self.moe_quant_config.use_fp8_w8a8}"
-                        f"or block_shape {self.moe_quant_config.block_shape}"
-                        f"=={get_mk_alignment_for_contiguous_layout()}."
-                    )
+                raise RuntimeError(
+                    f"MoE layer incompatible with DeepGEMM, expected "
+                    f"fp8==True, got {self.moe_quant_config.use_fp8_w8a8}"
+                    f"or block_shape {self.moe_quant_config.block_shape}"
+                    f"=={get_mk_alignment_for_contiguous_layout()}."
+                )
 
             if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
                 logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
