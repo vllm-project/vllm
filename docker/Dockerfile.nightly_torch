@@ -146,11 +146,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-    . /etc/environment
-    export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
-BASH
+RUN --mount=type=cache,target=/root/.cache/uv \
+    export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a' \
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.33.post2"
+
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -266,33 +265,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
-
-
-#################### EXTENSION Build IMAGE ####################
-
-#################### DEV IMAGE ####################
-FROM base AS dev
-
-ARG PIP_INDEX_URL UV_INDEX_URL
-ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
-ARG PYTORCH_CUDA_INDEX_BASE_URL
-
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-# Use copy mode to avoid hardlink failures with Docker cache mounts
-ENV UV_LINK_MODE=copy
-
-# Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
-COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.txt requirements/test.txt
-COPY requirements/dev.txt requirements/dev.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
-#################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -477,6 +449,9 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y git
+
+COPY use_existing_torch.py use_existing_torch.py
+COPY pyproject.toml pyproject.toml
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
