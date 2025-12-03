@@ -122,7 +122,9 @@ def test_full_graph(
             CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
                 custom_ops=["+rms_norm"],
-                pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+                pass_config=PassConfig(
+                    fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+                ),
             ),
             *model_info,
         )

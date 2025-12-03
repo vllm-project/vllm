@@ -159,7 +159,9 @@ def test_fusion_rmsnorm_quant(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
-            pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+            pass_config=PassConfig(
+                fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+            ),
         ),
     )
     with vllm.config.set_current_vllm_config(vllm_config):
