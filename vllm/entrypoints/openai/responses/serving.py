@@ -3,7 +3,6 @@
 
 import asyncio
 import time
-import uuid
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
