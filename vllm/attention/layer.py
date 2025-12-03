@@ -663,11 +663,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_b_proj = kv_b_proj
 
         # Initialize attributes from impl for direct method access
-        self.is_aiter_triton_fp8_bmm_enabled = self.impl.is_aiter_triton_fp8_bmm_enabled
-        self.dcp_world_size = self.impl.dcp_world_size
-        self.chunked_prefill_workspace_size = self.impl.chunked_prefill_workspace_size
-        self._pad_v = self.impl._pad_v
-        self._use_fi_prefill = self.impl._use_fi_prefill
+        # Use getattr since these exist on MLACommonImpl but not on abstract base
+        self.is_aiter_triton_fp8_bmm_enabled: bool = getattr(
+            self.impl, "is_aiter_triton_fp8_bmm_enabled", False
+        )
+        self.dcp_world_size: int | None = getattr(self.impl, "dcp_world_size", None)
+        self.chunked_prefill_workspace_size: int = getattr(
+            self.impl, "chunked_prefill_workspace_size", 0
+        )
+        self._pad_v: bool = getattr(self.impl, "_pad_v", False)
+        self._use_fi_prefill: bool = getattr(self.impl, "_use_fi_prefill", False)
 
         self.use_direct_call = not current_platform.opaque_attention_op()
 
@@ -694,27 +699,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     # (set during process_weights_after_loading in common.py)
     @property
     def W_UV(self):
-        return self.impl.W_UV
+        return getattr(self.impl, "W_UV", None)
 
     @property
     def W_UK_T(self):
-        return self.impl.W_UK_T
+        return getattr(self.impl, "W_UK_T", None)
 
     @property
     def W_V(self):
-        return self.impl.W_V
+        return getattr(self.impl, "W_V", None)
 
     @property
     def W_V_scale(self):
-        return self.impl.W_V_scale
+        return getattr(self.impl, "W_V_scale", None)
 
     @property
     def W_K(self):
-        return self.impl.W_K
+        return getattr(self.impl, "W_K", None)
 
     @property
     def W_K_scale(self):
-        return self.impl.W_K_scale
+        return getattr(self.impl, "W_K_scale", None)
 
     @property
     def q_pad_num_heads(self):
@@ -723,14 +728,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     # Property accessors for impl methods
     @property
     def _run_prefill_context_chunk(self):
-        return self.impl._run_prefill_context_chunk
+        return getattr(self.impl, "_run_prefill_context_chunk", None)
 
     @property
     def _run_prefill_new_tokens(self):
-        return self.impl._run_prefill_new_tokens
+        return getattr(self.impl, "_run_prefill_new_tokens", None)
 
     def _forward_decode(self, *args, **kwargs):
-        return self.impl._forward_decode(*args, **kwargs)
+        return self.impl._forward_decode(  # type: ignore[misc]
+            *args, **kwargs
+        )
 
     def forward(
         self,
