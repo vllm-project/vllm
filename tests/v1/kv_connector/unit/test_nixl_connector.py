@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
     has_kv_transfer_group,
 )
 from vllm.forward_context import ForwardContext
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -1099,7 +1100,19 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
-@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN", "TRITON_ATTN"])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        pytest.param(
+            "FLASH_ATTN",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Attention backend FLASH_ATTN is not supported on ROCm",
+            ),
+        ),
+        "TRITON_ATTN",
+    ],
+)
 def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
