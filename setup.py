@@ -346,10 +346,13 @@ class precompiled_wheel_utils:
         The order of preference is:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)
-        2. user-specified variant from nightly repo (current main commit via
-           VLLM_PRECOMPILED_WHEEL_VARIANT)
+        2. user-specified variant (VLLM_PRECOMPILED_WHEEL_VARIANT) from nightly repo
         3. the variant corresponding to VLLM_MAIN_CUDA_VERSION from nightly repo
-        4. the default variant from nightly repo (current main commit)
+        4. the default variant from nightly repo
+
+        If downloading from the nightly repo, the commit can be specified via
+        VLLM_PRECOMPILED_WHEEL_COMMIT; otherwise, the head commit in the main branch
+        is used.
         """
         wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
         if wheel_location is not None:
@@ -362,10 +365,13 @@ class precompiled_wheel_utils:
             # try to fetch the wheel metadata from the nightly wheel repo
             main_variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
             variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
-            commit = os.getenv(
-                "VLLM_PRECOMPILED_WHEEL_COMMIT",
-                precompiled_wheel_utils.get_base_commit_in_main_branch(),
-            )
+            commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+            if not commit or len(commit) != 40:
+                print(
+                    f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                    ", trying to fetch base commit in main branch"
+                )
+                commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             try_default = False
             wheels, repo_url, download_filename = None, None, None
@@ -502,10 +508,6 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def get_base_commit_in_main_branch() -> str:
-        # Force to use the nightly wheel. This is mainly used for CI testing.
-        if envs.VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL:
-            return "nightly"
-
         try:
             # Get the latest commit hash of the upstream main branch.
             resp_json = subprocess.check_output(
@@ -516,6 +518,7 @@ class precompiled_wheel_utils:
                 ]
             ).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
+            print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
             # In Docker build context, .git may be immutable or missing.
             if envs.VLLM_DOCKER_BUILD_CONTEXT:
