@@ -90,8 +90,8 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
-    is_deep_gemm_e8m0_used,
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -1090,11 +1090,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
             return experts
 
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedTritonExperts,
-        )
         from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
             BatchedDeepGemmExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts,
         )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
@@ -1113,7 +1113,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
             compatible_with_deep_gemm = (
                 self.moe_quant_config.use_fp8_w8a8
-                and self.moe_quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
+                and self.moe_quant_config.block_shape
+                == get_mk_alignment_for_contiguous_layout()
             )
 
             # If this MoE layer is compatible with DeepGEMM, the proper env
@@ -1121,7 +1122,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
                 raise RuntimeError("DeepGEMM requested but not installed.")
 
-            if use_deep_gemm and compatible_with_deep_gemm and has_Deep_gemm():
+            if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
                 logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
                 return BatchedDeepGemmExperts(
                     max_num_tokens=max_num_tokens_per_rank,
