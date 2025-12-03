@@ -1112,10 +1112,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             assert max_num_tokens_per_rank is not None
 
             if use_deep_gemm and not has_deep_gemm():
-                    raise RuntimeError(
-                        "DeepGEMM requested for MoE layer but not installed."
-                    )
-            
+                raise RuntimeError(
+                    "DeepGEMM requested for MoE layer but not installed."
+                )
+
             compatible_with_deep_gemm = (
                 self.moe_quant_config.use_fp8_w8a8
                 and self.moe_quant_config.block_shape
