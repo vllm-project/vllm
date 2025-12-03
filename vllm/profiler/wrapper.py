@@ -3,26 +3,27 @@
 
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
+from typing import Literal
 
 import torch
 from typing_extensions import override
 
-import vllm.envs as envs
+from vllm.config import ProfilerConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 class WorkerProfiler(ABC):
-    def __init__(self) -> None:
-        self._delay_iters = envs.VLLM_PROFILER_DELAY_ITERS
+    def __init__(self, profiler_config: ProfilerConfig) -> None:
+        self._delay_iters = profiler_config.delay_iterations
         if self._delay_iters > 0:
             logger.info_once(
                 "GPU profiling will start "
                 f"{self._delay_iters} steps after start_profile."
             )
 
-        self._max_iters = envs.VLLM_PROFILER_MAX_ITERS
+        self._max_iters = profiler_config.max_iterations
         if self._max_iters > 0:
             logger.info_once(
                 "GPU profiling will stop "
@@ -133,12 +134,27 @@ class WorkerProfiler(ABC):
         return nullcontext()
 
 
+TorchProfilerActivity = Literal["CPU", "CUDA", "XPU"]
+TorchProfilerActivityMap = {
+    "CPU": torch.profiler.ProfilerActivity.CPU,
+    "CUDA": torch.profiler.ProfilerActivity.CUDA,
+    "XPU": torch.profiler.ProfilerActivity.XPU,
+}
+
+
 class TorchProfilerWrapper(WorkerProfiler):
-    def __init__(self, worker_name: str, local_rank: int) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        worker_name: str,
+        local_rank: int,
+        activities: list[TorchProfilerActivity],
+    ) -> None:
+        super().__init__(profiler_config)
 
         self.local_rank = local_rank
-        torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        self.profiler_config = profiler_config
+        torch_profiler_trace_dir = profiler_config.torch_profiler_dir
         if local_rank in (None, 0):
             logger.info(
                 "Torch profiling enabled. Traces will be saved to: %s",
@@ -147,24 +163,23 @@ class TorchProfilerWrapper(WorkerProfiler):
             logger.debug(
                 "Profiler config: record_shapes=%s,"
                 "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+                profiler_config.torch_profiler_record_shapes,
+                profiler_config.torch_profiler_with_memory,
+                profiler_config.torch_profiler_with_stack,
+                profiler_config.torch_profiler_with_flops,
             )
+
+        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
         self.profiler = torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-            profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-            with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-            with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            activities=[TorchProfilerActivityMap[activity] for activity in activities],
+            record_shapes=profiler_config.torch_profiler_record_shapes,
+            profile_memory=profiler_config.torch_profiler_with_memory,
+            with_stack=profiler_config.torch_profiler_with_stack,
+            with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=torch.profiler.tensorboard_trace_handler(
                 torch_profiler_trace_dir,
                 worker_name=worker_name,
-                use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
+                use_gzip=profiler_config.torch_profiler_use_gzip,
             ),
         )
 
@@ -176,9 +191,10 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _stop(self) -> None:
         self.profiler.stop()
 
-        if envs.VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL:
-            rank = self.local_rank
-            profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+        profiler_config = self.profiler_config
+        rank = self.local_rank
+        if profiler_config.torch_profiler_dump_cuda_time_total:
+            profiler_dir = profiler_config.torch_profiler_dir
             profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
             sort_key = "self_cuda_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
@@ -189,6 +205,12 @@ class TorchProfilerWrapper(WorkerProfiler):
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
+        if self.dump_cpu_time_total and rank == 0:
+            logger.info(
+                self.profiler.key_averages().table(
+                    sort_by="self_cpu_time_total", row_limit=50
+                )
+            )
 
     @override
     def annotate_context_manager(self, name: str):
@@ -196,8 +218,8 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class CudaProfilerWrapper(WorkerProfiler):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, profiler_config: ProfilerConfig) -> None:
+        super().__init__(profiler_config)
         # Note: lazy import to avoid dependency issues if CUDA is not available.
         import torch.cuda.profiler as cuda_profiler
 

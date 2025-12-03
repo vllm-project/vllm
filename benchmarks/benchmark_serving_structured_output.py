@@ -34,7 +34,6 @@ from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from dataclasses import dataclass
 
-import datasets
 import numpy as np
 import pandas as pd
 from backend_request_func import (
@@ -44,6 +43,8 @@ from backend_request_func import (
 )
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
+
+import datasets
 
 try:
     from vllm.tokenizers import get_tokenizer
@@ -963,8 +964,7 @@ def create_argument_parser():
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. profiler_config must be provided on the server side.",
     )
     parser.add_argument(
         "--result-dir",
