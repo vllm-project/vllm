@@ -197,7 +197,7 @@ class DeepSeekV32ToolParser(ToolParser):
         ):
             return name_str[1:-1]
         return name_str
-    
+
     def _extract_param_name(self, input_str: str) -> str:
         """Extract param name"""
         start = input_str.find('"') + 1
