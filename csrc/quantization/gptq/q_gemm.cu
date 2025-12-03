@@ -7,7 +7,7 @@ https://github.com/qwopqwop200/GPTQ-for-LLaMa
 #include <cstdio>
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1855,7 +1855,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                         bool use_exllama, bool use_v2_format, int64_t bit) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const c10::DeviceGuard device_guard(a.device());
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
   at::Tensor temp_dq = torch::empty(
@@ -1877,7 +1877,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 }
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(q_weight));
+  const c10::DeviceGuard device_guard(q_weight.device());
   vllm::gptq::shuffle_exllama_weight(
       (uint32_t*)q_weight.data_ptr(),
       q_perm.device().is_meta() || q_perm.numel() == 0

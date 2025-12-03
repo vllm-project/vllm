@@ -8,7 +8,8 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
  */
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
+#include <c10/cuda/CUDAStream.h>
 
 #include "dequantize.cuh"
 
@@ -437,7 +438,7 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
     y_blocks = (int)(in_c / 8);
   }
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(_scaling_factors));
+  const c10::DeviceGuard device_guard(_scaling_factors.device());
 
   auto options = torch::TensorOptions()
                      .dtype(_scaling_factors.dtype())
@@ -471,7 +472,7 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        int64_t split_k_iters) {
   int num_in_feats = _in_feats.size(0);
   int num_in_channels = _in_feats.size(1);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
+  const c10::DeviceGuard device_guard(_in_feats.device());
 
   auto options = torch::TensorOptions()
                      .dtype(_in_feats.dtype())

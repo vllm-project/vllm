@@ -950,7 +950,7 @@ torch::Tensor allspark_w8a16_gemm(
 
   TORCH_CHECK(group_size == -1, "Currently only supports group_size = -1");
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const c10::DeviceGuard device_guard(a.device());
   const void* a_ptr = reinterpret_cast<const void*>(a.data_ptr());
   const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(b_qweight.data_ptr());
   const void* b_scale_ptr = reinterpret_cast<const void*>(b_scales.data_ptr());

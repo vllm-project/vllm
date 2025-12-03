@@ -13,7 +13,8 @@
 #include "quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
+#include <c10/cuda/CUDAStream.h>
 
 namespace vllm {
 
@@ -197,7 +198,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
@@ -257,7 +258,7 @@ void fused_add_rms_norm_static_fp8_quant(
      hiding on global mem ops. */
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 block(std::min(hidden_size, max_block_size));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   /*If the tensor types are FP16/BF16, try to use the optimized kernel
     with packed + vectorized ops.

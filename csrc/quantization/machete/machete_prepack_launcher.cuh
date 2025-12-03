@@ -15,7 +15,7 @@ struct PrepackBArgs {
 
 template <typename PrepackedLayoutB>
 torch::Tensor prepack_impl(torch::Tensor const B) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(B));
+  const c10::DeviceGuard device_guard(B.device());
   using ElementB = typename PrepackedLayoutB::ElementB;
   using PPBlockShape_NK = typename PrepackedLayoutB::PPBlockShape_NK;
 

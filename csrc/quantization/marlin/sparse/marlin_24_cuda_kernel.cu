@@ -19,7 +19,7 @@
 #include <torch/all.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1096,7 +1096,7 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
               "A is not float16, currently only float16 is supported");
 
   // Alloc C matrix
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const c10::DeviceGuard device_guard(a.device());
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c = torch::empty({size_m, size_n}, options);
 

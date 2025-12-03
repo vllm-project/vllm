@@ -1,6 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cmath>
 #include "core/math.hpp"
@@ -572,7 +572,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   int64_t num_tokens = input.numel() / input.size(-1);                      \
   dim3 grid(num_tokens, num_tokens > 16 ? num_tokens > 32 ? 1 : 2 : 4);     \
   dim3 block(std::min(d, 512));                                             \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));         \
+  const c10::DeviceGuard device_guard(input.device());         \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();             \
   VLLM_DISPATCH_FLOATING_TYPES(                                             \
       input.scalar_type(), "act_and_mul_kernel", [&] {                      \
@@ -646,7 +646,7 @@ void persistent_masked_m_silu_mul_quant(
     static constexpr int max_shared_mem_bytes =                                \
         GROUP_SIZE * 2 * STAGES * NUM_WARPS * 2;                               \
     dim3 grid(sms), block(THREAD_COUNT);                                       \
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
+    const c10::DeviceGuard device_guard(input.device());          \
     VLLM_DISPATCH_FP8_TYPES(                                                   \
         y_q.scalar_type(), "silu_mul_fp8_quant_deep_gemm_kernel", [&] {        \
           vllm::silu_mul_fp8_quant_deep_gemm_kernel<                           \

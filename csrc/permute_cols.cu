@@ -1,7 +1,7 @@
 #include <torch/all.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cuda_fp16.h>
 
@@ -65,7 +65,7 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 // More efficient version of A[..., perm]
 //  taken from gptq_marlin.cu
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+  const c10::DeviceGuard device_guard(A.device());
   auto dev = A.get_device();
   auto stream = at::cuda::getCurrentCUDAStream(dev);
 
