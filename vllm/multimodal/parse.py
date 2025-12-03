@@ -448,7 +448,6 @@ class MultiModalDataParser:
         data_items: list[AudioItem]
         if (
             is_list_of(data, float)
-            or isinstance(data, MediaWithBytes)
             or isinstance(data, (np.ndarray, torch.Tensor))
             and data.ndim == 1
             or isinstance(data, tuple)
@@ -513,7 +512,6 @@ class MultiModalDataParser:
         data_items: list[VideoItem]
         if (
             is_list_of(data, PILImage.Image)
-            or isinstance(data, MediaWithBytes)
             or isinstance(data, (np.ndarray, torch.Tensor))
             and data.ndim == 4
         ):
