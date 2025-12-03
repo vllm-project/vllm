@@ -93,7 +93,6 @@ def parse_score_data(
     mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
-
     content_2 = _parse_score_content(data_2, mm_tracker)
 
     def ensure_str(content: _ContentPart | None) -> str:
