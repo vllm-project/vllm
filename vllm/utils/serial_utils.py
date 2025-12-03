@@ -53,7 +53,7 @@ Endianness = Literal["native", "big", "little"]
 EncodingFormat = Literal["float", "base64", "bytes"]
 
 
-def tensor2base64(x: torch.Tensor):
+def tensor2base64(x: torch.Tensor) -> str:
     with io.BytesIO() as buf:
         torch.save(x, buf)
         buf.seek(0)
