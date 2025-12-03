@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from functools import total_ordering
+from typing import Any
 
 from vllm.v1.core.sched.policy.normalized_scorer import TimeAndLengthScorer
-from typing import Optional, List, Any
 
 TimeAndLengthScorer_Instance = None
 
@@ -24,7 +24,7 @@ class WeightedScoreSorter:
         self,
         request_length: int,
         request_arrival_time: float,
-        request_slo_requirement: Optional[List[Any]] = None,
+        request_slo_requirement: list[Any] | None = None,
     ):
         self.request_length = request_length
         self.request_arrival_time = request_arrival_time

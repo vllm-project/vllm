@@ -99,5 +99,6 @@ class TimeAndLengthScorer(NormalizedScorer):
         ]
         super().__init__(dim_list)
 
-    def score(self, time: float, length: float) -> float:
-        return super().score(time, length)
+    def score(self, *dims: float) -> float:
+        assert len(dims) == 2
+        return super().score(*dims)
