@@ -15,6 +15,7 @@ from pathlib import Path
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.compilation.helion.register import register_kernel
 
 # Automatically import all kernel modules to trigger registration
 # This allows new kernels to be added without modifying this file
@@ -47,5 +48,5 @@ for module_name in _kernel_files:
 __all__ = [
     "HelionCustomOp",
     "KernelBenchmark",
+    "register_kernel",
 ] + sorted(_helion_ops.keys())
-

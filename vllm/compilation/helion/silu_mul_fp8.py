@@ -8,6 +8,7 @@ import torch
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.compilation.helion.register import register_kernel
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 
@@ -28,7 +29,28 @@ if HELION_AVAILABLE:
     # TODO(gmagogsfm): Instead of specifying one config, we should
     # use Helion bound kernel to generate many kernels according to input shapes
 
-    # Pure Helion kernel for autotuning - this has the autotune method
+    def _silu_mul_fp8_custom_fake(
+        input: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Custom fake implementation for silu_mul_fp8 that handles symbolic shapes.
+
+        This avoids the "unhashable type: non-nested SymInt" error that occurs
+        when torch.compile uses symbolic shapes with Helion's bind() method.
+
+        Args:
+            input: Input tensor with shape [..., 2*d]
+            scale: Scalar scale factor for FP8 quantization
+
+        Returns:
+            Tensor with shape [..., d] and dtype float8_e4m3fn
+        """
+        # Manual shape inference: silu_mul_fp8 takes (batch, 2*d) -> (batch, d)
+        output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
+        return torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
+
+    # Helion kernel with automatic PyTorch custom op registration and custom fake
+    @register_kernel("silu_mul_fp8", fake_impl=_silu_mul_fp8_custom_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
         autotune_baseline_rtol=0.0,
@@ -49,9 +71,7 @@ if HELION_AVAILABLE:
             range_warp_specializes=[],
         ),
     )
-    def _silu_mul_fp8_pure_helion_kernel(
-        input: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
+    def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
         Pure Helion kernel for fused SiLU-and-mul with FP8 quantization.
         This version is used for autotuning and has the autotune method.
@@ -91,44 +111,8 @@ if HELION_AVAILABLE:
 
         return out
 
-    # PyTorch custom op wrapper - calls the pure Helion kernel
-    @torch.library.custom_op(
-        "my_helion_lib::silu_mul_fp8", mutates_args=(), device_types="cuda"
-    )
-    def _silu_mul_fp8_helion_kernel(
-        input: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        PyTorch custom op wrapper for Helion SiLU-mul-FP8 kernel.
-
-        Operation: quantize_fp8(SiLU(input[..., :d]) * input[..., d:2*d])
-
-        Args:
-            input (Tensor): Input tensor with last dimension = 2*d
-            scale (Tensor): Scalar scale factor for FP8 quantization
-
-        Returns:
-            Tensor: Output tensor with shape [..., d] and dtype float8_e4m3fn
-        """
-        return _silu_mul_fp8_pure_helion_kernel(input, scale)
-
-    @_silu_mul_fp8_helion_kernel.register_fake
-    def _silu_mul_fp8_helion_kernel_fake(
-        input: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Fake/meta implementation for silu_mul_fp8 Helion kernel.
-        Defines the input/output shape relationship without actual computation.
-
-        Shape contract:
-        - input: [..., 2*d]
-        - scale: scalar (numel == 1)
-        - returns: [..., d] with dtype float8_e4m3fn
-        """
-        d = input.shape[-1] // 2
-        output_shape = input.shape[:-1] + (d,)
-
-        return torch.empty(output_shape, device=input.device, dtype=torch.float8_e4m3fn)
+    # Note: PyTorch custom op registration is handled by @register_kernel decorator
+    # with custom fake implementation for symbolic shape compatibility
 
 
 # Now define the vLLM CustomOp wrapper
@@ -174,7 +158,7 @@ class SiluMulFp8Helion(HelionCustomOp):
                 "Helion is not installed. Please install Helion to use SiluMulFp8Helion. "
                 "Alternatively, use the CUDA baseline implementation."
             )
-        return torch.ops.my_helion_lib.silu_mul_fp8(input, scale)
+        return silu_mul_fp8(input, scale)
 
     def get_autotune_inputs(self) -> dict[str, tuple]:
         """
@@ -253,7 +237,7 @@ class SiluMulFp8Helion(HelionCustomOp):
     def helion_kernel(self):
         """The Helion kernel function for autotuning."""
         if HELION_AVAILABLE:
-            return _silu_mul_fp8_pure_helion_kernel
+            return silu_mul_fp8._helion_kernel
         return None
 
 

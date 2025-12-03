@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from contextlib import suppress
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -120,7 +119,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             # This encapsulates all the enable/disable logic in one place
             if self.helion_op is not None and self.helion_op.enabled():
                 # Call the Helion CustomOp's forward method
-                # This will internally call torch.ops.my_helion_lib.silu_mul_fp8
+                # This will internally call the decorated Helion kernel directly
                 return self.helion_op.forward_helion(input, scale)
             else:
                 d = input.shape[-1] // 2
