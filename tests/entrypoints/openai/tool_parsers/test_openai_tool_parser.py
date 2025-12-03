@@ -163,8 +163,9 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
 # Test Scenarios
 # ==========================================================
 @pytest.mark.asyncio
-async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
-    """Verify single tool call reasoning with the calculator (non-streaming)."""
+async def test_calculator_tool_call_and_argument_accuracy(client: openai.AsyncOpenAI):
+    """Verify calculator tool call is made and arguments are accurate."""
+
     response = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_CALC,
@@ -174,25 +175,37 @@ async def test_single_tool_call_calculator(client: openai.AsyncOpenAI):
     )
 
     message = response.choices[0].message
-
     tool_calls = getattr(message, "tool_calls", [])
+    assert tool_calls, "No tool calls detected"
 
-    function_names = [
-        c.function.name for c in tool_calls if getattr(c, "function", None)
-    ]
-    arguments = [
-        c.function.arguments for c in tool_calls if getattr(c, "function", None)
-    ]
+    calc_call = next((c for c in tool_calls if c.function.name == FUNC_CALC), None)
+    assert calc_call, "Calculator function not called"
 
-    assert FUNC_CALC in function_names, "Calculator function not called"
-    assert any(FUNC_ARGS_CALC in arg or "123 + 456" in arg for arg in arguments), (
-        f"Expected calculator arguments {FUNC_ARGS_CALC} not found in {arguments}"
+    raw_args = calc_call.function.arguments
+    assert raw_args, "Calculator arguments missing"
+    assert "123" in raw_args and "456" in raw_args, (
+        f"Expected values not in raw arguments: {raw_args}"
+    )
+
+    try:
+        parsed_args = json.loads(raw_args)
+    except json.JSONDecodeError:
+        pytest.fail(f"Invalid JSON in calculator arguments: {raw_args}")
+
+    expected_expr = "123 + 456"
+    actual_expr = parsed_args.get("expression", "")
+    similarity = fuzz.ratio(actual_expr, expected_expr)
+
+    assert similarity > 90, (
+        f"Expression mismatch: expected '{expected_expr}' "
+        f"got '{actual_expr}' (similarity={similarity}%)"
     )
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_call_get_time(client: openai.AsyncOpenAI):
-    """Verify single tool call reasoning with get_time."""
+async def test_streaming_tool_call_get_time_with_reasoning(client: openai.AsyncOpenAI):
+    """Verify streamed reasoning and tool call behavior for get_time."""
+
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES_GET_TIME,
@@ -203,11 +216,18 @@ async def test_streaming_tool_call_get_time(client: openai.AsyncOpenAI):
 
     chunks = [chunk async for chunk in stream]
     reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+
     assert FUNC_TIME in function_names, "get_time function not called"
+
     assert any("New York" in arg for arg in arguments), (
         f"Expected get_time arguments for New York not found in {arguments}"
     )
+
     assert len(reasoning) > 0, "Expected reasoning content missing"
+
+    assert any(keyword in reasoning for keyword in ["New York", "time", "current"]), (
+        f"Reasoning is not relevant to the request: {reasoning}"
+    )
 
 
 @pytest.mark.asyncio
@@ -285,37 +305,6 @@ async def test_tool_call_with_temperature(client: openai.AsyncOpenAI):
     print(f"Text: {message.content}")
 
 
-# ==========================================================
-# Accuracy & Consistency Tests
-# ==========================================================
-@pytest.mark.asyncio
-async def test_tool_call_argument_accuracy(client: openai.AsyncOpenAI):
-    """
-    Ensure the calculator tool arguments closely match
-    the expected arithmetic expression.
-    """
-    response = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        temperature=0.0,
-    )
-
-    calls = response.choices[0].message.tool_calls
-    assert calls, "No tool calls detected"
-    calc_call = next((c for c in calls if c.function.name == FUNC_CALC), None)
-    assert calc_call, "Calculator function missing"
-
-    try:
-        args = json.loads(calc_call.function.arguments)
-    except json.JSONDecodeError:
-        pytest.fail("Invalid JSON in calculator arguments")
-
-    expected_expr = "123 + 456"
-    similarity = fuzz.ratio(args.get("expression", ""), expected_expr)
-    assert similarity > 90, f"Expression mismatch (similarity={similarity}%)"
-
-
 @pytest.mark.asyncio
 async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
     """Validate that tool call arguments adhere to their declared JSON schema."""
@@ -347,24 +336,6 @@ async def test_tool_response_schema_accuracy(client: openai.AsyncOpenAI):
         assert schema is not None, f"No matching tool schema found for {func_name}"
 
         jsonschema.validate(instance=args, schema=schema)
-
-
-@pytest.mark.asyncio
-async def test_reasoning_relevance_accuracy(client: openai.AsyncOpenAI):
-    """Check whether reasoning content is semantically related to the user's query."""
-    stream = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=MESSAGES_CALC,
-        tools=TOOLS,
-        stream=True,
-    )
-    chunks = [chunk async for chunk in stream]
-    reasoning, _, _ = extract_reasoning_and_calls(chunks)
-
-    assert len(reasoning) > 0, "No reasoning emitted"
-    assert any(num in reasoning for num in ["123", "456"]), (
-        f"Reasoning does not reference expected numbers: {reasoning}"
-    )
 
 
 @pytest.mark.asyncio
