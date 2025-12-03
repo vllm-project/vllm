@@ -54,10 +54,10 @@ def _pad_out_ubatch_slices(
     padded_second_token_slice = slice(
         ubatch_slices[1].token_slice.start, num_total_tokens
     )
-    ubatch_slices[1] = UBatchSlice(
-        padded_second_request_slice, padded_second_token_slice
-    )
-    return ubatch_slices
+    return [
+        ubatch_slices[0],
+        UBatchSlice(padded_second_request_slice, padded_second_token_slice),
+    ]
 
 
 def maybe_create_ubatch_slices(
