@@ -196,7 +196,19 @@ class PassConfig:
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        return InductorPass.hash_dict(asdict(self))
+        d = asdict(self)
+        ignored_fields = [
+            "enable_fusion",
+            "enable_attn_fusion",
+            "enable_noop",
+            "enable_sequence_parallelism",
+            "enable_async_tp",
+            "enable_fi_allreduce_fusion",
+        ]
+
+        for old_flag in ignored_fields:
+            d.pop(old_flag, None)
+        return InductorPass.hash_dict(d)
 
     @field_validator(
         "fuse_norm_quant",
