@@ -2419,8 +2419,8 @@ class GPUModelRunner(
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         if (
             self.compilation_config.pass_config.enable_sequence_parallelism
-            and tp_size > 1
-        ):
+            or self.compilation_config.pass_config.enable_sp_moe
+        ) and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 

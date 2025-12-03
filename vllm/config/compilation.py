@@ -113,6 +113,8 @@ class PassConfig:
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = Field(default=None)
     """Whether to enable sequence parallelism."""
+    enable_sp_moe: bool = Field(default=None)
+    """Whether to enable sequence parallelism for moe"""
     enable_async_tp: bool = Field(default=None)
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = Field(default=None)
