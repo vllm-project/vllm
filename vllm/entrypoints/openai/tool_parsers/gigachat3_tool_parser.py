@@ -41,7 +41,6 @@ ARGS_REGEX = re.compile(
 )
 
 
-@ToolParserManager.register_module("gigachat3")
 class GigaChat3ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
