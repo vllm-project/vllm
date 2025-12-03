@@ -143,7 +143,7 @@ class StructuredOutputManager:
         if envs.VLLM_ASYNC_CREATE_GRAMMAR:
             grammar = self.executor.submit(self._create_grammar, request)
         else:
-            grammar = self._create_grammar(request)
+            grammar = self._create_grammar(request)  # type: ignore[assignment]
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
     def _create_grammar(
