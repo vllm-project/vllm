@@ -101,7 +101,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   float rms;
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
-  vllm::vectorized::compute_rms<scalar_t, has_residual, group_size>(
+  vllm::vectorized::compute_rms<scalar_t, has_residual>(
       &rms, input, hidden_size, var_epsilon, residual);
 
   // Compute Scale

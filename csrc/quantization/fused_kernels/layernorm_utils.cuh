@@ -215,7 +215,7 @@ namespace vectorized {
 
 // Compute 1.0/rms(input)
 // hidden_size must be a multiple of 4
-template <typename scalar_t, bool has_residual = false, int32_t group_size = 0>
+template <typename scalar_t, bool has_residual = false>
 __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
                             int32_t const hidden_size, float const epsilon,
                             scalar_t const* __restrict__ residual = nullptr) {
