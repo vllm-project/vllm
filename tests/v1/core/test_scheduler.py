@@ -641,6 +641,34 @@ def test_schedule_concurrent_batches(
     scheduler.update_from_output(scheduler_output1, model_runner_output)
 
 
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
+def test_schedule_order(enable_chunked_prefill: bool):
+    scheduler = create_scheduler(
+        max_num_batched_tokens=1024,
+        max_num_seqs=3,
+        enable_chunked_prefill=enable_chunked_prefill,
+    )
+
+    # long requests
+    requests = create_requests(num_requests=2, num_tokens=800)
+    # short requests
+    requests += create_requests(num_requests=2, num_tokens=10)
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler_output1 = scheduler.schedule()
+
+    if enable_chunked_prefill:
+        # When enable chunked prefill, long requests will be chunked.
+        assert len(scheduler_output1.scheduled_new_reqs) == 2
+    else:
+        # When disable chunked prefill, should not skip the long requests,
+        # and scheduling subsequent short requests in advance,
+        # even though there is still token budgets remaining.
+        assert len(scheduler_output1.scheduled_new_reqs) == 1
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.
@@ -698,6 +726,37 @@ def test_preempt_during_execution():
     # sampled token id.
     assert len(requests[1].output_token_ids) == 1
     assert requests[1].output_token_ids[0] == 42
+
+
+def test_scheduler_reset_prefix_cache():
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    requests = create_requests(num_requests=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Initial scheduling, requests should be at the running state now
+    _ = scheduler.schedule()
+
+    # Verify requests moved from waiting to running
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == len(requests)
+    for i, request in enumerate(requests):
+        assert scheduler.running[i] == request
+
+    # Reset prefix cache should fail since there are still running requests
+    # and they are taking KV cache
+    assert not scheduler.reset_prefix_cache()
+
+    # Reset prefix cache with reset_running_requests=True. All running requests
+    # Should be pushed back to the waiting queue and kv cache should be freed
+    assert scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    # Verify requests moved from running to waiting
+    assert len(scheduler.waiting) == len(requests)
+    assert len(scheduler.running) == 0
+
+    for i, request in enumerate(requests):
+        assert scheduler.waiting[i] == request
 
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
@@ -1449,6 +1508,12 @@ def create_scheduler_with_priority(
     Returns:
       {class}`Scheduler` instance with priority scheduling
     """
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+    )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
     scheduler_config = SchedulerConfig(
@@ -1458,13 +1523,8 @@ def create_scheduler_with_priority(
         long_prefill_token_threshold=long_prefill_token_threshold,
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
+        is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

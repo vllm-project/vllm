@@ -69,3 +69,15 @@ def rejection_sample(
         num_warps=1,
     )
     return sampled, num_sampled
+
+
+@torch.compile(dynamic=True)
+def get_num_rejected(
+    cu_num_logits: torch.Tensor,
+    num_sampled: torch.Tensor,
+) -> torch.Tensor:
+    num_logits = cu_num_logits[1:] - cu_num_logits[:-1]
+    num_rejected = num_logits - num_sampled
+    # No token is rejected for chunked prefills.
+    num_rejected *= num_sampled > 0
+    return num_rejected
