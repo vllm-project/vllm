@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -168,6 +169,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # information related to cudagraph execution
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

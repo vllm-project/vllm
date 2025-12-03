@@ -74,8 +74,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    GenerateRequest,
-    GenerateResponse,
     ResponsesRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
@@ -87,6 +85,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt

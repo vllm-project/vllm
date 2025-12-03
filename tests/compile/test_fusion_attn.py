@@ -373,7 +373,7 @@ def test_attention_quant_pattern(
 
     # Run model with attn fusion enabled
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_attn_fusion=True, enable_noop=True
+        fuse_attn_quant=True, eliminate_noops=True
     )
     with (
         set_current_vllm_config(vllm_config),
