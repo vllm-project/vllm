@@ -123,7 +123,7 @@ class HunYuanVLProcessor(ProcessorMixin):
 
         attention_mask = input_ids.ne(self.pad_id)
         text_inputs["attention_mask"] = attention_mask
-        text_inputs["imgs_pos"] = [self.get_imgs_pos(input_ids)]
+        text_inputs["imgs_pos"] = [self.get_imgs_pos(e) for e in input_ids]
         # image_inputs["imgs"] = [[image_inputs["pixel_values"]]]
 
         return_tensors = kwargs.pop("return_tensors", None)
