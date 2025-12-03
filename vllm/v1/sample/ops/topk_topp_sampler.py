@@ -106,7 +106,7 @@ class TopKTopPSampler(nn.Module):
             and k is not None
             and p is not None
         ):
-            return optimized_top_k_top_p(logits, generators, k, p, self.logprobs_mode)
+            return optimized_top_k_top_p_sample(logits, generators, k, p, self.logprobs_mode)
         logits_to_return = None
         logits = self.apply_top_k_top_p(logits, k, p)
         if self.logprobs_mode == "processed_logits":
