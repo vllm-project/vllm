@@ -309,7 +309,6 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         self.compiled = False
-
         TorchCompileWithNoGuardsWrapper.__init__(self)
 
     cls.__init__ = __init__

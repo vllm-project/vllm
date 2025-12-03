@@ -2736,7 +2736,6 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3535,7 +3534,6 @@ class GPUModelRunner(
         if self.parallel_config.enable_eplb:
             self.eplb_state = EplbState(self.parallel_config, self.device)
             eplb_models = 0
-
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
@@ -3610,7 +3608,6 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
-
         prepare_communication_buffer_for_model(self.model)
         if (drafter := getattr(self, "drafter", None)) and (
             drafter_model := getattr(drafter, "model", None)
