@@ -245,7 +245,7 @@ def _chunk_scan_fwd_kernel(
             )
             if not HAS_INITSTATES and (seq_idx != seq_idx_prev):
                 prev_states = tl.zeros(
-                    (BLOCK_SIZE_DSTATE, BLOCK_SIZE_K), dtype=C_ptr.dtype.element_ty
+                    (BLOCK_SIZE_K, BLOCK_SIZE_N), dtype=C_ptr.dtype.element_ty
                 )
             else:
                 prev_states = tl.load(

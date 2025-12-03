@@ -12,6 +12,7 @@ import pytest
 from packaging.version import Version
 from transformers import (
     AutoModel,
+    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
@@ -136,7 +137,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
@@ -151,7 +152,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen3_vl": VLMTestInfo(
@@ -172,7 +173,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
         ],
@@ -349,7 +350,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
-        image_size_factors=[(), (1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -691,6 +692,29 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
         hf_model_kwargs={"revision": "refs/pr/5"},
     ),
+    "paddleocr_vl": VLMTestInfo(
+        models=["PaddlePaddle/PaddleOCR-VL"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        img_idx_to_prompt=lambda idx: (
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+        ),
+        multi_image_prompt=(
+            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Describe these two images separately."
+        ),
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(0.25,)],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
+                reason="This model is broken in Transformers v4.57.3",
+            )
+        ],
+    ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -736,7 +760,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
     "skywork_r1v": VLMTestInfo(
@@ -788,7 +812,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests

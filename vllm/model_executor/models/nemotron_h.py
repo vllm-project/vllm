@@ -376,8 +376,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        output = torch.empty_like(hidden_states)
-        self.mixer(hidden_states, output)
+        output = self.mixer(hidden_states)
         return output, residual
 
 
@@ -714,7 +713,6 @@ class NemotronHForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
