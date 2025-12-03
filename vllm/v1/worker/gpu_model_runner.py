@@ -1085,29 +1085,43 @@ class GPUModelRunner(
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         req_ids_to_fix = list(self.async_spec_reqs_to_fix)
 
-        if req_ids_to_fix:
-            valid_sampled_token_count = self._get_valid_sampled_token_count()
+        if not req_ids_to_fix:
+            return
 
-            for req_id in req_ids_to_fix:
-                prev_index = prev_req_id_to_index.get(req_id)
-                req_state = self.requests.get(req_id)
+        valid_sampled_token_count = self._get_valid_sampled_token_count()
+        if not valid_sampled_token_count:
+            return
 
-                prev_draft_len = req_state.prev_num_draft_len  
-                req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
-                req_state.pending_prev_num_draft_len = 0
+        for req_id in req_ids_to_fix:
+            prev_index = prev_req_id_to_index.get(req_id)
+            assert prev_index is not None and prev_index < len(valid_sampled_token_count), (
+                f"req_id={req_id} not found in prev_req_id_to_index or index out of range"
+            )
+            req_state = self.requests.get(req_id)
+            assert req_state is not None, f"req_id={req_id} not found in requests"
 
-                num_accepted = valid_sampled_token_count[prev_index] - 1
-                assert num_accepted >= 0 and num_accepted <= prev_draft_len
-                num_rejected = prev_draft_len - num_accepted
-                if num_rejected == 0:
-                    continue
-                req_state.num_computed_tokens -= num_rejected
-           
-                assert len(req_state.output_token_ids) >= num_rejected
-                del req_state.output_token_ids[-num_rejected:]
+            prev_draft_len = req_state.prev_num_draft_len
+            req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
+            req_state.pending_prev_num_draft_len = 0
 
-                req_index = self.input_batch.req_id_to_index.get(req_id)
-                self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
+            num_accepted = valid_sampled_token_count[prev_index] - 1
+            assert num_accepted >= 0 and num_accepted <= prev_draft_len, (
+                f"Invalid num_accepted={num_accepted}, prev_draft_len={prev_draft_len}"
+            )
+            num_rejected = prev_draft_len - num_accepted
+            if num_rejected == 0:
+                continue
+            req_state.num_computed_tokens -= num_rejected
+
+            assert len(req_state.output_token_ids) >= num_rejected, (
+                f"output_token_ids length {len(req_state.output_token_ids)} < "
+                f"num_rejected {num_rejected}"
+            )
+            del req_state.output_token_ids[-num_rejected:]
+
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            assert req_index is not None, f"req_id={req_id} not found in req_id_to_index"
+            self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1372,34 +1386,35 @@ class GPUModelRunner(
 
         req_indices_to_correct = []
         prev_req_indices = []
+        prev_num_draft_lens = []
         tracked_req_ids = self.async_spec_reqs_to_fix
         for i, req_id in enumerate(self.input_batch.req_ids):
             if req_id not in tracked_req_ids:
                 continue
             prev_index = prev_req_id_to_index.get(req_id)
-            if prev_index is None:
-                continue
+            assert prev_index is not None
             req_indices_to_correct.append(i)
             prev_req_indices.append(prev_index)
+            prev_num_draft_lens.append(self.requests[req_id].prev_num_draft_len)
 
         if not req_indices_to_correct:
             return
 
         req_indices_tensor = torch.tensor(
-            req_indices_to_correct, dtype=torch.int64, device=self.device
-        )
+            req_indices_to_correct, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
         prev_req_indices_tensor = torch.tensor(
-            prev_req_indices, dtype=torch.int64, device=self.device
-        )
+            prev_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
 
-        actual_start_pos = pre_valid_sampled_token_count[prev_req_indices_tensor]
-        optimistic_start_pos = torch.tensor(
-            self.input_batch.num_computed_tokens_cpu[req_indices_to_correct],
-            dtype=torch.int64,
-            device=self.device,
-        )
+        # Compute the diff between optimistic and actual valid tokens cnt.
+        prev_num_draft_len_tensor = torch.tensor(
+            prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
 
-        diff = optimistic_start_pos - actual_start_pos
+        diff = prev_num_draft_len_tensor + 1 - pre_valid_sampled_token_count[
+            prev_req_indices_tensor
+        ].to(torch.int64)
         self.seq_lens.gpu[req_indices_tensor] -= diff.int()
 
         num_reqs = self.input_batch.num_reqs
@@ -1576,11 +1591,6 @@ class GPUModelRunner(
             cu_num_tokens,
         )
 
-        self._maybe_adjust_inputs_on_gpu(
-            scheduler_output,
-            num_scheduled_tokens,
-        )
-
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -1596,6 +1606,11 @@ class GPUModelRunner(
         else:
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        self._maybe_adjust_inputs_on_gpu(
+            scheduler_output,
+            num_scheduled_tokens,
+        )
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
