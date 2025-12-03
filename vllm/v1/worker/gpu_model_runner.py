@@ -2806,7 +2806,7 @@ class GPUModelRunner(
             )
 
             should_ubatch, num_tokens_across_dp = coordinate_batch_across_dp(
-                num_tokens_unpadded=num_tokens_padded,
+                num_tokens_unpadded=num_tokens,
                 parallel_config=self.parallel_config,
                 allow_microbatching=allow_microbatching,
                 allow_dp_padding=allow_dp_padding,
