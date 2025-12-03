@@ -851,6 +851,8 @@ class Scheduler(SchedulerInterface):
             session.mm_features.extend(request.mm_features)
 
         session._all_token_ids.extend(request.prompt_token_ids or [])
+        if session.prompt_token_ids is None:
+            session.prompt_token_ids = []
         session.prompt_token_ids.extend(request.prompt_token_ids or [])
         session.prompt_embeds = request.prompt_embeds
         session.max_tokens = session.num_output_tokens + request.max_tokens
