@@ -10,7 +10,7 @@ import yaml
 from transformers import AutoTokenizer
 from pydantic import ValidationError
 
-from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from ..utils import flat_product

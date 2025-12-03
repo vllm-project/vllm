@@ -326,7 +326,7 @@ def async_tp_pass_on_test_model(
     vllm_config = VllmConfig()
     vllm_config.compilation_config = CompilationConfig(
         pass_config=PassConfig(
-            enable_async_tp=True,
+            fuse_gemm_comms=True,
         ),
     )
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
@@ -413,7 +413,7 @@ def test_async_tp_pass_correctness(
         "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
-        "pass_config": {"enable_async_tp": async_tp_enabled},
+        "pass_config": {"fuse_gemm_comms": async_tp_enabled},
     }
 
     async_tp_args = [

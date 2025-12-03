@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.protocol import (
@@ -43,7 +43,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:

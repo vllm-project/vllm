@@ -14,27 +14,21 @@ import socket
 import tempfile
 import uuid
 from argparse import Namespace
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
-import prometheus_client
 import pydantic
-import regex as re
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
-from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
-from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
-from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -54,56 +48,41 @@ from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ClassificationRequest,
-    ClassificationResponse,
     CompletionRequest,
     CompletionResponse,
-    DetokenizeRequest,
-    DetokenizeResponse,
-    EmbeddingBytesResponse,
-    EmbeddingRequest,
-    EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
-    GenerateRequest,
-    GenerateResponse,
-    IOProcessorResponse,
-    PoolingBytesResponse,
-    PoolingRequest,
-    PoolingResponse,
-    RerankRequest,
-    RerankResponse,
     ResponsesRequest,
     ResponsesResponse,
-    ScoreRequest,
-    ScoreResponse,
     StreamingResponsesResponse,
-    TokenizeRequest,
-    TokenizeResponse,
     TranscriptionRequest,
-    TranscriptionResponse,
+    TranscriptionResponseVariant,
     TranslationRequest,
-    TranslationResponse,
+    TranslationResponseVariant,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
     OpenAIServingModels,
 )
-from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
-from vllm.entrypoints.openai.serving_score import ServingScores
-from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
-from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+from vllm.entrypoints.pooling.score.serving import ServingScores
+from vllm.entrypoints.serve.disagg.serving import ServingTokens
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    ScalingMiddleware,
+)
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -121,8 +100,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
-from vllm.v1.engine.exceptions import EngineDeadError
-from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -254,49 +231,7 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown()
 
 
-async def validate_json_request(raw_request: Request):
-    content_type = raw_request.headers.get("content-type", "").lower()
-    media_type = content_type.split(";", maxsplit=1)[0]
-    if media_type != "application/json":
-        raise RequestValidationError(
-            errors=["Unsupported Media Type: Only 'application/json' is allowed"]
-        )
-
-
 router = APIRouter()
-
-
-class PrometheusResponse(Response):
-    media_type = prometheus_client.CONTENT_TYPE_LATEST
-
-
-def mount_metrics(app: FastAPI):
-    """Mount prometheus metrics to a FastAPI app."""
-
-    registry = get_prometheus_registry()
-
-    # `response_class=PrometheusResponse` is needed to return an HTTP response
-    # with header "Content-Type: text/plain; version=0.0.4; charset=utf-8"
-    # instead of the default "application/json" which is incorrect.
-    # See https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/163#issue-1296092364
-    Instrumentator(
-        excluded_handlers=[
-            "/metrics",
-            "/health",
-            "/load",
-            "/ping",
-            "/version",
-            "/server_info",
-        ],
-        registry=registry,
-    ).add().instrument(app).expose(app, response_class=PrometheusResponse)
-
-    # Add prometheus asgi middleware to route /metrics requests
-    metrics_route = Mount("/metrics", make_asgi_app(registry=registry))
-
-    # Workaround for 307 Redirect for /metrics
-    metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
-    app.routes.append(metrics_route)
 
 
 def base(request: Request) -> OpenAIServing:
@@ -324,26 +259,6 @@ def completion(request: Request) -> OpenAIServingCompletion | None:
     return request.app.state.openai_serving_completion
 
 
-def pooling(request: Request) -> OpenAIServingPooling | None:
-    return request.app.state.openai_serving_pooling
-
-
-def embedding(request: Request) -> OpenAIServingEmbedding | None:
-    return request.app.state.openai_serving_embedding
-
-
-def score(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
-
-
-def classify(request: Request) -> ServingClassification | None:
-    return request.app.state.openai_serving_classification
-
-
-def rerank(request: Request) -> ServingScores | None:
-    return request.app.state.openai_serving_scores
-
-
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -364,16 +279,6 @@ def generate_tokens(request: Request) -> ServingTokens | None:
     return request.app.state.serving_tokens
 
 
-@router.get("/health", response_class=Response)
-async def health(raw_request: Request) -> Response:
-    """Health check."""
-    try:
-        await engine_client(raw_request).check_health()
-        return Response(status_code=200)
-    except EngineDeadError:
-        return Response(status_code=503)
-
-
 @router.get("/load")
 async def get_server_load_metrics(request: Request):
     # This endpoint returns the current server load metrics.
@@ -391,167 +296,6 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
-
-
-@router.post("/pause")
-async def pause_generation(
-    raw_request: Request,
-    wait_for_inflight_requests: bool = Query(False),
-    clear_cache: bool = Query(True),
-) -> JSONResponse:
-    """Pause generation requests to allow weight updates.
-
-    Args:
-        wait_for_inflight_requests: When ``True`` waits for in-flight
-            requests to finish before pausing. When ``False`` (default),
-            aborts any in-flight requests immediately.
-        clear_cache: Whether to clear KV/prefix caches after draining.
-    """
-
-    engine = engine_client(raw_request)
-
-    try:
-        await engine.pause_generation(
-            wait_for_inflight_requests=wait_for_inflight_requests,
-            clear_cache=clear_cache,
-        )
-        return JSONResponse(
-            content={"status": "paused"},
-            status_code=HTTPStatus.OK.value,
-        )
-
-    except ValueError as err:
-        return JSONResponse(
-            content={"error": str(err)},
-            status_code=HTTPStatus.BAD_REQUEST.value,
-        )
-    except Exception as err:  # pragma: no cover - defensive
-        logger.exception("Failed to pause generation")
-        return JSONResponse(
-            content={"error": f"Failed to pause generation: {err}"},
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-        )
-
-
-@router.post("/resume")
-async def resume_generation(raw_request: Request) -> JSONResponse:
-    """Resume generation after a pause."""
-
-    engine = engine_client(raw_request)
-
-    try:
-        await engine.resume_generation()
-        return JSONResponse(
-            content={"status": "resumed"},
-            status_code=HTTPStatus.OK.value,
-        )
-    except Exception as err:  # pragma: no cover - defensive
-        logger.exception("Failed to resume generation")
-        return JSONResponse(
-            content={"error": f"Failed to resume generation: {err}"},
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-        )
-
-
-@router.get("/is_paused")
-async def is_paused(raw_request: Request) -> JSONResponse:
-    """Return the current pause status."""
-
-    engine = engine_client(raw_request)
-
-    try:
-        paused = await engine.is_paused()
-    except Exception as err:  # pragma: no cover - defensive
-        logger.exception("Failed to fetch pause status")
-        return JSONResponse(
-            content={"error": f"Failed to fetch pause status: {err}"},
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-        )
-
-    return JSONResponse(content={"is_paused": paused})
-
-
-@router.post(
-    "/tokenize",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def tokenize(request: TokenizeRequest, raw_request: Request):
-    handler = tokenization(raw_request)
-
-    try:
-        generator = await handler.create_tokenize(request, raw_request)
-    except NotImplementedError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_IMPLEMENTED.value, detail=str(e)
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, TokenizeResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/detokenize",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def detokenize(request: DetokenizeRequest, raw_request: Request):
-    handler = tokenization(raw_request)
-
-    try:
-        generator = await handler.create_detokenize(request, raw_request)
-    except OverflowError as e:
-        raise RequestValidationError(errors=[str(e)]) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, DetokenizeResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-def maybe_register_tokenizer_info_endpoint(args):
-    """Conditionally register the tokenizer info endpoint if enabled."""
-    if getattr(args, "enable_tokenizer_info_endpoint", False):
-
-        @router.get("/tokenizer_info")
-        async def get_tokenizer_info(raw_request: Request):
-            """Get comprehensive tokenizer information."""
-            result = await tokenization(raw_request).get_tokenizer_info()
-            return JSONResponse(
-                content=result.model_dump(),
-                status_code=result.error.code
-                if isinstance(result, ErrorResponse)
-                else 200,
-            )
 
 
 @router.get("/v1/models")
@@ -818,166 +562,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 
 @router.post(
-    "/v1/embeddings",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_embedding(
-    request: EmbeddingRequest,
-    raw_request: Request,
-):
-    handler = embedding(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Embeddings API"
-        )
-
-    try:
-        generator = await handler.create_embedding(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, EmbeddingResponse):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, EmbeddingBytesResponse):
-        return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
-
-
-@router.post(
-    "/pooling",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_pooling(request: PoolingRequest, raw_request: Request):
-    handler = pooling(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Pooling API"
-        )
-    try:
-        generator = await handler.create_pooling(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, PoolingBytesResponse):
-        return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
-            media_type=generator.media_type,
-        )
-
-    assert_never(generator)
-
-
-@router.post("/classify", dependencies=[Depends(validate_json_request)])
-@with_cancellation
-@load_aware_call
-async def create_classify(request: ClassificationRequest, raw_request: Request):
-    handler = classify(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Classification API"
-        )
-
-    try:
-        generator = await handler.create_classify(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, ClassificationResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_score(request: ScoreRequest, raw_request: Request):
-    handler = score(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Score API"
-        )
-
-    try:
-        generator = await handler.create_score(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, ScoreResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/v1/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_score_v1(request: ScoreRequest, raw_request: Request):
-    logger.warning(
-        "To indicate that Score API is not part of standard OpenAI API, we "
-        "have moved it to `/score`. Please update your client accordingly."
-    )
-
-    return await create_score(request, raw_request)
-
-
-@router.post(
     "/v1/audio/transcriptions",
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
@@ -1010,7 +594,7 @@ async def create_transcriptions(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranscriptionResponse):
+    elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -1049,74 +633,10 @@ async def create_translations(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranslationResponse):
+    elif isinstance(generator, TranslationResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-@router.post(
-    "/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def do_rerank(request: RerankRequest, raw_request: Request):
-    handler = rerank(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support Rerank (Score) API"
-        )
-    try:
-        generator = await handler.do_rerank(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-    elif isinstance(generator, RerankResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-@router.post(
-    "/v1/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def do_rerank_v1(request: RerankRequest, raw_request: Request):
-    logger.warning_once(
-        "To indicate that the rerank API is not part of the standard OpenAI"
-        " API, we have located it at `/rerank`. Please update your client "
-        "accordingly. (Note: Conforms to JinaAI rerank API)"
-    )
-
-    return await do_rerank(request, raw_request)
-
-
-@router.post(
-    "/v2/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-async def do_rerank_v2(request: RerankRequest, raw_request: Request):
-    return await do_rerank(request, raw_request)
 
 
 if envs.VLLM_SERVER_DEV_MODE:
@@ -1142,13 +662,15 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
-    async def reset_prefix_cache(raw_request: Request):
+    async def reset_prefix_cache(
+        raw_request: Request, reset_running_requests: bool = Query(default=False)
+    ):
         """
         Reset the prefix cache. Note that we currently do not check if the
         prefix cache is successfully reset in the API server.
         """
         logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache()
+        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")
@@ -1160,33 +682,6 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("Resetting multi-modal cache...")
         await engine_client(raw_request).reset_mm_cache()
         return Response(status_code=200)
-
-    @router.post("/sleep")
-    async def sleep(raw_request: Request):
-        # get POST params
-        level = raw_request.query_params.get("level", "1")
-        await engine_client(raw_request).sleep(int(level))
-        # FIXME: in v0 with frontend multiprocessing, the sleep command
-        # is sent but does not finish yet when we return a response.
-        return Response(status_code=200)
-
-    @router.post("/wake_up")
-    async def wake_up(raw_request: Request):
-        tags = raw_request.query_params.getlist("tags")
-        if tags == []:
-            # set to None to wake up all tags if no tags are provided
-            tags = None
-        logger.info("wake up the engine with tags: %s", tags)
-        await engine_client(raw_request).wake_up(tags)
-        # FIXME: in v0 with frontend multiprocessing, the wake-up command
-        # is sent but does not finish yet when we return a response.
-        return Response(status_code=200)
-
-    @router.get("/is_sleeping")
-    async def is_sleeping(raw_request: Request):
-        logger.info("check whether the engine is sleeping")
-        is_sleeping = await engine_client(raw_request).is_sleeping()
-        return JSONResponse(content={"is_sleeping": is_sleeping})
 
     @router.post("/collective_rpc")
     async def collective_rpc(raw_request: Request):
@@ -1215,160 +710,11 @@ if envs.VLLM_SERVER_DEV_MODE:
             return Response(status_code=200)
         response: list[Any] = []
         for result in results:
-            if result is None or isinstance(result, (dict, list)):
+            if result is None or isinstance(result, dict | list):
                 response.append(result)
             else:
                 response.append(str(result))
         return JSONResponse(content={"results": response})
-
-
-@router.post(
-    "/scale_elastic_ep",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"model": dict},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.REQUEST_TIMEOUT.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-async def scale_elastic_ep(raw_request: Request):
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
-
-    new_data_parallel_size = body.get("new_data_parallel_size")
-    drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes
-
-    if new_data_parallel_size is None:
-        raise HTTPException(
-            status_code=400, detail="new_data_parallel_size is required"
-        )
-
-    if not isinstance(new_data_parallel_size, int) or new_data_parallel_size <= 0:
-        raise HTTPException(
-            status_code=400, detail="new_data_parallel_size must be a positive integer"
-        )
-
-    if not isinstance(drain_timeout, int) or drain_timeout <= 0:
-        raise HTTPException(
-            status_code=400, detail="drain_timeout must be a positive integer"
-        )
-
-    # Set scaling flag to prevent new requests
-    global _scaling_elastic_ep
-    _scaling_elastic_ep = True
-    client = engine_client(raw_request)
-    try:
-        await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
-        return JSONResponse(
-            {
-                "message": f"Scaled to {new_data_parallel_size} data parallel engines",
-            }
-        )
-    except TimeoutError as e:
-        raise HTTPException(
-            status_code=408,
-            detail="Scale failed due to request drain timeout "
-            f"after {drain_timeout} seconds",
-        ) from e
-    except Exception as e:
-        logger.error("Scale failed: %s", e)
-        raise HTTPException(status_code=500, detail="Scale failed") from e
-    finally:
-        _scaling_elastic_ep = False
-
-
-@router.post("/is_scaling_elastic_ep")
-async def is_scaling_elastic_ep(raw_request: Request):
-    return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
-
-
-# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
-# (requires typing_extensions >= 4.13)
-RequestType = Any
-GetHandlerFn = Callable[[Request], OpenAIServing | None]
-EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
-
-# NOTE: Items defined earlier take higher priority
-INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
-    (ChatCompletionRequest, (chat, create_chat_completion)),
-    (CompletionRequest, (completion, create_completion)),
-    (EmbeddingRequest, (embedding, create_embedding)),
-    (ClassificationRequest, (classify, create_classify)),
-    (ScoreRequest, (score, create_score)),
-    (RerankRequest, (rerank, do_rerank)),
-    (PoolingRequest, (pooling, create_pooling)),
-]
-
-# NOTE: Construct the TypeAdapters only once
-INVOCATION_VALIDATORS = [
-    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
-    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
-]
-
-
-@router.post(
-    "/inference/v1/generate",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def generate(request: GenerateRequest, raw_request: Request):
-    handler = generate_tokens(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support generate tokens API"
-        )
-    try:
-        generator = await handler.serve_tokens(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
-        )
-
-    elif isinstance(generator, GenerateResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
-if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning_once(
-        "Torch Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!"
-    )
-elif envs.VLLM_TORCH_CUDA_PROFILE:
-    logger.warning_once(
-        "CUDA Profiler is enabled in the API server. This should ONLY be "
-        "used for local development!"
-    )
-if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
-
-    @router.post("/start_profile")
-    async def start_profile(raw_request: Request):
-        logger.info("Starting profiler...")
-        await engine_client(raw_request).start_profile()
-        logger.info("Profiler started.")
-        return Response(status_code=200)
-
-    @router.post("/stop_profile")
-    async def stop_profile(raw_request: Request):
-        logger.info("Stopping profiler...")
-        await engine_client(raw_request).stop_profile()
-        logger.info("Profiler stopped.")
-        return Response(status_code=200)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -1461,41 +807,6 @@ class XRequestIdMiddleware:
             await send(message)
 
         return self.app(scope, receive, send_with_request_id)
-
-
-# Global variable to track scaling state
-_scaling_elastic_ep = False
-
-
-class ScalingMiddleware:
-    """
-    Middleware that checks if the model is currently scaling and
-    returns a 503 Service Unavailable response if it is.
-
-    This middleware applies to all HTTP requests and prevents
-    processing when the model is in a scaling state.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
-        if scope["type"] != "http":
-            return self.app(scope, receive, send)
-
-        # Check global scaling state
-        global _scaling_elastic_ep
-        if _scaling_elastic_ep:
-            # Return 503 Service Unavailable response
-            response = JSONResponse(
-                content={
-                    "error": "The model is currently scaling. Please try again later."
-                },
-                status_code=503,
-            )
-            return response(scope, receive, send)
-
-        return self.app(scope, receive, send)
 
 
 def _extract_content_from_chunk(chunk_data: dict) -> str:
@@ -1640,24 +951,21 @@ def build_app(args: Namespace) -> FastAPI:
         )
     else:
         app = FastAPI(lifespan=lifespan)
+    app.state.args = args
+    from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
-    if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-        logger.warning(
-            "LoRA dynamic loading & unloading is enabled in the API server. "
-            "This should ONLY be used for local development!"
-        )
-        from vllm.entrypoints.dynamic_lora import register_dynamic_lora_routes
-
-        register_dynamic_lora_routes(router)
+    register_vllm_serve_api_routers(app)
 
     from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
     register_sagemaker_routes(router)
-
     app.include_router(router)
+
     app.root_path = args.root_path
 
-    mount_metrics(app)
+    from vllm.entrypoints.pooling import register_pooling_api_routers
+
+    register_pooling_api_routers(app)
 
     app.add_middleware(
         CORSMiddleware,
@@ -1745,31 +1053,6 @@ def build_app(args: Namespace) -> FastAPI:
             )
 
     app = sagemaker_standards.bootstrap(app)
-    # Optional endpoints
-    if args.tokens_only:
-
-        @app.post("/abort_requests")
-        async def abort_requests(raw_request: Request):
-            """
-            Abort one or more requests. To be used in a
-            Disaggregated Everything setup.
-            """
-            try:
-                body = await raw_request.json()
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail=f"JSON decode error: {e}",
-                ) from e
-            request_ids = body.get("request_ids")
-            if request_ids is None:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Missing 'request_ids' in request body",
-                )
-            # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
-            return Response(status_code=200)
 
     return app
 
@@ -1798,7 +1081,7 @@ async def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
-
+    state.args = args
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
@@ -2122,7 +1405,6 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
-        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         await init_app_state(engine_client, app.state, args)

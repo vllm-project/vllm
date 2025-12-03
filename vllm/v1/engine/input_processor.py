@@ -19,8 +19,7 @@ from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -40,7 +39,7 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -62,11 +61,11 @@ class InputProcessor:
         )
 
     @property
-    def tokenizer(self) -> AnyTokenizer | None:
+    def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
 
     @tokenizer.setter
-    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
+    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
         self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(

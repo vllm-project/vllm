@@ -141,6 +141,16 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        # If the KV cache has just been woken up,
+        # the internal state of cache_engine must be reset,
+        # especially the FP8 scaling factor.
+        if (
+            (tags is None or "kv_cache" in tags)
+            and self.cache_config.cache_dtype.startswith("fp8")
+            and hasattr(self.model_runner, "init_fp8_kv_scales")
+        ):
+            self.model_runner.init_fp8_kv_scales()
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator
@@ -542,7 +552,7 @@ class Worker(WorkerBase):
 
         if (
             parallel_config.pipeline_parallel_size > 1
-            and compilation_config.pass_config.enable_sequence_parallelism
+            and compilation_config.pass_config.enable_sp
             and forward_pass
         ):
             # currently only supported by V1 GPUModelRunner
@@ -554,7 +564,7 @@ class Worker(WorkerBase):
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
             # in `execute_model`) but this requires a larger refactor of PP.
-            _, batch_desc, _, _ = (
+            _, batch_desc, _, _, _ = (
                 self.model_runner._determine_batch_execution_and_padding(
                     num_tokens=num_scheduled_tokens,
                     num_reqs=len(num_scheduled_tokens_np),

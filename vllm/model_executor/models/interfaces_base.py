@@ -76,6 +76,7 @@ def _check_vllm_model_embed_input_ids(model: type[object] | object) -> bool:
                 "this method to `embed_input_ids`."
             )
             model.embed_input_ids = model_get_input_embeddings
+            return True
         logger.warning(
             "The model (%s) is missing the `embed_input_ids` method.",
             model,

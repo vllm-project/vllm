@@ -40,6 +40,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
+    get_marlin_input_dtype,
+    marlin_act_int8_process_scales,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_moe_permute_scales,
@@ -69,7 +71,6 @@ class AWQMarlinConfig(QuantizationConfig):
     # num_bits -> type
     TYPE_MAP = {
         4: scalar_types.uint4,
-        8: scalar_types.uint8,
     }
 
     def __init__(
@@ -193,7 +194,9 @@ class AWQMarlinConfig(QuantizationConfig):
                 return AWQConfig.from_config(self.full_config).get_quant_method(
                     layer, prefix
                 )
-            return AWQMarlinLinearMethod(self)
+            quant_method = AWQMarlinLinearMethod(self)
+            quant_method.input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
@@ -211,7 +214,9 @@ class AWQMarlinConfig(QuantizationConfig):
                 return MoeWNA16Config.from_config(self.full_config).get_quant_method(
                     layer, prefix
                 )
-            return AWQMoEMethod(self, layer.moe_config)
+            moe_quant_method = AWQMarlinMoEMethod(self, layer.moe_config)
+            moe_quant_method.input_dtype = get_marlin_input_dtype(prefix)
+            return moe_quant_method
         return None
 
     @classmethod
@@ -270,6 +275,8 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AWQMarlinConfig) -> None:
         self.quant_config = quant_config
+        self.quant_type = scalar_types.uint4
+        self.input_dtype = None
 
     def create_weights(
         self,
@@ -312,6 +319,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         )
 
         num_groups = input_size_per_partition // group_size
+        layer.num_groups = num_groups
 
         qzeros = PackedvLLMParameter(
             data=torch.empty(
@@ -358,12 +366,19 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         # Allocate marlin workspace
         layer.workspace = marlin_make_workspace_new(device)
 
+        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
+
+        if self.input_dtype == torch.float8_e4m3fn:
+            ops.marlin_int4_fp8_preprocess(layer.qweight, layer.qzeros, inplace=True)
+            layer.scales.data = layer.scales.data * 512
+
         # Repack weights from AWQ format to marlin format.
         marlin_qweight = ops.awq_marlin_repack(
             layer.qweight,
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
             num_bits=self.quant_config.quant_type.size_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "qweight", marlin_qweight)
 
@@ -373,7 +388,16 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             size_k=layer.input_size_per_partition,
             size_n=layer.output_size_per_partition,
             group_size=self.quant_config.group_size,
+            is_a_8bit=is_a_8bit,
         )
+        if self.input_dtype == torch.int8 and layer.num_groups > 1:
+            marlin_scales, input_global_scale = marlin_act_int8_process_scales(
+                marlin_scales
+            )
+            layer.register_parameter(
+                "input_global_scale", Parameter(input_global_scale, requires_grad=False)
+            )
+
         replace_parameter(layer, "scales", marlin_scales)
 
         # Permute zero-points from AWQ format to marlin format.
@@ -382,6 +406,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             size_k=layer.num_groups,
             size_n=layer.output_size_per_partition,
             num_bits=self.quant_config.quant_type.size_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "qzeros", marlin_zp)
 
@@ -409,11 +434,13 @@ class AWQMarlinLinearMethod(LinearMethodBase):
             quant_type=self.quant_config.quant_type,
             output_size_per_partition=layer.output_size_per_partition,
             input_size_per_partition=layer.input_size_per_partition,
+            input_global_scale=getattr(layer, "input_global_scale", None),
             bias=bias,
+            input_dtype=self.input_dtype,
         )
 
 
-class AWQMoEMethod(FusedMoEMethodBase):
+class AWQMarlinMoEMethod(FusedMoEMethodBase):
     def __init__(
         self,
         quant_config: AWQMarlinConfig,
@@ -422,8 +449,9 @@ class AWQMoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
-            raise ValueError("AWQMoEMethod only supports 4bit now.")
+            raise ValueError("AWQMarlinMoEMethod only supports 4bit now.")
         self.quant_type = scalar_types.uint4
+        self.input_dtype = None
         self.use_marlin = True
 
     def create_weights(
@@ -435,6 +463,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        layer.input_dtype = self.input_dtype
         extra_weight_attrs.update(
             {
                 "is_transposed": True,
@@ -468,6 +497,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
         num_groups_w13 = hidden_size // self.quant_config.group_size
         num_groups_w2 = intermediate_size_per_partition // self.quant_config.group_size
+        layer.num_groups_w13 = num_groups_w13
+        layer.num_groups_w2 = num_groups_w2
 
         # WEIGHT_SCALES
         # Allocate 2 scales for w1 and w3 respectively.
@@ -522,6 +553,21 @@ class AWQMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_qweight.shape[0]
         device = layer.w13_qweight.device
+        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
+
+        if self.input_dtype == torch.float8_e4m3fn:
+            ops.marlin_int4_fp8_preprocess(
+                layer.w13_qweight.view(-1, layer.w13_qweight.size(2)),
+                layer.w13_qzeros.view(-1, layer.w13_qzeros.size(2)),
+                inplace=True,
+            )
+            ops.marlin_int4_fp8_preprocess(
+                layer.w2_qweight.view(-1, layer.w2_qweight.size(2)),
+                layer.w2_qzeros.view(-1, layer.w2_qzeros.size(2)),
+                inplace=True,
+            )
+            layer.w13_scales.data = layer.w13_scales.data * 512
+            layer.w2_scales.data = layer.w2_scales.data * 512
 
         layer.w13_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
@@ -538,6 +584,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.w13_qweight.shape[1],
             size_n=layer.w13_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
 
@@ -547,6 +594,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.w2_qweight.shape[1],
             size_n=layer.w2_qweight.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
 
@@ -556,7 +604,16 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
+            is_a_8bit=is_a_8bit,
         )
+        if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
+            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w13_scales
+            )
+            layer.register_parameter(
+                "w13_input_global_scale",
+                Parameter(w13_input_global_scale, requires_grad=False),
+            )
 
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
 
@@ -565,7 +622,17 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
+            is_a_8bit=is_a_8bit,
         )
+        if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
+            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w2_scales
+            )
+            layer.register_parameter(
+                "w2_input_global_scale",
+                Parameter(w2_input_global_scale, requires_grad=False),
+            )
+
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
         marlin_w13_zp = moe_awq_to_marlin_zero_points(
@@ -573,6 +640,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.w13_qzeros.shape[1],
             size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w13_qzeros", marlin_w13_zp)
 
@@ -581,6 +649,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             size_k=layer.w2_qzeros.shape[1],
             size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
             num_bits=self.quant_config.weight_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
 
@@ -636,6 +705,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
             router_logits,
             topk_weights,
             topk_ids,
+            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
+            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -643,4 +714,5 @@ class AWQMoEMethod(FusedMoEMethodBase):
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,
             workspace=layer.workspace,
+            input_dtype=self.input_dtype,
         )

@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import PoolingResponse, RerankResponse
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
+from vllm.entrypoints.pooling.score.protocol import RerankResponse
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():

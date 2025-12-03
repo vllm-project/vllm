@@ -82,3 +82,9 @@ class EAGLEConfig(PretrainedConfig):
             pretrained_model_name_or_path, **kwargs
         )
         return cls.from_dict(config_dict, **kwargs)
+
+    def to_json_string(self, use_diff: bool = True) -> str:
+        # we override use_diff to False as initializing
+        # EAGLEConfig with default arguments is not supported
+        del use_diff
+        return super().to_json_string(use_diff=False)
