@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
-    VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_CONFIGURE_LOGGING: bool = True
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
@@ -623,7 +623,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 0, vllm will not configure logging
     # If set to 1, vllm will configure logging using the default configuration
     #    or the configuration file specified by VLLM_LOGGING_CONFIG_PATH
-    "VLLM_CONFIGURE_LOGGING": lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
+    "VLLM_CONFIGURE_LOGGING": lambda: bool(
+        int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+    ),
     "VLLM_LOGGING_CONFIG_PATH": lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL": lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
