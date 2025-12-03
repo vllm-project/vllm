@@ -5,9 +5,6 @@ vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
 !!! tip
     [Docker](#set-up-using-docker) is the recommended way to use vLLM on ROCm.
 
-!!! warning
-    There are no pre-built wheels for this device, so you must either use the pre-built Docker image or build vLLM from source.
-
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
