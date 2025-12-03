@@ -60,6 +60,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
 )
@@ -96,8 +97,9 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
-    convert_tool_responses_to_completions_format,
+    construct_tool_dicts,
     extract_tool_types,
+    make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -228,7 +230,6 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_parser = self._get_tool_parser(
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
-        self.exclude_tools_when_tool_choice_none = False
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove responses from the store.
@@ -413,7 +414,17 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is an feature in development for parsing
+                        # tokens during generation instead of at the end
+                        context = ParsableContext(
+                            response_messages=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser_cls=self.reasoning_parser,
+                            request=request,
+                        )
+                    else:
+                        context = SimpleContext()
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -534,15 +545,7 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
         tokenizer: TokenizerLike,
     ):
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [
-                convert_tool_responses_to_completions_format(tool.model_dump())
-                for tool in request.tools
-            ]
+        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -642,6 +645,22 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "cancelled"
             else:
                 status = "incomplete"
+        elif isinstance(context, ParsableContext):
+            response_messages = context.parser.response_messages[
+                context.parser.num_init_messages :
+            ]
+            output = make_response_output_items_from_parsable_context(response_messages)
+
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently only supported for gpt-oss"
+                )
+
+            # TODO: Calculate usage.
+            # assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -661,7 +680,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens

@@ -338,6 +338,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
+        mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,

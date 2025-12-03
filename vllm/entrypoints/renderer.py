@@ -33,7 +33,7 @@ class RenderConfig:
     `0` yields an empty list (and skips embeds).
     `-1` maps to `model_config.max_model_len`."""
 
-    add_special_tokens: bool | None = True
+    add_special_tokens: bool = True
     """Whether to add model-specific special tokens during tokenization."""
 
     cache_salt: str | None = None
@@ -315,7 +315,7 @@ class CompletionRenderer(BaseRenderer):
         text: str,
         max_length: int | None,
         truncate_prompt_tokens: int | None,
-        add_special_tokens: bool | None,
+        add_special_tokens: bool,
         cache_salt: str | None,
     ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""

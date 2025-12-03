@@ -28,6 +28,19 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
@@ -72,19 +85,6 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
-
-    max_model_len: InitVar[int] = 8192
-    """Maximum length of a sequence (including prompt and generated text).
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    provide fallbacks and validate other attributes."""
-
-    is_encoder_decoder: InitVar[bool] = False
-    """True if the model is an encoder-decoder model.
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
 
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
@@ -141,6 +141,17 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    @staticmethod
+    def default_factory(**kwargs):
+        """
+        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
+
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.async_scheduling:
@@ -175,9 +186,19 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
+
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        factors.append(self.max_num_batched_tokens)
+
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
