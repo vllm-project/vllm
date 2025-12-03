@@ -74,8 +74,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
-    GenerateRequest,
-    GenerateResponse,
     ResponsesRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
@@ -87,6 +85,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -106,7 +105,7 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import DeepseekV32Tokenizer, MistralTokenizer, TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -1127,6 +1126,13 @@ class OpenAIServing:
             request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
+                **_chat_template_kwargs,
+            )
+        elif isinstance(tokenizer, DeepseekV32Tokenizer):
+            request_prompt = tokenizer.apply_chat_template(
+                conversation=conversation,
+                messages=messages,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
         else:
