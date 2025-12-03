@@ -2968,6 +2968,7 @@ class GPUModelRunner(
                     num_tokens_padded,
                     num_reqs_padded,
                 )
+
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
