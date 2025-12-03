@@ -103,4 +103,4 @@ def create_ubatch_slices(
     assert sum(s.num_tokens for s in ubatch_slices_padded) == num_tokens_padded
     assert sum(s.num_reqs for s in ubatch_slices_padded) == num_reqs_padded
 
-    return (ubatch_slices, ubatch_slices_padded)
+    return ubatch_slices, ubatch_slices_padded
