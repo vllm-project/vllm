@@ -1,11 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CPU backend initially developed for the x86 platform.
-
-ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
-
-!!! warning
-    There are no pre-built wheels or images for this device, so you must build vLLM from source.
+vLLM offers basic model inferencing and serving on Arm CPU platform, with support NEON, data types FP32, FP16 and BF16.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -19,6 +14,23 @@ ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
+
+Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels contain pre-compiled C++ binaries.
+Please replace `<version>` in the commands below with a specific version string (e.g., `0.11.2`).
+
+```bash
+uv pip install --pre vllm==<version>+cpu --extra-index-url https://wheels.vllm.ai/<version>%2Bcpu/
+```
+
+??? console "pip"
+    ```bash
+    pip install --pre vllm==<version>+cpu --extra-index-url https://wheels.vllm.ai/<version>%2Bcpu/
+    ```
+
+The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
+
+!!! note
+    Nightly wheels are currently unsupported for this architecture. (e.g. to bisect the behavior change, performance regression).
 
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
@@ -68,6 +80,8 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
+
+Currently, there are no pre-built Arm CPU images.
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
