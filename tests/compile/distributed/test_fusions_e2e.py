@@ -315,6 +315,12 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     assert int(log_matches[0]) == matches.allreduce_fusion
     assert int(log_matches[1]) == matches.allreduce_fusion
 
+    log_matches = re.findall(
+        r"pass_manager.py:\d+] Skipping .*AllReduceFusionPass.* with compile range",
+        log_holder.text,
+    )
+    assert len(log_matches) == 2, log_holder.text
+
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
