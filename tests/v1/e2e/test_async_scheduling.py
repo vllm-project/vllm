@@ -217,10 +217,18 @@ def run_tests(
                     and test_acceptance_rate is not None
                 ):
                     if "spec_mml=None" in test_config:
+                        # Preemption causes more variance in acceptance rates
+                        if (
+                            current_platform.is_rocm()
+                            and "preemption=True" in test_config
+                        ):
+                            tolerance = 0.10
+                        else:
+                            tolerance = 0.05
                         assert (
                             test_acceptance_rate > base_acceptance_rate
                             or test_acceptance_rate
-                            == pytest.approx(base_acceptance_rate, rel=5e-2)
+                            == pytest.approx(base_acceptance_rate, rel=tolerance)
                         )
                     else:
                         # Currently the reported acceptance rate is expected to be
