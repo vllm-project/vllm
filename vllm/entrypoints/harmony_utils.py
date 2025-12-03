@@ -413,11 +413,13 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"fc_{random_id}",
                 )
                 output_items.append(response_item)
-        elif recipient is not None and (
-            recipient.startswith("python")
-            or recipient.startswith("browser")
-            or recipient.startswith("container")
+        elif (
+            recipient is None  # Preambles: explanatory text before tool calls
+            or recipient.startswith(("python", "browser", "container"))
         ):
+            # Per Harmony format, commentary channel can contain preambles to calling
+            # multiple functions - explanatory text with no recipient. Built-in tool
+            # recipients (python/browser/container) also generate reasoning output.
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",
