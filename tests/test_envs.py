@@ -407,33 +407,6 @@ class TestVllmConfigureLogging:
             assert result is True
             assert isinstance(result, bool)
 
-    def test_configure_logging_returns_bool_not_int(self):
-        """Test that VLLM_CONFIGURE_LOGGING returns bool, not int."""
-        test_cases = [
-            ("0", False),
-            ("1", True),
-        ]
-
-        for env_value, expected in test_cases:
-            with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": env_value}):
-                # Clear cache if it exists
-                if hasattr(envs.__getattr__, "cache_clear"):
-                    envs.__getattr__.cache_clear()
-
-                result = envs.VLLM_CONFIGURE_LOGGING
-
-                # Should be a bool, not an int
-                assert isinstance(result, bool), (
-                    f"Expected bool for VLLM_CONFIGURE_LOGGING={env_value!r}, "
-                    f"got {type(result).__name__}"
-                )
-
-                # Should have the correct value
-                assert result == expected, (
-                    f"Expected {expected} for VLLM_CONFIGURE_LOGGING={env_value!r}, "
-                    f"got {result}"
-                )
-
     def test_configure_logging_with_invalid_value_raises_error(self):
         """Test that invalid VLLM_CONFIGURE_LOGGING value raises ValueError."""
         with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "invalid"}):
