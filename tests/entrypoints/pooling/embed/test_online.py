@@ -15,12 +15,10 @@ import torch.nn.functional as F
 from tests.models.language.pooling.embed_utils import run_embedding_correctness_test
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import (
-    EmbeddingResponse,
-    PoolingResponse,
-)
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
@@ -199,7 +197,7 @@ async def test_conversation_embedding(
     chat_response.raise_for_status()
     chat_embeddings = EmbeddingResponse.model_validate(chat_response.json())
 
-    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=model_name)
     prompt = tokenizer.apply_chat_template(
         messages,
         chat_template=DUMMY_CHAT_TEMPLATE,

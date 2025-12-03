@@ -59,6 +59,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -459,14 +460,17 @@ class HfRunner:
             embeddings.append(embedding)
         return embeddings
 
-    def classify(self, prompts: list[str]) -> list[str]:
+    def classify(self, prompts: list[str]) -> list[list[float]]:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
-        outputs = []
+        outputs: list[list[float]] = []
         problem_type = getattr(self.config, "problem_type", "")
 
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
+
+            assert isinstance(output.logits, torch.Tensor)
+
             if problem_type == "regression":
                 logits = output.logits[0].tolist()
             elif problem_type == "multi_label_classification":
@@ -1171,6 +1175,7 @@ def caplog_mp_spawn(tmp_path, monkeypatch):
             "level": level,
             "filename": log_path.as_posix(),
         }
+        config["loggers"]["vllm"]["level"] = level
 
         config_path.write_text(json.dumps(config))
 
@@ -1385,7 +1390,11 @@ class LocalAssetServer:
         return f"{self.base_url}/{name}"
 
     def get_image_asset(self, name: str) -> Image.Image:
-        return fetch_image(self.url_for(name))
+        image = fetch_image(self.url_for(name))
+        # Unwrap MediaWithBytes if present
+        if isinstance(image, MediaWithBytes):
+            image = image.media
+        return image
 
 
 @pytest.fixture(scope="session")

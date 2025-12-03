@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
 from contextlib import nullcontext
 from unittest.mock import patch
 
@@ -10,8 +11,9 @@ from pydantic import ValidationError
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.compilation import CompilationMode
+from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.logger import _print_warning_once
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
@@ -191,7 +193,7 @@ def test_splitting_ops_dynamic():
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -206,7 +208,7 @@ def test_splitting_ops_dynamic():
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
+                pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
                 # work around for accessing all attntion ops
@@ -219,7 +221,7 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
@@ -227,7 +229,7 @@ def test_splitting_ops_dynamic():
     # With inductor graph partition, attn_fusion and splitting_ops
     # work together. Default splitting_ops include attention ops.
     assert config.compilation_config.splitting_ops_contain_attention()
-    # enable_attn_fusion is directly supported under
+    # fuse_attn_quant is directly supported under
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
@@ -301,7 +303,7 @@ def test_should_split():
         "cudagraph_capture_sizes",
         "max_cudagraph_capture_size",
         "tp_size",
-        "enable_sequence_parallelism",
+        "enable_sp",
         "max_num_batched_tokens",
         "cudagraph_mode",
         "expected_max_size",
@@ -339,7 +341,7 @@ def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
     max_cudagraph_capture_size,
     tp_size,
-    enable_sequence_parallelism,
+    enable_sp,
     max_num_batched_tokens,
     cudagraph_mode,
     expected_max_size,
@@ -355,11 +357,12 @@ def test_cudagraph_sizes_post_init(
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
-            pass_config={
-                "enable_sequence_parallelism": enable_sequence_parallelism,
-                "enable_fusion": True,
-                "enable_noop": True,
-            },
+            pass_config=PassConfig(
+                enable_sp=enable_sp,
+                fuse_norm_quant=True,
+                fuse_act_quant=True,
+                eliminate_noops=True,
+            ),
             cudagraph_mode=cudagraph_mode,
         )
         engine_args = EngineArgs(
@@ -375,3 +378,53 @@ def test_cudagraph_sizes_post_init(
             vllm_config.compilation_config.max_cudagraph_capture_size
             == expected_max_size
         )
+
+
+def test_pass_config_deprecation(caplog_vllm):
+    caplog_vllm.set_level(logging.WARNING)
+
+    # Clear cache to ensure warnings are re-issued
+    _print_warning_once.cache_clear()
+
+    # Test enable_fusion -> fuse_norm_quant, fuse_act_quant
+    caplog_vllm.clear()
+    config = PassConfig(enable_fusion=True)
+    assert "enable_fusion is deprecated" in caplog_vllm.text
+    assert config.fuse_norm_quant is True
+    assert config.fuse_act_quant is True
+    assert config.enable_fusion is None
+
+    # Test enable_attn_fusion -> fuse_attn_quant
+    caplog_vllm.clear()
+    config = PassConfig(enable_attn_fusion=True)
+    assert "enable_attn_fusion is deprecated" in caplog_vllm.text
+    assert config.fuse_attn_quant is True
+    assert config.enable_attn_fusion is None
+
+    # Test enable_noop -> eliminate_noops
+    caplog_vllm.clear()
+    config = PassConfig(enable_noop=True)
+    assert "enable_noop is deprecated" in caplog_vllm.text
+    assert config.eliminate_noops is True
+    assert config.enable_noop is None
+
+    # Test enable_sequence_parallelism -> enable_sp
+    caplog_vllm.clear()
+    config = PassConfig(enable_sequence_parallelism=True)
+    assert "enable_sequence_parallelism is deprecated" in caplog_vllm.text
+    assert config.enable_sp is True
+    assert config.enable_sequence_parallelism is None
+
+    # Test enable_async_tp -> fuse_gemm_comms
+    caplog_vllm.clear()
+    config = PassConfig(enable_async_tp=True)
+    assert "enable_async_tp is deprecated" in caplog_vllm.text
+    assert config.fuse_gemm_comms is True
+    assert config.enable_async_tp is None
+
+    # Test enable_fi_allreduce_fusion -> fuse_allreduce_rms
+    caplog_vllm.clear()
+    config = PassConfig(enable_fi_allreduce_fusion=True)
+    assert "enable_fi_allreduce_fusion is deprecated" in caplog_vllm.text
+    assert config.fuse_allreduce_rms is True
+    assert config.enable_fi_allreduce_fusion is None

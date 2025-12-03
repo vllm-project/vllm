@@ -615,9 +615,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
 
-    def get_tokenizer(self):
-        return self.ctx.tokenizer
-
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessorFast:
         return self.get_hf_processor(**kwargs).image_processor
 
