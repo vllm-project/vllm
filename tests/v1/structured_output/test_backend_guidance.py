@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from concurrent.futures import Future
 import time
+from concurrent.futures import Future
 
 import pytest
 from transformers import AutoTokenizer
