@@ -60,9 +60,9 @@ class ObservabilityConfig:
     dispatch modes, and their observed frequencies at every logging interval)."""
 
     enable_layerwise_nvtx_tracing: bool = False
-    """Enable layerwise NVTX tracing. This traces the execution of each layer or module in the model
-    and attach informations such as input/output shapes to nvtx range markers. Noted that this doesn't
-    work with CUDA graphs enabled."""
+    """Enable layerwise NVTX tracing. This traces the execution of each layer or
+    module in the model and attach informations such as input/output shapes to
+    nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:
