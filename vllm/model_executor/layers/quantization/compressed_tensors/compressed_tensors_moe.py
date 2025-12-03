@@ -1120,7 +1120,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             # If this MoE layer is compatible with DeepGEMM, the proper env
             # vars are set and DeepGEMM is not installed, throw an error.
             if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
-                raise RuntimeError("DeepGEMM requested but not installed.")
+                if compatible_with_deep_gemm:
+                    raise RuntimeError("DeepGEMM requested for MoE layer but not installed.")
+                else:
+                    raise RuntimeError(f"MoE layer incompatible with DeepGEMM, expected fp8==True, got {self.moe_quant_config.use_fp8_w8a8} or block_shape=={self.moe_quant_config.block_shape} != {get_mk_alignment_for_contiguous_layout()}.")
 
             if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
                 logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
