@@ -648,8 +648,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def __init__(self, kv_cache_spec: MambaSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
+        self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
             # self._req_info : dict[str, MambaManager.AllocationInfo] = {}
             self.last_state_block_idx: dict[str, int] = {}
             self._allocated_spec_block_reqs: set[str] = set()
@@ -733,7 +733,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 * self.kv_cache_spec.num_speculative_blocks
             )
         num_blocks_to_allocate = super().get_num_blocks_to_allocate(
-            request_id, num_tokens, new_computed_blocks
+            request_id, num_tokens, new_computed_blocks, 
+            num_tokens_target_model,
         )
         if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
             # (Chen): This may be possible. (block_size 4, 2 sps).
@@ -741,7 +742,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # [A, ?, ?, ?]              NULL    NULL   [?, ?, ?, B] [stoken 1, stoken 2] SBLOCK1 SBLOCK2 -> need two blocks
             # but we do it as following:
             # [A, ?, ?, ?]              NULL    NULL   NULL         [stoken 1, stoken 2] SBLOCK1 SBLOCK2 -> need 1 block
-            if request_id in self._req_info:
+            if request_id in self._allocated_spec_block_reqs:
                 # previously allocated blocks
                 num_blocks_to_allocate = min(num_blocks_to_allocate, 1)
             else:
@@ -765,47 +766,51 @@ class MambaManager(SingleTypeKVCacheManager):
         # speculative decoding (MTP/EAGLE) with linear attention.
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            if self.kv_cache_spec.num_speculative_blocks > 0:
+            if self.num_speculative_blocks > 0:
                 num_tokens += (
-                    self.kv_cache_spec.block_size
-                    * self.kv_cache_spec.num_speculative_blocks
+                    self.block_size
+                    * self.num_speculative_blocks
                 )
             return super().allocate_new_blocks(request_id, num_tokens, num_tokens_target_model)
         else:
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             num_tokens = num_tokens_target_model
-            num_required_blocks = cdiv(num_tokens, self.block_size) + self.kv_cache_spec.num_speculative_blocks
+            num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             if num_required_blocks == len(req_blocks):
                 return []
             else:
-                assert num_required_blocks < len(req_blocks), f'num_required_blocks {num_required_blocks} < len(req_blocks) {len(req_blocks)}'
+                assert num_required_blocks > len(req_blocks), f'num_required_blocks {num_required_blocks} < len(req_blocks) {len(req_blocks)}'
                 prev_block_len = len(req_blocks)
-                dbg_is_allocated = request_id in self._allocated_spec_block_reqs
-                # We always save the current running state at this position.
+                spec_blocks_allocated = request_id in self._allocated_spec_block_reqs
+                # We always save the current running state at the last (1 + num_speculative_blocks) block
                 if request_id in self._allocated_spec_block_reqs:
-                    self.last_state_block_idx[request_id] = prev_block_len - 1 - self.kv_cache_spec.num_speculative_blocks
+                    self.last_state_block_idx[request_id] = prev_block_len - 1 - self.num_speculative_blocks
                 else:
                     if prev_block_len > 0:
                         self.last_state_block_idx[request_id] = prev_block_len - 1
-
-                required_block_start_idx = num_required_blocks - self.kv_cache_spec.num_speculative_blocks - 1
-                # null blocks
-                if len(req_blocks) < required_block_start_idx:
-                    req_blocks.extend([self._null_block for _ in range(required_block_start_idx - len(req_blocks))])
-
-                # reuse previous speculative blocks in this step
-                for block_idx in range(prev_block_len - self.kv_cache_spec.num_speculative_blocks, prev_block_len):
-                    if block_idx < required_block_start_idx:
-                        req_blocks.append(req_blocks[block_idx])
-                        req_blocks[block_idx] = self._null_block
                     else:
-                        break
+                        assert request_id not in self._allocated_spec_block_reqs
+
+                num_skipped_blocks = num_required_blocks - self.num_speculative_blocks - 1  
+                # null blocks
+                if len(req_blocks) < num_skipped_blocks:
+                    req_blocks.extend([self._null_block for _ in range(num_skipped_blocks - len(req_blocks))])
+
+                if spec_blocks_allocated:
+                    # reuse previous speculative blocks in this step
+                    for block_idx in range(prev_block_len - self.num_speculative_blocks, prev_block_len):
+                        if block_idx < num_skipped_blocks:
+                            req_blocks.append(req_blocks[block_idx])
+                            req_blocks[block_idx] = self._null_block
+                            self.print(f"Mamba.alloc_blks: {request_id=}, moving block {block_idx} to the end now, req_blocks={format_blocks(req_blocks)}")
+                        else:
+                            break
                 num_new_blocks = num_required_blocks - len(req_blocks)
                 self.print(f'Mamba.alloc_blks: {request_id=}, num_new_blocks={num_new_blocks}')
-                if dbg_is_allocated:
+                if spec_blocks_allocated:
                     assert num_new_blocks <= 1
                 else:
-                    assert num_new_blocks <= self.kv_cache_spec.num_speculative_blocks + 1
+                    assert num_new_blocks <= self.num_speculative_blocks + 1
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
                 req_blocks.extend(new_blocks)
                 self._allocated_spec_block_reqs.add(request_id)

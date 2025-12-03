@@ -4,7 +4,7 @@ import time
 def main():
     MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct"
     PROMPT_MULTIPLE = 6
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=5)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=300)
     prefix = ( # examples/offline_inference/prefix_caching.py
         "Your name is QQQQ "
         "You are an expert school principal, skilled in effectively managing "
@@ -22,7 +22,8 @@ def main():
     # for APC in [False, True]:
     for APC in [True]:
         engine = LLM(model=MODEL, enable_prefix_caching=APC, enforce_eager=True, tensor_parallel_size=4,
-        # load_format="dummy"
+        block_size=288,
+        # load_format="dummy",
         speculative_config={"method": "qwen3_next_mtp", "num_speculative_tokens": 2}
         )
         for i in range(3):
