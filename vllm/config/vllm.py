@@ -1258,6 +1258,11 @@ _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None
 
 
+def has_current_vllm_config() -> bool:
+    """Return True if a current VllmConfig has been set for this process."""
+    return _current_vllm_config is not None
+
+
 @contextmanager
 def set_current_vllm_config(
     vllm_config: VllmConfig, check_compile=False, prefix: str | None = None
