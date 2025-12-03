@@ -1194,7 +1194,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
-                        close_streaming_session=request.close_streaming_session,
+                        continue_session=request.continue_session,
                     )
                 )
             else:

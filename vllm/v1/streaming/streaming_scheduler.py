@@ -13,11 +13,8 @@ from vllm.v1.request import Request, RequestStatus
 
 class StreamingScheduler(Scheduler):
     def add_request(self, request: Request) -> None:
-        assert request.close_streaming_session is not None, (
-            "close_streaming_session must be set for streaming requests"
-        )
         if request.request_id not in self.requests:
-            if request.close_streaming_session:
+            if not request.continue_session:
                 return
             self.requests[request.request_id] = request
             self.waiting.add_request(request)
@@ -41,11 +38,11 @@ class StreamingScheduler(Scheduler):
         This also guarantees correct calculation of `num_new_tokens` in `schedule`.
         """
         request = session_request.streaming_queue.popleft()
-        if request.close_streaming_session:
+        if not request.continue_session:
             session_request.status = RequestStatus.FINISHED_STOPPED
-            session_request.close_streaming_session = True
-            session_request.stop_reason = "close_streaming_session"
-            self.finished_req_ids.add(session_request.request_id)
+            session_request.continue_session = False
+            session_request.stop_reason = "finished_session"
+            self._free_request(session_request)
             return True
 
         num_new_tokens = (
@@ -135,7 +132,7 @@ class StreamingScheduler(Scheduler):
         mark_running_stopped: Callable[[Request], None],
         mark_preempted_stopped: Callable[[Request], None],
     ) -> dict[str, Any] | None:
-        assert not request.close_streaming_session, "session should already be closed"
+        assert request.continue_session
         request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
         self.waiting.add_request(request)
         kv_transfer_params = None

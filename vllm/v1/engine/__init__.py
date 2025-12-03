@@ -71,7 +71,7 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
-    close_streaming_session: bool | None = None
+    continue_session: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -136,7 +136,7 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
-    close_streaming_session: bool | None = None
+    continue_session: bool = False
 
     @property
     def finished(self) -> bool:
