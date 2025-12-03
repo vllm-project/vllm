@@ -25,6 +25,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
+from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
@@ -308,10 +309,20 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+
+        rope_theta_names = ("rope_theta", "rotary_emb_base")
+        rope_theta = getattr_iter(config, rope_theta_names, None)
+        if rope_theta is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
+
+        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
+        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
+        if partial_rotary_factor is not None:
+            if not hasattr(config, "rope_parameters"):
+                config.rope_parameters = {"rope_type": "default"}
+            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
 
     # No RoPE parameters to patch
     if getattr(config, "rope_parameters", None) is None:

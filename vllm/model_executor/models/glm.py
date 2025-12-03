@@ -10,7 +10,6 @@ from .utils import PPMissingLayer
 
 class GlmForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        vllm_config.model_config.hf_config.partial_rotary_factor = 0.5
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Hack Llama model to fit HF format GLM implementation
         # Attention difference between GLM and Llama:
