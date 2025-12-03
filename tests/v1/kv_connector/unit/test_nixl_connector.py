@@ -1140,12 +1140,22 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
 
     # Store tensor info for validation
     expected_tensor_size = shared_tensor[0].element_size() * shared_tensor[0].numel()
-    expected_base_addrs = [
-        shared_tensor[0].data_ptr(),
-        shared_tensor[1].data_ptr(),
-        unique_tensor[0].data_ptr(),
-        unique_tensor[1].data_ptr(),
-    ]
+    if attn_backend == "TRITON_ATTN":
+        expected_tensor_size *= 2
+
+    expected_base_addrs = (
+        [
+            shared_tensor[0].data_ptr(),
+            unique_tensor[0].data_ptr(),
+        ]
+        if attn_backend == "TRITON_ATTN"
+        else [
+            shared_tensor[0].data_ptr(),
+            shared_tensor[1].data_ptr(),
+            unique_tensor[0].data_ptr(),
+            unique_tensor[1].data_ptr(),
+        ]
+    )
 
     with (
         patch(
@@ -1177,7 +1187,8 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
         # Verify get_reg_descs was called with caches_data
         assert mock_wrapper_instance.get_reg_descs.called
         caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
-        assert len(caches_data) == 4
+        expected_caches_data_len = 2 if attn_backend == "TRITON_ATTN" else 4
+        assert len(caches_data) == expected_caches_data_len
 
         for i, cache_entry in enumerate(caches_data):
             base_addr, size, _tp_rank, _ = cache_entry
@@ -1199,7 +1210,11 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
 
-        expected_block_len = expected_tensor_size // 2
+        expected_block_len = (
+            expected_tensor_size // 4
+            if attn_backend == "TRITON_ATTN"
+            else expected_tensor_size // 2
+        )
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
             assert block_len == expected_block_len, (
