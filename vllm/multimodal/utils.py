@@ -490,6 +490,10 @@ def fetch_audio(
     Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
     media_connector = MediaConnector(
@@ -507,6 +511,10 @@ def fetch_image(
     Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
     media_connector = MediaConnector(
@@ -524,6 +532,10 @@ def fetch_video(
     Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(
