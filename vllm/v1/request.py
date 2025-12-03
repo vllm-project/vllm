@@ -136,7 +136,9 @@ class Request:
 
         # Used for streaming
         self.continue_session = continue_session
-        self.streaming_queue: deque[Request] = deque()
+        self.streaming_queue: deque[Request] | None = (
+            deque() if continue_session else None
+        )
 
     @classmethod
     def from_engine_core_request(

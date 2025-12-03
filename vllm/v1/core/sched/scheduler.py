@@ -447,7 +447,7 @@ class Scheduler(SchedulerInterface):
 
                 # Streaming: skip request if still waiting for next streaming req.
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
-                    if len(request.streaming_queue) > 0:
+                    if request.streaming_queue:
                         finished = self._update_session(request)
                         if finished:
                             self.waiting.pop_request()
@@ -826,6 +826,7 @@ class Scheduler(SchedulerInterface):
         so the last output token is no longer needed and will not join the kv cache.
         This also guarantees correct calculation of `num_new_tokens` in `schedule`.
         """
+        assert session.streaming_queue is not None
         request = session.streaming_queue.popleft()
         if not request.continue_session:
             session.status = RequestStatus.FINISHED_STOPPED
@@ -1397,6 +1398,9 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
         else:
             session = self.requests[request.request_id]
+            assert session.streaming_queue is not None, (
+                "streaming queue must be initialized for session"
+            )
             session.streaming_queue.append(request)
 
         if self.log_stats:
