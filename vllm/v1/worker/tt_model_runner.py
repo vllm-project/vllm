@@ -67,6 +67,12 @@ class TTModelRunner:
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
 
+        # Detect if the model has "mrope" rope_scaling type.
+        # mrope requires keeping "rope_deltas" between prefill/decode phases.
+        self.request_specific_rope = bool(self.model_config.uses_mrope)
+        if self.request_specific_rope:
+            self.previous_req_ids: set[str] = set()
+
         # Because of multiprocessing, the config-dependent
         # class attributes might not have been set in this process,
         # so we need to call this again.
@@ -302,21 +308,33 @@ class TTModelRunner:
             "Request can contain multiple inputs, \
             but each input can contain only one image!")
 
-    def _gather_multi_modal_inputs(self, scheduler_output) -> dict:
+    def _gather_multi_modal_inputs(self, scheduler_output) -> dict[str, Any]:
         """
         Gather and batch multi-modal inputs from scheduled requests.
-        #TODO: Currently only supports image inputs in the "pixel_values" field.
 
-        Creates a list of pixel values for each request.
-        Example:
+        Currently only supports image inputs in the "pixel_values" and
+        "image_grid_thw" fields.
+
+        Returns dict, each value is a list of lists of tensors per-request:
         [
-          None, # for requests without mm_inputs
-          [pixel_values_1], # with single mm_input
-          [pixel_values_2, pixel_values_3, ...], # with multiple mm_inputs
+          # for requests w/o mm_inputs:
+          {"pixel_values": None,
+           "image_grid_thw": None},
+          # for requests w/ single mm_input:
+          {"pixel_values": [[pv_user_1],[pv_user_2]],
+          "image_grid_thw": [[ig_user_1],[ig_user_2]]},
+          # for requests w/ multiple mm_inputs:
+          {"pixel_values": [[pv_user_1_image_1, pv_user_1_image_2],
+                            [pv_user_2_image_1, pv_user_2_image_2]],
+           "image_grid_thw":[[ig_user_1_image_1, ig_user_1_image_2],
+                             [ig_user_2_image_1, ig_user_2_image_2]]},
         ]
         """
 
-        multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
+        multi_modal_kwargs: MultiModalKwargs = {
+            "pixel_values": [],
+            "image_grid_thw": []
+        }
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
@@ -324,14 +342,19 @@ class TTModelRunner:
 
             if not req_state.mm_inputs:
                 multi_modal_kwargs["pixel_values"].append(None)
+                multi_modal_kwargs["image_grid_thw"].append(None)
                 continue
 
             pv_array = []
+            image_grid_thw_array = []
             for mm_input in req_state.mm_inputs:
                 self._validate_mm_input(mm_input)
                 pv_array.append(mm_input["pixel_values"])
+                image_grid_thw_array.append(
+                    mm_input.get("image_grid_thw", None))
 
             multi_modal_kwargs["pixel_values"].append(pv_array)
+            multi_modal_kwargs["image_grid_thw"].append(image_grid_thw_array)
 
         return multi_modal_kwargs
 
@@ -715,10 +738,15 @@ class TTModelRunner:
 
         if self.model_config.is_multimodal_model and not is_decode:
             # Gather multi-modal inputs from all DP ranks
-            multi_modal_kwargs: MultiModalKwargs = {"pixel_values": []}
+            multi_modal_kwargs: MultiModalKwargs = {
+                "pixel_values": [],
+                "image_grid_thw": []
+            }
             for mi in inputs:
                 multi_modal_kwargs["pixel_values"].append(
                     mi.multi_modal_kwargs["pixel_values"])
+                multi_modal_kwargs["image_grid_thw"].append(
+                    mi.multi_modal_kwargs["image_grid_thw"])
         else:
             multi_modal_kwargs = {}
 
@@ -815,10 +843,31 @@ class TTModelRunner:
 
         # Execute model
         if not is_decode:
-            tt_out = self.model.prefill_forward(**kwargs)
+            if self.request_specific_rope:
+                tt_out, rope_deltas = self.model.prefill_forward(**kwargs)
+                # Store rope_deltas for each prefilled request
+                for i, req_id in enumerate(self.input_batch.req_ids):
+                    self.requests[req_id].mrope_position_delta = \
+                        rope_deltas[i].item()
+            else:
+                tt_out = self.model.prefill_forward(**kwargs)
         else:
             # TODO: Add encoder-decoder support
             enc_dec_kwargs: dict[str, Any] = {}
+            if self.request_specific_rope:
+                if any(req_id not in self.previous_req_ids
+                       for req_id in self.input_batch.req_ids):
+                    # Gather and pass rope_deltas from prefill step to decode
+                    enc_dec_kwargs = {
+                        "rope_deltas_all_users": [
+                            self.requests[req_id].mrope_position_delta
+                            for req_id in self.input_batch.req_ids
+                        ]
+                    }
+                else:
+                    enc_dec_kwargs = {"rope_deltas_all_users": None}
+                self.previous_req_ids = set(self.input_batch.req_ids)
+
             tt_out = self.model.decode_forward(**kwargs,
                                                **enc_dec_kwargs,
                                                enable_trace=self.trace_mode,
