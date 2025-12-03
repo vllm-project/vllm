@@ -1276,18 +1276,9 @@ class OpenAIServingResponses(OpenAIServing):
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
                 self._raise_if_error(output.finish_reason, request.request_id)
+                delta_message: DeltaMessage | None = None
                 delta_message = DeltaMessage(content=output.text)
-                if tool_parser:
-                    delta_message = tool_parser.extract_tool_calls_streaming(
-                        previous_text=previous_text,
-                        current_text=previous_text + output.text,
-                        delta_text=output.text,
-                        previous_token_ids=previous_token_ids,
-                        current_token_ids=previous_token_ids + output.token_ids,
-                        delta_token_ids=output.token_ids,
-                        request=request,
-                    )
-                if reasoning_parser and delta_message and not delta_message.tool_calls:
+                if reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
                         previous_text=previous_text,
                         current_text=previous_text + output.text,
@@ -1296,9 +1287,22 @@ class OpenAIServingResponses(OpenAIServing):
                         current_token_ids=previous_token_ids + output.token_ids,
                         delta_token_ids=output.token_ids,
                     )
+                if tool_parser:
+                    delta_message = tool_parser.extract_tool_calls_streaming(
+                        previous_text=previous_text,
+                        current_text=previous_text + output.text,
+                        delta_text=output.text,
+                        previous_token_ids=previous_token_ids,
+                        current_token_ids=previous_token_ids + output.token_ids,
+                        delta_token_ids=output.token_ids,
+                        request=request,  # type: ignore
+                    )
+                    if delta_message.tool_calls:
+                        assert delta_message.tool_calls[0].function is not None
+                        assert delta_message.tool_calls[0].function.name is not None
                 previous_text += output.text
                 previous_token_ids += output.token_ids
-                if not delta_message:
+                if delta_message is None:
                     continue
                 if not first_delta_sent:
                     current_item_id = random_uuid()
@@ -1408,6 +1412,7 @@ class OpenAIServingResponses(OpenAIServing):
                             output_index=current_output_index,
                             item_id=current_item_id,
                             arguments=tool_call_arguments,
+                            name=current_tool_call_name,
                         )
                     )
                     current_content_index = 0
@@ -1597,7 +1602,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     # reset previous delta messages
                     previous_delta_messages = []
-                if delta_message.tool_calls:
+                if delta_message.tool_calls and delta_message.tool_calls[0].function:
                     if delta_message.tool_calls[0].function.arguments:
                         yield _increment_sequence_number_and_return(
                             ResponseFunctionCallArgumentsDeltaEvent(
@@ -1654,6 +1659,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         current_output_index += 1
                         current_item_id = random_uuid()
+                        assert delta_message.tool_calls[0].function is not None
                         current_tool_call_name = delta_message.tool_calls[
                             0
                         ].function.name
@@ -1726,6 +1732,7 @@ class OpenAIServingResponses(OpenAIServing):
                         output_index=current_output_index,
                         item_id=current_item_id,
                         arguments=tool_call_arguments,
+                        name=current_tool_call_name,
                     )
                 )
                 current_content_index = 0
