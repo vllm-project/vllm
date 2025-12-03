@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
-    VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_CONFIGURE_LOGGING: bool = True
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
@@ -74,12 +74,12 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
-    VLLM_MAIN_CUDA_VERSION: str = "12.8"
+    VLLM_MAIN_CUDA_VERSION: str = "12.9"
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
-    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
@@ -100,6 +100,8 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_PROFILER_DELAY_ITERS: int = 0
     VLLM_PROFILER_MAX_ITERS: int = 0
+    VLLM_TORCH_PROFILER_USE_GZIP: bool = True
+    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: bool = True
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -116,7 +118,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
-    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+    VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -145,7 +147,9 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
+    VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
@@ -210,6 +214,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
+    VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
@@ -441,10 +446,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
-    # Main CUDA version of vLLM, supporting [12.6, 12.8, 12.9],
-    # 12.8 is the default. This follows PyTorch but can be overridden.
+    # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower()
-    or "12.8",
+    or "12.9",
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -458,17 +462,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     .lower()
     in ("1", "true")
     or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    # If set, skip adding +precompiled suffix to version string
+    "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: bool(
+        int(os.environ.get("VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX", "0"))
+    ),
     # Used to mark that setup.py is running in a Docker build context,
     # in order to force the use of precompiled binaries.
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "")
     .strip()
     .lower()
     in ("1", "true"),
-    # Whether to force using nightly wheel in python build.
-    # This is used for testing the nightly wheel in python build.
-    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL": lambda: bool(
-        int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
-    ),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -614,7 +617,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 0, vllm will not configure logging
     # If set to 1, vllm will configure logging using the default configuration
     #    or the configuration file specified by VLLM_LOGGING_CONFIG_PATH
-    "VLLM_CONFIGURE_LOGGING": lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
+    "VLLM_CONFIGURE_LOGGING": lambda: bool(
+        int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+    ),
     "VLLM_LOGGING_CONFIG_PATH": lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL": lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
@@ -888,6 +893,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
     # If set to 0, will not limit the number of iterations.
     "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
+    # Control whether torch profiler gzip-compresses profiling files.
+    # Set VLLM_TORCH_PROFILER_USE_GZIP=0 to disable gzip (enabled by default).
+    "VLLM_TORCH_PROFILER_USE_GZIP": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_USE_GZIP", "1") != "0"
+    ),
+    # Control whether torch profiler dumps the self_cuda_time_total table.
+    # Set VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL=0 to disable dumping
+    # (enabled by default).
+    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL", "1") != "0"
+    ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,
@@ -969,9 +985,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     # Whether to use aiter fusion shared experts ops.
-    # By default is enabled.
+    # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
@@ -1121,6 +1137,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
+    ),
+    # The activation dtype for marlin kernel
+    "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
+        "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
+    # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
+    # only supported on Blackwell GPUs and with
+    # https://github.com/deepseek-ai/DeepEP/pull/341
+    "VLLM_DEEPEPLL_NVFP4_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_DEEPEPLL_NVFP4_DISPATCH", "0"))
     ),
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
@@ -1419,6 +1445,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
+    ),
+    # Experimental: use this to enable MCP tool calling for non harmony models
+    "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
+        int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
