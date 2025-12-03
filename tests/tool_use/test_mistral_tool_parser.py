@@ -114,7 +114,13 @@ def stream_delta_message_generator(
     model_output: str | None,
     tools: list[tuple[str, str]] | None,
 ) -> Generator[DeltaMessage, None, None]:
-    if isinstance(mistral_tokenizer, MistralTokenizer):
+    if (
+        isinstance(mistral_tokenizer, MistralTokenizer)
+        and mistral_tokenizer.version >= 11
+    ):
+        # With the newer versions of the tokenizer,
+        # we cannot tokenize free text
+        # so we need to create a list of messages to get tokenized
         assert tools is not None
         assistant_msg = AssistantMessage(
             tool_calls=[
@@ -132,6 +138,8 @@ def stream_delta_message_generator(
         )
         all_token_ids = mistral_tokenizer.instruct.encode_instruct(request).tokens
     else:
+        # Older versions of the tokenizer are
+        # able to encode directly the model's output (free text) into tokens
         assert model_output is not None
         all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
 
