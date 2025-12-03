@@ -90,8 +90,10 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
+    get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
+from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
 
@@ -1088,15 +1090,19 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
             return experts
 
-        # triton path
-        from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-            BatchedTritonOrDeepGemmExperts,
+        from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+            BatchedDeepGemmExperts,
+        )
+        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+            BatchedTritonExperts,
         )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
         assert not self.rocm_aiter_moe_enabled and not self.use_marlin
+
+        use_deep_gemm = envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
 
         if (
             prepare_finalize.activation_format
@@ -1105,22 +1111,47 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
 
-            logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
-            return BatchedTritonOrDeepGemmExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
-                allow_deep_gemm=(
-                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
-                ),
+            if use_deep_gemm and not has_deep_gemm():
+                raise RuntimeError(
+                    "DeepGEMM requested for MoE layer but not installed."
+                )
+
+            compatible_with_deep_gemm = (
+                self.moe_quant_config.use_fp8_w8a8
+                and self.moe_quant_config.block_shape
+                == get_mk_alignment_for_contiguous_layout()
             )
+
+            # If this MoE layer is compatible with DeepGEMM, the proper env
+            # vars are set and DeepGEMM is not installed, throw an error.
+            if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
+                raise RuntimeError(
+                    f"MoE layer incompatible with DeepGEMM, expected "
+                    f"fp8==True, got {self.moe_quant_config.use_fp8_w8a8}"
+                    f"or block_shape {self.moe_quant_config.block_shape}"
+                    f"=={get_mk_alignment_for_contiguous_layout()}."
+                )
+
+            if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
+                logger.debug("BatchedDeepGemmExperts(%s)", self.__class__.__name__)
+                return BatchedDeepGemmExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=self.moe_quant_config,
+                )
+            else:
+                logger.debug("BatchedTritonExperts(%s)", self.__class__.__name__)
+                return BatchedTritonExperts(
+                    max_num_tokens=max_num_tokens_per_rank,
+                    num_dispatchers=prepare_finalize.num_dispatchers(),
+                    quant_config=self.moe_quant_config,
+                )
+
         else:
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
             return TritonOrDeepGemmExperts(
                 self.moe_quant_config,
-                allow_deep_gemm=(
-                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
-                ),
+                allow_deep_gemm=use_deep_gemm,
             )
 
     def get_fused_moe_quant_config(
