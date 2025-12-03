@@ -1905,10 +1905,15 @@ def fused_experts_impl(
 
         # Enable unpermute when token fan-out is manageable and the WNA16 kernels
         # (int4/int8 with block groups) are not required.
-        use_unpermute = tokens_in_chunk * top_k_num * 4 <= global_num_experts and not (
-            (use_int8_w8a16 or use_int4_w4a16)
-            and block_shape is not None
-            and block_shape[1] > 0
+
+        use_unpermute = (
+            expert_map is None
+            and tokens_in_chunk * top_k_num * 4 <= global_num_experts
+            and not (
+                (use_int8_w8a16 or use_int4_w4a16)
+                and block_shape is not None
+                and block_shape[1] > 0
+            )
         )
 
         if not use_unpermute:
