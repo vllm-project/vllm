@@ -142,9 +142,9 @@ class StructuredOutputManager:
         # impacting scheduling across ranks from RequestStatus.WAITING_FOR_FSM state
         if envs.VLLM_ASYNC_CREATE_GRAMMAR:
             grammar = self.executor.submit(self._create_grammar, request)
-            request.structured_output_request.grammar = grammar  # type: ignore[assignment]
         else:
-            request.structured_output_request.grammar = self._create_grammar(request)
+            grammar = self._create_grammar(request)
+        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
     def _create_grammar(
         self,
