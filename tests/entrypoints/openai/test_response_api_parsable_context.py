@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
+import importlib
 import json
 
 import pytest
@@ -15,6 +15,10 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
+    assert importlib.util.find_spec("gpt_oss") is not None, (
+        "Harmony tests require gpt_oss package to be installed"
+    )
+
     args = [
         "--reasoning-parser",
         "qwen3",
@@ -25,12 +29,13 @@ def server():
         "--enable-auto-tool-choice",
         "--tool-call-parser",
         "hermes",
+        "--tool-server",
+        "demo",
     ]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT="1",
-        # uncomment for tool calling
-        # PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
+        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
     )
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
@@ -153,4 +158,23 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
     # test_reasoning_and_function_items
 
 
-# TODO: test MCP tool call
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_mcp_tool_call(client: OpenAI, model_name: str):
+    response = await client.responses.create(
+        model=model_name,
+        input="What is 13 * 24? Use python to calculate the result.",
+        tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
+        temperature=0.0,
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.output[0].type == "reasoning"
+    assert response.output[1].type == "mcp_call"
+    assert type(response.output[1].arguments) is str
+    assert type(response.output[1].output) is str
+    assert response.output[2].type == "reasoning"
+    # make sure the correct math is in the final output
+    assert response.output[3].type == "message"
+    assert "312" in response.output[3].content[0].text

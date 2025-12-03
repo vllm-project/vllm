@@ -270,7 +270,7 @@ class ParsableContext(ConversationContext):
     ) -> list[ResponseInputOutputItem]:
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
-            return await tool_session.get_result(self)
+            return await tool_session.get_result_parsable_context(self)
         args = json.loads(last_msg.arguments)
         param = {
             "code": args["code"],

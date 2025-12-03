@@ -309,7 +309,9 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
-        # import fbvscode; fbvscode.set_trace()
+        import fbvscode
+
+        fbvscode.set_trace()
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
