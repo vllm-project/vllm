@@ -10,7 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config, has_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -811,11 +811,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             is_forward_context_available()
             and get_forward_context().attn_metadata is None
         )
-        if (
-            is_profile_run
-            and self.fused_experts.supports_chunking()
-            and has_current_vllm_config()
-        ):
+        if is_profile_run and self.fused_experts.supports_chunking():
             parallel_config = get_current_vllm_config().parallel_config
             is_dp_ep = (
                 parallel_config.data_parallel_size > 1

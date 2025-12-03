@@ -40,7 +40,6 @@ from vllm.config.vllm import (
     get_cached_compilation_config,
     get_current_vllm_config,
     get_layers_from_vllm_config,
-    has_current_vllm_config,
     set_current_vllm_config,
 )
 
@@ -98,7 +97,6 @@ __all__ = [
     "VllmConfig",
     "get_cached_compilation_config",
     "get_current_vllm_config",
-    "has_current_vllm_config",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
 ]
