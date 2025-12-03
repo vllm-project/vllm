@@ -95,6 +95,12 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
+        # Capability flags (inherited from MLACommonImpl, explicitly set for clarity)
+        self.supports_layer_owned_orchestration = True
+        self.supports_decode_q_tuple = True
+        self.requires_decode_head_padding = self.q_pad_num_heads is not None
+        self.supports_chunked_context_prefill = True
+
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):

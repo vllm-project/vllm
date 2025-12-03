@@ -260,6 +260,12 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             **mla_args,
         )
 
+        # Capability flags
+        self.supports_layer_owned_orchestration = True
+        self.supports_decode_q_tuple = True
+        self.requires_decode_head_padding = self.q_pad_num_heads is not None
+        self.supports_chunked_context_prefill = True
+
         assert flash_attn_supports_mla(), "FlashAttnMLA is not supported on this device"
 
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]

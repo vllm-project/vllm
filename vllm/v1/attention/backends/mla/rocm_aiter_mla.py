@@ -200,6 +200,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_sharing_target_layer_name,
             **mla_args,
         )
+
+        # Capability flags
+        self.supports_layer_owned_orchestration = True
+        self.supports_decode_q_tuple = True
+        self.requires_decode_head_padding = self.q_pad_num_heads is not None
+        self.supports_chunked_context_prefill = True
+
         assert num_heads == 16 or num_heads == 128, (
             f"Aiter MLA only supports 16 or 128 number of heads.\n"
             f"Provided {num_heads} number of heads.\n"

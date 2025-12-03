@@ -50,6 +50,13 @@ class AiterTritonMLAImpl(AiterMLAImpl):
             kv_sharing_target_layer_name,
             **mla_args,
         )
+
+        # Capability flags
+        self.supports_layer_owned_orchestration = True
+        self.supports_decode_q_tuple = True
+        self.requires_decode_head_padding = self.q_pad_num_heads is not None
+        self.supports_chunked_context_prefill = True
+
         from aiter.ops.triton.mha import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func

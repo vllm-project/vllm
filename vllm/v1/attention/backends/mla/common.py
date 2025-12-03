@@ -1137,6 +1137,12 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
             rocm_aiter_ops.is_fp8bmm_enabled() if rocm_aiter_ops is not None else False
         )
 
+        # Capability flags for layer-owned orchestration.
+        self.supports_layer_owned_orchestration: bool = True
+        self.supports_decode_q_tuple: bool = True
+        self.requires_decode_head_padding: bool = self.q_pad_num_heads is not None
+        self.supports_chunked_context_prefill: bool = True
+
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
