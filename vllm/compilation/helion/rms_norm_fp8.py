@@ -8,6 +8,7 @@ import torch
 
 from vllm.compilation.helion.benchmark import KernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.compilation.helion.register import register_kernel
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 
@@ -25,7 +26,31 @@ except ImportError:
 
 # Only define the kernel if Helion is available
 if HELION_AVAILABLE:
-    # Pure Helion kernel for autotuning - this has the autotune method
+
+    def _rms_norm_fp8_custom_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """
+        Custom fake implementation for rms_norm_fp8 that handles symbolic shapes.
+
+        This avoids potential SymInt issues with Helion's bind() method.
+
+        Args:
+            input: Input tensor with shape [..., hidden_size]
+            weight: Weight tensor with shape [hidden_size]
+            scale: Scalar scale factor for FP8 quantization
+            epsilon: Epsilon value for numerical stability
+
+        Returns:
+            Tensor with same shape as input and dtype float8_e4m3fn
+        """
+        return torch.empty_like(input, dtype=torch.float8_e4m3fn)
+
+    # Pure Helion kernel for autotuning with new @register_kernel decorator
+    @register_kernel("rms_norm_fp8", fake_impl=_rms_norm_fp8_custom_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
         autotune_baseline_rtol=0.0,
@@ -54,7 +79,7 @@ if HELION_AVAILABLE:
         ),
         static_shapes=False,
     )
-    def _rms_norm_fp8_pure_helion_kernel(
+    def rms_norm_fp8(
         input: torch.Tensor,
         weight: torch.Tensor,
         scale: torch.Tensor,
@@ -110,55 +135,8 @@ if HELION_AVAILABLE:
 
         return out
 
-    # PyTorch custom op wrapper - calls the pure Helion kernel
-    @torch.library.custom_op(
-        "my_helion_lib::rms_norm_fp8",
-        mutates_args=(),
-        device_types="cuda",
-    )
-    def _rms_norm_fp8_helion_kernel(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        scale: torch.Tensor,
-        epsilon: float,
-    ) -> torch.Tensor:
-        """
-        PyTorch custom op wrapper for Helion RMSNorm-FP8 kernel.
-
-        Operation: quantize_fp8(RMSNorm(input, weight, epsilon))
-
-        Args:
-            input (Tensor): Input tensor with shape [batch, hidden_size]
-            weight (Tensor): Weight tensor with shape [hidden_size]
-            scale (Tensor): Scalar scale factor for FP8 quantization
-            epsilon (float): Epsilon value for numerical stability
-
-        Returns:
-            Tensor: Output tensor with same shape as input and dtype float8_e4m3fn
-        """
-        return _rms_norm_fp8_pure_helion_kernel(input, weight, scale, epsilon)
-
-    @_rms_norm_fp8_helion_kernel.register_fake
-    def _rms_norm_fp8_helion_kernel_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        scale: torch.Tensor,
-        epsilon: float,
-    ) -> torch.Tensor:
-        """
-        Fake/meta implementation for rms_norm_fp8 Helion kernel.
-        Defines the input/output shape relationship without actual computation.
-
-        Shape contract:
-        - input: [..., hidden_size]
-        - weight: [hidden_size]
-        - scale: scalar (numel == 1)
-        - epsilon: float
-        - returns: [..., hidden_size] with dtype float8_e4m3fn
-        """
-        # TODO(gmagogsfm): Support other float8 types by changing this
-        # op into an out variant so caller can decide dtype
-        return torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    # Note: PyTorch custom op registration is handled by @register_kernel decorator
+    # with custom fake implementation for symbolic shape compatibility
 
 
 # Now define the vLLM CustomOp wrapper
@@ -208,7 +186,7 @@ class RMSNormFp8Helion(HelionCustomOp):
                 "Helion is not installed. Please install Helion to use RMSNormFp8Helion. "
                 "Alternatively, use the CUDA baseline implementation."
             )
-        return torch.ops.my_helion_lib.rms_norm_fp8(input, weight, scale, epsilon)
+        return rms_norm_fp8(input, weight, scale, epsilon)
 
     def get_autotune_inputs(self) -> dict[str, tuple]:
         """
@@ -288,7 +266,7 @@ class RMSNormFp8Helion(HelionCustomOp):
     def helion_kernel(self):
         """The Helion kernel function for autotuning."""
         if HELION_AVAILABLE:
-            return _rms_norm_fp8_pure_helion_kernel
+            return rms_norm_fp8._helion_kernel
         return None
 
 
