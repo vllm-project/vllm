@@ -171,8 +171,11 @@ def test_grammar_init_async_and_sync(async_grammar, monkeypatch):
         )
 
     # Wait for grammar to be ready (handles both async and sync cases)
+    start_time = time.time()
     while not request.structured_output_request._check_grammar_completion():
-        continue
+        if time.time() - start_time > 5:  # 5-second timeout
+            pytest.fail("Grammar compilation timed out")
+        time.sleep(0.01)
 
     # After completion, _grammar should no longer be a Future
     assert not isinstance(request.structured_output_request._grammar, Future)
