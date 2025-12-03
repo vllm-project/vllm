@@ -198,32 +198,11 @@ class Qwen2Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # start_event_qkv_proj = torch.cuda.Event(enable_timing=True)
-        # start_event_qkv_proj.record()
-        # end_event_qkv_proj = torch.cuda.Event(enable_timing=True)
         qkv, _ = self.qkv_proj(hidden_states)
-        # end_event_qkv_proj.record()
-        # end_event_qkv_proj.synchronize()
-        # qkv_proj_time = start_event_qkv_proj.elapsed_time(end_event_qkv_proj)
-        # print(f"qkv_proj_time: {qkv_proj_time} ms")
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        # start_event_attn = torch.cuda.Event(enable_timing=True)
-        # start_event_attn.record()
-        # end_event_attn = torch.cuda.Event(enable_timing=True)
         attn_output = self.attn(q, k, v)
-        # end_event_attn.record()
-        # end_event_attn.synchronize()
-        # attn_time = start_event_attn.elapsed_time(end_event_attn)
-        # print(f"attn_time: {attn_time} ms")
-        # start_event_o_proj = torch.cuda.Event(enable_timing=True)
-        # start_event_o_proj.record()
-        # end_event_o_proj = torch.cuda.Event(enable_timing=True)
         output, _ = self.o_proj(attn_output)
-        # end_event_o_proj.record()
-        # end_event_o_proj.synchronize()
-        # o_proj_time = start_event_o_proj.elapsed_time(end_event_o_proj)
-        # print(f"o_proj_time: {o_proj_time} ms")
         return output
 
 
