@@ -78,32 +78,9 @@ trap cleanup EXIT
 # while workers connect to the head's address.
 RAY_START_CMD="ray start --block"
 if [ "${NODE_TYPE}" == "--head" ]; then
-    RAY_START_CMD+=" --head --port=6379"
+    RAY_START_CMD+=" --head --node-ip-address=${HEAD_NODE_ADDRESS} --port=6379"
 else
-    RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379"
-fi
-
-# Parse VLLM_HOST_IP from additional args if present.
-# This is needed for multi-NIC configurations where Ray needs explicit IP bindings.
-VLLM_HOST_IP=""
-for arg in "${ADDITIONAL_ARGS[@]}"; do
-    if [[ $arg == "-e" ]]; then
-        continue
-    fi
-    if [[ $arg == VLLM_HOST_IP=* ]]; then
-        VLLM_HOST_IP="${arg#VLLM_HOST_IP=}"
-        break
-    fi
-done
-
-# Build Ray IP environment variables if VLLM_HOST_IP is set.
-# These variables ensure Ray binds to the correct network interface on multi-NIC systems.
-RAY_IP_VARS=()
-if [ -n "${VLLM_HOST_IP}" ]; then
-    RAY_IP_VARS=(
-        -e "RAY_NODE_IP_ADDRESS=${VLLM_HOST_IP}"
-        -e "RAY_OVERRIDE_NODE_IP_ADDRESS=${VLLM_HOST_IP}"
-    )
+    RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379 --node-ip-address=${VLLM_HOST_IP}"
 fi
 
 # Launch the container with the assembled parameters.
@@ -118,6 +95,5 @@ docker run \
     --shm-size 10.24g \
     --gpus all \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
-    "${RAY_IP_VARS[@]}" \
     "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"
