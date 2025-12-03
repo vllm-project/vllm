@@ -9,8 +9,8 @@ from vllm.model_executor.offloader.base import (
     get_offloader,
     set_offloader,
 )
-from vllm.model_executor.offloader.offloader_v2 import OffloaderV2
 from vllm.model_executor.offloader.uva import UVAOffloader
+from vllm.model_executor.offloader.v2 import OffloaderV2
 
 __all__ = [
     "BaseOffloader",

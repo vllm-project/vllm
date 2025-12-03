@@ -106,8 +106,8 @@ def create_offloader(cache_config: "CacheConfig") -> BaseOffloader:
 
     Priority: V2 offloading if configured, else UVA, else noop.
     """
-    from vllm.model_executor.offloader.offloader_v2 import OffloaderV2
     from vllm.model_executor.offloader.uva import UVAOffloader
+    from vllm.model_executor.offloader.v2 import OffloaderV2
 
     if cache_config.offload_group_size > 0:
         # Use V2 offloading
