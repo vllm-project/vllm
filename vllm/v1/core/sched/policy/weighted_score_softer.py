@@ -8,7 +8,7 @@ from vllm.v1.core.sched.policy.normalized_scorer import TimeAndLengthScorer
 
 TimeAndLengthScorer_Instance = None
 
-if TimeAndLengthScorer_Instance == None:
+if TimeAndLengthScorer_Instance is None:
     TimeAndLengthScorer_Instance = TimeAndLengthScorer(
         time_median=5,
         time_weight=0.5,
