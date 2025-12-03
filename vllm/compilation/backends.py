@@ -39,6 +39,7 @@ from .compiler_interface import (
     EagerAdaptor,
     InductorAdaptor,
     InductorStandaloneAdaptor,
+    compute_input_signature_hash,
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
@@ -81,8 +82,12 @@ class CompilerManager:
     and compiling the graph.
 
     The cache is a dict mapping
-    `(runtime_shape, graph_index, backend_name)`
+    `(runtime_shape, graph_index, backend_name, input_sig_hash)`
     to `any_data` returned from the compiler.
+
+    The input_sig_hash distinguishes graphs with different input signatures
+    (counts, shapes, types, dtypes) to prevent cache collisions between
+    structurally similar graphs with different inputs.
 
     When serializing the cache, we save it to a Python file
     for readability. We don't use json here because json doesn't
@@ -90,7 +95,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[int | None, int, str], Any] = dict()
+        self.cache: dict[tuple[int | None, int, str, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -161,9 +166,13 @@ class CompilerManager:
         graph_index: int,
         runtime_shape: int | None = None,
     ) -> Callable | None:
-        if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
+        # Compute input signature hash to distinguish graphs with different inputs
+        input_sig_hash = compute_input_signature_hash(example_inputs)
+        cache_key = (runtime_shape, graph_index, self.compiler.name, input_sig_hash)
+
+        if cache_key not in self.cache:
             return None
-        handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
+        handle = self.cache[cache_key]
         compiled_graph = self.compiler.load(
             handle, graph, example_inputs, graph_index, runtime_shape
         )
@@ -248,7 +257,10 @@ class CompilerManager:
 
         # store the artifact in the cache
         if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
-            self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
+            # Compute input signature hash to distinguish graphs with different inputs
+            input_sig_hash = compute_input_signature_hash(example_inputs)
+            cache_key = (runtime_shape, graph_index, self.compiler.name, input_sig_hash)
+            self.cache[cache_key] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
