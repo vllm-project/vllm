@@ -564,7 +564,7 @@ class Worker(WorkerBase):
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
             # in `execute_model`) but this requires a larger refactor of PP.
-            _, batch_desc, _, _ = (
+            _, batch_desc, _, _, _ = (
                 self.model_runner._determine_batch_execution_and_padding(
                     num_tokens=num_scheduled_tokens,
                     num_reqs=len(num_scheduled_tokens_np),
