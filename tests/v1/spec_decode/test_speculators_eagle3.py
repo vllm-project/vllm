@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
             id="qwen3-eagle3-speculator-w4a16-verifier",
             marks=pytest.mark.skipif(
                 current_platform.is_rocm(),
-                reason="The tests are skipped on non-CUDA platform.",
+                reason="The tests are skipped on rocm platform.",
             ),
         ),
     ],
