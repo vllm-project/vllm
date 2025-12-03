@@ -23,6 +23,11 @@ from vllm.entrypoints.context import (
     ParsableContext,
     StreamingHarmonyContext,
 )
+from vllm.entrypoints.openai.protocol import (
+    FunctionCall,
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -44,6 +49,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -77,11 +83,9 @@ from vllm.entrypoints.openai.protocol import (
     DetokenizeRequest,
     ErrorInfo,
     ErrorResponse,
-    FunctionCall,
     FunctionDefinition,
     GenerateRequest,
     GenerateResponse,
-    ResponsesRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
@@ -1234,13 +1238,13 @@ class OpenAIServing:
 
     async def _render_next_turn(
         self,
-        request,
-        tokenizer,
-        messages,
-        tool_dicts,
+        request: ResponsesRequest,
+        tokenizer: AnyTokenizer,
+        messages: list[ResponseInputOutputItem],
+        tool_dicts: list[dict[str, Any]] | None,
         tool_parser,
-        chat_template,
-        chat_template_content_format,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
     ):
         new_messages = construct_input_messages(
             request_input=messages,

@@ -254,7 +254,7 @@ class ParsableContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a MCP tool call"""
         last_message = self.parser.response_messages[-1]
-        # HACK: figure out which tools are MCP tools
+        # TODO: figure out which tools are MCP tools
         if (  # noqa: SIM103
             last_message.type == "function_call"
             and (
@@ -297,15 +297,7 @@ class ParsableContext(ConversationContext):
         return []
 
     def render_for_completion(self):
-        return [
-            self.request,
-            self.tokenizer,
-            self.parser.response_messages,
-            self.tool_dicts,
-            self.tool_parser_cls,
-            self.chat_template,
-            self.chat_template_content_format,
-        ]
+        raise NotImplementedError("Should not be called.")
 
     async def init_tool_sessions(
         self,

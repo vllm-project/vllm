@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -13,7 +15,17 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
+    args = [
+        "--reasoning-parser",
+        "qwen3",
+        "--max_model_len",
+        "5000",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "hermes",
+    ]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
         VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT="1",
@@ -85,3 +97,60 @@ async def test_reasoning_and_function_items(client: OpenAI, model_name: str):
     assert response.output[0].type == "reasoning"
     assert response.output[1].type == "message"
     assert type(response.output[1].content[0].text) is str
+
+
+def get_horoscope(sign):
+    return f"{sign}: Next Tuesday you will befriend a baby otter."
+
+
+def call_function(name, args):
+    if name == "get_horoscope":
+        return get_horoscope(**args)
+    else:
+        raise ValueError(f"Unknown function: {name}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_call_first_turn(client: OpenAI, model_name: str):
+    tools = [
+        {
+            "type": "function",
+            "name": "get_horoscope",
+            "description": "Get today's horoscope for an astrological sign.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sign": {"type": "string"},
+                },
+                "required": ["sign"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    response = await client.responses.create(
+        model=model_name,
+        input="What is the horoscope for Aquarius today?",
+        tools=tools,
+        temperature=0.0,
+    )
+    assert response is not None
+    assert response.status == "completed"
+    assert len(response.output) == 2
+    assert response.output[0].type == "reasoning"
+    assert response.output[1].type == "function_call"
+
+    function_call = response.output[1]
+    assert function_call.name == "get_horoscope"
+    assert function_call.call_id is not None
+
+    args = json.loads(function_call.arguments)
+    assert "sign" in args
+
+    # the multi turn function call is tested above in
+    # test_reasoning_and_function_items
+
+
+# TODO: test MCP tool call

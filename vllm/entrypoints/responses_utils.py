@@ -38,12 +38,18 @@ def make_response_output_items_from_parsable_context(
         if not isinstance(message, ResponseFunctionToolCallOutputItem):
             output_messages.append(message)
         else:
+            if len(output_messages) == 0:
+                raise ValueError(
+                    "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                )
             if isinstance(output_messages[-1], ResponseFunctionToolCall):
                 mcp_message = McpCall(
                     id=f"mcp_{random_uuid()}",
                     arguments=output_messages[-1].arguments,
                     name=output_messages[-1].name,
-                    server_label=output_messages[-1].name,  # TODO
+                    server_label=output_messages[
+                        -1
+                    ].name,  # TODO: store the server label
                     type="mcp_call",
                     status="completed",
                     output=message.output,
