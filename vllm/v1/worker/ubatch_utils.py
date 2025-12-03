@@ -20,10 +20,6 @@ class UBatchSlice:
         )
 
     @property
-    def num_reqs(self) -> int:
-        return self.request_slice.stop - self.request_slice.start
-
-    @property
     def num_tokens(self) -> int:
         return self.token_slice.stop - self.token_slice.start
 
@@ -65,8 +61,14 @@ def _pad_out_ubatch_slices(
 
 
 def create_ubatch_slices(
-    num_scheduled_tokens: np.ndarray, num_tokens_padded: int, num_reqs_padded: int
-) -> tuple[UBatchSlices, UBatchSlices]:
+    should_ubatch: bool,
+    num_scheduled_tokens: np.ndarray,
+    num_tokens_padded: int,
+    num_reqs_padded: int,
+) -> tuple[UBatchSlices | None, UBatchSlices | None]:
+    if not should_ubatch:
+        return None, None
+
     split_point = int(num_tokens_padded) // 2
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
@@ -101,6 +103,5 @@ def create_ubatch_slices(
     )
 
     assert sum(s.num_tokens for s in ubatch_slices_padded) == num_tokens_padded
-    assert sum(s.num_reqs for s in ubatch_slices_padded) == num_reqs_padded
 
     return ubatch_slices, ubatch_slices_padded
