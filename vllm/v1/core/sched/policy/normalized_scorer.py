@@ -70,7 +70,12 @@ class NormalizedScorer:
                 score = self._sigmoid_normalize(
                     dim_value, dim_info.median, dim_info.norm_scale
                 )
-            logger.debug(f"{dim_info.name}({dim_info.reverse}) : {score:.10f}")
+            logger.debug(
+                "%s(%s) : %.10f",
+                dim_info.name,
+                dim_info.reverse,
+                score
+            )
 
             # Weighted summation.
             final_score += score * dim_info.weight
