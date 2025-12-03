@@ -267,14 +267,6 @@ class PassConfig:
             "v0.13.0 or v1.0.0, whichever is sooner",
         )
 
-        # Force old flags to None to ensure they are not used
-        self.enable_fusion = None
-        self.enable_attn_fusion = None
-        self.enable_noop = None
-        self.enable_sequence_parallelism = None
-        self.enable_async_tp = None
-        self.enable_fi_allreduce_fusion = None
-
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:
                 logger.warning_once(
