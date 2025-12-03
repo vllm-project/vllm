@@ -2763,7 +2763,7 @@ class GPUModelRunner(
         BatchDescriptor,
         UBatchSlices | None,
         torch.Tensor | None,
-        CUDAGraphStat,
+        CUDAGraphStat | None,
     ]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         uniform_decode = (
@@ -2828,12 +2828,14 @@ class GPUModelRunner(
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
-        cudagraph_stats = CUDAGraphStat(
-            num_unpadded_tokens=num_tokens,
-            num_padded_tokens=batch_descriptor.num_tokens,
-            num_paddings=batch_descriptor.num_tokens - num_tokens,
-            runtime_mode=str(cudagraph_mode),
-        )
+        cudagraph_stats = None
+        if self.vllm_config.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_tokens,
+                num_padded_tokens=batch_descriptor.num_tokens,
+                num_paddings=batch_descriptor.num_tokens - num_tokens,
+                runtime_mode=str(cudagraph_mode),
+            )
 
         return (
             cudagraph_mode,
