@@ -803,7 +803,7 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        logger.info('>>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}')
+        logger.info(f'>>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}')
         return scheduler_output
 
     def _update_after_schedule(
