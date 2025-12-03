@@ -1116,8 +1116,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 and self.moe_quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
             )
 
-            # If this MoE layer is compatible with DeepGEMM and the proper env
-            # vars are set, error out if DeepGEMM is not installed.
+            # If this MoE layer is compatible with DeepGEMM, the proper env
+            # vars are set and DeepGEMM is not installed, throw an error.
             if use_deep_gemm and compatible_with_deep_gemm and not has_deep_gemm():
                 raise RuntimeError("DeepGEMM requested but not installed.")
 
