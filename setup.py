@@ -368,7 +368,8 @@ class precompiled_wheel_utils:
             commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
             if not commit or len(commit) != 40:
                 print(
-                    f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}, fetching base commit"
+                    f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                    ", trying to fetch base commit in main branch"
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
@@ -509,6 +510,7 @@ class precompiled_wheel_utils:
                 ]
             ).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
+            print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
             # In Docker build context, .git may be immutable or missing.
             if envs.VLLM_DOCKER_BUILD_CONTEXT:
