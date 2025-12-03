@@ -38,7 +38,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "eagle_dynamic", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -109,6 +109,11 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # Dynamic speculative decoding configuration
+    acceptance_rate_threshold: float = 0.3
+    """Target acceptance rate for dynamically adjusting the number of speculative
+    tokens (k). Used when the speculative decoding method is "eagle_dynamic"."""
 
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
@@ -340,16 +345,18 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
+                    # User explicitly specified method, don't override
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
                 # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
                 # AngelSlim/Qwen3-8B_eagle3
+                elif "eagle3" in self.draft_model_config.model.lower():
+                    # Prefer eagle3 detection first since it's more specific
+                    self.method = "eagle3"
                 elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -384,7 +391,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
@@ -394,9 +401,21 @@ class SpeculativeConfig:
                     ):
                         pass
                     else:
+                        # For eagle_dynamic, detect which EAGLE version from draft
+                        # model name
+                        if self.method == "eagle_dynamic":
+                            eagle_method = (
+                                "eagle3"
+                                if "eagle3" in self.draft_model_config.model.lower()
+                                else "eagle"
+                            )
+                        else:
+                            eagle_method = (
+                                "eagle3" if self.method == "eagle3" else "eagle"
+                            )
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method,
+                            method=eagle_method,
                             model_type="eagle",
                         )
                         self.draft_model_config.hf_config = eagle_config
@@ -634,7 +653,7 @@ class SpeculativeConfig:
         return self
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "eagle_dynamic", "mtp")
 
     def __repr__(self) -> str:
         method = self.method
