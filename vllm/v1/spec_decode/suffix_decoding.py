@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
-
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -34,16 +32,16 @@ class SuffixDecodingProposer:
     def propose(
         self,
         input_batch: InputBatch,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
         """
-        draft_token_ids: list[np.ndarray] = []
+        draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            if sampled_ids.shape[0] == 0:
+            if not sampled_ids:
                 # Skip speculative decoding for partial prefills.
                 draft_token_ids.append([])
                 continue
@@ -72,7 +70,7 @@ class SuffixDecodingProposer:
                 self.suffix_cache.start_request(req_id, prompt_token_ids)
 
             # Append the newly sampled ids to the suffix cache for this request.
-            self.suffix_cache.add_active_response(req_id, sampled_ids.tolist())
+            self.suffix_cache.add_active_response(req_id, sampled_ids)
 
             # Suffix decoding only uses the most recent tokens up to max_tree_depth, so
             # we extract the pattern from the end of the input.

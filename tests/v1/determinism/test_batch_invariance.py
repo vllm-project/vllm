@@ -6,29 +6,16 @@ import random
 
 import pytest
 import torch
-from utils import _extract_step_logprobs, _random_prompt, skip_unsupported
+from utils import (
+    BACKENDS,
+    _extract_step_logprobs,
+    _random_prompt,
+    resolve_model_name,
+    skip_unsupported,
+)
 
+import vllm.model_executor.layers.batch_invariant as batch_invariant
 from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
-
-BACKENDS: list[str] = [
-    "FLASH_ATTN",
-    "FLASHINFER",
-]
-
-if current_platform.is_cuda() and current_platform.is_device_capability(90):
-    BACKENDS.append("FLASH_ATTN_MLA")
-
-DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
-MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-
-
-def resolve_model_name(backend: str) -> str:
-    """Resolve the model name for the given backend, respecting env overrides."""
-    model = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
-    if backend.endswith("MLA") and model == DEFAULT_MODEL:
-        return MLA_MODEL
-    return model
 
 
 @skip_unsupported
@@ -172,7 +159,6 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -203,6 +189,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
+        gpu_memory_utilization=0.9,
     )
 
     # Use more realistic prompts for better token generation
@@ -441,7 +428,6 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_without_batch_invariance_should_fail(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -454,14 +440,11 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
-
-    vllm_is_batch_invariant.cache_clear()
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
 
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-
+    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     model_name = resolve_model_name(backend)
@@ -661,7 +644,6 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 @skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-@pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
