@@ -1631,7 +1631,7 @@ class FusedMoE(CustomOp):
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
                 eplb_static=self.eplb_static,
-                indices_type=indices_type
+                indices_type=indices_type,
             )
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:

@@ -209,7 +209,7 @@ class EplbModelState:
 def save_eplb_state(
     global_expert_load_windows: list[torch.Tensor],
     save_dir: Path,
-    dir_iter: int,
+    state_iter: int,
     model_states: list[EplbModelState],
 ) -> None:
     tensors = {}
@@ -219,7 +219,7 @@ def save_eplb_state(
         name = type(eplb_model_state.model).__name__
         tensors[f"global_expert_load_window_{name}"] = global_expert_load_window
     try:
-        file_path = f"{save_dir}/global_expert_load_window_i{dir_iter}.safetensors"  # noqa: E501
+        file_path = f"{save_dir}/global_expert_load_window_i{state_iter}.safetensors"  # noqa: E501
         save_file(tensors, file_path)
         logger.info("Successfully saved to %s.", file_path)
     except Exception as e:
@@ -274,9 +274,10 @@ class EplbState:
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
         """
-        self.expert_rearrangement_step_interval: int = 0
-        #ADDCOMENT
-        self.save_dir_iter = 0
+        self.saved_state_iter = 0
+        """
+        Iterator for the saved state file.
+        """
         self.is_async: bool = False
         """
         The flag indicates whether the EPLB is running in async mode.
@@ -792,10 +793,10 @@ class EplbState:
                 save_eplb_state(
                     global_expert_load_windows,
                     self.parallel_config.eplb_config.save_dir,
-                    self.save_dir_iter,
+                    self.saved_state_iter,
                     list(self.model_states.values()),
                 )
-                self.save_dir_iter += 1
+                self.saved_state_iter += 1
 
             # Perform all-reduce to get the expert load across all ranks for each model
             global_expert_load_windows = self._allreduce_list(

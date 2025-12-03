@@ -1153,6 +1153,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,

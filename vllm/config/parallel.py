@@ -671,6 +671,10 @@ class ParallelConfig:
             )
         if self.eplb_config.save_load_window and self.eplb_config.static:
             raise ValueError(
-                "save_load_window is set to True, but static is set to True."
+                "save_load_window cannot be set to true with static eplb."
+            )
+        if self.eplb_config.use_async and self.eplb_config.static:
+            raise ValueError(
+                "use_async cannot be set to true with static eplb."
             )
         return self
