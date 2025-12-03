@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from .deepseekv32 import DeepseekV32Tokenizer
 from .hf import HfTokenizer
 from .mistral import MistralTokenizer
 from .protocol import TokenizerLike
@@ -21,4 +22,5 @@ __all__ = [
     "get_tokenizer",
     "cached_tokenizer_from_config",
     "init_tokenizer_from_config",
+    "DeepseekV32Tokenizer",
 ]
