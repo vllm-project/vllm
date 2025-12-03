@@ -47,6 +47,7 @@ class DeepSeekV32ToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
 
         # Sentinel tokens
+        self.dsml_token = "｜DSML｜"
         self.tool_call_start_token: str = "<｜DSML｜function_calls>"
         self.tool_call_end_token: str = "</｜DSML｜function_calls>"
         self.invoke_start_prefix: str = "<｜DSML｜invoke name="
@@ -72,7 +73,6 @@ class DeepSeekV32ToolParser(ToolParser):
         self.param_count: int = 0
         self.in_param: bool = False
         self.in_function: bool = False
-        self.accumulated_text: str = ""
         self.json_started: bool = False
         self.json_closed: bool = False
         self.accumulated_params: dict = {}
@@ -120,7 +120,6 @@ class DeepSeekV32ToolParser(ToolParser):
         self.param_count = 0
         self.in_param = False
         self.in_function = False
-        self.accumulated_text = ""
         self.json_started = False
         self.json_closed = False
         # Store accumulated parameters for type conversion
@@ -198,6 +197,39 @@ class DeepSeekV32ToolParser(ToolParser):
             return name_str[1:-1]
         return name_str
 
+    def _convert_param_value(self, value: str, param_type: str) -> Any:
+        """Convert parameter value to the correct type."""
+        if value.lower() == "null":
+            return None
+
+        param_type = param_type.lower()
+        if param_type in ["string", "str", "text"]:
+            return value
+        elif param_type in ["integer", "int"]:
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return value
+        elif param_type in ["number", "float"]:
+            try:
+                val = float(value)
+                return val if val != int(val) else int(val)
+            except (ValueError, TypeError):
+                return value
+        elif param_type in ["boolean", "bool"]:
+            return value.lower() in ["true", "1"]
+        elif param_type in ["object", "array"]:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        else:
+            # Try JSON parse first, fallback to string
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -211,7 +243,7 @@ class DeepSeekV32ToolParser(ToolParser):
         """Extract tool calls from streaming model output."""
 
         # Store request for type conversion
-        if not previous_text or self.tool_call_start_token in delta_text:
+        if not previous_text:
             self._reset_streaming_state()
             self.streaming_request = request
 
@@ -238,9 +270,6 @@ class DeepSeekV32ToolParser(ToolParser):
                     return DeltaMessage(content="")
             return None
 
-        # Update accumulated text
-        self.accumulated_text = current_text
-
         # Check if we need to advance to next tool
         if self.json_closed and not self.in_function:
             # Check if this tool call has ended
@@ -260,7 +289,7 @@ class DeepSeekV32ToolParser(ToolParser):
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
-            if self.tool_call_start_token in delta_text:
+            if self.tool_call_start_token in current_text:
                 self.is_tool_call_started = True
                 # Return any content before the tool call
                 if self.tool_call_start_token in delta_text:
@@ -340,6 +369,8 @@ class DeepSeekV32ToolParser(ToolParser):
                         )
 
                     # Send header with function info
+                    logger.info("DeepSeek-V3.2 tool parser send tool call header: %s", 
+                                 self.current_function_name)
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
