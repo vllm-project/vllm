@@ -21,6 +21,8 @@ class MediaWithBytes(Generic[_T]):
 
     The wrapper delegates attribute access to the underlying media object,
     making it behave transparently like the wrapped type (e.g., PIL.Image).
+
+    NOTE: Currently, this wrapper is used only for the image modality.
     """
 
     media: _T
