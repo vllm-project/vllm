@@ -46,10 +46,24 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
 ### Pre-built wheels
 
-Please refer to the instructions for [pre-built wheels on GPU](./gpu.md#pre-built-wheels).
-
 When specifying the index URL, please make sure to use the `cpu` variant subdirectory.
 For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
+
+=== "Intel/AMD x86"
+
+    --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-wheels"
+
+=== "ARM AArch64"
+
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:pre-built-wheels"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:pre-built-wheels"
+
+=== "IBM Z (S390X)"
+
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-wheels"
 
 ### Build wheel from source
 
@@ -86,6 +100,18 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 === "Intel/AMD x86"
 
     --8<-- "docs/getting_started/installation/cpu.x86.inc.md:pre-built-images"
+
+=== "ARM AArch64"
+
+    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:pre-built-images"
+
+=== "Apple silicon"
+
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:pre-built-images"
+
+=== "IBM Z (S390X)"
+
+    --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-images"
 
 ### Build image from source
 
