@@ -197,3 +197,101 @@ async def test_named_tool_use(client: openai.AsyncOpenAI):
     response_2 = await client.responses.create(model=MODEL_NAME, input=input_messages)
     # check the output
     assert len(response_2.output_text) > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_with_streaming_expected_arguments(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided location in celsius.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+
+    stream_response = await client.responses.create(
+        model=model_name,
+        input="Can you tell me what the current weather is in Berlin?",
+        tools=tools,
+        stream=True,
+    )
+
+    tool_call_item = None
+    async for event in stream_response:
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        ):
+            tool_call_item = event.item
+        elif event.type == "response.function_call_arguments.delta" and tool_call_item:
+            tool_call_item.arguments += event.delta
+
+    assert tool_call_item is not None
+    assert tool_call_item.type == "function_call"
+    assert tool_call_item.name == "get_weather"
+    args = json.loads(tool_call_item.arguments)
+    assert "location" in args
+    assert args["location"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_with_streaming_types(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    # this links the "done" type with the "start" type
+    # so every "done" type should have a corresponding "start" type
+    # and every open block should be closed by the end of the stream
+    pairs_of_event_types = {
+        "response.completed": "response.created",
+        "response.output_item.done": "response.output_item.added",
+        "response.output_text.done": "response.output_text.delta",
+        "response.content_part.done": "response.content_part.added",
+        "response.reasoning_text.done": "response.reasoning_text.delta",
+        "response.reasoning_part.done": "response.reasoning_part.added",
+        "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
+    }
+
+    input_list = [
+        {
+            "role": "user",
+            "content": "Can you tell me what the current weather is in Berlin and the "
+            "forecast for the next 5 days, in fahrenheit?",
+        }
+    ]
+    stream_response = await client.responses.create(
+        model=model_name,
+        input=input_list,
+        tools=tools,
+        stream=True,
+    )
+
+    stack_of_event_types = []
+    async for event in stream_response:
+        if event.type == "response.created":
+            stack_of_event_types.append(event.type)
+        elif event.type == "response.completed":
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+        if event.type.endswith("added"):
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("delta"):
+            if stack_of_event_types[-1] == event.type:
+                continue
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("done"):
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+    assert len(stack_of_event_types) == 0
