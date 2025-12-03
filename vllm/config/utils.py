@@ -19,6 +19,10 @@ import torch
 from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 else:
@@ -293,3 +297,28 @@ def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, ob
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
+
+
+def handle_deprecated(
+    config: ConfigT,
+    old_name: str,
+    new_name_or_names: str | list[str],
+    removal_version: str,
+) -> None:
+    old_val = getattr(config, old_name)
+    if old_val is None:
+        return
+
+    if isinstance(new_name_or_names, str):
+        new_names = [new_name_or_names]
+    else:
+        new_names = new_name_or_names
+
+    msg = (
+        f"{old_name} is deprecated and will be removed in {removal_version}. "
+        f"Use {', '.join(new_names)} instead."
+    )
+    logger.warning(msg)
+
+    for new_name in new_names:
+        setattr(config, new_name, old_val)

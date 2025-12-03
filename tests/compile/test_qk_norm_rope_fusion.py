@@ -140,7 +140,7 @@ def test_qk_norm_rope_fusion(
             custom_ops=custom_ops,
             pass_config=PassConfig(
                 enable_qk_norm_rope_fusion=True,
-                enable_noop=True,
+                eliminate_noops=True,
             ),
         ),
     )
