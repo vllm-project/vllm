@@ -520,6 +520,7 @@ class EngineArgs:
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
+    cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
     external_parameters: Optional[dict] = SchedulerConfig.external_parameters
@@ -1023,6 +1024,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--kv-cache-metrics-sample",
             **observability_kwargs["kv_cache_metrics_sample"],
+        )
+        observability_group.add_argument(
+            "--cudagraph-metrics",
+            **observability_kwargs["cudagraph_metrics"],
         )
 
         # Scheduler arguments
@@ -1715,6 +1720,7 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
         )
 
         # Compilation config overrides
