@@ -7,29 +7,35 @@ from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import StringIO
+from typing import Any, TypeAlias
 
 import aiohttp
 import torch
 from prometheus_client import start_http_server
+from pydantic import TypeAdapter, field_validator
+from pydantic_core.core_schema import ValidationInfo
 from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
-    BatchRequestInput,
-    BatchRequestOutput,
-    BatchResponseData,
+    ChatCompletionRequest,
     ChatCompletionResponse,
-    EmbeddingResponse,
     ErrorResponse,
-    RerankResponse,
-    ScoreResponse,
+    OpenAIBaseModel,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.serving_score import ServingScores
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankRequest,
+    RerankResponse,
+    ScoreRequest,
+    ScoreResponse,
+)
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.utils import random_uuid
@@ -37,6 +43,84 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+BatchRequestInputBody: TypeAlias = (
+    ChatCompletionRequest | EmbeddingRequest | ScoreRequest | RerankRequest
+)
+
+
+class BatchRequestInput(OpenAIBaseModel):
+    """
+    The per-line object of the batch input file.
+
+    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
+    """
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs. Must be unique for each request in a batch.
+    custom_id: str
+
+    # The HTTP method to be used for the request. Currently only POST is
+    # supported.
+    method: str
+
+    # The OpenAI API relative URL to be used for the request. Currently
+    # /v1/chat/completions is supported.
+    url: str
+
+    # The parameters of the request.
+    body: BatchRequestInputBody
+
+    @field_validator("body", mode="plain")
+    @classmethod
+    def check_type_for_url(cls, value: Any, info: ValidationInfo):
+        # Use url to disambiguate models
+        url: str = info.data["url"]
+        if url == "/v1/chat/completions":
+            return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/embeddings":
+            return TypeAdapter(EmbeddingRequest).validate_python(value)
+        if url.endswith("/score"):
+            return ScoreRequest.model_validate(value)
+        if url.endswith("/rerank"):
+            return RerankRequest.model_validate(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
+
+
+class BatchResponseData(OpenAIBaseModel):
+    # HTTP status code of the response.
+    status_code: int = 200
+
+    # An unique identifier for the API request.
+    request_id: str
+
+    # The body of the response.
+    body: (
+        ChatCompletionResponse
+        | EmbeddingResponse
+        | ScoreResponse
+        | RerankResponse
+        | None
+    ) = None
+
+
+class BatchRequestOutput(OpenAIBaseModel):
+    """
+    The per-line object of the batch output and error files
+    """
+
+    id: str
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs.
+    custom_id: str
+
+    response: BatchResponseData | None
+
+    # For requests that failed with a non-HTTP error, this will contain more
+    # information on the cause of the failure.
+    error: Any | None
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):

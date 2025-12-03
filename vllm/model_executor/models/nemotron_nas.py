@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import AttentionType
+from vllm.attention.backends.abstract import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
@@ -387,7 +387,6 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints

@@ -304,7 +304,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
-        # Used to cleanup redundant views created temporarily
+        # Used to clean up redundant views created temporarily
         # to circumvent residual shape change issues
         self.noop_cleanup = NoOpEliminationPass(config)
         self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"

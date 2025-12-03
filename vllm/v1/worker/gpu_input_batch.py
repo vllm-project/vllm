@@ -43,6 +43,8 @@ class CachedRequestState:
     mrope_positions: torch.Tensor | None = None
     mrope_position_delta: int | None = None
 
+    xdrope_positions: torch.Tensor | None = None
+
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
@@ -480,6 +482,8 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+        if self.prev_req_id_to_index is not None:
+            self.prev_req_id_to_index.pop(req_id, None)
 
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
@@ -525,7 +529,7 @@ class InputBatch:
         # NOTE: the following is unsafe
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
         #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
-        # instead, we need to temporiarily copy the data for one of the indices
+        # instead, we need to temporarily copy the data for one of the indices
         # TODO(lucas): optimize this by only copying valid indices
         tmp = self.token_ids_cpu[i1, ...].copy()
         self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]

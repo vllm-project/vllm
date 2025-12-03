@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -37,7 +37,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     Reasoning parser for MiniMax M2 model.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         self.end_token_id = self.vocab.get("</think>")
 
