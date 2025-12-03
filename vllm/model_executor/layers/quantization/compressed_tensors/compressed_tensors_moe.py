@@ -92,7 +92,6 @@ from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
-    get_mk_alignment_for_contiguous_layout,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
