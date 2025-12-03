@@ -2036,6 +2036,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     ql_nope_shape[1],
                     ql_nope_shape[2] + q_pe_shape[2],
                 )
+                # Using empty and copy since torch.cat introduces significant overhead.
                 decode_q0 = torch.empty(
                     decode_q_shape,
                     device=decode_ql_nope.device,
