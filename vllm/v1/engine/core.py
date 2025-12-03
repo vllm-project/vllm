@@ -467,8 +467,16 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def _process_aborts_queue(self):
-        while not self.aborts_queue.empty():
-            self.abort_requests(self.aborts_queue.get_nowait())
+        if not self.aborts_queue.empty():
+            request_ids = []
+            while not self.aborts_queue.empty():
+                ids = self.aborts_queue.get_nowait()
+                if isinstance(ids, str):
+                    # Should be a list here, but also handle string just in case.
+                    ids = (ids,)
+                request_ids.extend(ids)
+            # More efficient to abort all as a single batch.
+            self.abort_requests(request_ids)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
