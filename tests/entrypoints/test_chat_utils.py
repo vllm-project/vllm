@@ -842,7 +842,7 @@ def test_parse_chat_messages_audio_embeds_with_string(
     audio_embedding = torch.randn(1, 128, 768)
 
     # Encode it as base64
-    base64_audio_embedding = tensor2base64(audio_embedding[0])
+    base64_audio_embedding = tensor2base64(audio_embedding)
 
     conversation, mm_data, mm_uuids = parse_chat_messages(
         [
@@ -884,7 +884,7 @@ async def test_parse_chat_messages_audio_embeds_async(
     audio_embedding = torch.randn(1, 128, 768)
 
     # Encode it as base64
-    base64_audio_embedding = tensor2base64(audio_embedding[0])
+    base64_audio_embedding = tensor2base64(audio_embedding)
 
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
         [
