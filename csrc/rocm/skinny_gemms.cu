@@ -1249,7 +1249,7 @@ int mindiv(int N, int div1, int div2) {
     rnds[i] = N / nPrRnd;
     nPrRnd -= div1;
   }
-  for (int i = 12; i > 0; i--)
+  for (int i = 12; i >= 0; i--)
     if (rnds[0] == rnds[i]) return (div2 - i);
 }
 
