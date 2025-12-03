@@ -60,7 +60,7 @@ def _pad_out_ubatch_slices(
     return ubatch_slices
 
 
-def create_ubatch_slices(
+def maybe_create_ubatch_slices(
     should_ubatch: bool,
     num_scheduled_tokens: np.ndarray,
     num_tokens_padded: int,

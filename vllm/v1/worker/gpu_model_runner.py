@@ -153,7 +153,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
-    create_ubatch_slices,
+    maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
@@ -2962,7 +2962,7 @@ class GPUModelRunner(
                 num_reqs_padded = (
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
-                ubatch_slices, ubatch_slices_padded = create_ubatch_slices(
+                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
                     should_ubatch,
                     num_scheduled_tokens_np,
                     num_tokens_padded,
@@ -4004,7 +4004,7 @@ class GPUModelRunner(
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
-        ubatch_slices, ubatch_slices_padded = create_ubatch_slices(
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded
         )
 
