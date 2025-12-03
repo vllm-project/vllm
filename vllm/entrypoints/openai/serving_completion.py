@@ -443,7 +443,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    self._handle_error_finish_reason(finish_reason, request_id)
+                    self._raise_if_error(finish_reason, request_id)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -507,7 +507,6 @@ class OpenAIServingCompletion(OpenAIServing):
             request_metadata.final_usage_info = final_usage_info
 
         except GenerationError as e:
-            logger.exception("Error in completion stream generator.")
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
@@ -526,10 +525,6 @@ class OpenAIServingCompletion(OpenAIServing):
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
-        for final_res in final_res_batch:
-            for output in final_res.outputs:
-                self._handle_error_finish_reason(output.finish_reason, request_id)
-
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
@@ -546,6 +541,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                self._raise_if_error(output.finish_reason, request_id)
+
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:

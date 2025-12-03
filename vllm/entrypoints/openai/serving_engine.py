@@ -801,10 +801,8 @@ class OpenAIServing:
         )
         return json_str
 
-    def _handle_error_finish_reason(
-        self, finish_reason: str | None, request_id: str
-    ) -> None:
-        """handle error finish reason by logging and raising exception if found"""
+    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+        """Raise GenerationError if finish_reason indicates an error."""
         if finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
@@ -815,7 +813,7 @@ class OpenAIServing:
     def _convert_generation_error_to_response(
         self, e: GenerationError
     ) -> ErrorResponse:
-        """convert GenerationError to ErrorResponse"""
+        """Convert GenerationError to ErrorResponse."""
         return self.create_error_response(
             str(e),
             err_type="InternalServerError",
@@ -825,7 +823,7 @@ class OpenAIServing:
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError
     ) -> str:
-        """convert GenerationError to streaming error response"""
+        """Convert GenerationError to streaming error response."""
         return self.create_streaming_error_response(
             str(e),
             err_type="InternalServerError",

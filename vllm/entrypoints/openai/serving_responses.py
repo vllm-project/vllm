@@ -646,12 +646,8 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "incomplete"
                 elif context.finish_reason == "abort":
                     status = "cancelled"
-                elif context.finish_reason == "error":
-                    logger.error(
-                        "Request %s failed with internal error during generation",
-                        request.request_id,
-                    )
-                    raise GenerationError("Internal server error")
+                else:
+                    self._raise_if_error(context.finish_reason, request.request_id)
             else:
                 status = "incomplete"
         else:
@@ -662,9 +658,7 @@ class OpenAIServingResponses(OpenAIServing):
             final_output = final_res.outputs[0]
 
             # finish_reason='error' indicates retryable internal error
-            self._handle_error_finish_reason(
-                final_output.finish_reason, request.request_id
-            )
+            self._raise_if_error(final_output.finish_reason, request.request_id)
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
@@ -1062,7 +1056,6 @@ class OpenAIServingResponses(OpenAIServing):
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
         except GenerationError as e:
-            logger.exception("Background request failed for %s", request.request_id)
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
@@ -1088,7 +1081,6 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             response = await self.responses_full_generator(request, *args, **kwargs)
         except GenerationError as e:
-            logger.exception("Background request failed for %s", request.request_id)
             response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
@@ -1229,9 +1221,7 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
-                self._handle_error_finish_reason(
-                    output.finish_reason, request.request_id
-                )
+                self._raise_if_error(output.finish_reason, request.request_id)
                 if reasoning_parser:
                     delta_message = reasoning_parser.extract_reasoning_streaming(
                         previous_text=previous_text,
@@ -1528,7 +1518,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(ctx, StreamingHarmonyContext)
 
             # finish_reason='error' indicates a retryable error
-            self._handle_error_finish_reason(ctx.finish_reason, request.request_id)
+            self._raise_if_error(ctx.finish_reason, request.request_id)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
@@ -2038,7 +2028,6 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     yield event_data
             except GenerationError as e:
-                logger.exception("Error in responses stream generator.")
                 error_json = self._convert_generation_error_to_streaming_response(e)
                 yield _increment_sequence_number_and_return(
                     TypeAdapter(StreamingResponsesResponse).validate_json(error_json)

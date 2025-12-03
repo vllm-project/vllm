@@ -1123,9 +1123,7 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check for error finish reason and abort streaming
                         # finish_reason='error' indicates a retryable error
-                        self._handle_error_finish_reason(
-                            output.finish_reason, request_id
-                        )
+                        self._raise_if_error(output.finish_reason, request_id)
 
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
@@ -1295,7 +1293,6 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
         except GenerationError as e:
-            logger.exception("Error in chat completion stream generator.")
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
@@ -1339,7 +1336,7 @@ class OpenAIServingChat(OpenAIServing):
         for output in final_res.outputs:
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
-            self._handle_error_finish_reason(output.finish_reason, request_id)
+            self._raise_if_error(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None

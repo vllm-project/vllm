@@ -11,8 +11,8 @@ from vllm.entrypoints.openai.serving_engine import GenerationError, OpenAIServin
 
 
 @pytest.mark.asyncio
-async def test_handle_error_finish_reason_raises_generation_error():
-    """test _handle_error_finish_reason raises GenerationError"""
+async def test_raise_if_error_raises_generation_error():
+    """test _raise_if_error raises GenerationError"""
     # create a minimal OpenAIServing instance
     mock_engine = MagicMock()
     mock_engine.model_config = MagicMock()
@@ -27,15 +27,15 @@ async def test_handle_error_finish_reason_raises_generation_error():
 
     # test that error finish_reason raises GenerationError
     with pytest.raises(GenerationError) as exc_info:
-        serving._handle_error_finish_reason("error", "test-request-id")
+        serving._raise_if_error("error", "test-request-id")
 
     assert str(exc_info.value) == "Internal server error"
     assert exc_info.value.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
 
     # test that other finish_reasons don't raise
-    serving._handle_error_finish_reason("stop", "test-request-id")  # should not raise
-    serving._handle_error_finish_reason("length", "test-request-id")  # should not raise
-    serving._handle_error_finish_reason(None, "test-request-id")  # should not raise
+    serving._raise_if_error("stop", "test-request-id")  # should not raise
+    serving._raise_if_error("length", "test-request-id")  # should not raise
+    serving._raise_if_error(None, "test-request-id")  # should not raise
 
 
 @pytest.mark.asyncio
