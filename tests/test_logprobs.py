@@ -84,7 +84,7 @@ def test_append_logprobs_for_next_position_flat() -> None:
         logprobs=[0.1],
         decoded_tokens=["1"],
         rank=10,
-        num_logprobs=-1,
+        num_logprobs=0,
     )
     append_logprobs_for_next_position(
         logprobs,
@@ -92,7 +92,7 @@ def test_append_logprobs_for_next_position_flat() -> None:
         logprobs=[0.2, 0.3],
         decoded_tokens=["2", "3"],
         rank=11,
-        num_logprobs=-1,
+        num_logprobs=1,
     )
     assert isinstance(logprobs, FlatLogprobs)
     assert logprobs.start_indices == [0, 1]
@@ -181,6 +181,17 @@ def test_flat_logprobs_access() -> None:
         [LOGPROBS_ONE_POSITION_1, LOGPROBS_ONE_POSITION_2, LOGPROBS_ONE_POSITION_0],
     ):
         assert actual_logprobs == expected_logprobs
+
+    # Test get_logprob
+    assert logprobs.get_logprob(0, 2) == 0.2
+    assert logprobs.get_logprob(0, 3) == 0.3
+    assert logprobs.get_logprob(1, 4) == 0.4
+    assert logprobs.get_logprob(1, 5) == 0.5
+    assert logprobs.get_logprob(1, 6) == 0.6
+    assert logprobs.get_logprob(2, 1) == 0.1
+    assert logprobs.get_logprob(0, 0) is None
+    assert logprobs.get_logprob(1, 1) is None
+    assert logprobs.get_logprob(2, 2) is None
 
     # Test __getitem__ : single item
     assert logprobs[0] == LOGPROBS_ONE_POSITION_1
