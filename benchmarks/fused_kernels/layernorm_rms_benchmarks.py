@@ -129,7 +129,13 @@ def fused_groupwise_impl(
     group_size: list[int],
 ):
     out, _ = ops.rms_norm_per_block_quant(
-        x, rms_norm_layer.weight, 1e-6, quant_dtype, group_size, residual=residual
+        x,
+        rms_norm_layer.weight,
+        1e-6,
+        quant_dtype,
+        group_size,
+        residual=residual,
+        is_scale_transposed=True,
     )
 
 

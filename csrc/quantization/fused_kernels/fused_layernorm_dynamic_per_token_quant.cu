@@ -98,17 +98,17 @@ __global__ void rms_norm_per_block_quant_kernel(
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr) {
-  __shared__ float s_rms;
+  float rms;
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
   vllm::vectorized::compute_rms<scalar_t, has_residual, group_size>(
-      &s_rms, input, hidden_size, var_epsilon, residual);
+      &rms, input, hidden_size, var_epsilon, residual);
 
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
       scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, s_rms, scale_ub, hidden_size, residual);
+      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -119,7 +119,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
       has_residual, is_scale_transposed, group_size>(
-      out, input, weight, s_rms, scales, hidden_size, residual);
+      out, input, weight, rms, scales, hidden_size, residual);
 }
 
 }  // namespace vllm
@@ -212,7 +212,8 @@ void rms_norm_per_block_quant_dispatch(
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
-  dim3 block(std::min(hidden_size, 512));
+  const int max_block_size = (num_tokens <= 256) ? 512 : 256;
+  dim3 block(std::min(hidden_size, max_block_size));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 

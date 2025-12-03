@@ -449,11 +449,18 @@ def rms_norm_per_block_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
-    scales = torch.empty(
-        (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
-        device=input.device,
-        dtype=torch.float32,
-    )
+    if is_scale_transposed:
+        scales = torch.empty(
+            (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
+            device=input.device,
+            dtype=torch.float32,
+        ).transpose(0, 1)
+    else:
+        scales = torch.empty(
+            (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
+            device=input.device,
+            dtype=torch.float32,
+        )
 
     torch.ops._C.rms_norm_per_block_quant(
         output,
