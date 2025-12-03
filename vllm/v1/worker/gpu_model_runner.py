@@ -1083,6 +1083,7 @@ class GPUModelRunner(
             "GPU async SPS is only supported without pipeline parallelism."
         )
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        assert prev_req_id_to_index is not None
         req_ids_to_fix = list(self.async_spec_reqs_to_fix)
 
         if not req_ids_to_fix:
@@ -1094,9 +1095,9 @@ class GPUModelRunner(
 
         for req_id in req_ids_to_fix:
             prev_index = prev_req_id_to_index.get(req_id)
-            assert prev_index is not None and prev_index < len(valid_sampled_token_count), (
-                f"req_id={req_id} not found in prev_req_id_to_index or index out of range"
-            )
+            assert prev_index is not None and prev_index < len(
+                valid_sampled_token_count
+            ), f"req_id={req_id} not found or index out of range"
             req_state = self.requests.get(req_id)
             assert req_state is not None, f"req_id={req_id} not found in requests"
 
@@ -1120,7 +1121,9 @@ class GPUModelRunner(
             del req_state.output_token_ids[-num_rejected:]
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
-            assert req_index is not None, f"req_id={req_id} not found in req_id_to_index"
+            assert req_index is not None, (
+                f"req_id={req_id} not found or index out of range"
+            )
             self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
@@ -1412,9 +1415,11 @@ class GPUModelRunner(
             prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
         ).to(self.device, non_blocking=True)
 
-        diff = prev_num_draft_len_tensor + 1 - pre_valid_sampled_token_count[
-            prev_req_indices_tensor
-        ].to(torch.int64)
+        diff = (
+            prev_num_draft_len_tensor
+            + 1
+            - pre_valid_sampled_token_count[prev_req_indices_tensor].to(torch.int64)
+        )
         self.seq_lens.gpu[req_indices_tensor] -= diff.int()
 
         num_reqs = self.input_batch.num_reqs
@@ -1433,14 +1438,13 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             for dim in range(3):
-                self.mrope_positions.gpu[
-                    dim, : req_indices_flat_gpu.shape[0]
-                ] -= diff_per_token
+                self.mrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
+                    diff_per_token
+                )
 
         self.input_batch.block_table.compute_slot_mapping_gpu(
             req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
         )
-
 
     def _prepare_inputs(
         self,
