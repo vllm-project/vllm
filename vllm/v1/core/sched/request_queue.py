@@ -212,6 +212,7 @@ class SJFRequestQueue(RequestQueue):
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to SJF policy."""
+        assert request.prompt_token_ids is not None, "prompt_token_ids cannot be None for SJF scheduling."
         heapq.heappush(
             self._heap,
             (
@@ -274,7 +275,7 @@ class SJFRequestQueue(RequestQueue):
         """Iterate over the queue according to SJF policy."""
         heap_copy = self._heap[:]
         while heap_copy:
-            _, _, request = heapq.heappop(heap_copy)
+            _, request = heapq.heappop(heap_copy)
             yield request
 
     def __reversed__(self) -> Iterator[Request]:
