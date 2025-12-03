@@ -4,7 +4,7 @@ set -euxo pipefail
 # args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT]
 THRESHOLD=${1:-0.25}
 NUM_Q=${2:-1319}
-PORT=${3:-8010}
+PORT=${3:-8040}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
 mkdir -p "${OUT_DIR}"
 
@@ -16,7 +16,7 @@ wait_for_server() {
     done'
 }
 
-MODEL="deepseek-ai/DeepSeek-V2-lite"
+MODEL="Qwen/Qwen3-Next-80B-A3B-Instruct"
 
 # Set BACKENDS based on platform
 if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
@@ -46,13 +46,14 @@ for BACK in "${BACKENDS[@]}"; do
   VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
-    --tensor-parallel-size 2 \
-    --data-parallel-size 2 \
+    --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --enable-eplb \
-    --eplb-config '{"window_size":200,"step_interval":600}' \
+    --eplb-config '{"window_size":200,"step_interval":600,"use_async":true}' \
+    --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \
     --max-model-len 2048 \
+    --gpu-memory-utilization 0.9 \
     --port $PORT &
   SERVER_PID=$!
   wait_for_server $PORT
