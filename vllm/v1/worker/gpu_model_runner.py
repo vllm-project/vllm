@@ -3073,6 +3073,7 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            # if same_step(prefill and decode_step 0) -> eager o/w call torch.compiled model for subsequent ones
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4096,6 +4097,7 @@ class GPUModelRunner(
             assert num_tokens_padded <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs(num_tokens_padded)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
+                # NOT ENC-DEC
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = {
@@ -4153,6 +4155,7 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                 ),
             ):
+            # CALLING MODEL
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -4452,6 +4455,7 @@ class GPUModelRunner(
                     self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
+        # TORCH COMPILE FOR DECODE (step 1 onward)
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
