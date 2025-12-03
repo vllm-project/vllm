@@ -26,10 +26,9 @@ from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
@@ -112,7 +111,7 @@ class AsyncLLM(EngineClient):
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_configs(self.model_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -190,7 +189,9 @@ class AsyncLLM(EngineClient):
                 ],
                 with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
                 ),
             )
         else:
@@ -748,8 +749,8 @@ class AsyncLLM(EngineClient):
         self.input_processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self) -> None:
-        await self.engine_core.reset_prefix_cache_async()
+    async def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+        return await self.engine_core.reset_prefix_cache_async(reset_running_requests)
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()
