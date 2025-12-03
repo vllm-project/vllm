@@ -111,17 +111,6 @@ if current_platform.is_cuda():
                 async_tp=96,  # MLP is MoE, half the fusions of dense
             ),
         ),
-        ModelBackendTestCase(
-            model_name="openai/gpt-oss-20b",
-            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            backend=AttentionBackendEnum.FLASHINFER,
-            matches=Matches(
-                attention_fusion=0,
-                allreduce_fusion=49,
-                sequence_parallel=49,
-                async_tp=48,
-            ),
-        ),
     ]
 
 elif current_platform.is_rocm():
@@ -203,7 +192,7 @@ def test_attn_quant(
         splitting_ops=splitting_ops,
         # Common
         mode=CompilationMode.VLLM_COMPILE,
-        pass_config=PassConfig(enable_attn_fusion=True, enable_noop=True),
+        pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
     )
@@ -293,9 +282,9 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         # Common
         mode=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
-            enable_attn_fusion=True,
-            enable_noop=True,
-            enable_fi_allreduce_fusion=True,
+            fuse_attn_quant=True,
+            eliminate_noops=True,
+            fuse_allreduce_rms=True,
         ),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
@@ -395,10 +384,10 @@ def test_tp2_attn_quant_async_tp(
         # Common
         level=CompilationMode.VLLM_COMPILE,
         pass_config=PassConfig(
-            enable_attn_fusion=True,
-            enable_noop=True,
-            enable_sequence_parallelism=True,
-            enable_async_tp=True,
+            fuse_attn_quant=True,
+            eliminate_noops=True,
+            enable_sp=True,
+            fuse_gemm_comms=True,
         ),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},

@@ -7,7 +7,11 @@ from enum import Enum
 
 import torch
 from compressed_tensors import CompressionFormat
-from compressed_tensors.quantization import ActivationOrdering, QuantizationStrategy
+from compressed_tensors.quantization import (
+    ActivationOrdering,
+    QuantizationArgs,
+    QuantizationStrategy,
+)
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
@@ -23,6 +27,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -45,9 +50,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
 )
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target,
-)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
@@ -66,6 +68,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
+    get_marlin_input_dtype,
+    marlin_act_int8_process_scales,
     marlin_make_workspace_new,
     marlin_moe_permute_scales,
 )
@@ -103,7 +107,7 @@ __all__ = [
     "CompressedTensorsW8A8Int8MoEMethod",
     "CompressedTensorsWNA16MarlinMoEMethod",
     "CompressedTensorsWNA16MoEMethod",
-    "CompressedTensorsW4A4Nvfp4MoeMethod",
+    "CompressedTensorsW4A4Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
 ]
 
@@ -113,43 +117,55 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         layer: torch.nn.Module,
+        layer_name: str,
     ) -> "CompressedTensorsMoEMethod":
+        # FusedMoE was made by combining multiple Linears so need to
+        # make sure quantization config for Linear can target it
+        quant_config._add_fused_moe_to_target_scheme_map()
+        unfused_names = [
+            layer_name + proj_name
+            for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
+        ]
+        # TODO: refactor this to use expert_mapping and check all layer numbers
+        all_scheme_dicts = [
+            quant_config.get_scheme_dict(layer, name) for name in unfused_names
+        ]
+        scheme_dict = all_scheme_dicts.pop()
+
+        # multiple schemes found
+        if not all([cur_dict == scheme_dict for cur_dict in all_scheme_dicts]):
+            raise ValueError(
+                "All MoE projections need to have same "
+                "quantization scheme but found multiple"
+            )
+
+        if scheme_dict is None:  # ignored layer
+            return UnquantizedFusedMoEMethod(layer.moe_config)
+
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        # Check if a using "Linear" to select schemes
-        if "Linear" in quant_config.target_scheme_map:
-            matched_target = "Linear"
-        else:
-            # May have instead defined the linear layers in the fused model
-
-            fused_layers = ["re:.*down_proj.*", "re:.*gate_proj.*", "re:.*up_proj.*"]
-            current_scheme = None
-            for fused_layer in fused_layers:
-                # Check if one of the fused layers are defined in quant_config
-                matched_target = find_matched_target(
-                    layer_name=fused_layer,
-                    module=layer,
-                    targets=quant_config.target_scheme_map.keys(),
-                    fused_mapping=quant_config.packed_modules_mapping,
-                )
-
-                # Only valid if down_proj, gate_proj, and up_proj
-                # are mapped to the same quant scheme in the quant_config
-                if current_scheme is None:
-                    current_scheme = quant_config.target_scheme_map.get(matched_target)
-                else:
-                    assert current_scheme == quant_config.target_scheme_map.get(
-                        matched_target
-                    )
-
-        weight_quant = quant_config.target_scheme_map[matched_target].get("weights")
-        input_quant = quant_config.target_scheme_map[matched_target].get(
-            "input_activations"
-        )
+        weight_quant = scheme_dict.get("weights")
+        input_quant = scheme_dict.get("input_activations")
+        format = scheme_dict.get("format")
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1
+
+            valid_format_and_bits = (
+                weight_quant.num_bits in WNA16_SUPPORTED_BITS
+                and format == CompressionFormat.pack_quantized.value
+            )
+
+            if not valid_format_and_bits:
+                raise ValueError(
+                    "For Fused MoE layers, only format: ",
+                    f"{CompressionFormat.pack_quantized.value} ",
+                    f" and bits: {WNA16_SUPPORTED_BITS} is supported ",
+                    f"but got format: {CompressionFormat.pack_quantized.value} "
+                    f" and bits: {weight_quant.num_bits}",
+                )
+
             # Prefer to use the MarlinMoE kernel when it is supported.
             if (
                 not check_moe_marlin_supports_layer(layer, group_size)
@@ -164,32 +180,40 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
-                return CompressedTensorsWNA16MoEMethod(quant_config, layer.moe_config)
+                return CompressedTensorsWNA16MoEMethod(
+                    weight_quant, input_quant, layer.moe_config
+                )
             else:
                 logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(
-                    quant_config, layer.moe_config
+                    weight_quant, input_quant, layer.moe_config
                 )
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A4Nvfp4MoeMethod(layer.moe_config)
+            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8(weight_quant, input_quant)
         ):
-            return CompressedTensorsW8A8Fp8MoEMethod(quant_config, layer.moe_config)
+            return CompressedTensorsW8A8Fp8MoEMethod(
+                weight_quant, input_quant, layer.moe_config
+            )
         elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant):
-            return CompressedTensorsW8A8Int8MoEMethod(quant_config, layer.moe_config)
+            return CompressedTensorsW8A8Int8MoEMethod(
+                weight_quant, input_quant, layer.moe_config
+            )
         elif quant_config._is_dynamic_token_w4a8_int(weight_quant, input_quant):
-            return CompressedTensorsW4A8Int8MoEMethod(quant_config, layer.moe_config)
+            return CompressedTensorsW4A8Int8MoEMethod(
+                weight_quant, input_quant, layer.moe_config
+            )
         else:
             raise RuntimeError(
                 f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
             )
 
 
-class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig):
+class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
+    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
@@ -200,17 +224,21 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
+        self.layer_name = layer_name
+        self.marlin_input_dtype = (
+            get_marlin_input_dtype(layer_name) if self.use_marlin else None
+        )
         self.flashinfer_moe_backend = None
         if self.allow_flashinfer:
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
-                " for CompressedTensorsW4A4Nvfp4MoeMethod."
+                " for CompressedTensorsW4A4Nvfp4MoEMethod."
             )
         elif self.use_marlin:
-            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoeMethod.")
+            logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoEMethod.")
         else:
-            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoeMethod.")
+            logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoEMethod.")
 
     def create_weights(
         self,
@@ -360,7 +388,7 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
         )
 
         if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
             return
         # w13
         if (
@@ -544,7 +572,7 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
         ):
             if enable_eplb:
                 raise NotImplementedError(
-                    "EPLB not supported for `CompressedTensorsW4A4MoeMethod` yet."
+                    "EPLB not supported for `CompressedTensorsW4A4MoEMethod` yet."
                 )
 
             return flashinfer_trtllm_fp4_moe(
@@ -582,6 +610,7 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
 
@@ -616,7 +645,7 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
             assert expert_map is None, (
                 "Expert Parallelism / expert_map "
                 "is currently not supported for "
-                "CompressedTensorsW4A4Nvfp4MoeMethod."
+                "CompressedTensorsW4A4Nvfp4MoEMethod."
             )
             assert self.moe_quant_config is not None
 
@@ -641,15 +670,18 @@ class CompressedTensorsW4A4Nvfp4MoeMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
-        super().__init__(moe)
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations"
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+            CompressedTensorsConfig,
         )
+
+        super().__init__(moe)
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
 
         per_tensor = (
             self.weight_quant.strategy == QuantizationStrategy.TENSOR
@@ -688,14 +720,20 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # cutlass path
-        self.is_fp8_w8a8_sm100 = quant_config._is_fp8_w8a8_sm100(
+        self.is_fp8_w8a8_sm100 = CompressedTensorsConfig._is_fp8_w8a8_sm100(
             self.weight_quant, self.input_quant
         )
         self.use_cutlass = not self.block_quant and (
-            quant_config._is_fp8_w8a8_sm90(self.weight_quant, self.input_quant)
+            CompressedTensorsConfig._is_fp8_w8a8_sm90(
+                self.weight_quant, self.input_quant
+            )
             or self.is_fp8_w8a8_sm100
         )
         self.disable_expert_map = False
+        self.layer_name = layer_name
+        self.marlin_input_dtype = (
+            get_marlin_input_dtype(layer_name) if self.use_marlin else None
+        )
 
     def create_weights(
         self,
@@ -937,7 +975,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
         elif self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(layer, False)
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=self.marlin_input_dtype
+            )
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
@@ -1150,6 +1190,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
 
@@ -1244,15 +1285,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
         super().__init__(moe)
-        self.quant_config = quant_config
-        self.weight_quant = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
-            "input_activations"
-        )
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
 
         per_channel = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL
@@ -1396,33 +1436,27 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
         super().__init__(moe)
-        self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.num_bits = config.num_bits
-        self.packed_factor = 32 // config.num_bits
-        self.strategy = config.strategy
-        self.group_size = config.group_size
-        self.actorder = config.actorder
-        assert config.symmetric, "Only symmetric quantization is supported for MoE"
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+        assert weight_quant.symmetric, (
+            "Only symmetric quantization is supported for MoE"
+        )
+        # Extract properties from weight_quant
+        self.num_bits = weight_quant.num_bits
+        self.packed_factor = 32 // weight_quant.num_bits
+        self.strategy = weight_quant.strategy
+        self.group_size = weight_quant.group_size
+        self.actorder = weight_quant.actorder
 
-        if not (
-            self.quant_config.quant_format == CompressionFormat.pack_quantized.value
-            and self.num_bits in WNA16_SUPPORTED_BITS
-        ):
-            raise ValueError(
-                "For Fused MoE layers, only ",
-                f"{CompressionFormat.pack_quantized.value} ",
-                "is supported for the following bits: ",
-                f"{WNA16_SUPPORTED_BITS}",
-            )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
         self.use_marlin = True
+        self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
 
     def create_weights(
         self,
@@ -1482,6 +1516,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         else:
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
+
+        layer.num_groups_w13 = num_groups_w13
+        layer.num_groups_w2 = num_groups_w2
 
         w13_scale = torch.nn.Parameter(
             torch.ones(
@@ -1566,6 +1603,17 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         num_experts = layer.w13_weight_g_idx.shape[0]
         device = layer.w13_weight_g_idx.device
+        is_a_8bit = (
+            self.marlin_input_dtype is not None
+            and self.marlin_input_dtype.itemsize == 1
+        )
+
+        if self.marlin_input_dtype == torch.float8_e4m3fn:
+            # NOTE: for non-zp quantization format only
+            ops.marlin_int4_fp8_preprocess(layer.w13_weight_packed, inplace=True)
+            ops.marlin_int4_fp8_preprocess(layer.w2_weight_packed, inplace=True)
+            layer.w13_weight_scale.data = layer.w13_weight_scale.data * 512
+            layer.w2_weight_scale.data = layer.w2_weight_scale.data * 512
 
         # when running models with grouped act order,
         # resort to g_idx values provided in checkpoint
@@ -1616,31 +1664,54 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_packed.shape[1] * self.packed_factor,
             layer.w13_weight_packed.shape[2],
             self.num_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w13_weight_packed", marlin_w13_qweight)
+
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_weight_packed,
             layer.w2_g_idx_sort_indices,
             layer.w2_weight_packed.shape[1] * self.packed_factor,
             layer.w2_weight_packed.shape[2],
             self.num_bits,
+            is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w2_weight_packed", marlin_w2_qweight)
+
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_weight_scale,
             size_k=layer.w13_weight_packed.shape[2],
             size_n=layer.w13_weight_scale.shape[2],
             group_size=self.group_size,
+            is_a_8bit=is_a_8bit,
         )
+        if self.marlin_input_dtype == torch.int8 and layer.num_groups_w13 > 1:
+            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w13_scales
+            )
+            layer.register_parameter(
+                "w13_input_global_scale",
+                torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+            )
         replace_parameter(layer, "w13_weight_scale", marlin_w13_scales)
+
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_weight_scale,
             size_k=layer.w2_weight_scale.shape[1]
             * (self.group_size if self.group_size != -1 else self.packed_factor),
             size_n=layer.w2_weight_scale.shape[2],
             group_size=self.group_size,
+            is_a_8bit=is_a_8bit,
         )
+        if self.marlin_input_dtype == torch.int8 and layer.num_groups_w2 > 1:
+            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w2_scales
+            )
+            layer.register_parameter(
+                "w2_input_global_scale",
+                torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+            )
         replace_parameter(layer, "w2_weight_scale", marlin_w2_scales)
 
         layer.workspace = marlin_make_workspace_new(device, 4)
@@ -1735,6 +1806,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             router_logits,
             topk_weights,
             topk_ids,
+            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
+            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -1744,6 +1817,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             sort_indices1=layer.w13_g_idx_sort_indices,
             sort_indices2=layer.w2_g_idx_sort_indices,
             workspace=layer.workspace,
+            input_dtype=self.marlin_input_dtype,
             is_k_full=self.is_k_full,
         )
 
@@ -1751,34 +1825,26 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
         super().__init__(moe)
-        self.quant_config = quant_config
-        # TODO: @dsikka: refactor this to use schemes as other kernels
-        # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
-        self.num_bits = config.num_bits
-        self.packed_factor = 32 // config.num_bits
-        self.strategy = config.strategy
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
+        # Extract properties from weight_quant
+        self.num_bits = weight_quant.num_bits
+        self.packed_factor = 32 // weight_quant.num_bits
+        self.strategy = weight_quant.strategy
         # channelwise is not supported by this kernel
-        assert config.strategy == "group"
-        self.group_size = config.group_size
+        assert weight_quant.strategy == "group"
+        self.group_size = weight_quant.group_size
         # grouped actorder isn't supported by this kernel
-        assert config.actorder != "group"
-        assert config.symmetric, "Only symmetric quantization is supported for MoE"
-
-        if not (
-            self.quant_config.quant_format == CompressionFormat.pack_quantized.value
-            and self.num_bits in WNA16_SUPPORTED_BITS
-        ):
-            raise ValueError(
-                "For Fused MoE layers, only ",
-                f"{CompressionFormat.pack_quantized.value} ",
-                "is supported for the following bits: ",
-                f"{WNA16_SUPPORTED_BITS}",
-            )
+        assert weight_quant.actorder != "group"
+        assert weight_quant.symmetric, (
+            "Only symmetric quantization is supported for MoE"
+        )
 
     def create_weights(
         self,
@@ -2003,27 +2069,33 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def __init__(
         self,
-        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
+        layer_name: str | None = None,
     ):
         super().__init__(moe)
         self.has_bias = self.moe.has_bias
-        self.quant_config = quant_config
+        self.weight_quant = weight_quant
+        self.input_quant = input_quant
 
         # Validate scheme: weights=W4 (channel or group),
         # activations=dynamic TOKEN (A8)
-        wq = self.quant_config.target_scheme_map["Linear"].get("weights")
-        aq = self.quant_config.target_scheme_map["Linear"].get("input_activations")
 
         # Must be dynamic per-token activations
-        if aq.strategy != QuantizationStrategy.TOKEN or not aq.dynamic:
+        if (
+            input_quant.strategy != QuantizationStrategy.TOKEN
+            or not input_quant.dynamic
+        ):
             raise ValueError(
                 "W4A8-int MoE needs dynamic per-token activation quantization."
             )
 
         # Weight can be channel-wise (group_size=None) or group-wise
-        self.group_size = wq.group_size if (wq.group_size is not None) else -1
-        if wq.num_bits != 4:
+        self.group_size = (
+            weight_quant.group_size if (weight_quant.group_size is not None) else -1
+        )
+        if weight_quant.num_bits != 4:
             raise ValueError("This method only supports 4-bit weights (num_bits=4).")
 
         # CPU only

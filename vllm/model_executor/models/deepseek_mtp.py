@@ -346,10 +346,15 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     # Use expert_params_mapping to locate the destination
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
+                    is_expert_weight = False
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
+
+                        # Anyway, this is an expert weight and should not be
+                        # attempted to load as other weights later
+                        is_expert_weight = True
 
                         # Do not modify `name` since the loop may continue here
                         # Instead, create a new variable
@@ -377,6 +382,12 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                                 loaded_params.add(name_mapped)
                             break
                     else:
+                        if is_expert_weight:
+                            # We've checked that this is an expert weight
+                            # However it's not mapped locally to this rank
+                            # So we simply skip it
+                            continue
+
                         # Skip loading extra bias for GPTQ models.
                         if name.endswith(".bias") and name not in params_dict:
                             continue

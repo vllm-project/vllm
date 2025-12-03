@@ -13,7 +13,7 @@ from typing import (
 
 import torch
 
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import (

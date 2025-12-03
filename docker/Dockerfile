@@ -150,8 +150,8 @@ ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BASE BUILD IMAGE ####################
 
-#################### WHEEL BUILD IMAGE ####################
-FROM base AS build
+#################### CSRC BUILD IMAGE ####################
+FROM base AS csrc-build
 ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -172,10 +172,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-COPY . .
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
+WORKDIR /workspace
+
+COPY pyproject.toml setup.py CMakeLists.txt ./
+COPY cmake cmake/
+COPY csrc csrc/
+COPY vllm/envs.py vllm/envs.py
+COPY vllm/__init__.py vllm/__init__.py
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -195,9 +198,11 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 ARG VLLM_USE_PRECOMPILED=""
 ARG VLLM_MAIN_CUDA_VERSION=""
 
+# Use dummy version for csrc-build wheel (only .so files are extracted, version doesn't matter)
+ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
@@ -223,7 +228,6 @@ ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git  \
     if [ "$USE_SCCACHE" != "1" ]; then \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
@@ -232,6 +236,52 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
+#################### CSRC BUILD IMAGE ####################
+
+#################### WHEEL BUILD IMAGE ####################
+FROM base AS build
+ARG TARGETPLATFORM
+
+ARG PIP_INDEX_URL UV_INDEX_URL
+ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+ARG PYTORCH_CUDA_INDEX_BASE_URL
+
+# install build dependencies
+COPY requirements/build.txt requirements/build.txt
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+WORKDIR /workspace
+
+COPY --from=csrc-build /workspace/dist /precompiled-wheels
+
+COPY . .
+
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
+
+ARG vllm_target_device="cuda"
+ENV VLLM_TARGET_DEVICE=${vllm_target_device}
+
+# Skip adding +precompiled suffix to version (preserves git-derived version)
+ENV VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX=1
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "${vllm_target_device}" = "cuda" ]; then \
+        export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
+    fi && \
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REF
@@ -244,9 +294,15 @@ RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
 # Install EP kernels(pplx-kernels and DeepEP)
+ARG PPLX_COMMIT_HASH
+ARG DEEPEP_COMMIT_HASH
 RUN --mount=type=cache,target=/root/.cache/uv \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
-    /tmp/install_python_libraries.sh /tmp/ep_kernels_workspace wheel && \
+    /tmp/install_python_libraries.sh \
+        --workspace /tmp/ep_kernels_workspace \
+        --mode wheel \
+        ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
+        ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -358,7 +414,12 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
     cuda-cudart-${CUDA_VERSION_DASH} \
     cuda-nvrtc-${CUDA_VERSION_DASH} \
     cuda-cuobjdump-${CUDA_VERSION_DASH} \
-    libcublas-${CUDA_VERSION_DASH} && \
+    # https://github.com/vllm-project/vllm/issues/29590
+    libcurand-dev-${CUDA_VERSION_DASH} \
+    libcublas-${CUDA_VERSION_DASH} \
+    # Fixes nccl_allocator requiring nccl.h at runtime
+    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
+    libnccl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -392,8 +453,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==0.5.2 \
-    && uv pip install --system flashinfer-jit-cache==0.5.2 \
+    uv pip install --system flashinfer-cubin==0.5.3 \
+    && uv pip install --system flashinfer-jit-cache==0.5.3 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 
