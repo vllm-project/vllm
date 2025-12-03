@@ -65,7 +65,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
-# Centralized v1 package - copied to both test and final stages
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
@@ -98,7 +97,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Copy in the v1 package
+# Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 # Source code is used in the `python_only_compile.sh` test
@@ -129,9 +128,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
-
-# Copy in the v1 package
-COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
 ARG COMMON_WORKDIR
 
