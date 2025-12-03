@@ -6,9 +6,9 @@ from collections.abc import Callable
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -256,7 +256,9 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm(rocm_aiter_weight_shuffled: bool = False) -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_gemm(
+    rocm_aiter_weight_shuffled: bool = False,
+) -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         if rocm_aiter_weight_shuffled:
             return aiter_unquantized_gemm_bpreshuffled

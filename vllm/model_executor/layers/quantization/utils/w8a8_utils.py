@@ -6,9 +6,9 @@ from collections.abc import Callable
 import torch
 from packaging import version
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -391,7 +391,10 @@ def aiter_ptpc_w8a8_scaled_mm_bpreshuffled(
 
 
 def dispatch_w8a8_scaled_mm(
-    preferred_backend: str, per_tensor_weights: bool, per_tensor_activations: bool, rocm_aiter_weight_shuffled: bool = False
+    preferred_backend: str,
+    per_tensor_weights: bool,
+    per_tensor_activations: bool,
+    rocm_aiter_weight_shuffled: bool = False,
 ) -> Callable[..., torch.Tensor]:
     if per_tensor_weights and per_tensor_activations:
         if preferred_backend == "rocm":
@@ -407,10 +410,7 @@ def dispatch_w8a8_scaled_mm(
         return cutlass_w8a8_scaled_mm
 
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
-    if (
-        not per_tensor_weights
-        and not per_tensor_activations
-    ):
+    if not per_tensor_weights and not per_tensor_activations:
         if rocm_aiter_weight_shuffled:
             return aiter_ptpc_w8a8_scaled_mm_bpreshuffled
         if USE_ROWWISE_TORCH_SCALED_MM:
@@ -467,8 +467,10 @@ class Fp8LinearOp:
             group_shape=act_quant_group_shape,
             num_token_padding=self.output_padding,
         )
-        
-        self.rocm_aiter_weight_shuffled = False if rocm_aiter_weight_shuffled is None else rocm_aiter_weight_shuffled
+
+        self.rocm_aiter_weight_shuffled = (
+            False if rocm_aiter_weight_shuffled is None else rocm_aiter_weight_shuffled
+        )
 
     def apply(
         self,
@@ -515,7 +517,9 @@ class Fp8LinearOp:
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.preferred_backend, per_tensor_weights, per_tensor_activations,
+            self.preferred_backend,
+            per_tensor_weights,
+            per_tensor_activations,
             self.rocm_aiter_weight_shuffled,
         )
 

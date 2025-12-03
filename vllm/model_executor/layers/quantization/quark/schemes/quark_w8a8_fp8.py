@@ -100,12 +100,14 @@ class QuarkW8A8Fp8(QuarkScheme):
 
             if rocm_aiter_ops.is_linear_shuffle_enabled():
                 layout = (16, 16)
-                use_swizzle_gemm = rocm_aiter_ops.gemm_weight_can_shuffle(weight.shape[0], weight.shape[1], layout=layout)
-                
+                use_swizzle_gemm = rocm_aiter_ops.gemm_weight_can_shuffle(
+                    weight.shape[0], weight.shape[1], layout=layout
+                )
+
                 if use_swizzle_gemm:
                     weight = rocm_aiter_ops.shuffle_weight(weight, layout)
                     weight_scale = weight_scale.t()
-                    
+
                     self.fp8_linear = Fp8LinearOp(
                         act_quant_static=self.is_static_input_scheme,
                         act_quant_group_shape=self.act_quant_group_shape,
