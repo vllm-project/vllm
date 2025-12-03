@@ -5,6 +5,7 @@
 from vllm.model_executor.offloader.base import (
     BaseOffloader,
     NoopOffloader,
+    create_offloader,
     get_offloader,
     set_offloader,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "NoopOffloader",
     "UVAOffloader",
     "OffloaderV2",
+    "create_offloader",
     "get_offloader",
     "set_offloader",
 ]
