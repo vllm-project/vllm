@@ -114,11 +114,14 @@ class MultiprocExecutor(Executor):
         tp_size = self.parallel_config.tensor_parallel_size
         pp_size = self.parallel_config.pipeline_parallel_size
         pcp_size = self.parallel_config.prefill_context_parallel_size
-        assert self.world_size == tp_size * pp_size * pcp_size, (
+        rp_size = self.parallel_config.ring_parallel_size if not self.parallel_config.share_rp_tp_group else 1
+        up_size = self.parallel_config.ulysses_parallel_size
+        assert self.world_size == tp_size * pp_size * pcp_size * rp_size * up_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
             f"_parallel_size ({pp_size}) x prefill_context"
-            f"_parallel_size ({pcp_size}). "
+            f"_parallel_size ({pcp_size}) x ring_parallel_size ({rp_size}) "
+            f"x ulysses_parallel_size ({up_size}). "
         )
 
         # Set multiprocessing envs
@@ -431,6 +434,8 @@ class MultiprocExecutor(Executor):
             self.world_size
             - self.parallel_config.tensor_parallel_size
             * self.parallel_config.prefill_context_parallel_size
+            * self.parallel_config.ring_parallel_size
+            * self.parallel_config.ulysses_parallel_size
         )
 
 

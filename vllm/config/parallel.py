@@ -77,6 +77,12 @@ class ParallelConfig:
     """Number of tensor parallel groups."""
     prefill_context_parallel_size: int = 1
     """Number of prefill context parallel groups."""
+    ring_parallel_size: int = 1
+    """Number of ring parallel groups."""
+    share_rp_tp_group: bool = False
+    """Share the process group between ring parallel and tensor parallel."""
+    ulysses_parallel_size: int = 1
+    """Number of ulysses parallel groups."""
     data_parallel_size: int = 1
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
@@ -317,6 +323,13 @@ class ParallelConfig:
                 "Prefill context parallelism is not fully supported. "
                 "Please set prefill_context_parallel_size to 1."
             )
+
+        if self.share_rp_tp_group and self.ring_parallel_size != self.tensor_parallel_size:
+            raise ValueError(
+                "Ring parallel size and tensor parallel size must be equal "
+                "to share the process group."
+            )
+
         return self
 
     @property
@@ -505,6 +518,8 @@ class ParallelConfig:
             self.pipeline_parallel_size
             * self.tensor_parallel_size
             * self.prefill_context_parallel_size
+            * (self.ring_parallel_size if not self.share_rp_tp_group else 1)
+            * self.ulysses_parallel_size
         )
 
         if self.distributed_executor_backend == "external_launcher":

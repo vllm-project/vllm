@@ -392,6 +392,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    ring_parallel_size: int = ParallelConfig.ring_parallel_size
+    ulysses_parallel_size: int = ParallelConfig.ulysses_parallel_size
+    share_rp_tp_group: bool = ParallelConfig.share_rp_tp_group
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
@@ -753,6 +756,15 @@ class EngineArgs:
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
+        )
+        parallel_group.add_argument(
+            "--ring-parallel-size", "-rp", **parallel_kwargs["ring_parallel_size"]
+        )
+        parallel_group.add_argument(
+            "--ulysses-parallel-size", "-up", **parallel_kwargs["ulysses_parallel_size"]
+        )
+        parallel_group.add_argument(
+            "--share-rp-tp-group", "-srt", **parallel_kwargs["share_rp_tp_group"]
         )
         parallel_group.add_argument(
             "--decode-context-parallel-size",
@@ -1594,6 +1606,9 @@ class EngineArgs:
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
+            ring_parallel_size = self.ring_parallel_size,
+            ulysses_parallel_size = self.ulysses_parallel_size,
+            share_rp_tp_group = self.share_rp_tp_group,
             prefill_context_parallel_size=self.prefill_context_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
