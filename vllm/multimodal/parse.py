@@ -134,11 +134,17 @@ class EmbeddingItems(
     or a list of embedding tensors (one per item).
     """
 
+    def _unwrap(
+        self, item: torch.Tensor | MediaWithBytes[torch.Tensor]
+    ) -> torch.Tensor:
+        """Extract media from wrapper if present."""
+        return item.media if isinstance(item, MediaWithBytes) else item
+
     def get_count(self) -> int:
         return len(self.data)
 
     def get(self, index: int) -> torch.Tensor:
-        return self.data[index]
+        return self._unwrap(self.data[index])
 
     def get_processor_data(self) -> Mapping[str, object]:
         return {}
