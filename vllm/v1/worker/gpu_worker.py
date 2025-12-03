@@ -552,7 +552,7 @@ class Worker(WorkerBase):
 
         if (
             parallel_config.pipeline_parallel_size > 1
-            and compilation_config.pass_config.enable_sequence_parallelism
+            and compilation_config.pass_config.enable_sp
             and forward_pass
         ):
             # currently only supported by V1 GPUModelRunner
