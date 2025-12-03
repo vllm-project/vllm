@@ -195,7 +195,6 @@ from typing import ClassVar, Generic, TypeVar, cast
 import torch
 
 from vllm import envs
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
@@ -213,6 +212,11 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm._aiter_ops import rocm_aiter_ops
+else:
+    rocm_aiter_ops = None
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
@@ -1129,7 +1133,9 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         self.kv_b_proj = kv_b_proj
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.is_aiter_triton_fp8_bmm_enabled = (
+            rocm_aiter_ops.is_fp8bmm_enabled() if rocm_aiter_ops is not None else False
+        )
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
