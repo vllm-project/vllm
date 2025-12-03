@@ -3610,7 +3610,7 @@ class GPUModelRunner(
                 old_global_expert_indices,
                 rank_mapping,
             )
-            if self.parallel_config.eplb_config.load_initial_load_window is not None:
+            if self.parallel_config.eplb_config.load_initial_load_window:
                 self.eplb_state.rearrange(load_initial_load_window=True)
                 if self.parallel_config.eplb_config.static:
                     self.eplb_state = None
