@@ -163,6 +163,7 @@ def _synchronize_dp_ranks(
         tensor,
         should_dp_pad,
     )
+    
     return should_ubatch, num_tokens_after_padding
 
 
