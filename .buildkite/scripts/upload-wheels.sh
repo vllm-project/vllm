@@ -81,6 +81,7 @@ else
     alias_arg=""
 fi
 
+$PYTHON -m pip install regex -y
 $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
