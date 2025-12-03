@@ -181,7 +181,7 @@ def apply_top_k_top_p(
     after thresholding the logit using this cut-off, the remaining elements
     shall constitute the top-p set.
 
-    Note: in the case of tie (i.e. multipple cut-off elements present in the
+    Note: in the case of tie (i.e. multiple cut-off elements present in the
     logit), all tie elements are included in the top-p set. In other words,
     this function does not break ties. Instead, these tie tokens have equal
     chance of being chosen during final sampling, so we can consider the tie
