@@ -461,14 +461,22 @@ class precompiled_wheel_utils:
                     "vllm/cumem_allocator.abi3.so",
                 ]
 
-                compiled_regex = re.compile(
+                flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
+                )
+                triton_kernels_regex = re.compile(
+                    r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
                 file_members += list(
-                    filter(lambda x: compiled_regex.match(x.filename), wheel.filelist)
+                    filter(lambda x: flash_attn_regex.match(x.filename), wheel.filelist)
+                )
+                file_members += list(
+                    filter(
+                        lambda x: triton_kernels_regex.match(x.filename), wheel.filelist
+                    )
                 )
 
                 for file in file_members:
@@ -648,7 +656,7 @@ def get_vllm_version() -> str:
         if envs.VLLM_TARGET_DEVICE == "empty":
             version += f"{sep}empty"
     elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED:
+        if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
             version += f"{sep}precompiled"
         else:
             cuda_version = str(get_nvcc_cuda_version())
