@@ -10,7 +10,7 @@ from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from partial_json_parser.core.options import Allow
-from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.tool_parsers import MistralToolParser
