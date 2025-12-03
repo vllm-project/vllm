@@ -48,7 +48,7 @@ try:
     if HELION_OP_AVAILABLE:
         import torch
 
-        _ = torch.ops.my_helion_lib.allreduce_add_rmsnorm  # Will raise if not registered
+        _ = torch.ops.vllm_helion.allreduce_add_rmsnorm  # Will raise if not registered
 except (ImportError, AttributeError):
     HELION_OP_AVAILABLE = False
 
@@ -89,7 +89,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
     def ops_in_model_after(self):
         if self.use_helion:
-            return [torch.ops.my_helion_lib.allreduce_add_rmsnorm.default]
+            return [torch.ops.vllm_helion.allreduce_add_rmsnorm.default]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
@@ -144,7 +144,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 
     def ops_in_model_after(self):
         if self.use_helion:
-            return [torch.ops.my_helion_lib.allreduce_add_rmsnorm.default]
+            return [torch.ops.vllm_helion.allreduce_add_rmsnorm.default]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
     def ops_in_model_before(self):
@@ -161,7 +161,9 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
-        self.use_helion = use_helion  # Not used for FP4 model, but accept for consistency
+        self.use_helion = (
+            use_helion  # Not used for FP4 model, but accept for consistency
+        )
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
 
         self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]

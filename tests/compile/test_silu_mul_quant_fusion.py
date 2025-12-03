@@ -42,14 +42,14 @@ from .backend import TestBackend
 
 # Check if Helion torch.ops are available
 try:
-    from vllm.compilation.helion.silu_mul_fp8 import SiluMulFp8Helion
-
-    # Check if the op is available - this will be True if Helion is installed and enabled
-    HELION_OP_AVAILABLE = SiluMulFp8Helion.is_helion_available()
+    # Import to trigger registration
     # Try to access the torch.ops to verify it's registered
-    if HELION_OP_AVAILABLE:
-        import torch
-        _ = torch.ops.my_helion_lib.silu_mul_fp8  # Will raise if not registered
+    import torch
+
+    from vllm.compilation.helion.silu_mul_fp8 import silu_mul_fp8
+
+    _ = torch.ops.vllm_helion.silu_mul_fp8  # Will raise if not registered
+    HELION_OP_AVAILABLE = True
 except (ImportError, AttributeError):
     HELION_OP_AVAILABLE = False
 
@@ -102,7 +102,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 
     def ops_in_model_after(self):
         if self.use_helion:
-            return [torch.ops.my_helion_lib.silu_mul_fp8]
+            return [torch.ops.vllm_helion.silu_mul_fp8]
         return [FUSED_OPS[kFp8StaticTensorSym]]
 
 
@@ -190,7 +190,11 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "model_class, enable_quant_fp8_custom_op, cuda_force_torch, use_helion",
     # Test FP8 model with both Helion and non-Helion
-    list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False], [False, True]))
+    list(
+        itertools.product(
+            [TestSiluMulFp8QuantModel], [True, False], [True, False], [False, True]
+        )
+    )
     # Test NVFP4 model only without Helion (use_helion must be False)
     + [
         (TestSiluMulNvfp4QuantModel, False, False, False),
@@ -342,7 +346,7 @@ def test_fusion_silu_and_mul_quant_helion(
             hidden_size=hidden_size,
             cuda_force_torch=cuda_force_torch,
             x=x,
-            use_helion=True,
+            use_helion=use_helion,
         )
 
         # First dimension dynamic
