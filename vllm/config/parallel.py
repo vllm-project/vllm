@@ -67,8 +67,17 @@ class EPLBConfig:
     """
 
     load_initial_load_window: bool = False
+    """
+    Whether to load initial load window.
+    """
     save_load_window: bool = False
+    """
+    Whether to save load window.
+    """
     static: bool = False
+    """
+    Whether to do just one expert reshuffling at the start.
+    """
     save_dir: Path | None = None
     """Directory to save expert load balance metrics."""
     load_path: Path | None = None
