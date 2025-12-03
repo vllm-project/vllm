@@ -294,10 +294,14 @@ def test_prefill_split_across_ubatches(
     qsl_np = common.query_start_loc_cpu.numpy()
     num_tokens = common.num_actual_tokens
 
-    ubatch_slices = maybe_create_ubatch_slices(
-        True, num_scheduled_tokens, num_tokens, batch_spec.batch_size
+    ubatch_slices, _ = maybe_create_ubatch_slices(
+        True,
+        num_scheduled_tokens,
+        num_tokens,
+        batch_spec.batch_size,
+        split_point=split_point,
     )
-    assert len(ubatch_slices) == 2
+    assert ubatch_slices is not None and len(ubatch_slices) == 2
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)
     second_meta = _make_metadata_with_slice(ubatch_slices[1], common)

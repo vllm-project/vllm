@@ -65,11 +65,13 @@ def maybe_create_ubatch_slices(
     num_scheduled_tokens: np.ndarray,
     num_tokens_padded: int,
     num_reqs_padded: int,
+    split_point: int | None = None,
 ) -> tuple[UBatchSlices | None, UBatchSlices | None]:
     if not should_ubatch:
         return None, None
 
-    split_point = int(num_tokens_padded) // 2
+    if split_point is None:
+        split_point = int(num_tokens_padded) // 2
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
