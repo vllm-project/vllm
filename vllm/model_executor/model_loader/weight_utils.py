@@ -921,7 +921,17 @@ def gguf_quant_weights_iterator(
             name = gguf_to_hf_name_map[tensor.name]
             if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
-            param = torch.tensor(weight)
+            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+                # BF16 is currently the only "quantization" type that isn't
+                # actually quantized but is read as a raw byte tensor.
+                # Reinterpret as `torch.bfloat16` tensor.
+                weight = weight.view(np.uint16)
+                if reader.byte_order == "S":
+                    # GGUF endianness != system endianness
+                    weight = weight.byteswap()
+                param = torch.tensor(weight).view(torch.bfloat16)
+            else:
+                param = torch.tensor(weight)
             yield name, param
 
 
