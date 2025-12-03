@@ -6,21 +6,9 @@ import torch.cuda.nvtx as nvtx
 
 
 def print_tensor(tensor_obj, prefix, tensor_list=None):
-    """Descends iterators that contains Tensors and prints the Tensor
-
+    """Descends iterators that contains Tensors and prints the Tensor.
     Recursive function that descends iterator type arguments until
     it finds a Tensor object.
-
-    Args:
-        tensor_obj: Could be a Tensor or an iterator type that contains Tensors
-        prefix: String name to assign to the Tensor
-        tensor_list: List to accumulate tensor dimensions
-
-    Returns:
-        List of tensor dimensions
-
-    Raises:
-        None:
     """
     if tensor_list is None:
         tensor_list = []
@@ -202,14 +190,7 @@ class PytHooks:
     """
 
     def __init__(self):
-        """Initialize module variables
-
-        Returns:
-            None:
-
-        Raises:
-            None:
-        """
+        """Initialize module variables."""
         super().__init__()
         self.module_to_name_map = {}
 
@@ -217,21 +198,9 @@ class PytHooks:
         return process_layer_params(module_obj)
 
     def module_fwd_hook(self, module_obj, in_tensor, out_tensor):
-        """Callback function that ends the NVTX marker
-
-        Records the module name and tensor information
+        """Callback function that ends the NVTX marker.
+        Records the module name and tensor information.
         Called after the module executes the forward method.
-
-        Args:
-            module_obj: Pointer to the module object
-            in_tensor: Input tensor or list of tensors
-            out_tensor: Output tensor of the resulting forward operator
-
-        Returns:
-            None:
-
-        Raises:
-            None:
         """
         nvtx_range_pop()
         module_name = self.module_to_name_map.get(module_obj, "unknown")
@@ -244,18 +213,7 @@ class PytHooks:
 
     def module_fwd_pre_hook(self, module_obj, in_tensor, kwargs):
         """Creates an NVTX marker with the module name in it.
-
-        This function is called before the module executes
-
-        Args:
-            module_obj: Module object data structure - used to get unique module name
-            in_tensor: Input tensor data structure
-
-        Returns:
-            None
-
-        Raises:
-            None
+        This function is called before the module executes.
         """
         module_name = self.module_to_name_map.get(module_obj, "unknown")
         marker_dict = construct_marker_dict(
@@ -265,21 +223,10 @@ class PytHooks:
         return
 
     def register_hooks(self, network_model, module_prefix="top"):
-        """User level function that activates all the hooks
-
-        The user needs to call this method from the network source code
+        """User level function that activates all the hooks.
+        The user needs to call this method from the network source code.
         The code descends all the modules in the network and registers their
         respective hooks.
-
-        Args:
-            network_model: Model object for the network
-            module_prefix: (default: top)
-
-        Returns:
-            None
-
-        Raises:
-            Exception if a module instance is reused
         """
         # Module types to skip (simple operations that don't need detailed profiling)
         skip_types = (
