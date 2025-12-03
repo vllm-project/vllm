@@ -307,9 +307,9 @@ def optimized_top_k_top_p_sample(
     top_p_mask.scatter_(dim=1, index=first_true_indices, value=False)
     topk_values.masked_fill_(top_p_mask, -float("inf"))
     logits_to_return = None
-    if self.logprobs_mode == "processed_logits":
+    if logprobs_mode == "processed_logits":
         logits_to_return = topk_values
-    elif self.logprobs_mode == "processed_logprobs":
+    elif logprobs_mode == "processed_logprobs":
         logits_to_return = topk_values.log_softmax(dim=-1, dtype=torch.float32)
     probs = topk_values.softmax(dim=-1, dtype=torch.float32)
     topk_indices = topk_indices
