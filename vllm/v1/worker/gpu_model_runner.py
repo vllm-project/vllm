@@ -27,7 +27,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -258,6 +258,7 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class GPUModelRunner(
@@ -2457,10 +2458,7 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if (
-            self.compilation_config.pass_config.enable_sequence_parallelism
-            and tp_size > 1
-        ):
+        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -2798,7 +2796,11 @@ class GPUModelRunner(
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
     ) -> tuple[
-        CUDAGraphMode, BatchDescriptor, UBatchSlices | None, torch.Tensor | None
+        CUDAGraphMode,
+        BatchDescriptor,
+        UBatchSlices | None,
+        torch.Tensor | None,
+        CUDAGraphStat | None,
     ]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         uniform_decode = (
@@ -2863,7 +2865,22 @@ class GPUModelRunner(
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
-        return cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp
+        cudagraph_stats = None
+        if self.vllm_config.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_tokens,
+                num_padded_tokens=batch_descriptor.num_tokens,
+                num_paddings=batch_descriptor.num_tokens - num_tokens,
+                runtime_mode=str(cudagraph_mode),
+            )
+
+        return (
+            cudagraph_mode,
+            batch_descriptor,
+            ubatch_slices,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -2961,6 +2978,7 @@ class GPUModelRunner(
                     batch_desc,
                     ubatch_slices,
                     num_tokens_across_dp,
+                    cudagraph_stats,
                 ) = self._determine_batch_execution_and_padding(
                     num_tokens=num_tokens_unpadded,
                     num_reqs=num_reqs,
@@ -3110,6 +3128,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -3145,6 +3164,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -3260,6 +3280,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                cudagraph_stats=cudagraph_stats,
             )
 
         if not self.use_async_scheduling:
@@ -3980,7 +4001,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp = (
+        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -4040,7 +4061,7 @@ class GPUModelRunner(
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices,
-                for_cudagraph_capture=True,
+                for_cudagraph_capture=is_graph_capturing,
             )
 
         with self.maybe_dummy_run_with_lora(
