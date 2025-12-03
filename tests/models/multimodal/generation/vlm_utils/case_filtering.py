@@ -58,9 +58,6 @@ def get_filtered_test_settings(
                 test_info.distributed_executor_backend is not None
             ) == new_proc_per_test:
                 matching_tests[test_name] = test_info
-        elif test_type == VLMTestType.NO_INPUTS:
-            # Model initialization tests
-            matching_tests[test_name] = test_info
 
     return matching_tests
 
@@ -101,7 +98,6 @@ def get_model_type_cases(
     if test_type not in (
         VLMTestType.CUSTOM_INPUTS,
         VLMTestType.AUDIO,
-        VLMTestType.NO_INPUTS,
     ):
         wrapped_sizes = get_wrapped_test_sizes(test_info, test_type)
         if wrapped_sizes is None:

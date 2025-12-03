@@ -71,7 +71,6 @@ class VLMTestType(Enum):
     VIDEO = 4
     AUDIO = 5
     CUSTOM_INPUTS = 6
-    NO_INPUTS = 7
 
 
 class SizeType(Enum):

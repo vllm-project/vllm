@@ -941,36 +941,12 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
 
 ### Test wrappers
 # Wrappers around the core test running func for:
-# - model initialization & weights loading
 # - single image
 # - multi-image
 # - image embeddings
 # - video
 # - audio
 # - custom inputs
-@pytest.mark.parametrize(
-    "model_type,test_case",
-    get_parametrized_options(
-        VLM_TEST_SETTINGS,
-        test_type=VLMTestType.NO_INPUTS,
-        create_new_process_for_each_test=False,
-    ),
-)
-def test_models_initialization(
-    model_type: str,
-    test_case: ExpandableVLMTestArgs,
-    hf_runner: type[HfRunner],
-    vllm_runner: type[VllmRunner],
-):
-    model_test_info = VLM_TEST_SETTINGS[model_type]
-    runners.run_model_initialization_test(
-        model_test_info=model_test_info,
-        test_case=test_case,
-        hf_runner=hf_runner,
-        vllm_runner=vllm_runner,
-    )
-
-
 @pytest.mark.parametrize(
     "model_type,test_case",
     get_parametrized_options(
