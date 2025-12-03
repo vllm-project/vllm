@@ -4,6 +4,7 @@ import multiprocessing
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -137,11 +138,15 @@ class StructuredOutputManager:
                 )
             else:
                 raise ValueError(f"Unsupported structured output backend: {backend}")
+        # Async grammar creation can cause deadlocks due to grammar compilation
+        # impacting scheduling across ranks from RequestStatus.WAITING_FOR_FSM state
+        if envs.VLLM_ASYNC_CREATE_GRAMMAR:
+            grammar = self.executor.submit(self._create_grammar, request)
+            request.structured_output_request.grammar = grammar  # type: ignore[assignment]
+        else:
+            request.structured_output_request.grammar = self._create_grammar(request)
 
-        grammar = self.executor.submit(self._async_create_grammar, request)
-        request.structured_output_request.grammar = grammar  # type: ignore[assignment]
-
-    def _async_create_grammar(
+    def _create_grammar(
         self,
         request: Request,
     ) -> StructuredOutputGrammar:
