@@ -97,10 +97,9 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
-  - pushd ../examples/offline_inference
+  - cd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
-  - popd
 
 - label: Distributed Tests (8 GPUs)(H100)
   optional: true
