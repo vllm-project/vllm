@@ -1128,8 +1128,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     raise RuntimeError(
                         f"MoE layer incompatible with DeepGEMM, expected "
                         f"fp8==True, got {self.moe_quant_config.use_fp8_w8a8}"
-                        f"or block_shape=={self.moe_quant_config.block_shape}"
-                        f" != {get_mk_alignment_for_contiguous_layout()}."
+                        f"or block_shape {self.moe_quant_config.block_shape}"
+                        f"=={get_mk_alignment_for_contiguous_layout()}."
                     )
 
             if use_deep_gemm and compatible_with_deep_gemm and has_deep_gemm():
