@@ -921,7 +921,7 @@ def gguf_quant_weights_iterator(
             name = gguf_to_hf_name_map[tensor.name]
             if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
-            param = torch.tensor(weight)
+            param = torch.from_numpy(weight)
             yield name, param
 
 
