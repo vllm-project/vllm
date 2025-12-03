@@ -47,7 +47,8 @@ class DeepSeekV32ToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
 
         # Sentinel tokens
-        self.dsml_token = "｜DSML｜"
+        self.dsml_token: str = "｜DSML｜"
+        self.dsml_start_check: str = "<" + self.dsml_token
         self.tool_call_start_token: str = "<｜DSML｜function_calls>"
         self.tool_call_end_token: str = "</｜DSML｜function_calls>"
         self.invoke_start_prefix: str = "<｜DSML｜invoke name="
@@ -196,7 +197,7 @@ class DeepSeekV32ToolParser(ToolParser):
         ):
             return name_str[1:-1]
         return name_str
-
+    
     def _extract_param_name(self, input_str: str) -> str:
         """Extract param name"""
         start = input_str.find('"') + 1
@@ -295,12 +296,12 @@ class DeepSeekV32ToolParser(ToolParser):
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
-            if self.tool_call_start_token in current_text:
+            if self.dsml_token in current_text:
                 self.is_tool_call_started = True
                 # Return any content before the tool call
-                if self.tool_call_start_token in delta_text:
+                if self.dsml_start_check in delta_text:
                     content_before = delta_text[
-                        : delta_text.index(self.tool_call_start_token)
+                        : delta_text.index(self.dsml_start_check)
                     ]
                     if content_before:
                         return DeltaMessage(content=content_before)
@@ -314,6 +315,10 @@ class DeepSeekV32ToolParser(ToolParser):
                     # We just ended a tool call, skip whitespace
                     return None
                 # Normal content, no tool call
+                if delta_text.endswith("<"):
+                    return DeltaMessage(content=delta_text[:-1])
+                if previous_text and previous_text.endswith("<"):
+                    return DeltaMessage(content="<" + delta_text)
                 return DeltaMessage(content=delta_text)
 
         # Check if we're between tool calls (waiting for next one)
