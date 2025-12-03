@@ -108,7 +108,6 @@ class StreamingXMLToolCallParser:
         self.streaming_buffer += xml_chunk
 
         found_elements = self._process_complete_xml_elements()
-
         if found_elements:
             # If complete elements found, check if end events were missed
             # some tags may not have been triggered
@@ -172,7 +171,7 @@ class StreamingXMLToolCallParser:
                             self._end_element("DSML_invoke")
                         self._end_element("DSML_function_calls")
             except Exception as e:
-                logger.warning("Error with fallback parsing: %s", e)
+                logger.error("Error with fallback parsing: %s", e)
             # Merge newly generated deltas into single response
             result_delta = self._merge_new_deltas_to_single_response(
                 initial_delta_count
@@ -278,7 +277,7 @@ class StreamingXMLToolCallParser:
                 # If a new invoke starts and
                 # there are already completed invokes
                 if (
-                    preprocessed_element.strip().startswith("<DSML_invoke")
+                    preprocessed_element.strip().startswith("<DSML_function_calls")
                     and self.tool_call_index > 0
                     and self.current_call_id
                 ):
@@ -302,6 +301,7 @@ class StreamingXMLToolCallParser:
                         ],
                     )
                     self._emit_delta(final_delta)
+
                     # Reset current call state (lightweight reset for DeepSeek)
                     self._reset_current_call_state()
                 # Parse preprocessed element
@@ -390,10 +390,10 @@ class StreamingXMLToolCallParser:
                 if self.current_call_id is None:
                     # Check if might be start of DeepSeek tags
                     if (
-                        buffer.startswith("<DSML_function_calls")
-                        or buffer == "<DSML_function_calls"[: len(buffer)]
-                        or buffer.startswith("<DSML_invoke")
-                        or buffer == "<DSML_invoke"[: len(buffer)]
+                        buffer.startswith("<D｜DSML｜function_calls")
+                        or buffer == "<｜DSML｜function_calls"[: len(buffer)]
+                        or buffer.startswith("<｜DSML｜invoke")
+                        or buffer == "<｜DSML｜invoke"[: len(buffer)]
                     ):
                         # Might be start of DeepSeek tag, wait for more data
                         return None, start_pos
@@ -614,40 +614,43 @@ class StreamingXMLToolCallParser:
         """
         # First close unclosed parameters
         if self.current_param_name:
-            self._end_element("parameter")
+            self._end_element("DSML_parameter")
 
         # If about to start new function or tool_call,
         # and there are unclosed functions, close function first
-        if incoming_tag in ("function", "tool_call") and self.current_function_name:
-            self._end_element("function")
+        if (
+            incoming_tag in ("DSML_function_calls", "DSML_invoke")
+            and self.current_function_name
+        ):
+            self._end_element("DSML_invoke")
 
         # If about to start new tool_call,
         # and there are unclosed tool_calls, close tool_call first
-        if incoming_tag == "tool_call" and self.current_call_id:
-            self._end_element("tool_call")
+        if incoming_tag == "DSML_function_calls" and self.current_call_id:
+            self._end_element("DSML_function_calls")
 
     def _start_element(self, name: str, attrs: dict[str, str]):
         """Handle XML start element events for DeepSeek format"""
-
         if name == "root":
             return
-
         # Handle function calls
         if name == "DSML_function_calls":
             # Before opening new tool_call,
             # automatically complete previous unclosed tags
             self._auto_close_open_parameter_if_needed("DSML_function_calls")
+            # add a dummy call id to indicate it is in function
+            self.current_call_id = -1
 
+        # Handle invoke (equivalent to Qwen3's tool_call + function combined)
+        if name == "DSML_invoke":
             self.parameters = {}
             self.current_call_id = make_tool_call_id()
             self.current_param_is_first = True
             self.tool_call_index += 1
 
-        # Handle invoke (equivalent to Qwen3's tool_call + function combined)
-        if name == "DSML_invoke":
-            # If missing tool_call, manually complete
-            if not self.current_call_id:
-                self._start_element("DSML_function_calls", {})
+            # # If missing tool_call, manually complete
+            # if not self.current_call_id:
+            #     self._start_element("DSML_function_calls", {})
 
             # Extract function name from invoke's name attribute
             function_name = attrs.get("name")
@@ -983,7 +986,6 @@ class StreamingXMLToolCallParser:
                 ]
             )
             self._emit_delta(delta)
-
             # Check if there's text content to output (between invokes)
             if self.text_content_buffer.strip():
                 text_delta = DeltaMessage(content=self.text_content_buffer)
@@ -1228,6 +1230,10 @@ class StreamingXMLToolCallParser:
         function_calls container.
         Does NOT reset the parser or deltas.
         """
+        # recreate XML parser
+        self.parser = ParserCreate()
+        self.setup_parser()
+
         # Reset current tool_call state
         if self.current_call_id:
             self.last_completed_call_id = self.current_call_id
