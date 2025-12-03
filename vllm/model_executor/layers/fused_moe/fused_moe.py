@@ -1922,7 +1922,7 @@ def fused_experts_impl(
             )
         else:
             max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
-            expert_ids = topk_ids
+            expert_ids = curr_topk_ids.view(-1)
             num_tokens_post_padded = torch.empty(
                 (1), dtype=torch.int32, device=topk_ids.device
             )
