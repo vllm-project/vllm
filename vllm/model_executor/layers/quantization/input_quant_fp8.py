@@ -97,7 +97,7 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant:
             assert scale is None, "Group quantization is always dynamic"
             return self._quantize_group_native(x)
