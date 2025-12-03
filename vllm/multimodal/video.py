@@ -267,7 +267,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         return frames, metadata
 
 
-class VideoMediaIO(MediaIO[npt.NDArray]):
+class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
     def __init__(
         self,
         image_io: ImageMediaIO,
