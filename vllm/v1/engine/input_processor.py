@@ -442,7 +442,9 @@ class InputProcessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
+            request_id=request_id,
         )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(

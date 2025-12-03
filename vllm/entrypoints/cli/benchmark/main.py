@@ -5,6 +5,13 @@ import argparse
 import typing
 
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
+from vllm.entrypoints.cli.benchmark.latency import BenchmarkLatencySubcommand
+from vllm.entrypoints.cli.benchmark.multimodal_processor import (
+    BenchmarkMultimodalProcessorSubcommand,
+)
+from vllm.entrypoints.cli.benchmark.serve import BenchmarkServingSubcommand
+from vllm.entrypoints.cli.benchmark.sweep import BenchmarkSweepSubcommand
+from vllm.entrypoints.cli.benchmark.throughput import BenchmarkThroughputSubcommand
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 
