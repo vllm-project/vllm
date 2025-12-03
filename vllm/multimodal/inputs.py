@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
+    from .base import MediaWithBytes
     from .processing import MultiModalHashes
 
 else:
@@ -59,7 +60,7 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor"]
+ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", "MediaWithBytes[HfImageItem]"]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
