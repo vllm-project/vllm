@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -9,7 +11,12 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response import ToolChoice
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
+from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
@@ -18,6 +25,63 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
+
+
+def make_response_output_items_from_parsable_context(
+    response_messages: list[ResponseInputOutputItem],
+) -> list[ResponseOutputItem]:
+    """Given a list of sentences, construct ResponseOutput Items."""
+    output_messages: list[ResponseOutputItem] = []
+    for message in response_messages:
+        if not isinstance(message, ResponseFunctionToolCallOutputItem):
+            output_messages.append(message)
+        else:
+            raise NotImplementedError("tool calls not supported for response context")
+
+    return output_messages
+
+
+def construct_input_messages(
+    *,
+    request_instructions: str | None = None,
+    request_input: str | list[ResponseInputOutputItem],
+    prev_msg: list[ChatCompletionMessageParam] | None = None,
+    prev_response_output: list[ResponseOutputItem] | None = None,
+):
+    messages: list[ChatCompletionMessageParam] = []
+    if request_instructions:
+        messages.append(
+            {
+                "role": "system",
+                "content": request_instructions,
+            }
+        )
+
+    # Prepend the conversation history.
+    if prev_msg is not None:
+        # Add the previous messages.
+        messages.extend(prev_msg)
+    if prev_response_output is not None:
+        # Add the previous output.
+        for output_item in prev_response_output:
+            # NOTE: We skip the reasoning output.
+            if isinstance(output_item, ResponseOutputMessage):
+                for content in output_item.content:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content.text,
+                        }
+                    )
+
+    # Append the new input.
+    # Responses API supports simple text inputs without chat format.
+    if isinstance(request_input, str):
+        messages.append({"role": "user", "content": request_input})
+    else:
+        for item in request_input:
+            messages.append(construct_chat_message_with_tool_call(item))
+    return messages
 
 
 def construct_chat_message_with_tool_call(
@@ -50,7 +114,18 @@ def construct_chat_message_with_tool_call(
             "role": "assistant",
             "reasoning": reasoning_content,
         }
-    elif item.get("type") == "function_call_output":
+    elif isinstance(item, ResponseOutputMessage):
+        return {
+            "role": "assistant",
+            "content": item.content[0].text,
+        }
+    elif isinstance(item, ResponseFunctionToolCallOutputItem):
+        return ChatCompletionToolMessageParam(
+            role="tool",
+            content=item.output,
+            tool_call_id=item.call_id,
+        )
+    elif isinstance(item, dict) and item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
             role="tool",
@@ -88,3 +163,16 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
         "type": "function",
         "function": tool,
     }
+
+
+def construct_tool_dicts(
+    tools: list[Tool], tool_choice: ToolChoice
+) -> list[dict[str, Any]] | None:
+    if tools is None or (tool_choice == "none"):
+        tool_dicts = None
+    else:
+        tool_dicts = [
+            convert_tool_responses_to_completions_format(tool.model_dump())
+            for tool in tools
+        ]
+    return tool_dicts

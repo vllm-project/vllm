@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -24,6 +25,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
@@ -39,7 +41,12 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import (
+    eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_next_token_padded_kernel,
+)
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -65,6 +72,7 @@ class EagleProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
@@ -72,6 +80,7 @@ class EagleProposer:
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -143,7 +152,9 @@ class EagleProposer:
         )
 
         self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
+            (self.max_num_tokens, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=device,
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(
@@ -155,8 +166,6 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
@@ -271,15 +280,24 @@ class EagleProposer:
             assert draft_indexer_metadata is not None
             per_layer_attn_metadata[layer_name] = draft_indexer_metadata
 
+        num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_tokens,
+        )
+
         cudagraph_runtime_mode = CUDAGraphMode.NONE
         if (
             self.use_cuda_graph
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
+            and num_tokens_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            num_input_tokens = num_tokens
+            num_input_tokens = num_tokens_dp_padded
+        if num_tokens_across_dp is not None:
+            num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -303,6 +321,7 @@ class EagleProposer:
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
@@ -365,15 +384,23 @@ class EagleProposer:
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
 
+        batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=batch_size,
+            num_tokens_padded=batch_size,
+        )
+
         if (
             self.use_cuda_graph
-            and batch_size <= self.compilation_config.max_cudagraph_capture_size
+            and batch_size_dp_padded
+            <= self.compilation_config.max_cudagraph_capture_size
         ):
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
+            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
-            input_batch_size = batch_size
+            input_batch_size = batch_size_dp_padded
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+        if batch_size_across_dp is not None:
+            batch_size_across_dp[self.dp_rank] = input_batch_size
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -474,6 +501,7 @@ class EagleProposer:
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
+                num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
@@ -535,20 +563,15 @@ class EagleProposer:
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
-        discard_request_indices: torch.Tensor,
-        num_discarded_requests: int,
+        discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead.
-        It also accounts for the rejected tokens in `sampled_token_ids`.
-        This function must use device functions to operate on the inputs, and
-        should not introduce any blocking CPU-GPU synchronization.
+        is not sampled and comes from `request.get_token_id()` instead. This is denoted
+        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # TODO(Ben): Combine this into a custom fused kernel
-
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         self.backup_next_token_ids.np[:num_reqs] = np.array(
@@ -557,44 +580,39 @@ class EagleProposer:
                     common_attn_metadata.seq_lens_cpu[i].item()
                 )
                 for i in range(num_reqs)
-            ]
+            ],
+            dtype=np.int32,
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu
 
-        # Mask out the sampled tokens indices that should not be sampled.
-        discard_sampled_tokens_req_indices = discard_request_indices[
-            :num_discarded_requests
-        ]
+        batch_size, num_tokens = sampled_token_ids.shape
+        device = sampled_token_ids.device
 
-        valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-        valid_sampled_token_ids_gpu.index_fill_(
-            0, discard_sampled_tokens_req_indices, -1
+        assert discard_request_mask.dtype == torch.bool
+        assert backup_tokens_gpu.dtype == torch.int32
+
+        next_token_ids = torch.empty((batch_size,), dtype=torch.int32, device=device)
+        valid_sampled_tokens_count = torch.empty(
+            (batch_size,), dtype=torch.int32, device=device
         )
 
-        # Generate a mask for all valid tokens within those requests
-        valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-        )
+        # Kernel grid: one program per request (row)
+        grid = (batch_size,)
 
-        # Count the number of valid tokens in each request
-        valid_sampled_tokens_count = valid_mask.sum(dim=1)
-
-        # Get the rightmost valid index per row
-        last_valid_indices = valid_sampled_tokens_count - 1
-        last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
-
-        # Get last valid token from each row
-        # (assume undefined state where there is no valid token)
-        selected_tokens = torch.gather(
-            valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
-        ).squeeze(1)
-
-        # Use last token if valid, pre-computed backup if not
-        batch_size = valid_sampled_token_ids_gpu.shape[0]
-        next_token_ids = torch.where(
-            last_valid_indices != -1,
-            selected_tokens,
-            self.backup_next_token_ids.gpu[:batch_size],
+        # Find the next power of 2 for block sizes
+        BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
+        eagle_prepare_next_token_padded_kernel[grid](
+            sampled_token_ids,
+            discard_request_mask,
+            backup_tokens_gpu,
+            next_token_ids,
+            valid_sampled_tokens_count,
+            gpu_input_batch.vocab_size,
+            num_tokens,
+            batch_size,
+            sampled_token_ids.stride(0),
+            BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
         )
 
         return next_token_ids, valid_sampled_tokens_count
@@ -604,35 +622,35 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
         used as padding and filtered out later by `token_indices_to_sample`.
-        No blocking CPU operations should be introduced in this function.
         """
-        num_draft_tokens_gpu = torch.cat(
-            [
-                spec_decode_metadata.cu_num_draft_tokens[0:1],
-                spec_decode_metadata.cu_num_draft_tokens[1:]
-                - spec_decode_metadata.cu_num_draft_tokens[:-1],
-            ]
+        num_reqs = common_attn_metadata.num_reqs
+        device = valid_sampled_tokens_count.device
+
+        token_indices_to_sample = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
         )
 
-        num_rejected_tokens_gpu = torch.where(
-            num_draft_tokens_gpu > 0,
-            num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-            torch.zeros_like(num_draft_tokens_gpu),
+        # Kernel grid: one program per request (row)
+        grid = (num_reqs,)
+        eagle_prepare_inputs_padded_kernel[grid](
+            spec_decode_metadata.cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            common_attn_metadata.query_start_loc,
+            token_indices_to_sample,
+            num_reqs,
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
         total_num_tokens = query_start_loc_cpu[-1].item()
-        token_indices = self.arange[:total_num_tokens]
 
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
@@ -645,16 +663,12 @@ class EagleProposer:
             max_query_len=new_query_len_per_req.max().item(),
             max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
-        token_indices_to_sample = (
-            common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
-        )
-
-        return spec_common_attn_metadata, token_indices, token_indices_to_sample
+        return spec_common_attn_metadata, token_indices_to_sample
 
     def propose_tree(
         self,
@@ -997,11 +1011,15 @@ class EagleProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
-            if (
-                self.get_model_name(target_model)
-                == "Qwen2_5_VLForConditionalGeneration"
-            ):
+            if self.get_model_name(target_model) in [
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3VLForConditionalGeneration",
+            ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
+            elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.vision_config.image_token_id
+                )
             else:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
@@ -1034,11 +1052,11 @@ class EagleProposer:
                 elif (
                     isinstance(target_embed_tokens.weight, torch.Tensor)
                     and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
-                    and torch.allclose(
+                    # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                    # usage in CI testing environments with limited GPU memory
+                    and torch.equal(
                         target_embed_tokens.weight.cpu(),
                         self.model.model.embed_tokens.weight.cpu(),
-                        rtol=1e-5,
-                        atol=1e-7,
                     )
                 ):
                     share_embeddings = True
@@ -1084,8 +1102,11 @@ class EagleProposer:
                 hasattr(target_language_model, "lm_head")
                 and isinstance(target_language_model.lm_head.weight, torch.Tensor)
                 and isinstance(self.model.lm_head.weight, torch.Tensor)
+                # TODO: Offload to CPU for comparison to avoid extra GPU memory
+                # usage in CI testing environments with limited GPU memory
                 and torch.equal(
-                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                    target_language_model.lm_head.weight.cpu(),
+                    self.model.lm_head.weight.cpu(),
                 )
             ):
                 share_lm_head = True
@@ -1116,36 +1137,56 @@ class EagleProposer:
         self,
         num_tokens: int,
         use_cudagraphs=True,
+        is_graph_capturing=False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-        if (
-            cudagraphs_enabled
-            and num_tokens <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
-        with set_forward_context(
-            None,
-            self.vllm_config,
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=(
-                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
-            ),
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
+        for fwd_idx in range(
+            self.num_speculative_tokens if not is_graph_capturing else 1
         ):
-            if self.supports_mm_inputs:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
+            if fwd_idx <= 1:
+                num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    num_tokens_padded=num_tokens,
+                )
+                if (
+                    cudagraphs_enabled
+                    and num_tokens_dp_padded
+                    <= self.compilation_config.max_cudagraph_capture_size
+                ):
+                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                        num_tokens_dp_padded
+                    )
+                else:
+                    num_input_tokens = num_tokens_dp_padded
+                if num_tokens_across_dp is not None:
+                    num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-            self.model(
-                input_ids=input_ids,
-                positions=self._get_positions(num_tokens),
-                hidden_states=self.hidden_states[:num_tokens],
-                inputs_embeds=inputs_embeds,
-            )
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+                if cudagraphs_enabled
+                else CUDAGraphMode.NONE,
+            ):
+                if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                else:
+                    input_ids = self.input_ids[:num_input_tokens]
+                    inputs_embeds = None
+
+                self.model(
+                    input_ids=input_ids,
+                    positions=self._get_positions(num_input_tokens),
+                    hidden_states=self.hidden_states[:num_input_tokens],
+                    inputs_embeds=inputs_embeds,
+                )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
@@ -1210,6 +1251,28 @@ class EagleProposer:
             )
             == 1
         ), "All eagle layers should belong to the same kv cache group"
+
+    def _pad_batch_across_dp(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+    ) -> tuple[int, torch.Tensor]:
+        # TODO(Flechman): support DBO ubatching
+        ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=False,
+            allow_dp_padding=self.use_cuda_graph,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=None,
+            num_scheduled_tokens_per_request=None,
+        )
+        assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
+
+        num_tokens_dp_padded = num_tokens_padded
+        if num_toks_across_dp is not None:
+            num_tokens_dp_padded = int(num_toks_across_dp[self.dp_rank].item())
+        return num_tokens_dp_padded, num_toks_across_dp
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

@@ -8,16 +8,14 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
-else:
-    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -196,7 +194,6 @@ class RocmPlatform(Platform):
         from importlib.util import find_spec
 
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if rocm_aiter_ops.is_mha_enabled():
             # Note: AITER FA is only supported for Qwen-VL models.
@@ -222,7 +219,6 @@ class RocmPlatform(Platform):
         attn_type: str | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             if kv_cache_dtype.startswith("fp8"):
@@ -261,6 +257,10 @@ class RocmPlatform(Platform):
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
             )
+
+        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend.")
+            return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info("Using Triton Attention backend on V1 engine.")
@@ -317,8 +317,8 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         raise RuntimeError(
-            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-            "to select a supported backend."
+            f"Attention backend {selected_backend.name} is not supported on "
+            "ROCm. Note that V0 attention backends have been removed."
         )
 
     @classmethod

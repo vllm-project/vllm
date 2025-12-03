@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -238,7 +238,7 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    skip_reading_prefix_cache: bool = None
+    skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
     def from_optional(
@@ -477,7 +477,7 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
         self._bad_words_token_ids = []

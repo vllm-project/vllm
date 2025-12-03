@@ -69,7 +69,7 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.processor = self.engine_client.processor
+        self.input_processor = self.engine_client.input_processor
         self.io_processor = self.engine_client.io_processor
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
@@ -150,7 +150,7 @@ class OpenAIServingModels:
                 lora_request.base_model_name = base_model_name
 
             # Validate that the adapter can be loaded into the engine
-            # This will also pre-load it for incoming requests
+            # This will also preload it for incoming requests
             try:
                 await self.engine_client.add_lora(lora_request)
             except Exception as e:
