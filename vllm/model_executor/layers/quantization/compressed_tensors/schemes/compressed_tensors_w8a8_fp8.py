@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
+from collections import defaultdict
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -31,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
+    ModelWeightParameter,
     PerTensorScaleParameter,
 )
 
@@ -99,6 +101,26 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.logical_widths = output_partition_sizes
         layer.weight_block_size = None
         layer.orig_dtype = params_dtype
+
+        online_quantization = True
+        if online_quantization:
+            weight = ModelWeightParameter(
+                data=torch.empty(
+                    output_size_per_partition,
+                    input_size_per_partition,
+                ),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+                device="meta",  # (1) Initialize unquantized weight on meta device
+                weight_loader=online_quantize(
+                    layer,
+                    weight_loader,
+                    name="weight",
+                    wait_for_params=["weight"],
+                ),
+            )
+            return
 
         if self.strategy == QuantizationStrategy.BLOCK:
             assert self.weight_block_size is not None
@@ -198,3 +220,26 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale=layer.input_scale,
             bias=bias,
         )
+
+
+def online_quantize(layer, weight_loader, param_name, wait_for_params):
+    numel_loaded = defaultdict(int)
+
+    def wrapped_weight_loader(param, loaded_weight, **kwargs):
+        # (2) allocate unquantized buffer on GPU for loading
+        if getattr(layer, param_name).device == "meta":
+            layer.register_parameter(param_name, param.to(torch.cuda.current_device()))
+
+        # (3) load into unquantized GPU buffer
+        weight_loader(getattr(layer, param_name), loaded_weight, **kwargs)
+
+        # check if all necessary weights and shards are loaded
+        numel_loaded[param_name] += loaded_weight.numel()
+        if all(
+            numel_loaded[name] >= getattr(layer, name).numel()
+            for name in wait_for_params
+        ):
+            # (4) do quantization and allocate new quantized params
+            layer.weight, layer.scale = fp8_quantize(layer.weight)
+
+    return wrapped_weight_loader
