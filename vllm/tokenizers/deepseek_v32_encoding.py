@@ -5,8 +5,9 @@
 # copy from https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/main/encoding/encoding_dsv32.py
 import copy
 import json
-import re
 from typing import Any
+
+import regex as re
 
 # flake8: noqa: E501
 TOOLS_SYSTEM_TEMPLATE = """## Tools
