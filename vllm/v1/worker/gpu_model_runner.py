@@ -386,7 +386,7 @@ class GPUModelRunner(
                     self.drafter = DynamicProposer(self.vllm_config, self.device, self)  # type: ignore
                 else:
                     self.drafter = EagleProposer(self.vllm_config, self.device, self)  # type: ignore
-                if self.speculative_config.method == "eagle3":
+                if self.drafter.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
                     )

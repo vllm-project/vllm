@@ -61,6 +61,22 @@ class DynamicProposer(EagleProposer):
 
         logger.info("DynamicProposer initialized for adaptive k.")
 
+        # If the method is eagle_dynamic and the draft model is eagle3,
+        # we treat it as eagle3 to enable eagle3-specific logic
+        # (e.g. hidden state combination).
+        if (
+            self.method == "eagle_dynamic"
+            and "eagle3" in self.draft_model_config.model.lower()
+        ):
+            self.method = "eagle3"
+            self.eagle3_use_aux_hidden_state = (
+                self._get_eagle3_use_aux_hidden_state_from_config()
+            )
+            logger.info(
+                "DynamicProposer detected Eagle3 draft model. "
+                "Enabling Eagle3 specific logic."
+            )
+
     def update_sequence_states(
         self,
         req_ids: Sequence[str | None],

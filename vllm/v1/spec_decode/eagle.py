@@ -55,6 +55,8 @@ PADDING_SLOT_ID = -1
 
 
 class EagleProposer:
+    method: str | None
+
     def __init__(
         self,
         vllm_config: VllmConfig,
