@@ -5,6 +5,7 @@ import torch
 
 from vllm.config import SpeculativeConfig
 from vllm.model_executor.models.interfaces import supports_eagle3
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
@@ -21,6 +22,10 @@ from vllm.model_executor.models.interfaces import supports_eagle3
         pytest.param(
             "nm-testing/Speculator-Qwen3-8B-Eagle3-converted-071-quantized-w4a16",
             id="qwen3-eagle3-speculator-w4a16-verifier",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="The tests are skipped on non-CUDA platform.",
+            ),
         ),
     ],
 )
