@@ -10,15 +10,15 @@ from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
 from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from partial_json_parser.core.options import Allow
-from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
-from vllm.entrypoints.openai.tool_parsers import MistralToolParser
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser
+from vllm.tokenizers import (
     MistralTokenizer,
+    TokenizerLike,
     get_tokenizer,
 )
+from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +73,7 @@ def assert_tool_calls(
 def fix_tool_call_tokenization(
     tokens: list[int],
     mistral_tool_parser: MistralToolParser,
-    mistral_tokenizer: AnyTokenizer,
+    mistral_tokenizer: TokenizerLike,
 ):
     """
     Replaces the textual token sequence for [TOOL_CALLS]
@@ -110,7 +110,7 @@ def fix_tool_call_tokenization(
 
 def stream_delta_message_generator(
     mistral_tool_parser: MistralToolParser,
-    mistral_tokenizer: AnyTokenizer,
+    mistral_tokenizer: TokenizerLike,
     model_output: str | None,
     tools: list[tuple[str, str]] | None,
 ) -> Generator[DeltaMessage, None, None]:
