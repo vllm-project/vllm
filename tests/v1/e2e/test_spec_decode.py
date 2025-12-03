@@ -405,7 +405,8 @@ def test_eagle_correctness(
 
             # pass if not ROCm
             if current_platform.is_rocm():
-                pytest.skip("Flex Attn not supported on ROCm")
+                # TODO: Enable Flex Attn for spec_decode on ROCm
+                pytest.skip("Flex Attn for spec_decode not supported on ROCm currently")
         else:
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
