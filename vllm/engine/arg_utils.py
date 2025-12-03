@@ -735,12 +735,6 @@ class EngineArgs:
             **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
 
-        # Profiler arguments
-        parser.add_argument_group(
-            title="ProfilerConfig",
-            description=ProfilerConfig.__doc__,
-        )
-
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         parallel_group = parser.add_argument_group(
