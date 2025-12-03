@@ -147,6 +147,7 @@ def test_extract_tool_calls_multiple_functions(
 
     assert extracted.tools_called
     assert extracted.content is None
+    assert extracted.tool_calls[0].id != extracted.tool_calls[1].id
     assert_tool_calls(extracted.tool_calls, expected_tool_calls)
 
 
@@ -450,3 +451,96 @@ def test_extract_tool_calls_streaming_incomplete_chunk_functions(
     assert state0["arguments"] is not None
     arguments0 = json.loads(state0["arguments"])
     assert arguments0 == {"location": "北京", "time": "2025-03-21"}
+
+
+def test_extract_tool_calls_streaming_incomplete_chunk_function2(
+    deepseek_tool_parser,
+    sample_tools,
+):
+    """Test streaming extraction of multiple function calls"""
+    # Simulate streaming chunks for two function calls
+    chunks = [
+        "<｜DSML｜function_calls>",
+        '<｜DSML｜invoke name="get_current_weather">',
+        '<｜DSML｜parameter name="location" string="true">北京</｜DSML｜parameter>',
+        '<｜DSML｜parameter name="time" string="true">2025-03-21</｜DSML｜parameter>',
+        "</｜DSML｜invoke>",
+        '<｜DSML｜invoke name="get_current_weather">',
+        '<｜DSML｜parameter name="location" string="true">北京</｜DSML｜parameter>',
+        "</｜DSML｜invoke>",
+        " </｜DSML｜function_calls>",
+    ]
+
+    request = ChatCompletionRequest(
+        model="deepseek-v3",
+        messages=[{"role": "user", "content": "What is the weather?"}],
+        tools=sample_tools,
+    )
+
+    # Track accumulated state
+    tool_states = {}
+    previous_text = ""
+
+    for chunk in chunks:
+        current_text = previous_text + chunk
+        delta_text = chunk
+        # Call streaming extraction
+        delta_message = deepseek_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+        print("aaa", delta_message)
+        if delta_message and delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index if tool_call.index is not None else 0
+
+                # Initialize state for new tool
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                # Update state
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+        previous_text = current_text
+
+    # Verify final state
+    assert len(tool_states) == 2, f"Expected 2 tool calls, got {len(tool_states)}"
+
+    # Verify first tool call
+    state0 = tool_states[0]
+    assert state0["id"] is not None
+    assert state0["type"] == "function"
+    assert state0["name"] == "get_current_weather"
+    assert state0["arguments"] is not None
+    arguments0 = json.loads(state0["arguments"])
+    assert arguments0 == {"location": "北京", "time": "2025-03-21"}
+
+    # Verify second tool call
+    state0 = tool_states[1]
+    assert state0["id"] is not None
+    assert state0["type"] == "function"
+    assert state0["name"] == "get_current_weather"
+    assert state0["arguments"] is not None
+    arguments0 = json.loads(state0["arguments"])
+    assert arguments0 == {"location": "北京"}
