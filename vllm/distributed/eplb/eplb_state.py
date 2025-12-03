@@ -251,6 +251,7 @@ class EplbState:
         self.model_states: dict[str, EplbModelState] = {}
         """
         Current step in the sliding window.
+
         Different from `expert_rearrangement_step`, 
         each EP rank may have its own `expert_load_window_step`.
         """
@@ -621,7 +622,7 @@ class EplbState:
 
                 if ep_group.rank() == 0:
                     logger.info(
-                        "EPLBS step: %d for model %s: avg_tokens=%.2f, "
+                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f",
                         self.expert_rearrangement_step,
                         eplb_model_state.model_name,
