@@ -556,8 +556,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-    def supports_quant_query_input(self) -> bool:
-        return True
+        self.supports_quant_query_input = True
 
     def forward(
         self,
