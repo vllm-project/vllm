@@ -223,7 +223,11 @@ def test_fix_functionalization(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
-            pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True),
+            pass_config=PassConfig(
+                fuse_norm_quant=do_fusion,
+                fuse_act_quant=do_fusion,
+                eliminate_noops=True,
+            ),
         ),
     )
 
