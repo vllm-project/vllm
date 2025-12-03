@@ -21,7 +21,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 async def stream_response(engine: AsyncLLM, prompt: str, request_id: str) -> None:
     """
-    Stream response from AsyncLLM and display tokens as they arrive.
+    Stream responsee from AsyncLLM and display tokens as they arrive.
 
     This function demonstrates the core streaming pattern:
     1. Create SamplingParams with DELTA output kind
