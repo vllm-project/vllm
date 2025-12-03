@@ -7,7 +7,7 @@ from typing import Any
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput
+from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -144,28 +144,3 @@ class StreamingScheduler(Scheduler):
         else:
             mark_preempted_stopped(request)
         return kv_transfer_params
-
-    def _handle_finished(
-        self,
-        finished_req_ids: set[str],
-        outputs: dict[int, list[EngineCoreOutput]],
-    ) -> None:
-        for req_id in finished_req_ids:
-            request = self.requests.get(req_id)
-            if request is None:
-                # This can happen if the request was aborted.
-                continue
-            assert request.close_streaming_session, "session should be in close state"
-            outputs[request.client_index].append(
-                EngineCoreOutput(
-                    new_token_ids=[],
-                    request_id=req_id,
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
-                    events=request.take_events(),
-                    trace_headers=request.trace_headers,
-                    num_cached_tokens=request.num_cached_tokens,
-                    close_streaming_session=True,
-                )
-            )
-            self._free_request(request)

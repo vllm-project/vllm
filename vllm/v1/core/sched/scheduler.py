@@ -1158,13 +1158,6 @@ class Scheduler(SchedulerInterface):
                     mark_running_stopped,
                     mark_preempted_stopped,
                 )
-            else:
-                self._handle_non_stopped(
-                    request,
-                    status_before_stop,
-                    mark_running_stopped,
-                    model_runner_output,
-                )
 
             # Extract sample logprobs if needed.
             if (
@@ -1207,8 +1200,6 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
-
-        self._handle_finished(scheduler_output.finished_req_ids, outputs)
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
@@ -1304,22 +1295,6 @@ class Scheduler(SchedulerInterface):
         else:
             mark_preempted_stopped(request)
         return kv_transfer_params
-
-    def _handle_non_stopped(
-        self,
-        request: Request,
-        status_before_stop: RequestStatus,
-        mark_running_stopped: Callable[[Request], None],
-        model_runner_output: ModelRunnerOutput,
-    ) -> None:
-        pass
-
-    def _handle_finished(
-        self,
-        finished_req_ids: set[str],
-        outputs: dict[int, list[EngineCoreOutput]],
-    ) -> None:
-        pass
 
     def _free_encoder_inputs(self, request: Request) -> None:
         cached_encoder_input_ids = self.encoder_cache_manager.get_cached_input_ids(
