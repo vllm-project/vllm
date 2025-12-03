@@ -4,6 +4,7 @@ import time
 from functools import total_ordering
 
 from vllm.v1.core.sched.policy.normalized_scorer import TimeAndLengthScorer
+from typing import Optional, List, Any
 
 TimeAndLengthScorer_Instance = None
 
@@ -23,7 +24,7 @@ class WeightedScoreSorter:
         self,
         request_length: int,
         request_arrival_time: float,
-        request_slo_requirement: list = None,
+        request_slo_requirement: Optional[List[Any]] = None,
     ):
         self.request_length = request_length
         self.request_arrival_time = request_arrival_time
@@ -34,11 +35,14 @@ class WeightedScoreSorter:
         self.__update_stats()
         return self.weighted_score > other_request_weighted_score.weighted_score
 
-    def __eq__(self, other_request_weighted_score: "WeightedScoreSorter") -> bool:
+    def __eq__(self, other_request_weighted_score: object) -> bool:
+        if not isinstance(other_request_weighted_score, WeightedScoreSorter):
+            return NotImplemented
         return self.weighted_score == other_request_weighted_score.weighted_score
 
     def __update_stats(self):
         self.wait_time = time.time() - self.request_arrival_time
+        assert TimeAndLengthScorer_Instance is not None
         self.weighted_score = TimeAndLengthScorer_Instance.score(
             self.wait_time, self.request_length
         )
