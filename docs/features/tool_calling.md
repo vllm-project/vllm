@@ -371,7 +371,8 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 
 Supported models:
 
-* TODO (will be updated after Olmo 3 release)
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
 
 Flags: `--tool-call-parser olmo3`
 
@@ -421,7 +422,7 @@ Here is a summary of a plugin file:
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens

@@ -23,7 +23,7 @@ class _HfExamplesInfo:
     tokenizer: str | None = None
     """Set the tokenizer to load for this architecture."""
 
-    tokenizer_mode: TokenizerMode = "auto"
+    tokenizer_mode: TokenizerMode | str = "auto"
     """Set the tokenizer type for this architecture."""
 
     speculative_model: str | None = None
@@ -358,6 +358,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
+    "MistralLarge3ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4", is_available_online=False
+    ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
         {"tiny": "TitanML/tiny-mixtral"},
@@ -435,6 +438,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
+    ),
+    "TeleChatForCausalLM": _HfExamplesInfo(
+        "chuhac/TeleChat2-35B", trust_remote_code=True
     ),
     "TeleChat2ForCausalLM": _HfExamplesInfo(
         "Tele-AI/TeleChat2-3B", trust_remote_code=True
@@ -767,7 +773,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",
+        extras={
+            "mistral-large-3": "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+            "ministral-3": "mistralai/Ministral-3-3B-Instruct-2512",
+        },
         tokenizer_mode="mistral",
+        # TODO: revert once Mistral-Large-3 and Ministral-3 are publicly available.
+        is_available_online=False,
     ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
@@ -819,7 +831,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
     "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
         "omni-research/Tarsier2-Recap-7b",
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
@@ -867,6 +882,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         max_model_len=10240,
     ),
+    "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Large-3-675B-Instruct-2512",
+        speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
+        is_available_online=False,
+    ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         trust_remote_code=True,
@@ -909,6 +929,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2.5-VL-7B-Instruct",
         speculative_model="Rayzl/qwen2.5-vl-7b-eagle3-sgl",
+    ),
+    "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-VL-8B-Instruct",
+        speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
     ),
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
