@@ -735,7 +735,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return getattr(self.impl, "_run_prefill_new_tokens", None)
 
     def _forward_decode(self, *args, **kwargs):
-        return self.impl._forward_decode(  # type: ignore[misc]
+        return self.impl._forward_decode(  # type: ignore[attr-defined]
             *args, **kwargs
         )
 
