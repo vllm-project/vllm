@@ -594,7 +594,7 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         )
 
-        self.use_gpu_async_sps = (
+        self.async_sps_zero_bubble_mode = (
             self.use_async_scheduling
             and self.num_spec_tokens > 0
             and self.dcp_world_size == 1
@@ -861,7 +861,7 @@ class GPUModelRunner(
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
         valid_sampled_token_count = []
-        if not self.use_gpu_async_sps:
+        if not self.async_sps_zero_bubble_mode:
             valid_sampled_token_count = self._get_valid_sampled_token_count()
         else:
             self.async_spec_reqs_to_fix.clear()
@@ -891,10 +891,10 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # If use_gpu_async_sps, assume all tokens are accepted, and will
-                    # adjust the inputs correctly in _adjust_inputs_on_gpu to avoid
-                    # cpu sync, which may cause gpu bubble in async scheduling.
-                    if self.use_gpu_async_sps:
+                    # If async_sps_zero_bubble_mode, assume all tokens are accepted,
+                    # and will adjust the inputs correctly in _adjust_inputs_on_gpu to
+                    # avoid cpu sync, which may cause gpu bubble in async scheduling.
+                    if self.async_sps_zero_bubble_mode:
                         num_accepted = req_state.prev_num_draft_len
                         num_rejected = 0
                         self.async_spec_reqs_to_fix.add(req_id)
@@ -1009,7 +1009,10 @@ class GPUModelRunner(
             # we clear the spec_decoding info in scheduler_output and
             # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
-                if self.use_gpu_async_sps and req_id in self.async_spec_reqs_to_fix:
+                if (
+                    self.async_sps_zero_bubble_mode
+                    and req_id in self.async_spec_reqs_to_fix
+                ):
                     req_state.pending_prev_num_draft_len = num_spec_tokens
                 else:
                     req_state.prev_num_draft_len = num_spec_tokens
@@ -1043,7 +1046,7 @@ class GPUModelRunner(
            tokens were accepted so the next iteration can shift states.
         """
 
-        if self.use_gpu_async_sps:
+        if self.async_sps_zero_bubble_mode:
             self._finalize_async_spec_cpu_state()
 
         if not self.model_config.is_hybrid or not self.speculative_config:
@@ -1076,7 +1079,7 @@ class GPUModelRunner(
     def _finalize_async_spec_cpu_state(self) -> None:
         """Synchronize CPU metadata after deferred speculative acceptance."""
 
-        if not self.use_gpu_async_sps:
+        if not self.async_sps_zero_bubble_mode:
             return
 
         assert self.parallel_config.pipeline_parallel_size == 1, (
@@ -1376,7 +1379,7 @@ class GPUModelRunner(
         are accepted in update_states to avoid cpu sync, and will adjust the
         inputs correctly based on the actual accepted token count in GPU."""
 
-        if not self.use_gpu_async_sps:
+        if not self.async_sps_zero_bubble_mode:
             return
 
         pre_valid_sampled_token_count = self.input_batch.pre_valid_sampled_token_count
