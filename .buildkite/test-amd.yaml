@@ -51,7 +51,7 @@ steps:
 - label: Async Engine, Inputs, Utils, Worker Test # 10min
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -64,7 +64,7 @@ steps:
 - label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -99,7 +99,7 @@ steps:
 - label: Basic Correctness Test # 20min
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   # grade: Blocking
   fast_check: true
   torch_nightly: true
@@ -116,7 +116,7 @@ steps:
 
 - label: Entrypoints Unit Tests # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
@@ -131,7 +131,7 @@ steps:
 - label: Entrypoints Integration Test (LLM) # 30min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -254,7 +254,7 @@ steps:
 
 - label: EPLB Algorithm Test # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
@@ -266,7 +266,7 @@ steps:
 
 - label: EPLB Execution Test # 10min
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_4
+  agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
@@ -281,7 +281,7 @@ steps:
 - label: Metrics, Tracing Test # 12min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_2
+  agent_pool: mi325_2
   # grade: Blocking
   num_gpus: 2
   source_file_dependencies:
@@ -301,7 +301,7 @@ steps:
 - label: Regression Test # 7min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -343,7 +343,7 @@ steps:
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
     - vllm/
@@ -544,7 +544,7 @@ steps:
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_1
+  agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
