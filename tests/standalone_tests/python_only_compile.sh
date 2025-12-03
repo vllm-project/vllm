@@ -22,7 +22,7 @@ apt autoremove -y
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
-VLLM_PRECOMPILED_WHEEL_COMMIT=$(merge_base_commit) VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 
 # Run the script
 python3 -c 'import vllm'
