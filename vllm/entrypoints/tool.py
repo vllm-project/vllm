@@ -143,7 +143,7 @@ class HarmonyPythonTool(Tool):
     async def get_result(self, context: "ConversationContext") -> Any:
         from vllm.entrypoints.context import HarmonyContext
 
-        assert isinstance(context, HarmonyContext)  # this breaks
+        assert isinstance(context, HarmonyContext)
         last_msg = context.messages[-1]
         tool_output_msgs = []
         async for msg in self.python_tool.process(last_msg):
@@ -151,9 +151,13 @@ class HarmonyPythonTool(Tool):
         return tool_output_msgs
 
     async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+        """
+        This function converts parsable context types to harmony and
+        back so we can use GPTOSS demo python tool
+        """
         from vllm.entrypoints.context import ParsableContext
 
-        assert isinstance(context, ParsableContext)  # this breaks
+        assert isinstance(context, ParsableContext)
 
         last_msg = context.parser.response_messages[-1]
         args = json.loads(last_msg.arguments)
@@ -177,8 +181,6 @@ class HarmonyPythonTool(Tool):
             )
             tool_output_msgs.append(processed)
         return tool_output_msgs
-
-        # convert last_msg to harmony_message
 
     @property
     def tool_config(self) -> Any:
