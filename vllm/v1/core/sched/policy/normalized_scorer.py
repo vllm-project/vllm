@@ -32,7 +32,11 @@ class NormalizedScorer:
 
     def __init__(self, dim_list: list[ScoreDim]) -> None:
         """
-        :param dim_list: Scoring dimensions; each dimension must define a median reference point, scaling factor, and weight.
+        Initialize the scorer with a list of scoring dimensions.
+
+        Args:
+            dim_list: A list of `ScoreDim` objects. Each dimension must define a
+                      median reference point, scaling factor, and weight.
         """
         self.dim_list = dim_list
         self.dim_count = len(dim_list)
