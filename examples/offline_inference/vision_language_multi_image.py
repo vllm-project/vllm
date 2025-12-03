@@ -311,7 +311,7 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
 
 # HunyuanOCR
 def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "/home/mozf/LLM/HunyuanOCR"
+    model_name = "tencent/HunyuanOCR"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -324,16 +324,10 @@ def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     ) * len(image_urls)
     prompt = f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
 
-    from vllm.assets.image import ImageAsset
-
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[
-            ImageAsset("cherry_blossom").pil_image.resize((256, 256 * i))
-            for i, _ in enumerate(image_urls, start=1)
-        ],
-        # image_data=[fetch_image(url) for url in image_urls],
+        image_data=[fetch_image(url) for url in image_urls],
     )
 
 
