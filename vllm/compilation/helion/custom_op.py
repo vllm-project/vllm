@@ -45,7 +45,7 @@ class HelionCustomOp(CustomOp):
         @CustomOp.register("my_helion_op")
         class MyHelionOp(HelionCustomOp):
             def forward_helion(self, x):
-                return torch.ops.my_helion_lib.my_op(x)
+                return torch.ops.vllm_helion.my_op(x)
 
     Checking if an op is enabled:
         # Class method (call on the class)

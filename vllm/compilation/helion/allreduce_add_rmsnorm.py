@@ -17,6 +17,7 @@ import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.compilation.helion.benchmark import DistributedKernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
+from vllm.compilation.helion.register import register_kernel
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 
@@ -188,8 +189,10 @@ def copy_engine_all_reduce_w_progress(
 
 
 # Create a custom op wrapper for fake tensor support
+# TODO(gmagogsfm): remove this custom op registration when torch.compile
+# and make_fx support it
 @torch.library.custom_op(
-    "my_helion_lib::copy_engine_all_reduce_w_progress",
+    "vllm_helion::copy_engine_all_reduce_w_progress",
     mutates_args=("output", "progress"),  # output and progress tensors are mutated
     device_types="cuda",
 )
@@ -231,7 +234,36 @@ def copy_engine_all_reduce_w_progress_fake(
 
 # Only define the Helion kernel if Helion is available
 if HELION_AVAILABLE:
-    # Pure Helion kernel for autotuning - this has the autotune method
+
+    def _allreduce_add_rmsnorm_fake(
+        allreduce_buf: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        progress: torch.Tensor,
+        rms_eps: float,
+        SPLITS_PER_RANK: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Custom fake implementation for allreduce_add_rmsnorm.
+
+        Shape contract:
+        - allreduce_buf: [M, K]
+        - residual: [M, K]
+        - rms_gamma: [K]
+        - progress: [SPLITS_PER_RANK]
+        - returns: tuple of (normalized_output, updated_residual) both [M, K]
+        """
+        M, K = allreduce_buf.size()
+        out = torch.empty(
+            [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
+        )
+        residual_out = torch.empty(
+            [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
+        )
+        return out, residual_out
+
+    # Apply @register_kernel to the actual Helion kernel
+    @register_kernel("allreduce_add_rmsnorm", fake_impl=_allreduce_add_rmsnorm_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
         autotune_baseline_rtol=0.0,
@@ -273,7 +305,7 @@ if HELION_AVAILABLE:
         ),
         static_shapes=True,
     )
-    def _allreduce_add_rmsnorm_pure_helion_kernel(
+    def allreduce_add_rmsnorm(
         allreduce_buf: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -343,70 +375,6 @@ if HELION_AVAILABLE:
 
         return out, residual_out
 
-    # PyTorch custom op wrapper - calls the pure Helion kernel
-    @torch.library.custom_op(
-        "my_helion_lib::allreduce_add_rmsnorm",
-        mutates_args=(),
-        device_types="cuda",
-    )
-    def _allreduce_add_rmsnorm_helion_kernel(
-        allreduce_buf: torch.Tensor,
-        residual: torch.Tensor,
-        rms_gamma: torch.Tensor,
-        progress: torch.Tensor,
-        rms_eps: float,
-        SPLITS_PER_RANK: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        PyTorch custom op wrapper for Helion AllReduce+Add+RMSNorm kernel.
-
-        Operation: RMSNorm(AllReduce(input) + residual), returns both normalized
-        and residual
-
-        Args:
-            allreduce_buf: Buffer being filled by AllReduce [M, K]
-            residual: Residual tensor to add [M, K]
-            rms_gamma: RMSNorm gamma weights [K]
-            progress: Progress tracking tensor [SPLITS_PER_RANK]
-            rms_eps: Epsilon for numerical stability
-            SPLITS_PER_RANK: Number of splits per rank
-
-        Returns:
-            Tuple of (normalized_output, updated_residual) both [M, K]
-        """
-        return _allreduce_add_rmsnorm_pure_helion_kernel(
-            allreduce_buf, residual, rms_gamma, progress, rms_eps, SPLITS_PER_RANK
-        )
-
-    @_allreduce_add_rmsnorm_helion_kernel.register_fake
-    def _allreduce_add_rmsnorm_helion_kernel_fake(
-        allreduce_buf: torch.Tensor,
-        residual: torch.Tensor,
-        rms_gamma: torch.Tensor,
-        progress: torch.Tensor,
-        rms_eps: float,
-        SPLITS_PER_RANK: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Fake/meta implementation for allreduce_add_rmsnorm Helion kernel.
-        Defines the input/output shape relationship without actual computation.
-
-        Shape contract:
-        - allreduce_buf: [M, K]
-        - residual: [M, K]
-        - rms_gamma: [K]
-        - progress: [SPLITS_PER_RANK]
-        - returns: tuple of (normalized_output, updated_residual) both [M, K]
-        """
-        M, K = allreduce_buf.size()
-        out = torch.empty(
-            [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
-        )
-        residual_out = torch.empty(
-            [M, K], dtype=allreduce_buf.dtype, device=allreduce_buf.device
-        )
-        return out, residual_out
-
 
 def helion_allreduce_add_rmsnorm(
     input_shared: torch.Tensor,
@@ -462,12 +430,12 @@ def helion_allreduce_add_rmsnorm(
     )
 
     # Perform AllReduce with progress tracking (custom op handles fake mode and symmetric memory conversion)
-    torch.ops.my_helion_lib.copy_engine_all_reduce_w_progress(
+    torch.ops.vllm_helion.copy_engine_all_reduce_w_progress(
         allreduce_out, input_shared, progress, splits_per_rank
     )
 
     # Call the Helion kernel for Add + RMSNorm
-    norm_out, residual_out = torch.ops.my_helion_lib.allreduce_add_rmsnorm(
+    norm_out, residual_out = allreduce_add_rmsnorm(
         allreduce_out,
         residual,
         rms_gamma,
@@ -662,9 +630,9 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
                 splits_match = key_splits == splits
 
                 if distance < best_distance or (
-                    distance == best_distance and splits_match and (
-                        best_match is None or not best_match[2]
-                    )
+                    distance == best_distance
+                    and splits_match
+                    and (best_match is None or not best_match[2])
                 ):
                     best_match = (size, key, splits_match)
                     best_distance = distance
@@ -688,7 +656,7 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
     def helion_kernel(self):
         """The Helion kernel function for autotuning."""
         if HELION_AVAILABLE:
-            return _allreduce_add_rmsnorm_pure_helion_kernel
+            return allreduce_add_rmsnorm._helion_kernel
         return None
 
 
