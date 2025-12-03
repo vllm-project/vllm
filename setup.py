@@ -365,12 +365,11 @@ class precompiled_wheel_utils:
             # try to fetch the wheel metadata from the nightly wheel repo
             main_variant = "cu" + envs.VLLM_MAIN_CUDA_VERSION.replace(".", "")
             variant = os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", main_variant)
-            commit = os.getenv(
-                "VLLM_PRECOMPILED_WHEEL_COMMIT",
-                ""
-            ).lower()
+            commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
             if not commit or len(commit) != 40:
-                print(f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}, fetching base commit")
+                print(
+                    f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}, fetching base commit"
+                )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
             try_default = False
@@ -500,7 +499,6 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def get_base_commit_in_main_branch() -> str:
-
         try:
             # Get the latest commit hash of the upstream main branch.
             resp_json = subprocess.check_output(
