@@ -44,7 +44,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -1073,6 +1073,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
         memory_gb < min_gb,
         reason=f"Need at least {min_gb}GB GPU memory to run the test.",
     )
+
+
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
 
 
 def large_gpu_test(*, min_gb: int):

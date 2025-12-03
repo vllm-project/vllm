@@ -196,9 +196,9 @@ def batch_propose_numba(
             k=k,
         )
 
-        valid_ngram_num_drafts[i] = drafter_output.shape[0]
+        valid_ngram_num_drafts[idx] = drafter_output.shape[0]
         if len(drafter_output):
-            valid_ngram_draft[i, : drafter_output.shape[0]] = drafter_output
+            valid_ngram_draft[idx, : drafter_output.shape[0]] = drafter_output
 
 
 @jit(nopython=True)
@@ -269,7 +269,7 @@ def _find_longest_matched_ngram_and_propose_tokens(
                 prev_lps = lps[max_ngram - 1]
             i += 1
         elif prev_lps != 0:
-            # Token mismatch: try the second longest prefix
+            # Token mismatch: try the second-longest prefix
             # among all suffix of tokens[:i],
             # which is the longest prefix of tokens[:prev_lps]
             prev_lps = lps[prev_lps - 1]

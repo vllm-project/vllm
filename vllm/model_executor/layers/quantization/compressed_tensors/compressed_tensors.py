@@ -18,6 +18,7 @@ from compressed_tensors.quantization import (
 from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
+from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -131,8 +132,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -158,7 +157,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer, prefix)
+            return CompressedTensorsMoEMethod.get_moe_method(
+                self, layer, layer_name=prefix
+            )
         return None
 
     def _add_fused_moe_to_target_scheme_map(self):
@@ -548,6 +549,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
         format: str | None = None,
+        layer_name: str | None = None,
     ) -> "CompressedTensorsScheme":
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
@@ -586,6 +588,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     symmetric=weight_quant.symmetric,
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder,
+                    layer_name=layer_name,
                 )
 
         act_quant_format = is_activation_quantization_format(format)
@@ -725,7 +728,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             # Find the quant_scheme
             scheme = self._get_scheme_from_parts(  # type: ignore
-                weight_quant=weight_quant, input_quant=input_quant, format=format
+                weight_quant=weight_quant,
+                input_quant=input_quant,
+                format=format,
+                layer_name=layer_name,
             )
 
         # Raise error if device does not support the scheme
