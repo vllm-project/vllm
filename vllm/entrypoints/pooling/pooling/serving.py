@@ -16,6 +16,11 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
+    UsageInfo,
+)
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     IOProcessorResponse,
     PoolingBytesResponse,
@@ -24,10 +29,7 @@ from vllm.entrypoints.openai.protocol import (
     PoolingRequest,
     PoolingResponse,
     PoolingResponseData,
-    UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger

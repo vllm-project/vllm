@@ -28,8 +28,10 @@ class StructuredOutputsConfig:
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
     disable_any_whitespace: bool = False
-    """If `True`, the model will not generate any whitespace during structured
-    outputs. This is only supported for xgrammar and guidance backends."""
+    """If `True`, json output will always be compact without any whitespace.
+    If `False`, the model may generate whitespace between JSON fields,
+    which is still valid JSON. This is only supported for xgrammar
+    and guidance backends."""
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
     in the JSON schema. This is only supported for the `guidance` backend and
