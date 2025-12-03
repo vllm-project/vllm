@@ -56,7 +56,21 @@ def register_tt_models(register_test_models=False) -> None:
     # Qwen2.5 - Text
     path_qwen_text = "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
     ModelRegistry.register_model("TTQwen2ForCausalLM", path_qwen_text)
-    ModelRegistry.register_model("TTQwen3ForCausalLM", path_qwen_text)
+
+    # Qwen3 - Text
+    qwen3_text_version = os.getenv("TT_QWEN3_TEXT_VER", "tt_transformers")
+    if qwen3_text_version == "tt_transformers":
+        path_qwen3_text = \
+            "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
+    elif qwen3_text_version == "qwen3_32b_galaxy":
+        path_qwen3_text = \
+            "models.demos.llama3_70b_galaxy.tt.generator_vllm:QwenForCausalLM"
+    else:
+        raise ValueError(
+            f"Unsupported TT Qwen3 version: {qwen3_text_version}, "
+            "pick one of [tt_transformers, qwen3_32b_galaxy]")
+
+    ModelRegistry.register_model("TTQwen3ForCausalLM", path_qwen3_text)
 
     # Qwen2.5 - Vision
     ModelRegistry.register_model(
