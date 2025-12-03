@@ -1019,7 +1019,6 @@ class EngineArgs:
             **observability_kwargs["collect_detailed_traces"],
         )
         observability_group.add_argument(
-<<<<<<< HEAD
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
         )
         observability_group.add_argument(
@@ -1029,10 +1028,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--cudagraph-metrics",
             **observability_kwargs["cudagraph_metrics"],
-=======
+        )
+        observability_group.add_argument(
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
->>>>>>> c896786f8 (add impl)
         )
 
         # Scheduler arguments
