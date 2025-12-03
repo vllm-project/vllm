@@ -306,6 +306,7 @@ class GPUModelRunner(
 
         # Always set to false after the first forward pass
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
+        self.layerwise_nvtx_hooks_registered: bool = False
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
@@ -3000,6 +3001,36 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        if (
+            self.vllm_config.observability_config.enable_layerwise_nvtx_tracing
+            and not self.layerwise_nvtx_hooks_registered
+        ):
+            if cudagraph_mode != CUDAGraphMode.NONE:
+                logger.debug(
+                    "layerwise NVTX tracing won't work when CUDA graph is "
+                    "turned on; you may observe part or all of the model "
+                    "missing NVTX markers"
+                )
+
+            # In STOCK_TORCH_COMPILE mode, after registering hooks here,
+            # the __call__ function of nn.module will be recompiled with
+            # fullgraph=True. Since nvtx.range_push/pop are not traceable
+            # by torch dynamo, we can't register hook functions here
+            # because hook functions will also be traced by torch dynamo.
+            if (
+                self.vllm_config.compilation_config.mode
+                == CompilationMode.STOCK_TORCH_COMPILE
+            ):
+                logger.debug(
+                    "layerwise NVTX tracing is not supported when "
+                    "CompilationMode is STOCK_TORCH_COMPILE, skipping "
+                    "function hooks registration"
+                )
+            else:
+                pyt_hooks = PytHooks()
+                pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
+                self.layerwise_nvtx_hooks_registered = True
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -3015,21 +3046,6 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            # Enable layerwise NVTX tracing for the model
-            # Position the registration here after CUDA graph has been captured
-            # and models have been torch compiled
-            if self.observability_config.enable_layerwise_nvtx_tracing:
-                if cudagraph_runtime_mode != CUDAGraphMode.NONE:
-                    logger.warning(
-                        "layerwise NVTX tracing is enabled, \
-                         but cudagraph runtime mode is not NONE"
-                    )
-                    logger.warning("Layers captured by cudagraph will not be traced")
-                if not hasattr(self, "_nvtx_hooks_registered"):
-                    pyt_hooks = PytHooks()
-                    pyt_hooks.register_hooks(self.model, module_prefix="model")
-                    self._nvtx_hooks_registered = True
-
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3519,6 +3535,7 @@ class GPUModelRunner(
         if self.parallel_config.enable_eplb:
             self.eplb_state = EplbState(self.parallel_config, self.device)
             eplb_models = 0
+
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
