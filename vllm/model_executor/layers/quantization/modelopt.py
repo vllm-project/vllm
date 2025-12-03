@@ -1563,16 +1563,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
-            # Pack top k ids and expert weights into a single int32 tensor, as
-            # required by TRT-LLM
-            packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-                torch.bfloat16
-            ).view(torch.int16)
-
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
                 x=x,
-                topk_ids=packed_tensor,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
                 top_k=top_k,
                 global_num_experts=global_num_experts,
             )
