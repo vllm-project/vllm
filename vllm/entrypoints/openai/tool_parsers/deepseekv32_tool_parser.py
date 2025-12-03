@@ -197,6 +197,12 @@ class DeepSeekV32ToolParser(ToolParser):
             return name_str[1:-1]
         return name_str
 
+    def _extract_param_name(self, input_str: str) -> str:
+        """Extract param name"""
+        start = input_str.find('"') + 1
+        end = input_str.find('"', start)
+        return input_str[start:end] if start > 0 and end > start else input_str
+
     def _convert_param_value(self, value: str, param_type: str) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
@@ -369,8 +375,6 @@ class DeepSeekV32ToolParser(ToolParser):
                         )
 
                     # Send header with function info
-                    logger.info("DeepSeek-V3.2 tool parser send tool call header: %s", 
-                                 self.current_function_name)
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -425,20 +429,14 @@ class DeepSeekV32ToolParser(ToolParser):
                         invoke_content = tool_text[invoke_start:invoke_content_end]
                         # Parse to get the complete arguments
                         try:
-                            parsed_tool = self._parse_single_invoke(
-                                invoke_content,
-                                self.streaming_request.tools
-                                if self.streaming_request
-                                else None,
-                            )
-                            if parsed_tool and self.current_tool_index < len(
+                            invoke_params = self._parse_invoke_params(invoke_content)
+                            if invoke_params and self.current_tool_index < len(
                                 self.prev_tool_call_arr
                             ):
                                 # Update existing entry in prev_tool_call_arr
-                                args = parsed_tool.function.arguments
                                 self.prev_tool_call_arr[self.current_tool_index][
                                     "arguments"
-                                ] = args
+                                ] = json.dumps(invoke_params, ensure_ascii=False)
                         except Exception:
                             pass  # Ignore parsing errors during streaming
 
@@ -489,7 +487,7 @@ class DeepSeekV32ToolParser(ToolParser):
                     # We have the complete parameter name
                     name_end = remaining.find(">")
                     param_name_raw = remaining[:name_end]
-                    self.current_param_name = self._extract_name(param_name_raw)
+                    self.current_param_name = self._extract_param_name(param_name_raw)
 
                     # Find the parameter value
                     value_start = param_start + name_end + 1
