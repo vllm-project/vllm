@@ -23,29 +23,30 @@ def torch_dtype_to_tl(dtype: torch.dtype):
 @triton.autotune(
     configs=[
         triton.Config({"ROWS_PER_PID": r}, num_warps=num_warps, num_stages=num_stages)
-        for r in [1, 2, 4, 8, 16, 32, 64, 128]
-        for num_warps in [1, 2, 4, 8, 16, 32]
-        for num_stages in [1, 2, 3]
+        for r in [1, 2]
+        for num_warps in [1]
+        for num_stages in [1]
     ],
     key=["N", "topk"],
-    cache_results=True,
+    # cache_results=True,
 )
 @triton.jit
 def _topk_softmax_kernel(
     logits_ptr,
     weights_ptr,
     indices_ptr,
-    M,
+    M: tl.constexpr,
     N: tl.constexpr,
     topk: tl.constexpr,
-    topk_padded: tl.constexpr,
     stride_lm,
     stride_ln,
     stride_wm,
     stride_wk,
     stride_im,
     stride_ik,
+    BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    topk_padded: tl.constexpr,
     RENORM: tl.constexpr,
     ROWS_PER_PID: tl.constexpr,
     num_stages: tl.constexpr,
@@ -61,12 +62,17 @@ def _topk_softmax_kernel(
     # impl topk<=2 and RENORM specialization by tl.constexpr,
     # same as constexpr if in C++17
     if topk == 1:
-        for row_idx in tl.range(pid, M, num_programs, num_stages):
-            logits = tl.load(
-                logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
-                mask=mask_n,
-                other=float("-inf"),
-            )
+        for row_idx in tl.range(pid, M, num_programs, num_stages, warp_specialize=True):
+            if BLOCK_N != N:
+                logits = tl.load(
+                    logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
+                    mask=mask_n,
+                    other=float("-inf"),
+                )
+            else:
+                logits = tl.load(
+                    logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
+                )
 
             if not RENORM:
                 row_sub_max = logits - tl.max(logits, axis=0)
@@ -81,12 +87,17 @@ def _topk_softmax_kernel(
             tl.store(indices_ptr + row_idx * stride_im + 0 * stride_ik, cur_idx)
 
     elif topk == 2:
-        for row_idx in tl.range(pid, M, num_programs, num_stages):
-            logits = tl.load(
-                logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
-                mask=mask_n,
-                other=float("-inf"),
-            )
+        for row_idx in tl.range(pid, M, num_programs, num_stages, warp_specialize=True):
+            if BLOCK_N != N:
+                logits = tl.load(
+                    logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
+                    mask=mask_n,
+                    other=float("-inf"),
+                )
+            else:
+                logits = tl.load(
+                    logits_ptr + row_idx * stride_lm + offs_n * stride_ln,
+                )
 
             if not RENORM:
                 row_sub_max = logits - tl.max(logits, axis=0)
@@ -113,29 +124,39 @@ def _topk_softmax_kernel(
             tl.store(indices_ptr + row_idx * stride_im + 1 * stride_ik, idx1)
 
     else:
-        topk_vals = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.float32) + float(
-            "-inf"
-        )
-        topk_idxs = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.int32)
-
         rows = tl.arange(0, ROWS_PER_PID)
         for row_idx in tl.range(
             pid * ROWS_PER_PID,
             M,
             num_programs * ROWS_PER_PID,
             num_stages,
+            warp_specialize=True,
         ):
+            topk_vals = tl.full(
+                [ROWS_PER_PID, topk_padded], float("-inf"), dtype=tl.float32
+            )
+            topk_idxs = tl.zeros([ROWS_PER_PID, topk_padded], dtype=tl.int32)
             row_indices = row_idx + rows  # [ROWS_PER_POD,]
             row_mask = row_indices < M
+
             # broadcast to [ROWS_PER_PID, BLOCKN]
-            logits = tl.load(
+            ptr_off = (
                 logits_ptr
-                + row_indices[:, None] * stride_lm  # [ROWS_PER_PID, 1]
-                + offs_n[None, :] * stride_ln,  # [1, BLOCK_N]
-                mask=row_mask[:, None]  # [ROWS_PER_PID,1]
-                & mask_n[None, :],  # [1, BLOCKN]
-                other=float("-inf"),
+                + row_indices[:, None] * stride_lm
+                + offs_n[None, :] * stride_ln
             )
+            if BLOCK_N == N and BLOCK_M == M:
+                logits = tl.load(ptr_off)
+            elif BLOCK_N != N and BLOCK_M != M:
+                logits = tl.load(
+                    ptr_off,
+                    mask=row_mask[:, None] & mask_n[None, :],
+                    other=float("-inf"),
+                )
+            elif BLOCK_N != N:
+                logits = tl.load(ptr_off, mask=mask_n[None, :], other=float("-inf"))
+            elif BLOCK_M != M:
+                logits = tl.load(ptr_off, mask=row_mask[:, None], other=float("-inf"))
 
             if not RENORM:
                 row_sub_max = logits - tl.max(
@@ -170,20 +191,64 @@ def _topk_softmax_kernel(
                 )  # [ROWSPERPID,1]
                 topk_vals = numerator / denominator  # [ROWSPERPID,topkpadded]
 
-            tl.store(
-                weights_ptr
-                + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
-                + offs_k[None, :] * stride_wk,  # [1, topkpadded]
-                topk_vals,
-                mask=row_mask[:, None] & store_mask[None, :],  # [1, topkpadded]
-            )
-            tl.store(
-                indices_ptr
-                + row_indices[:, None] * stride_im
-                + offs_k[None, :] * stride_ik,
-                topk_idxs,
-                mask=row_mask[:, None] & store_mask[None, :],
-            )
+            if topk == topk_padded and BLOCK_M == M:
+                tl.store(
+                    weights_ptr
+                    + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+                    + offs_k[None, :] * stride_wk,  # [1, topkpadded]
+                    topk_vals,
+                )
+                tl.store(
+                    indices_ptr
+                    + row_indices[:, None] * stride_im
+                    + offs_k[None, :] * stride_ik,
+                    topk_idxs,
+                )
+            elif topk != topk_padded and BLOCK_M != M:
+                tl.store(
+                    weights_ptr
+                    + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+                    + offs_k[None, :] * stride_wk,  # [1, topkpadded]
+                    topk_vals,
+                    mask=row_mask[:, None] & store_mask[None, :],  # [1, topkpadded]
+                )
+                tl.store(
+                    indices_ptr
+                    + row_indices[:, None] * stride_im
+                    + offs_k[None, :] * stride_ik,
+                    topk_idxs,
+                    mask=row_mask[:, None] & store_mask[None, :],
+                )
+            elif topk != topk_padded:
+                tl.store(
+                    weights_ptr
+                    + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+                    + offs_k[None, :] * stride_wk,  # [1, topkpadded]
+                    topk_vals,
+                    mask=store_mask[None, :],  # [1, topkpadded]
+                )
+                tl.store(
+                    indices_ptr
+                    + row_indices[:, None] * stride_im
+                    + offs_k[None, :] * stride_ik,
+                    topk_idxs,
+                    mask=store_mask[None, :],
+                )
+            elif BLOCK_M != M:
+                tl.store(
+                    weights_ptr
+                    + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+                    + offs_k[None, :] * stride_wk,  # [1, topkpadded]
+                    topk_vals,
+                    mask=row_mask[:, None],
+                )
+                tl.store(
+                    indices_ptr
+                    + row_indices[:, None] * stride_im
+                    + offs_k[None, :] * stride_ik,
+                    topk_idxs,
+                    mask=row_mask[:, None],
+                )
 
 
 def fused_topk_softmax(
@@ -198,6 +263,7 @@ def fused_topk_softmax(
 
     BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
     topk_padded = triton.next_power_of_2(topk)
+    BLOCK_M = triton.next_power_of_2(M)
 
     # enable autotune to find correct num threadblock,
     # refer to https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -210,14 +276,15 @@ def fused_topk_softmax(
         M=M,
         N=N,
         topk=topk,
-        topk_padded=topk_padded,
         stride_lm=router_logits.stride(0),
         stride_ln=router_logits.stride(1),
         stride_wm=weights.stride(0),
         stride_wk=weights.stride(1),
         stride_im=indices.stride(0),
         stride_ik=indices.stride(1),
+        BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        topk_padded=topk_padded,
         RENORM=renormalize,
     )
 
@@ -231,4 +298,5 @@ def gpt_oss_custom_routing_function(
     renormalize: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # only use gating_output to avoid padding issues
+    assert gating_output.is_contiguous()
     return fused_topk_softmax(gating_output, topk, renormalize)
