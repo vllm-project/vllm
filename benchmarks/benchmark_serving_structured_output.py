@@ -34,6 +34,7 @@ from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from dataclasses import dataclass
 
+import datasets
 import numpy as np
 import pandas as pd
 from backend_request_func import (
@@ -43,8 +44,6 @@ from backend_request_func import (
 )
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
-
-import datasets
 
 try:
     from vllm.tokenizers import get_tokenizer

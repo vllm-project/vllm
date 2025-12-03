@@ -651,7 +651,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--profile",
         action="store_true",
         default=False,
-        help="Use vLLM Profiling. profiler_config must be provided on the server side.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
 
     # prefix repetition dataset

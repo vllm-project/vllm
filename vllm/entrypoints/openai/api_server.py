@@ -517,10 +517,11 @@ def maybe_register_profiler_endpoints(args):
     """Conditionally add profiler start/stop endpoints if enabled."""
     profiler_config = args.profiler_config
     assert isinstance(profiler_config, ProfilerConfig)
-    if profiler_config.profiler != "none":
+    if profiler_config.profiler is not None:
         logger.warning_once(
-            f"Profiler with mode '{profiler_config.profiler}' is enabled in the "
-            "API server. This should ONLY be used for local development!"
+            "Profiler with mode '%s' is enabled in the "
+            "API server. This should ONLY be used for local development!",
+            profiler_config.profiler,
         )
 
         @router.post("/start_profile")

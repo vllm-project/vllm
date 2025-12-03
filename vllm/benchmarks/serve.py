@@ -1085,7 +1085,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use vLLM Profiling. profiler_config must be provided on the server side.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--save-result",
