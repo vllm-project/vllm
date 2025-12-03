@@ -956,13 +956,16 @@ class CompilationConfig:
             "mode is CompilationMode.VLLM_COMPILE"
         )
 
-        if self.use_inductor_graph_partition:
-            self.set_splitting_ops_for_inductor_graph_partition()
-        elif self.pass_config.fuse_attn_quant:
-            # here use_inductor_graph_partition is False
+        added_default_splitting_ops = False
+
+        if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
-            if self.splitting_ops is None:
+            if self.use_inductor_graph_partition:
+                if self.splitting_ops is None:
+                    added_default_splitting_ops = True
+                self.set_splitting_ops_for_inductor_graph_partition()
+            elif self.splitting_ops is None:
                 # NOTE: When using full cudagraph, instead of setting an empty
                 # list and capture the full cudagraph inside the flattened fx
                 # graph, we keep the piecewise fx graph structure but capture
@@ -972,6 +975,7 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+                added_default_splitting_ops = True
             elif len(self.splitting_ops) == 0:
                 logger.warning_once(
                     "Using piecewise compilation with empty splitting_ops"
@@ -996,24 +1000,39 @@ class CompilationConfig:
                 self.splitting_ops = []
 
         # split MoE ops for cudagraph
+        moe_ops = [
+            "vllm::moe_forward",
+            "vllm::moe_forward_shared",
+        ]
         backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
         dp_size = data_parallel_size if data_parallel_size is not None else 1
-        if (
+        need_moe_splitting = (
             backend == "deepep_high_throughput"
             and dp_size > 1
-            and self.splitting_ops
-            and (
-                not self.pass_config.enable_attn_fusion
-                or self.use_inductor_graph_partition
+            # pure attn-fusion without inductor partition deliberately disables
+            # piecewise graphs and MoE splitting.
+            and not (
+                self.pass_config.fuse_attn_quant
+                and not self.use_inductor_graph_partition
             )
-        ):
-            moe_ops = [
-                "vllm::moe_forward",
-                "vllm::moe_forward_shared",
-            ]
-            for op in moe_ops:
-                if op not in self.splitting_ops:
-                    self.splitting_ops.append(op)
+        )
+
+        if need_moe_splitting and self.splitting_ops is not None:
+            # if we just initialized default splitting_ops for this config,
+            # automatically append the MoE ops
+            if added_default_splitting_ops:
+                for op in moe_ops:
+                    if op not in self.splitting_ops:
+                        self.splitting_ops.append(op)
+
+            # make sure MoE ops are split out
+            if not any(op in self.splitting_ops for op in moe_ops):
+                raise ValueError(
+                    "DeepEP high throughput backend with data_parallel_size > 1 "
+                    "requires splitting MoE ops from cudagraphs. Please ensure "
+                    "'vllm::moe_forward' or 'vllm::moe_forward_shared' are "
+                    "present in CompilationConfig.splitting_ops."
+                )
 
     def set_splitting_ops_for_inductor_graph_partition(self):
         assert self.use_inductor_graph_partition

@@ -264,14 +264,19 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention"],
+            splitting_ops=[
+                "vllm::unified_attention",
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ],
         ),
     )
     splitting_ops = config.compilation_config.splitting_ops
-    assert splitting_ops is not None
-    assert "vllm::unified_attention" in splitting_ops
-    assert "vllm::moe_forward" in splitting_ops
-    assert "vllm::moe_forward_shared" in splitting_ops
+    assert splitting_ops == [
+        "vllm::unified_attention",
+        "vllm::moe_forward",
+        "vllm::moe_forward_shared",
+    ]
 
 
 def test_moe_splitting_ops_deepep_ht_attn_fusion_no_inductor():
