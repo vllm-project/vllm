@@ -690,7 +690,8 @@ class MambaManager(SingleTypeKVCacheManager):
     def remove_skipped_blocks(self, request_id: str,
                               num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if not (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                and self.kv_cache_spec.enable_caching):
             # Here unused blocks may be freed up for running requests.
             # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
             #  (for which find_longest_cache_hit returns block_pool.null_block)
@@ -741,7 +742,10 @@ class MambaManager(SingleTypeKVCacheManager):
             # how about in decode?
             num_tokens -= (self.num_speculative_blocks 
                            if request_id in self._allocated_reqs else 0)
-            num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            if self.kv_cache_spec.enable_caching:
+                num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            else:
+                num_required_blocks = 1 + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
                               len(self.req_to_blocks[request_id]))
             num_new_alloc_blocks = 0
@@ -791,7 +795,10 @@ class MambaManager(SingleTypeKVCacheManager):
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             num_tokens -= (self.num_speculative_blocks 
                            if request_id in self._allocated_reqs else 0)
-            num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            if self.kv_cache_spec.enable_caching:
+                num_required_blocks = cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
+            else:
+                num_required_blocks = 1 + self.num_speculative_blocks
             num_new_blocks = (num_required_blocks - len(self.req_to_blocks[request_id]))
             self.print(f'Mamba.alloc_blks: {request_id=}, {num_tokens=}, {num_required_blocks=}, {num_new_blocks=}')
             if num_new_blocks <= 0:
