@@ -1104,9 +1104,40 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
+            # Swizzle block scales and then pad the packed NVFP4 weights so that
+            # both N (rows) and K (columns) satisfy the alignment constraints
+            # implied by the FlashInfer / Cutlass kernels.
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+            weight = layer.weight.data
+
+            # Zero-pad weights in N dim if swizzled block scales have more rows
+            # than the original weights (e.g. to satisfy 32-row tile alignment).
+            out_orig = weight.shape[0]
+            out_padded = swizzled_weight_scale.shape[0]
+            if out_padded != out_orig:
+                pad_rows = out_padded - out_orig
+                assert pad_rows > 0
+                weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows))
+                layer.output_size_per_partition = out_orig
+
+            layer.execution_padding_k_bytes = 0
+
+            if self.backend.startswith("flashinfer-"):
+                group_size = self.quant_config.group_size
+                num_k_blocks_padded = swizzled_weight_scale.shape[1]
+                k_bytes_padded = (num_k_blocks_padded * group_size) // 2
+
+                k_bytes_orig = weight.shape[1]
+
+                if k_bytes_padded != k_bytes_orig:
+                    pad_bytes = k_bytes_padded - k_bytes_orig
+                    assert pad_bytes >= 0
+                    if pad_bytes > 0:
+                        weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0))
+                        layer.execution_padding_k_bytes = pad_bytes
+
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1128,10 +1159,18 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
+        # output_shape = [x.shape[0], layer.weight.shape[0]] # todo ?
+
+        # `output_size_per_partition` stores the original logical output size
+        # (before any padding we may have applied to satisfy kernel alignment).
+        out_logical = layer.output_size_per_partition
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        # x_blockscale is implicitly padded/rounded by the kernel to satisfy alignment
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
+
+        actual_batch_size = x_fp4.shape[0]
+        x_blockscale = x_blockscale[:actual_batch_size, :].contiguous()
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
@@ -1141,24 +1180,40 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
-        mm_args = (
-            x_fp4,
-            layer.weight,
-            x_blockscale,
-            layer.weight_scale,
-            layer.alpha,
-            output_dtype,
-        )
         if self.backend.startswith("flashinfer-"):
             backend_name = self.backend[len("flashinfer-") :]
+
+            # Match packed-K bytes between activations and weights using
+            # pre-calculated padding
+            pad_k_bytes = getattr(layer, "execution_padding_k_bytes", 0)
+            x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes))
+
+            mm_args = (
+                x_fp4,
+                layer.weight,
+                x_blockscale,
+                layer.weight_scale,
+                layer.alpha,
+                output_dtype,
+            )
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
             assert self.backend == "cutlass"
+            mm_args = (
+                x_fp4,
+                layer.weight,
+                x_blockscale,
+                layer.weight_scale,
+                layer.alpha,
+                output_dtype,
+            )
             out = cutlass_scaled_fp4_mm(*mm_args)
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+
+        out = out[:, :out_logical]
+        return out
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
