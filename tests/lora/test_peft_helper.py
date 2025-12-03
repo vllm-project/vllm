@@ -25,31 +25,33 @@ ERROR_CASES = [
 ]
 
 
-def test_peft_helper_pass(sql_lora_files, tmp_path):
+def test_peft_helper_pass(llama32_lora_files, tmp_path):
     peft_helper = PEFTHelper.from_local_dir(
-        sql_lora_files, max_position_embeddings=4096
+        llama32_lora_files, max_position_embeddings=4096
     )
     lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
     peft_helper.validate_legal(lora_config)
     assert peft_helper.r == 8
-    assert peft_helper.lora_alpha == 16
-    assert peft_helper.target_modules == [
-        "q_proj",
-        "v_proj",
-        "k_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
+    assert peft_helper.lora_alpha == 32
+    target_modules = sorted(peft_helper.target_modules)
+
+    assert target_modules == [
         "down_proj",
         "embed_tokens",
+        "gate_proj",
+        "k_proj",
         "lm_head",
+        "o_proj",
+        "q_proj",
+        "up_proj",
+        "v_proj",
     ]
     assert peft_helper.vllm_max_position_embeddings == 4096
 
     # test RSLoRA
     rslora_config = dict(use_rslora=True)
     test_dir = tmp_path / "test_rslora"
-    shutil.copytree(sql_lora_files, test_dir)
+    shutil.copytree(llama32_lora_files, test_dir)
 
     # Load and modify configuration
     config_path = test_dir / "adapter_config.json"
@@ -70,14 +72,14 @@ def test_peft_helper_pass(sql_lora_files, tmp_path):
 
 @pytest.mark.parametrize("test_name,config_change,expected_error", ERROR_CASES)
 def test_peft_helper_error(
-    sql_lora_files,
+    llama32_lora_files,
     tmp_path,
     test_name: str,
     config_change: dict,
     expected_error: str,
 ):
     test_dir = tmp_path / test_name
-    shutil.copytree(sql_lora_files, test_dir)
+    shutil.copytree(llama32_lora_files, test_dir)
 
     # Load and modify configuration
     config_path = test_dir / "adapter_config.json"

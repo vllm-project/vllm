@@ -310,7 +310,6 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                     result,
                 )
-            logger.info("Retrieve request for request_id=%s finished", request_id)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:

@@ -46,7 +46,6 @@ from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_torch_sdpa_wrapper,
-    vit_xformers_attn_wrapper,
 )
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -230,6 +229,9 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         - hidden_size must match the hidden size of language model backbone.
         - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
           format
+        - second_per_grid_ts: The video time interval (in seconds) for each
+          grid along the temporal dimension in the 3D position IDs. Returned
+          when `videos` is not `None`.
     """
 
     type: Literal["video_embeds"]
@@ -243,6 +245,11 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
         torch.Tensor,
         TensorShape("nv", 3),
     ]
+
+    second_per_grid_ts: Annotated[
+        torch.Tensor | None,
+        TensorShape("nv"),
+    ] = None
 
 
 Qwen2_5_VLVideoInputs: TypeAlias = (
@@ -300,7 +307,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
@@ -337,24 +343,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
-        # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
-        from vllm.platforms import current_platform
 
-        if (
-            current_platform.is_rocm()
-            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-        ):
-            self.use_upstream_fa = True
-        if current_platform.is_xpu():
-            self.use_upstream_fa = False
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
@@ -367,7 +362,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -409,7 +403,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                 max_seqlen,
                 batch_size,
                 self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
@@ -427,8 +420,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                 v,
                 cu_seqlens,
             )
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
         output, _ = self.proj(context_layer)
         return output
@@ -440,9 +431,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         "cu_seqlens": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
-        "seqlens": 0,
     },
-    mark_unbacked_dims={"seqlens": 0},
     enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionBlock(nn.Module):
@@ -457,7 +446,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
@@ -473,7 +461,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
             attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2_5_VisionMLP(
@@ -493,7 +480,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -501,7 +487,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -644,7 +629,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             is_neox_style=True,
         )
 
-        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
@@ -654,7 +638,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
@@ -662,7 +645,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -682,7 +664,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                         prefix=f"{prefix}.blocks.{layer_idx}",
                         use_data_parallel=use_data_parallel,
                         attn_backend=self.attn_backend,
-                        use_upstream_fa=use_upstream_fa,
                         attn_backend_override=attn_backend_override,
                     )
                     for layer_idx in range(depth)
@@ -814,17 +795,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        seqlens = torch.zeros(1, device=cu_seqlens.device)
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-        return max_seqlen, seqlens
+        return max_seqlen
 
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
@@ -889,10 +867,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # transformers
         # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        max_seqlen_full, seqlens_full = self.compute_attn_mask_seqlen(cu_seqlens)
-        max_seqlen_window, seqlens_window = self.compute_attn_mask_seqlen(
-            cu_window_seqlens
-        )
+        max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
+        max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
 
         cu_seqlens = cu_seqlens.to(device=self.device, non_blocking=True)
         cu_window_seqlens = cu_window_seqlens.to(device=self.device, non_blocking=True)
@@ -919,11 +895,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
-                seqlens_now = seqlens_full
             else:
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
-                seqlens_now = seqlens_window
 
             hidden_states = blk(
                 hidden_states,
@@ -931,7 +905,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
-                seqlens=seqlens_now,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -1311,6 +1284,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 type="video_embeds",
                 video_embeds=video_embeds,
                 video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
             )
 
     def _process_image_input(
@@ -1422,7 +1396,13 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Cast to long to match the original code
         # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
-        second_per_grid_ts = video_input["second_per_grid_ts"].long()
+        second_per_grid_ts = video_input.get("second_per_grid_ts")
+        if second_per_grid_ts is None:
+            raise ValueError(
+                "second_per_grid_ts is required when video_pruning_rate > 0 "
+                "is enabled for video inputs, including the video_embeds path."
+            )
+        second_per_grid_ts = second_per_grid_ts.long()
         tokens_per_second = self.config.vision_config.tokens_per_second
 
         video_embeds_out = []
