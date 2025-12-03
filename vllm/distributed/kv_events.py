@@ -134,21 +134,29 @@ class KVEventAggregator:
         """
         self._event_counter.clear()
 
-    def set_workers(self, count: int = 1) -> None:
+    def increment_workers(self, count: int = 1) -> None:
         """
-        Set the number of workers contributing events.
+        Increment the number of workers contributing events.
 
-        :param count: Number of workers to add.
+        :param count: Number to increment the workers by.
         """
         if count <= 0:
             raise ValueError("count must be positive.")
-        self._num_workers = count
+        self._num_workers += count
 
     def reset_workers(self) -> None:
         """
         Reset the number of workers to 1.
         """
         self._num_workers = 1
+
+    def get_number_of_workers(self) -> int:
+        """
+        Return the number of workers.
+
+        :return: int number of workers.
+        """
+        return self._num_workers
 
     def __repr__(self) -> str:
         return (
@@ -172,11 +180,19 @@ class KVConnectorKVEvents(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def set_workers(self, count: int = 1) -> None:
+    def increment_workers(self, count: int = 1) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def get_all_events(self) -> list[KVCacheEvent]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_number_of_workers(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear_events(self) -> None:
         raise NotImplementedError
 
 

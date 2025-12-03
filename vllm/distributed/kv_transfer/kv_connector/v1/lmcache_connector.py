@@ -55,11 +55,18 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         self._aggregator.reset_workers()
         return self
 
-    def set_workers(self, count: int = 1) -> None:
-        self._aggregator.set_workers(count)
+    def increment_workers(self, count: int = 1) -> None:
+        self._aggregator.increment_workers(count)
 
     def get_all_events(self) -> list[KVCacheEvent]:
         return self._aggregator.get_all_events()
+
+    def get_number_of_workers(self) -> int:
+        return self._aggregator.get_number_of_workers()
+
+    def clear_events(self) -> None:
+        self._aggregator.clear_events()
+        self._aggregator.reset_workers()
 
     def __repr__(self) -> str:
         return f"<LMCacheKVEvents events={self.get_all_events()}>"
@@ -93,7 +100,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         self._lmcache_engine = cls(vllm_config, role, self)
 
-        self._kv_cache_events: list[KVCacheEvent] = []
+        self._kv_cache_events: LMCacheKVEvents | None = None
 
     # ==============================
     # Worker-side methods
@@ -276,7 +283,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(kv_cache_events, LMCacheKVEvents):
             return
-        self._kv_cache_events.extend(kv_cache_events.get_all_events())
+
+        if self._kv_cache_events is None:
+            self._kv_cache_events = kv_cache_events
+        else:
+            self._kv_cache_events.add_events(kv_cache_events.get_all_events())
+            self._kv_cache_events.increment_workers(
+                kv_cache_events.get_number_of_workers()
+            )
         return
 
     def request_finished(
@@ -304,5 +318,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             New KV cache events since the last call.
         """
         if self._kv_cache_events is not None:
-            yield from self._kv_cache_events
-            self._kv_cache_events.clear()
+            self._kv_cache_events.aggregate()
+            kv_cache_events = self._kv_cache_events.get_all_events()
+            yield from kv_cache_events
+            self._kv_cache_events.clear_events()
+            self._kv_cache_events = None
