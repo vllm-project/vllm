@@ -15,7 +15,6 @@ from vllm.attention.layer import Attention
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
@@ -715,9 +714,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 )
             assert layer.activation == "silu", (
                 f"Expected 'silu' activation but got {layer.activation}"
-            )
-            assert layer.routing_method_type == RoutingMethodType.Llama4, (
-                "FusedMoE flashinfer kernels are only supported for Llama4"
             )
 
             assert not layer.renormalize
