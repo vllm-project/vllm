@@ -235,3 +235,16 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
     )
     out_prompt = json.loads(transcription_wprompt)["text"]
     assert prefix in out_prompt
+
+
+@pytest.mark.asyncio
+async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="verbose_json",
+        temperature=0.0,
+    )
+    assert transcription.segments is not None
+    assert len(transcription.segments) > 0

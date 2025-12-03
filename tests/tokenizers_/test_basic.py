@@ -5,8 +5,7 @@ from typing import _get_protocol_attrs  # type: ignore
 import pytest
 from transformers import PreTrainedTokenizerBase
 
-from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 
 
 def _get_missing_attrs(obj: object, target: type):

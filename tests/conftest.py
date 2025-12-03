@@ -1174,6 +1174,7 @@ def caplog_mp_spawn(tmp_path, monkeypatch):
             "level": level,
             "filename": log_path.as_posix(),
         }
+        config["loggers"]["vllm"]["level"] = level
 
         config_path.write_text(json.dumps(config))
 

@@ -86,7 +86,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "custom"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -137,13 +137,13 @@ class ModelConfig:
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
-    tokenizer_mode: TokenizerMode = "auto"
+    tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:\n
     - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
-    - "custom" will use --tokenizer to select the preregistered tokenizer."""
+    - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -708,15 +708,16 @@ class ModelConfig:
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
 
-        if not self.skip_tokenizer_init:
-            self._verify_tokenizer_mode()
-
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
 
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    @field_validator("tokenizer_mode", mode="after")
+    def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
+        return tokenizer_mode.lower()
 
     @field_validator("quantization", mode="before")
     @classmethod
@@ -828,15 +829,6 @@ class ModelConfig:
         if is_remote_gguf(model):
             model, _ = split_remote_gguf(model)
         return get_sentence_transformer_tokenizer_config(model, self.revision)
-
-    def _verify_tokenizer_mode(self) -> None:
-        tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
-        if tokenizer_mode not in get_args(TokenizerMode):
-            raise ValueError(
-                f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
-                f"one of {get_args(TokenizerMode)}."
-            )
-        self.tokenizer_mode = tokenizer_mode
 
     def _get_default_runner_type(
         self,

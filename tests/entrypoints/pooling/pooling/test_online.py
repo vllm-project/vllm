@@ -11,8 +11,8 @@ import torch
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import PoolingResponse
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
@@ -158,11 +158,7 @@ async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str)
     chat_response.raise_for_status()
     chat_poolings = PoolingResponse.model_validate(chat_response.json())
 
-    tokenizer = get_tokenizer(
-        tokenizer_name=model_name,
-        tokenizer_mode="fast",
-        trust_remote_code=True,
-    )
+    tokenizer = get_tokenizer(tokenizer_name=model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(
         messages,
         chat_template=DUMMY_CHAT_TEMPLATE,
