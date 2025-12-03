@@ -1627,12 +1627,11 @@ class FusedMoE(CustomOp):
         if self.enable_eplb:
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                eplb_static=eplb_static,
-                logical_replica_count=logical_replica_count,
-                indices_type=indices_type, # TODO
                 expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
+                eplb_static=self.eplb_static,
+                indices_type=indices_type
             )
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:

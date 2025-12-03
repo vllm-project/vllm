@@ -3613,7 +3613,7 @@ class GPUModelRunner(
             if self.parallel_config.eplb_config.load_path is not None:
                 self.eplb_state.rearrange(self.model, load_initial_load_window=True)
                 if self.parallel_config.eplb_config.static:
-                    self.eplb_state = None # TODO FIX
+                    self.eplb_state = None
             if self.eplb_state.is_async:
                 self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
