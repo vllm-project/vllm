@@ -75,11 +75,9 @@ ARCH=$(uname -m)
 case "${ARCH,,}" in
   x86_64|amd64)
     NVSHMEM_SUBDIR="linux-x86_64"
-    NVSHMEM_FILE="libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda${CUDA_VERSION_MAJOR}-archive.tar.xz"
     ;;
   aarch64|arm64)
     NVSHMEM_SUBDIR="linux-sbsa"
-    NVSHMEM_FILE="libnvshmem-linux-sbsa-${NVSHMEM_VER}_cuda${CUDA_VERSION_MAJOR}-archive.tar.xz"
     ;;
   *)
     echo "Unsupported architecture: ${ARCH}" >&2
@@ -87,6 +85,7 @@ case "${ARCH,,}" in
     ;;
 esac
 
+NVSHMEM_FILE="libnvshmem-${NVSHMEM_SUBDIR}-${NVSHMEM_VER}_cuda${CUDA_VERSION_MAJOR}-archive.tar.xz"
 NVSHMEM_URL="https://developer.download.nvidia.com/compute/nvshmem/redist/libnvshmem/${NVSHMEM_SUBDIR}/${NVSHMEM_FILE}"
 
 pushd "$WORKSPACE"
