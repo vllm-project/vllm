@@ -17,9 +17,10 @@ import torch.distributed._symmetric_memory as symm_mem
 
 from vllm.compilation.helion.benchmark import DistributedKernelBenchmark
 from vllm.compilation.helion.custom_op import HelionCustomOp
-from vllm.compilation.helion.register import register_kernel
+from vllm.compilation.helion.register import register_kernel, vllm_helion_lib
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -189,13 +190,6 @@ def copy_engine_all_reduce_w_progress(
 
 
 # Create a custom op wrapper for fake tensor support
-# TODO(gmagogsfm): remove this custom op registration when torch.compile
-# and make_fx support it
-@torch.library.custom_op(
-    "vllm_helion::copy_engine_all_reduce_w_progress",
-    mutates_args=("output", "progress"),  # output and progress tensors are mutated
-    device_types="cuda",
-)
 def _copy_engine_all_reduce_w_progress_custom_op(
     output: torch.Tensor,
     inp: torch.Tensor,
@@ -209,7 +203,6 @@ def _copy_engine_all_reduce_w_progress_custom_op(
     copy_engine_all_reduce_w_progress(output, input_symm, progress, splits_per_rank)
 
 
-@_copy_engine_all_reduce_w_progress_custom_op.register_fake
 def copy_engine_all_reduce_w_progress_fake(
     output: torch.Tensor,
     inp: torch.Tensor,
@@ -230,6 +223,16 @@ def copy_engine_all_reduce_w_progress_fake(
         f"Progress size {progress.numel()} < splits_per_rank {splits_per_rank}"
     )
     # In fake mode, we don't actually fill the tensors, just validate shapes
+
+
+# Register using vLLM's direct_register_custom_op for better performance
+direct_register_custom_op(
+    op_name="copy_engine_all_reduce_w_progress",
+    op_func=_copy_engine_all_reduce_w_progress_custom_op,
+    mutates_args=["output", "progress"],  # output and progress tensors are mutated
+    fake_impl=copy_engine_all_reduce_w_progress_fake,
+    target_lib=vllm_helion_lib,
+)
 
 
 # Only define the Helion kernel if Helion is available

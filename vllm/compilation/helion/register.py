@@ -11,10 +11,15 @@ from collections.abc import Callable
 from typing import Optional
 
 import torch
+from torch.library import Library
 
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
+
+# Create a library to hold the Helion custom ops
+vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 
 
 class HelionKernelWrapper:
@@ -417,22 +422,13 @@ def register_kernel(
         namespace = "vllm_helion"  # Fixed namespace for all Helion kernels
         kernel_wrapper = HelionKernelWrapper(helion_kernel_func, final_op_name, namespace)
 
-        # Register the wrapper as PyTorch custom op
-        pytorch_op_wrapper = torch.library.custom_op(
-            kernel_wrapper.full_op_name,
-            mutates_args=mutates_args,
-            device_types=device_types,
-        )(kernel_wrapper)
+        # Register the wrapper as PyTorch custom op using vLLM's low-overhead function
+        # Convert mutates_args tuple to list of strings for direct_register_custom_op
+        mutates_args_list = list(mutates_args) if mutates_args else None
 
-        # Register fake implementation
-        if fake_impl is not None:
-            # Use user-provided fake implementation
-            pytorch_op_wrapper.register_fake(fake_impl)
-            logger.info(
-                "Registered custom fake implementation for Helion kernel '%s'",
-                helion_kernel_func.__name__,
-            )
-        else:
+        # Determine fake implementation
+        final_fake_impl = fake_impl
+        if final_fake_impl is None:
             # Create auto-generated fake implementation using proper Helion bind/compile pattern
             def helion_fake_kernel(*args, **kwargs):
                 """
@@ -458,18 +454,34 @@ def register_kernel(
                     *args, **kwargs, _launcher=lambda *args, **kwargs: None
                 )
 
-            pytorch_op_wrapper.register_fake(helion_fake_kernel)
+            final_fake_impl = helion_fake_kernel
+
+        # Register using vLLM's direct_register_custom_op
+        direct_register_custom_op(
+            op_name=final_op_name,
+            op_func=kernel_wrapper,
+            mutates_args=mutates_args_list,
+            fake_impl=final_fake_impl,
+            target_lib=vllm_helion_lib,
+        )
+
+        # Preserve references for advanced use and debugging
+        kernel_wrapper._pytorch_op_wrapper = None  # No longer applicable with direct registration
+        kernel_wrapper._helion_kernel = helion_kernel_func
+
+        if final_fake_impl == fake_impl:
+            logger.info(
+                "Registered custom fake implementation for Helion kernel '%s'",
+                helion_kernel_func.__name__,
+            )
+        else:
             logger.info(
                 "Registered auto-generated fake implementation for Helion kernel '%s'",
                 helion_kernel_func.__name__,
             )
 
-        # Preserve references for advanced use and debugging
-        kernel_wrapper._pytorch_op_wrapper = pytorch_op_wrapper
-        kernel_wrapper._helion_kernel = helion_kernel_func
-
         logger.info(
-            "Registered Helion kernel '%s' as PyTorch custom op '%s'",
+            "Registered Helion kernel '%s' as PyTorch custom op '%s' using direct registration",
             helion_kernel_func.__name__,
             kernel_wrapper.full_op_name,
         )
