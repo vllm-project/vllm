@@ -1551,7 +1551,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
-
+    # Flag to enable async SPS zero bubble mode.
     "VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE": lambda: bool(
         int(os.getenv("VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE", "0"))
     ),
