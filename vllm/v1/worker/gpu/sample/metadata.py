@@ -29,6 +29,9 @@ class SamplingMetadata:
     prompt_bin_mask: torch.Tensor
     output_bin_counts: torch.Tensor
 
+    # Token IDs to track logprobs for (merged from all requests)
+    track_token_ids: torch.Tensor | None = None
+
     @classmethod
     def make_dummy(
         cls,
@@ -73,6 +76,7 @@ class SamplingMetadata:
             idx_mapping=idx_mapping,
             prompt_bin_mask=prompt_bin_mask,
             output_bin_counts=output_bin_counts,
+            track_token_ids=None,
         )
 
 
@@ -176,4 +180,5 @@ def expand_sampling_metadata(
         idx_mapping=sampling_metadata.idx_mapping,
         prompt_bin_mask=sampling_metadata.prompt_bin_mask,
         output_bin_counts=sampling_metadata.output_bin_counts,
+        track_token_ids=sampling_metadata.track_token_ids,
     )
