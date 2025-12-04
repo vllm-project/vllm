@@ -42,3 +42,6 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Token IDs to track logprobs for (merged from all requests)
+    track_token_ids: torch.Tensor | None = None

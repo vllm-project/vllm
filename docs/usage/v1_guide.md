@@ -61,6 +61,12 @@ Processed means the values after applying all processors, including temperature 
 While V1 supports passing prompt logprobs with prefix caching enabled, it no longer caches the logprobs.
 For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
+#### Tracked Token Logprobs (New in V1)
+
+V1 introduces the `track_token_ids` parameter in `SamplingParams`, which enables efficient tracking of logprobs for specific tokens without requiring full vocabulary logprobs. This is useful for classification tasks, constrained generation, and any use case where you need probabilities for a small set of predefined tokens (e.g., class labels).
+
+See [Tracked Token Logprobs](../features/track_token_ids.md) for detailed documentation and usage examples.
+
 ## Feature Support
 
 For each item, its support in vLLM V1 falls into one of the following states:
@@ -150,6 +156,7 @@ following a similar pattern by implementing support through the [plugin system](
 | **Chunked Prefill**                         | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional</nobr>                                                        |
 | **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
+| **Tracked Token Logprobs**                  | <nobr>🟢 Functional</nobr>                                                        |
 | **FP8 KV Cache**                            | <nobr>🟢 Functional</nobr>                                                        |
 | **Spec Decode**                             | <nobr>🟢 Functional</nobr>                                                        |
 | **Prompt Logprobs with Prefix Caching**     | <nobr>🟢 Functional</nobr>                                                        |
