@@ -46,3 +46,5 @@ jobs:
             'For future commits, `pre-commit` will run automatically on changed files before each commit.'
 
           })
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
