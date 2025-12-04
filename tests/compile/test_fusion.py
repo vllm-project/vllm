@@ -123,7 +123,7 @@ class TestModel(torch.nn.Module):
         )
 
 
-class TestAiterRmsnormGroupFp8QuantModel(torch.nn.Module):
+class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, eps: float, **kwargs):
         super().__init__()
         self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
@@ -194,7 +194,7 @@ class TestAiterRmsnormGroupFp8QuantModel(torch.nn.Module):
 @pytest.mark.parametrize(
     "model_class, enable_rms_norm_custom_op, enable_quant_fp8_custom_op",
     list(itertools.product([TestModel], [True, False], [True, False]))
-    + [(TestAiterRmsnormGroupFp8QuantModel, False, False)],
+    + [(TestRmsnormGroupFp8QuantModel, False, False)],
 )
 # cuda_force_torch used to test torch code path on platforms that
 # cutlass_fp8_supported() == True.
@@ -215,7 +215,7 @@ def test_fusion_rmsnorm_quant(
     enable_quant_fp8_custom_op,
     cuda_force_torch,
 ):
-    if model_class is TestAiterRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
+    if model_class is TestRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
 
     torch.set_default_device("cuda")
@@ -241,7 +241,7 @@ def test_fusion_rmsnorm_quant(
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
-        if model_class is TestAiterRmsnormGroupFp8QuantModel:
+        if model_class is TestRmsnormGroupFp8QuantModel:
             from vllm.compilation.rocm_aiter_fusion import (
                 RocmAiterRMSNormFp8GroupQuantFusionPass,
             )
@@ -290,7 +290,7 @@ def test_fusion_rmsnorm_quant(
         # Hence, we check only 2 add nodes are left (final fused rmsnorm add).
         if (
             not enable_rms_norm_custom_op
-            and model_class is not TestAiterRmsnormGroupFp8QuantModel
+            and model_class is not TestRmsnormGroupFp8QuantModel
         ):
             n_add_nodes = lambda g: sum(1 for _ in find_op_nodes(torch.ops.aten.add, g))
             # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)

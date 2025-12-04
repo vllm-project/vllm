@@ -170,7 +170,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     list(itertools.product([TestSiluMulFp8QuantModel], [True, False], [True, False]))
     + [
         (TestSiluMulNvfp4QuantModel, False, False),
-        (TestAiterSiluMulGroupFp8QuantModel, False, False),
+        (TestSiluMulGroupFp8QuantModel, False, False),
     ],
 )
 # cuda_force_torch used to test torch code path on platforms that
@@ -185,7 +185,7 @@ def test_fusion_silu_and_mul_quant(
     model_class: type[
         TestSiluMulFp8QuantModel
         | TestSiluMulNvfp4QuantModel
-        | TestAiterSiluMulGroupFp8QuantModel
+        | TestSiluMulGroupFp8QuantModel
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
@@ -193,7 +193,7 @@ def test_fusion_silu_and_mul_quant(
 ):
     if model_class is TestSiluMulNvfp4QuantModel and not is_nvfp4_supported():
         pytest.skip("NVFP4 is not supported on this GPU.")
-    if model_class is TestAiterSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
+    if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
 
     torch.set_default_device("cuda")
@@ -218,12 +218,12 @@ def test_fusion_silu_and_mul_quant(
 
     with set_current_vllm_config(config):
         fusion_passes = [ActivationQuantFusionPass(config)]
-        if AITER_FOUND:
+        if IS_AITER_FOUND:
             from vllm.compilation.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
-            fusion_pass += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+            fusion_passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
         passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
@@ -244,14 +244,14 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
-        elif model_class == TestAiterSiluMulGroupFp8QuantModel:
+        elif model_class == TestSiluMulGroupFp8QuantModel:
             atol, rtol = 5e-2, 5e-2
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
         )
 
-        assert fusion_pass.matched_count == 1
+        assert sum([p.matched_count for p in fusion_passes]) == 1
 
         # In pre-nodes, quant op should be present and fused kernels should not
         backend.check_before_ops(model.ops_in_model_before())
