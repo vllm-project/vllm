@@ -57,15 +57,15 @@ vLLM also provides [a reference example](../../examples/online_serving/prometheu
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
 - `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
-- `vllm:prompt_tokens_total` - Prompt tokens.
-- `vllm:generation_tokens_total` - Generation tokens.
+- `vllm:prompt_tokens` - Prompt tokens.
+- `vllm:generation_tokens` - Generation tokens.
 - `vllm:time_per_output_token_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:gpu_cache_usage_perc` - Percentage of used cache blocks by vLLM.
 - `vllm:request_prompt_tokens` - Request prompt length.
 - `vllm:request_generation_tokens` - Request generation length.
-- `vllm:request_success_total` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
+- `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
 - `vllm:request_queue_time_seconds` - Queue time.
 - `vllm:request_prefill_time_seconds` - Requests prefill time.
 - `vllm:request_decode_time_seconds` - Requests decode time.
@@ -262,6 +262,29 @@ record:
   first token events, as described above.
 - End-to-end latency - the interval between frontend `arrival_time`
   and the frontend receiving the final token.
+
+### KV Cache Residency Metrics
+
+We also emit a set of histograms that describe how long sampled KV cache
+blocks stay resident and how often they are reused. Sampling
+(`--kv-cache-metrics-sample`) keeps the overhead tiny; when a block is
+chosen we record:
+
+- `lifetime` – allocation ⟶ eviction
+- `idle before eviction` – last touch ⟶ eviction
+- `reuse gaps` – the pauses between touches when the block gets reused
+
+Those map directly to the Prometheus metrics:
+
+- `vllm:kv_block_lifetime_seconds` – how long each sampled block exists.
+- `vllm:kv_block_idle_before_evict_seconds` – idle tail after the final access.
+- `vllm:kv_block_reuse_gap_seconds` – time between consecutive touches.
+
+The engine core only ships raw eviction events via `SchedulerStats`; the
+frontend drains them, turns them into Prometheus observations, and also
+exposes the same data through `LLM.get_metrics()` when logging is on.
+Looking at lifetime and idle time on one chart makes it easy to spot
+stranded cache or workloads that pin prompts for a long decode.
 
 ### Metrics Publishing - Logging
 
@@ -548,9 +571,9 @@ model and then validate those tokens with the larger model.
 
 - `vllm:spec_decode_draft_acceptance_rate` (Gauge)
 - `vllm:spec_decode_efficiency` (Gauge)
-- `vllm:spec_decode_num_accepted_tokens_total` (Counter)
-- `vllm:spec_decode_num_draft_tokens_total` (Counter)
-- `vllm:spec_decode_num_emitted_tokens_total` (Counter)
+- `vllm:spec_decode_num_accepted_tokens` (Counter)
+- `vllm:spec_decode_num_draft_tokens` (Counter)
+- `vllm:spec_decode_num_emitted_tokens` (Counter)
 
 There is a PR under review (<https://github.com/vllm-project/vllm/pull/12193>) to add "prompt lookup (ngram)"
 speculative decoding to v1. Other techniques will follow. We should
