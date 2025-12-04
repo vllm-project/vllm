@@ -1484,10 +1484,13 @@ class GPUModelRunner(
         # so that we could clear the sampled tokens before returning
         if self.pcp_world_size > 1:
             self.discard_request_mask.np[:num_reqs] = (
-                self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                + num_scheduled_tokens * self.pcp_world_size
-                - self.pcp_manager.num_pcp_pads_cpu[:num_reqs]
-            ) < num_tokens_np
+                self.pcp_manager.get_discard_request_mask(
+                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
+                    num_scheduled_tokens=num_scheduled_tokens,
+                    num_reqs=num_reqs,
+                    num_tokens_np=num_tokens_np,
+                )
+            )
         else:
             self.discard_request_mask.np[:num_reqs] = (
                 self.seq_lens.np[:num_reqs] < num_tokens_np
@@ -1526,13 +1529,9 @@ class GPUModelRunner(
             # TODO: Support prompt logprobs.
             logits_indices = query_start_loc[1:] - 1
             if self.pcp_world_size > 1:
-                logits_indices = (
-                    torch.from_numpy(cu_num_tokens) * self.pcp_world_size
-                    - self.pcp_manager.num_pcp_pads_cpu_tensor[:num_reqs]
-                    - 1
+                logits_indices = self.pcp_manager.get_logits_indices(
+                    cu_num_tokens, num_reqs
                 )
-            else:
-                logits_indices = query_start_loc[1:] - 1
             num_draft_tokens = None
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
@@ -1646,7 +1645,7 @@ class GPUModelRunner(
             )
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
-                    (num_tokens_padded, 1),
+                    (num_reqs_padded, 1),
                     dtype=torch.int32,
                     device=self.device,
                 )
@@ -1666,17 +1665,10 @@ class GPUModelRunner(
                     slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                     blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
             if self.pcp_world_size > 1:
-                # After pcp allgather and restore, there are padded tokens in
-                # kv, so we need pad slotmapping for alignment.
-                pcp_padded_slot_mapping = self.pcp_manager.pcp_padded_slot_mapping[
-                    : num_tokens * self.pcp_world_size
-                ]
-                cp_unpad_mask = self.pcp_manager.pcp_unpad_mask_cpu_tensor[
-                    : num_tokens * self.pcp_world_size
-                ]
-                pcp_padded_slot_mapping.fill_(-1)
-                pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
-                slot_mapping = pcp_padded_slot_mapping
+                slot_mapping = self.pcp_manager.get_padded_slot_mapping(
+                    num_tokens,
+                    slot_mapping,
+                )
 
             return blk_table_tensor, slot_mapping
 
@@ -3340,17 +3332,9 @@ class GPUModelRunner(
             if self.pcp_world_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
-                hidden_states = get_pcp_group().all_gather(
-                    hidden_states[:num_tokens_unpadded],
-                    0,
-                )
-                restore_idx = self.pcp_manager.pcp_allgather_restore_idx.gpu[
-                    : hidden_states.shape[0]
-                ]
-                hidden_states = torch.index_select(
+                hidden_states = self.pcp_manager.get_restore_hidden_states(
                     hidden_states,
-                    0,
-                    restore_idx,
+                    num_tokens_unpadded,
                 )
                 # Restore total_num_scheduled_tokens.
                 scheduler_output.total_num_scheduled_tokens = num_scheduled_tokens
