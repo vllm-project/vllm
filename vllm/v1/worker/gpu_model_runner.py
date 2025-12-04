@@ -137,6 +137,8 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
     PoolerOutput,
     SamplerOutput,
+    TrackedLogprobsLists,
+    TrackedLogprobsTensors,
     make_empty_encoder_model_runner_output,
 )
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
@@ -193,6 +195,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         model_runner_output: ModelRunnerOutput,
         sampled_token_ids: torch.Tensor,
         logprobs_tensors: LogprobsTensors | None,
+        tracked_logprobs_tensors: "TrackedLogprobsTensors | None",
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
@@ -208,6 +211,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
+        self._tracked_logprobs_tensors = tracked_logprobs_tensors
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -219,6 +223,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             self._logprobs_tensors_cpu = (
                 self._logprobs_tensors.to_cpu_nonblocking()
                 if self._logprobs_tensors
+                else None
+            )
+            self._tracked_logprobs_tensors_cpu = (
+                self._tracked_logprobs_tensors.to_cpu_nonblocking()
+                if self._tracked_logprobs_tensors
                 else None
             )
             self.async_copy_ready_event.record()
@@ -233,6 +242,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
+        del self._tracked_logprobs_tensors
         del self._sampled_token_ids
         if max_gen_len == 1:
             valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
@@ -240,17 +250,25 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 valid_sampled_token_ids[i].clear()
             cu_num_tokens = None
         else:
+            need_cu_num_tokens = (
+                self._logprobs_tensors_cpu is not None
+                or self._tracked_logprobs_tensors_cpu is not None
+            )
             valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,
-                return_cu_num_tokens=self._logprobs_tensors_cpu is not None,
+                return_cu_num_tokens=need_cu_num_tokens,
             )
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         if self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
+        if self._tracked_logprobs_tensors_cpu:
+            output.tracked_logprobs = self._tracked_logprobs_tensors_cpu.tolists(
+                cu_num_tokens
+            )
         return output
 
 
@@ -2692,6 +2710,7 @@ class GPUModelRunner(
         list[str],
         dict[str, int],
         list[int],
+        "TrackedLogprobsLists | None",
     ]:
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -2714,6 +2733,7 @@ class GPUModelRunner(
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
+        tracked_logprobs_tensors = sampler_output.tracked_logprobs_tensors
         invalid_req_indices = []
         cu_num_tokens: list[int] | None = None
         if not self.use_async_scheduling:
@@ -2727,11 +2747,15 @@ class GPUModelRunner(
                     valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
+                # Need cu_num_tokens for proper slicing of logprobs or tracked logprobs
+                need_cu_num_tokens = (
+                    logprobs_tensors is not None or tracked_logprobs_tensors is not None
+                )
                 valid_sampled_token_ids, cu_num_tokens = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                     discard_sampled_tokens_req_indices,
-                    return_cu_num_tokens=logprobs_tensors is not None,
+                    return_cu_num_tokens=need_cu_num_tokens,
                 )
         else:
             valid_sampled_token_ids = []
@@ -2790,6 +2814,13 @@ class GPUModelRunner(
             else None
         )
 
+        # Process tracked logprobs if present
+        tracked_logprobs_lists = (
+            tracked_logprobs_tensors.tolists(cu_num_tokens)
+            if not self.use_async_scheduling and tracked_logprobs_tensors is not None
+            else None
+        )
+
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
@@ -2804,6 +2835,7 @@ class GPUModelRunner(
             req_ids_output_copy,
             req_id_to_index_output_copy,
             invalid_req_indices,
+            tracked_logprobs_lists,
         )
 
     @contextmanager
@@ -3412,6 +3444,7 @@ class GPUModelRunner(
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
                 invalid_req_indices,
+                tracked_logprobs_lists,
             ) = self._bookkeeping_sync(
                 scheduler_output,
                 sampler_output,
@@ -3440,6 +3473,7 @@ class GPUModelRunner(
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
+                tracked_logprobs=tracked_logprobs_lists,
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
@@ -3457,6 +3491,7 @@ class GPUModelRunner(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
                 logprobs_tensors=sampler_output.logprobs_tensors,
+                tracked_logprobs_tensors=sampler_output.tracked_logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
                 vocab_size=self.input_batch.vocab_size,

@@ -226,6 +226,8 @@ class InputBatch:
         self.generators: dict[int, torch.Generator] = {}
 
         self.num_logprobs: dict[str, int] = {}
+        # req_id -> list of token IDs to track logprobs for
+        self.track_token_ids: dict[str, list[int]] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -389,6 +391,22 @@ class InputBatch:
                     else sampling_params.logprobs
                 )
 
+            if sampling_params.track_token_ids:
+                # Validate token IDs are within vocab bounds to prevent
+                # GPU indexing errors
+                invalid_ids = [
+                    tid
+                    for tid in sampling_params.track_token_ids
+                    if tid >= self.vocab_size
+                ]
+                if invalid_ids:
+                    raise ValueError(
+                        f"track_token_ids contains token IDs {invalid_ids} "
+                        f"that exceed vocab_size ({self.vocab_size}). "
+                        f"Valid range is [0, {self.vocab_size - 1}]."
+                    )
+                self.track_token_ids[req_id] = sampling_params.track_token_ids
+
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
                 if self.allowed_token_ids_mask_cpu_tensor is None:
@@ -490,6 +508,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.track_token_ids.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
@@ -834,6 +853,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            track_token_ids=self.merged_track_token_ids,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -974,6 +994,23 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int | None:
         return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    @property
+    def merged_track_token_ids(self) -> torch.Tensor | None:
+        """Returns merged track_token_ids from all requests as a sorted tensor.
+
+        If any request in the batch has track_token_ids specified, returns
+        the union of all track_token_ids as a sorted tensor on device.
+        Returns None if no requests have track_token_ids.
+        """
+        if not self.track_token_ids:
+            return None
+        all_ids: set[int] = set()
+        for ids in self.track_token_ids.values():
+            all_ids.update(ids)
+        if not all_ids:
+            return None
+        return torch.tensor(sorted(all_ids), device=self.device, dtype=torch.int64)
 
     @property
     def no_allowed_token_ids(self) -> bool:

@@ -1065,6 +1065,7 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
+        tracked_logprobs = model_runner_output.tracked_logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
@@ -1173,6 +1174,17 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
+            # Extract tracked logprobs if needed.
+            new_tracked_logprobs = None
+            if (
+                request.sampling_params is not None
+                and request.sampling_params.track_token_ids
+                and tracked_logprobs is not None
+            ):
+                new_tracked_logprobs = tracked_logprobs.slice_request(
+                    req_index, len(new_token_ids)
+                )
+
             if new_token_ids and self.structured_output_manager.should_advance(request):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
@@ -1193,6 +1205,7 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                        new_tracked_logprobs=new_tracked_logprobs,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),

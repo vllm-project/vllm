@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import LogprobsTensors, SamplerOutput
+from vllm.v1.outputs import LogprobsTensors, SamplerOutput, TrackedLogprobsTensors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -161,9 +161,21 @@ class RejectionSampler(nn.Module):
                 output_token_ids,
             )
 
+        # Compute tracked logprobs if requested
+        tracked_logprobs_tensors = None
+        if sampling_metadata.track_token_ids is not None:
+            tracked_logprobs_tensors = self._get_tracked_logprobs_tensors(
+                sampling_metadata.track_token_ids,
+                metadata,
+                target_logits if self.is_processed_logprobs_mode else raw_target_logits,
+                bonus_sampler_output,
+                output_token_ids,
+            )
+
         return SamplerOutput(
             sampled_token_ids=output_token_ids,
             logprobs_tensors=logprobs_tensors,
+            tracked_logprobs_tensors=tracked_logprobs_tensors,
         )
 
     def _get_logprobs_tensors(
@@ -205,6 +217,63 @@ class RejectionSampler(nn.Module):
             accepted_logprobs,
             max_num_logprobs,
             accepted_tokens.to(torch.int64),
+        )
+
+    def _get_tracked_logprobs_tensors(
+        self,
+        track_token_ids: torch.Tensor,
+        metadata: SpecDecodeMetadata,
+        target_logits: torch.Tensor,
+        bonus_sampler_output: SamplerOutput,
+        sampled_token_ids: torch.Tensor,
+    ) -> TrackedLogprobsTensors:
+        """Compute tracked logprobs for speculative decoding.
+
+        For spec decoding, we need to compute tracked logprobs only for the
+        accepted tokens. We combine the target logits with the bonus logits
+        and then extract the tracked token logprobs for accepted positions.
+        """
+        cu_num_sampled_tokens = torch.zeros_like(metadata.cu_num_sampled_tokens)
+        cu_num_sampled_tokens[1:] = metadata.cu_num_sampled_tokens[:-1]
+
+        # Collect target and bonus logits
+        bonus_logits_indices = metadata.bonus_logits_indices
+        target_logits_indices = metadata.target_logits_indices
+
+        # Get bonus logits from the bonus sampler output
+        # The bonus_sampler_output was run with logprobs_mode_override to get logits
+        bonus_logits = bonus_sampler_output.logprobs_tensors.logprobs
+
+        # Create combined logits tensor
+        vocab_size = target_logits.shape[-1]
+        num_total_positions = len(target_logits_indices) + len(bonus_logits_indices)
+        final_logits = torch.zeros(
+            num_total_positions,
+            vocab_size,
+            dtype=torch.float32,
+            device=target_logits.device,
+        )
+        final_logits[target_logits_indices] = target_logits.to(torch.float32)
+        final_logits[bonus_logits_indices] = bonus_logits.to(torch.float32)
+
+        # Compute accepted token indices
+        accepted_mask = sampled_token_ids != PLACEHOLDER_TOKEN_ID
+        num_accepted_tokens = accepted_mask.sum(dim=-1)
+        accepted_logit_indices = accepted_mask.nonzero(as_tuple=True)[1]
+        accepted_logit_indices += cu_num_sampled_tokens.repeat_interleave(
+            num_accepted_tokens
+        )
+
+        # Get logits for accepted positions
+        accepted_logits = final_logits[accepted_logit_indices]
+
+        # Compute logprobs and extract tracked tokens
+        logprobs = self.sampler.compute_logprobs(accepted_logits)
+        tracked_logprobs = logprobs[:, track_token_ids]
+
+        return TrackedLogprobsTensors(
+            logprobs=tracked_logprobs,
+            token_ids=track_token_ids,
         )
 
     @staticmethod

@@ -36,6 +36,9 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        tracked_logprobs: The log probabilities for tracked tokens across all
+            generation steps. Format: {token_id: [logprob_step0, logprob_step1, ...]}
+            Only present if track_token_ids was specified in SamplingParams.
     """
 
     index: int
@@ -46,6 +49,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    tracked_logprobs: dict[int, list[float]] | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -58,7 +62,8 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
-            f"stop_reason={self.stop_reason})"
+            f"stop_reason={self.stop_reason}, "
+            f"tracked_logprobs={self.tracked_logprobs})"
         )
 
 
@@ -161,6 +166,17 @@ class RequestOutput:
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
                             completion.logprobs.extend(next_completion.logprobs)
+                        # Merge tracked_logprobs: extend each token's logprob list
+                        if next_completion.tracked_logprobs:
+                            if completion.tracked_logprobs is None:
+                                completion.tracked_logprobs = {}
+                            for (
+                                token_id,
+                                lp_list,
+                            ) in next_completion.tracked_logprobs.items():
+                                if token_id not in completion.tracked_logprobs:
+                                    completion.tracked_logprobs[token_id] = []
+                                completion.tracked_logprobs[token_id].extend(lp_list)
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

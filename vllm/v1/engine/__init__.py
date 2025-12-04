@@ -14,7 +14,11 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import (
+    LogprobsLists,
+    LogprobsTensors,
+    TrackedLogprobsLists,
+)
 from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
@@ -128,6 +132,7 @@ class EngineCoreOutput(
 
     new_logprobs: LogprobsLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
+    new_tracked_logprobs: TrackedLogprobsLists | None = None
 
     pooling_output: torch.Tensor | None = None
 
