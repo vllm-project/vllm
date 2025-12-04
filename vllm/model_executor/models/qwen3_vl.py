@@ -103,7 +103,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
-from .qwen2_vl import Qwen2VLProcessingInfo, Qwen2VLMultiModalDataParser
+from .qwen2_vl import Qwen2VLMultiModalDataParser, Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
