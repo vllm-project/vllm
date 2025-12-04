@@ -4463,7 +4463,6 @@ class GPUModelRunner(
                     self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
         # Add `is_profile` here to pre-allocate communication buffers
-        # TORCH COMPILE FOR DECODE (step 1 onward)
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
