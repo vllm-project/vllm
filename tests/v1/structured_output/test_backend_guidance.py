@@ -6,9 +6,9 @@ from concurrent.futures import Future
 import pytest
 from transformers import AutoTokenizer
 
-import vllm.envs as envs
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
@@ -124,20 +124,23 @@ def test_grammar_bitmask_with_specdec():
 
 
 @pytest.mark.parametrize("async_grammar", [True, False])
-def test_grammar_init_async_and_sync(async_grammar, monkeypatch):
+def test_grammar_init_async_and_sync(async_grammar):
     """Test grammar initialization works correctly in both async and sync modes.
 
-    This test validates that the VLLM_ASYNC_CREATE_GRAMMAR environment variable
+    This test validates that the distributed_executor_backend config option
     correctly controls whether grammar compilation happens asynchronously
-    (via executor.submit) or synchronously.
+    (via executor.submit) or synchronously. When set to "external_launcher",
+    grammar compilation is synchronous to avoid deadlocks.
     """
-    monkeypatch.setattr(envs, "VLLM_ASYNC_CREATE_GRAMMAR", async_grammar)
-
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode('{"a": "b"}')
+
+    # Use "external_launcher" for sync mode, None for async mode
+    executor_backend = None if async_grammar else "external_launcher"
     vllm_config = VllmConfig(
         model_config=ModelConfig(tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+        parallel_config=ParallelConfig(distributed_executor_backend=executor_backend),
     )
     structured_output_manager = StructuredOutputManager(vllm_config)
 
