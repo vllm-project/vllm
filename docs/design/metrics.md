@@ -62,7 +62,7 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:time_per_output_token_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
-- `vllm:gpu_cache_usage_perc` - Percentage of used cache blocks by vLLM.
+- `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
 - `vllm:request_prompt_tokens` - Request prompt length.
 - `vllm:request_generation_tokens` - Request generation length.
 - `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
