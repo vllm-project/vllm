@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   pre-commit:
@@ -26,3 +27,22 @@ jobs:
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
         extra_args: --all-files --hook-stage manual
+    - name: Comment on PR with fix instructions
+      if: failure() && github.event.pull_request.draft == false
+      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      with:
+        script: |
+          github.rest.issues.createComment({
+          issue_number: context.issue.number,
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          body: '`pre-commit` has failed. To fix this, please run:\n\n' +
+            '```bash\n' +
+            'uv pip install pre-commit\n' +
+            `pre-commit install\n` +
+            'pre-commit run --all-files\n' +
+            '```\n\n' +
+            'Then, commit the changes and push to your branch.\n\n' +
+            'For future commits, `pre-commit` will run automatically on changed files before each commit.'
+
+          })
