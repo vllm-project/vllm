@@ -53,8 +53,7 @@ class UVAOffloader(BaseOffloader):
         if device == torch.device("cpu"):
             return module
 
-        global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
+        if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
             return module
 
         pin_memory = is_pin_memory_available()
@@ -67,7 +66,7 @@ class UVAOffloader(BaseOffloader):
         # use pin_memory if possible, which helps cudagraph capture speed
         offloaded_parameters = False
         for p in module.parameters():
-            if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
+            if self.cpu_offload_bytes >= self.cpu_offload_max_bytes:
                 # we use per-parameter offloading
                 # one module might have some parameters offloaded and some not
                 break
@@ -88,7 +87,7 @@ class UVAOffloader(BaseOffloader):
                 # keep the cpu data alive
                 p._vllm_offloaded_cpu_data = cpu_data
                 p.data = get_cuda_view_from_cpu_tensor(cpu_data)
-            _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
+            self.cpu_offload_bytes += p.data.numel() * p.data.element_size()
             offloaded_parameters = True
 
         if offloaded_parameters and not uva_offloading:
@@ -109,18 +108,3 @@ class UVAOffloader(BaseOffloader):
             module.forward = forward
 
         return module
-
-
-# Backward compatibility: Global state for legacy set_cpu_offload_max_bytes()
-_CPU_OFFLOAD_BYTES = 0
-_CPU_OFFLOAD_MAX_BYTES = 0
-
-
-def set_cpu_offload_max_bytes(max_bytes: int) -> None:
-    """Set maximum bytes to offload for legacy UVA offloading.
-
-    Deprecated: Use UVAOffloader class directly.
-    """
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    _CPU_OFFLOAD_BYTES = 0
-    _CPU_OFFLOAD_MAX_BYTES = max_bytes
