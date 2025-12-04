@@ -26,7 +26,7 @@ import cloudpickle
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -519,7 +519,6 @@ class WorkerProc:
         shared_worker_lock: LockType,
     ):
         self.rank = rank
-        self.vllm_config = vllm_config
         wrapper = WorkerWrapperBase(
             vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
         )
@@ -815,10 +814,7 @@ class WorkerProc:
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
 
-                assert self.vllm_config is not None
-                # ensure vLLM config is set for all worker-side RPCs
-                with set_current_vllm_config(self.vllm_config):
-                    output = func(*args, **kwargs)
+                output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
