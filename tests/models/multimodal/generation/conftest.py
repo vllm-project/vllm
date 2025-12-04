@@ -16,6 +16,11 @@ def pytest_configure(config):
     if not current_platform.is_rocm():
         return
 
+    skip_patterns = ["test_granite_speech.py"]
+    if any(pattern in str(arg) for arg in config.args for pattern in skip_patterns):
+        # Skip disabling SDP for Granite Speech tests on ROCm
+        return
+
     # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
     # accuracy issues
     # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
