@@ -1,0 +1,35 @@
+# Justfile
+
+PROFILER_DIR := "profiles"
+PORT := "8000"
+
+launch MODEL TP_SIZE:
+    VLLM_TORCH_PROFILER_DIR={{PROFILER_DIR}} \
+    VLLM_TORCH_PROFILER_WITH_STACK=0 \
+    VLLM_PROFILER_MAX_ITERS=10 \
+    VLLM_PROFILER_DELAY_ITERS=50 \
+    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 \
+        vllm serve {{MODEL}} --port {{PORT}} -tp {{TP_SIZE}}
+
+bench_decode MODEL BATCH_SIZE:
+    NUM_PROMPTS := BATCH_SIZE * 2 \
+    vllm bench serve \
+        --port {{PORT}} \
+        --model {{MODEL}} \
+        --max-concurrency {{BATCH_SIZE}} \
+        --dataset-name random \
+        --random-input-len 2 \
+        --random-output-len 100 \
+        --num-prompts {{NUM_PROMPTS}} \
+        --seed $(date +%s) \
+        --ignore-eos
+
+start_profile:
+    curl -X POST http://localhost:{{PORT}}/start_profile
+
+trace_decode MODEL BATCH_SIZE:
+    just start_profile && \
+    just bench_decode MODEL BATCH_SIZE
+
+sweep MODEL INPUT_LEN OUTPUT_LEN:
+    MODEL={{MODEL}} INPUT_LEN={{INPUT_LEN}} OUTPUT_LEN={{OUTPUT_LEN}} ./sweep.sh
