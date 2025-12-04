@@ -374,7 +374,6 @@ _MULTIMODAL_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
-    "Phi4MultimodalForCausalLM": ("phi4_multimodal", "Phi4MultimodalForCausalLM"),  # noqa: E501
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
