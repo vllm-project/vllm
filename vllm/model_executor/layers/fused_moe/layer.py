@@ -584,10 +584,12 @@ class FusedMoE(CustomOp):
             Helper method to ensure self.quant_method is never None and
             of the proper type.
             """
+            from vllm.model_executor.layers.linear import LinearMethodBase
+
             quant_method = None
             if self.quant_config is not None:
                 quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None:
+            if quant_method is None or isinstance(quant_method, LinearMethodBase):
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             assert isinstance(quant_method, FusedMoEMethodBase)
             return quant_method
