@@ -1042,7 +1042,7 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
-        per_request_spec_decoding_stats: dict[str, SpecDecodingStats] = {}
+        per_request_spec_decoding_stats: dict[str, SpecDecodingStats | None] = {}
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
