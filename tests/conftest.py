@@ -27,7 +27,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -66,6 +66,11 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers.generation.utils import GenerateOutput
+
 
 logger = init_logger(__name__)
 
@@ -370,8 +375,6 @@ class HfRunner:
 
             self.model = model
 
-        from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-
         if not skip_tokenizer_init:
             self.tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast = (
                 AutoTokenizer.from_pretrained(
@@ -572,8 +575,6 @@ class HfRunner:
             prompts, images=images, videos=videos, audios=audios
         )
 
-        from transformers.generation.utils import GenerateOutput
-
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
             output: GenerateOutput = self.model.generate(
@@ -656,8 +657,6 @@ class HfRunner:
         all_logprobs: list[list[dict[int, float]]] = []
         all_output_ids: list[list[int]] = []
         all_output_strs: list[str] = []
-
-        from transformers.generation.utils import GenerateOutput
 
         for inputs in all_inputs:
             output: GenerateOutput = self.model.generate(
