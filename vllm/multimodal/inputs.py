@@ -866,6 +866,7 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
+@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.13.")
 class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
