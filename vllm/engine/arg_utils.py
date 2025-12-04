@@ -1173,6 +1173,15 @@ class EngineArgs:
         # gguf file needs a specific model loader
         if is_gguf(self.model):
             self.quantization = self.load_format = "gguf"
+            # GGUF dequantization kernels use half precision (fp16) internally.
+            # Using bfloat16 causes incorrect output due to dtype mismatch.
+            # Force float16 for GGUF models unless user explicitly set dtype.
+            if self.dtype == "auto":
+                self.dtype = "float16"
+                logger.info(
+                    "GGUF models require float16 dtype. "
+                    "Setting dtype to float16 automatically."
+                )
 
         # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
