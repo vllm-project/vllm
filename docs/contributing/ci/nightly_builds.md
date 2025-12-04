@@ -1,14 +1,14 @@
 # Nightly Builds of vLLM Wheels
 
-vLLM maintains a nightly wheel repository at `https://wheels.vllm.ai` that provides pre-built wheels for every commit since `v0.5.3`. This document explains how the nightly wheel index mechanism works.
+vLLM maintains a per-commit wheel repository (commonly referred to as "nightly") at `https://wheels.vllm.ai` that provides pre-built wheels for every commit since `v0.5.3`. This document explains how the nightly wheel index mechanism works.
 
 ## Build and Upload Process on CI
 
 ### Wheel Building
 
-Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) for multiple variants:
+Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch, with multiple variants:
 
-- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`), and later may include others like `rocm`.
+- **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`).
 - **Architecture variants**: x86_64 and aarch64.
 
 Each build step:
@@ -26,7 +26,7 @@ After uploading each wheel, the `.buildkite/scripts/upload-wheels.sh` script:
    - Parses wheel filenames to extract metadata (version, variant, platform tags).
    - Creates HTML index files (`index.html`) for PyPI compatibility.
    - Generates machine-readable `metadata.json` files.
-3. **Uploads indices** to multiple locations (override if they exist):
+3. **Uploads indices** to multiple locations (overriding existing ones):
    - `/{commit_hash}/` - Always uploaded for commit-specific access.
    - `/nightly/` - Only for commits on `main` branch (not PRs).
    - `/{version}/` - Only for release wheels (no `dev` in its version).
@@ -38,7 +38,7 @@ After uploading each wheel, the `.buildkite/scripts/upload-wheels.sh` script:
 
 The S3 bucket structure follows this pattern:
 
-```
+```text
 s3://vllm-wheels/
 ├── {commit_hash}/              # Commit-specific wheels and indices
 │   ├── vllm-*.whl              # All wheel files
@@ -67,7 +67,7 @@ For example, you can use the following URLs to use different indices:
 * `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
 * `https://wheels.vllm.ai/0.12.0/cpu` for 0.12.0 release wheels built for CPU variant.
 
-Please note that not all variants are present on every commit, and this might change over time.
+Please note that not all variants are present on every commit. The available variants are subject to change over time, e.g., changing cu130 to cu131.
 
 ### Variant Organization
 
@@ -78,7 +78,7 @@ Indices are organized by variant:
 - **Alias to default**: The default variant can have an alias (e.g., `cu129` for now) for consistency and convenience.
 
 The variant is extracted from the wheel filename (as described in the [file name convention](https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-name-convention)):
-- Format: `vllm-{version}(+{variant}|.{variant})-{python_tag}-{abi_tag}-{platform_tag}.whl`
+- The variant is encoded in the local version identifier (e.g. `+cu129` or `dev<N>+g<hash>.cu130`).
 - Examples:
   - `vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl` → default variant
   - `vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl` → `cu129` variant
@@ -107,6 +107,25 @@ The `generate-nightly-index.py` script performs the following:
    - Includes `path` field with URL-encoded relative path to wheel file
    - Used by `setup.py` to locate compatible pre-compiled wheels during Python-only builds
 
+### Special Handling for AWS Services
+
+The wheels and indices are directly stored on AWS S3, and we use AWS CloudFront as a CDN in front of the S3 bucket.
+
+Since S3 does not provide proper directory listing, to support PyPI-compatible simple repository API behavior, we deploy a CloudFront Function that:
+
+* redirects any URL that does not end with `/` and does not look like a file (i.e., does not contain a dot `.` in the last path segment) to the same URL with a trailing `/`
+* appends `/index.html` to any URL that ends with `/`
+
+For example, the following requests would be handled as:
+
+* `/nightly` --> `/nightly/index.html`
+* `/nightly/cu130/` --> `/nightly/cu130/index.html`
+* `/nightly/index.html` or `/nightly/vllm.whl` --> unchanged
+
+!!! note "AWS S3 Filename Escaping"
+
+    S3 will automatically escape filenames upon upload according to its [naming rule](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html). The direct impact on vllm is that `+` in filenames will be escaped to `%2B`. We take special care in both the index generation script to do the proper escaping when generating the HTML indices and JSON metadata to ensure the URLs are correct.
+
 ## Usage of precompiled wheels in `setup.py` {#precompiled-wheels-usage}
 
 When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
@@ -116,7 +135,7 @@ When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
    - Determines the variant from `VLLM_MAIN_CUDA_VERSION` (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_VARIANT`); the default variant will also be tried as a fallback.
    - Determines the _base commit_ (explained later) of this branch (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_COMMIT`).
 
-2. **Fetches metadata** from `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json`
+2. **Fetches metadata** from `https://wheels.vllm.ai/{commit}/vllm/metadata.json` (for the default variant) or `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json` (for a specific variant).
 
 3. **Selects compatible wheel** based on:
    - Package name (`vllm`)
