@@ -4,16 +4,16 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import asdict, field
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config
+from vllm.config.utils import config, get_hash_factors, handle_deprecated, hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -97,20 +97,51 @@ class PassConfig:
 
     This is separate from general `CompilationConfig` so that inductor passes
     don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
+    the `PassManager` is set as a property of config.
 
-    enable_fusion: bool = False
-    """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
-    """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = False
-    """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
-    """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
-    """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
-    """Whether to enable flashinfer allreduce fusion."""
+    You must pass PassConfig to VLLMConfig constructor via the CompilationConfig
+    constructor. VLLMConfig's post_init does further initialization.
+    If used outside of the VLLMConfig, some fields may be left in an
+    improper state.
+    """
+
+    # New flags
+    fuse_norm_quant: bool = Field(default=None)
+    """Fuse the custom RMSNorm + quant ops."""
+    fuse_act_quant: bool = Field(default=None)
+    """Fuse the custom SiluMul + quant ops."""
+    fuse_attn_quant: bool = Field(default=None)
+    """Fuse the custom attention + quant ops."""
+    eliminate_noops: bool = Field(default=None)
+    """Eliminate no-op ops."""
+    enable_sp: bool = Field(default=None)
+    """Enable sequence parallelism."""
+    fuse_gemm_comms: bool = Field(default=None)
+    """Enable async TP."""
+    fuse_allreduce_rms: bool = Field(default=None)
+    """Enable flashinfer allreduce fusion."""
+
+    # Deprecated flags
+    enable_fusion: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use fuse_norm_quant and fuse_act_quant 
+    instead. Will be removed in v0.13.0 or v1.0.0, whichever is sooner.
+    """
+    enable_attn_fusion: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use fuse_attn_quant instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
+    enable_noop: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use eliminate_noops instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
+    enable_sequence_parallelism: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use enable_sp instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
+    enable_async_tp: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use fuse_gemm_comms instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
+    enable_fi_allreduce_fusion: bool = Field(default=None)
+    """Deprecated in: v0.12.0. Use fuse_allreduce_rms instead. 
+    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
+
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
@@ -130,7 +161,7 @@ class PassConfig:
             },
         }, where key is the device capability"""
     enable_qk_norm_rope_fusion: bool = False
-    """Whether to enable the fused Q/K RMSNorm + RoPE pass."""
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # TODO(luka) better pass enabling system.
 
@@ -165,21 +196,98 @@ class PassConfig:
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        return InductorPass.hash_dict(asdict(self))
+
+        ignored_fields = [
+            "enable_fusion",
+            "enable_attn_fusion",
+            "enable_noop",
+            "enable_sequence_parallelism",
+            "enable_async_tp",
+            "enable_fi_allreduce_fusion",
+        ]
+        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
+
+    @field_validator(
+        "fuse_norm_quant",
+        "fuse_act_quant",
+        "fuse_attn_quant",
+        "eliminate_noops",
+        "enable_sp",
+        "fuse_gemm_comms",
+        "fuse_allreduce_rms",
+        "enable_fusion",
+        "enable_attn_fusion",
+        "enable_noop",
+        "enable_sequence_parallelism",
+        "enable_async_tp",
+        "enable_fi_allreduce_fusion",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
 
     def __post_init__(self) -> None:
-        if not self.enable_noop:
-            if self.enable_fusion:
+        # Handle deprecation and defaults
+
+        # Map old flags to new flags and issue warnings
+        handle_deprecated(
+            self,
+            "enable_fusion",
+            ["fuse_norm_quant", "fuse_act_quant"],
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_attn_fusion",
+            "fuse_attn_quant",
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_sequence_parallelism",
+            "enable_sp",
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_async_tp",
+            "fuse_gemm_comms",
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_fi_allreduce_fusion",
+            "fuse_allreduce_rms",
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        handle_deprecated(
+            self,
+            "enable_noop",
+            "eliminate_noops",
+            "v0.13.0 or v1.0.0, whichever is sooner",
+        )
+
+        if not self.eliminate_noops:
+            if self.fuse_norm_quant or self.fuse_act_quant:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm/SiluMul + quant (fp8) fusion might not work"
                 )
-            if self.enable_attn_fusion:
+            if self.fuse_attn_quant:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
-            if self.enable_fi_allreduce_fusion:
+            if self.fuse_allreduce_rms:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
@@ -243,7 +351,13 @@ class DynamicShapesConfig:
 @config
 @dataclass
 class CompilationConfig:
-    """Configuration for compilation. It has three parts:
+    """Configuration for compilation.
+
+    You must pass CompilationConfig to VLLMConfig constructor.
+    VLLMConfig's post_init does further initialization. If used outside of the
+    VLLMConfig, some fields will be left in an improper state.
+
+    It has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -282,14 +396,14 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int | None = None
+    level: int = Field(default=None)
     """
     Level is deprecated and will be removed in the next release,
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: CompilationMode | None = None
+    mode: CompilationMode = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -390,7 +504,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode | None = None
+    cudagraph_mode: CUDAGraphMode = Field(default=None)
     """
     The mode of the cudagraph:
 
@@ -452,7 +566,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool = Field(default=None)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -648,6 +762,20 @@ class CompilationConfig:
             )
         return value
 
+    @field_validator(
+        "level",
+        "mode",
+        "cudagraph_mode",
+        "use_inductor_graph_partition",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     def __post_init__(self) -> None:
         if self.level is not None:
             logger.warning(
@@ -813,6 +941,13 @@ class CompilationConfig:
         self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(self):
+        # To compatible with OOT hardware plugin platform (for example vllm-ascend)
+        # which currently only supports sequence parallelism in eager mode.
+        if self.mode != CompilationMode.VLLM_COMPILE:
+            if self.splitting_ops is None:
+                self.splitting_ops = []
+            return
+
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
         assert self.mode == CompilationMode.VLLM_COMPILE, (
@@ -824,7 +959,7 @@ class CompilationConfig:
             self.set_splitting_ops_for_inductor_graph_partition()
             return
 
-        if self.pass_config.enable_attn_fusion:
+        if self.pass_config.fuse_attn_quant:
             # here use_inductor_graph_partition is False
             self.set_splitting_ops_for_attn_fusion()
             return
@@ -866,12 +1001,12 @@ class CompilationConfig:
             self.splitting_ops = list(self._attention_ops)
 
     def set_splitting_ops_for_attn_fusion(self):
-        assert self.pass_config.enable_attn_fusion
+        assert self.pass_config.fuse_attn_quant
         if self.splitting_ops is None:
             self.splitting_ops = []
             if self.cudagraph_mode.has_piecewise_cudagraphs():
                 logger.warning_once(
-                    "enable_attn_fusion is incompatible with piecewise "
+                    "fuse_attn_quant is incompatible with piecewise "
                     "cudagraph when use_inductor_graph_partition is off. "
                     "In this case, splitting_ops will be set to empty "
                     "list, and cudagraph_mode will be set to FULL. "
@@ -882,8 +1017,7 @@ class CompilationConfig:
                 self.cudagraph_mode = CUDAGraphMode.FULL
 
         assert not self.splitting_ops_contain_attention(), (
-            "attention ops should not be in splitting_ops "
-            "when enable_attn_fusion is True"
+            "attention ops should not be in splitting_ops when fuse_attn_quant is True"
         )
 
     def splitting_ops_contain_attention(self) -> bool:
@@ -948,11 +1082,18 @@ class CompilationConfig:
                     op,
                 )
 
+    def is_custom_op_enabled(self, op: str) -> bool:
+        if "all" in self.custom_ops:
+            return f"-{op}" not in self.custom_ops
+
+        assert "none" in self.custom_ops
+        return f"+{op}" in self.custom_ops
+
     def adjust_cudagraph_sizes_for_spec_decode(
         self, uniform_decode_query_len: int, tensor_parallel_size: int
     ):
         multiple_of = uniform_decode_query_len
-        if tensor_parallel_size > 1 and self.pass_config.enable_sequence_parallelism:
+        if tensor_parallel_size > 1 and self.pass_config.enable_sp:
             multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
             if (
                 multiple_of % uniform_decode_query_len != 0
