@@ -734,12 +734,7 @@ class StepPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
-        prompt_token_ids = get_prompt_token_ids(pooling_metadata)
-        pooling_params = get_pooling_params(pooling_metadata)
         prompt_token_ids = pooling_metadata.get_prompt_token_ids()
-
-        pooled_data = list[torch.Tensor]()
-
         pooling_params = pooling_metadata.pooling_params
 
         pooled_data: PoolerOutput = []
