@@ -269,12 +269,16 @@ def flashinfer_trtllm_fp4_moe(
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # Quantize input to FP4
-    a1_gscale = layer.w13_input_scale_quant
-    (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-        x,
-        a1_gscale,
-        is_sf_swizzled_layout=False,
-    )
+    if isinstance(x, tuple):
+        hidden_states_fp4, hidden_states_scale_linear_fp4 = x
+    else:
+        # hidden_states is the already quantized
+        a1_gscale = layer.w13_input_scale_quant
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
+            x,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
 
     # Determine routing method type
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
