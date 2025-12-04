@@ -84,8 +84,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorInfo,
     ErrorResponse,
     FunctionDefinition,
-    GenerateRequest,
-    GenerateResponse,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,

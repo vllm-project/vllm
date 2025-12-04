@@ -33,11 +33,13 @@ from vllm.entrypoints.openai.protocol import (
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.entrypoints.responses_utils import construct_tool_dicts
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
@@ -230,7 +232,7 @@ class ParsableContext(ConversationContext):
         reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
-        tool_parser_cls,
+        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -279,9 +281,7 @@ class ParsableContext(ConversationContext):
         # TODO: figure out which tools are MCP tools
         if (  # noqa: SIM103
             last_message.type == "function_call"
-            and (
-                last_message.name == "code_interpreter" or last_message.name == "python"
-            )
+            and last_message.name in ("code_interpreter", "python")
         ):
             return True
 
@@ -330,16 +330,18 @@ class ParsableContext(ConversationContext):
     ):
         if tool_server:
             for tool_name in self.available_tools:
-                if tool_name not in self._tool_sessions:
-                    tool_type = _map_tool_name_to_tool_type(tool_name)
-                    headers = (
-                        mcp_tools[tool_type].headers if tool_type in mcp_tools else None
-                    )
-                    tool_session = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name, request_id, headers)
-                    )
-                    self._tool_sessions[tool_name] = tool_session
-                    exit_stack.push_async_exit(self.cleanup_session)
+                if tool_name in self._tool_sessions:
+                    continue
+
+                tool_type = _map_tool_name_to_tool_type(tool_name)
+                headers = (
+                    mcp_tools[tool_type].headers if tool_type in mcp_tools else None
+                )
+                tool_session = await exit_stack.enter_async_context(
+                    tool_server.new_session(tool_name, request_id, headers)
+                )
+                self._tool_sessions[tool_name] = tool_session
+                exit_stack.push_async_exit(self.cleanup_session)
 
     async def cleanup_session(self, *args, **kwargs) -> None:
         """Can be used as coro to used in __aexit__"""

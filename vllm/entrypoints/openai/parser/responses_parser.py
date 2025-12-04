@@ -12,8 +12,10 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.tokenizers.protocol import TokenizerLike
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
@@ -30,7 +32,7 @@ class ResponsesParser:
         reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
-        tool_parser_cls,
+        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
             # TODO: initial messages may not be properly typed
@@ -41,7 +43,9 @@ class ResponsesParser:
         self.request = request
 
         self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
-        self.tool_parser_instance = tool_parser_cls(tokenizer)
+        self.tool_parser_instance = None
+        if tool_parser_cls is not None:
+            self.tool_parser_instance = tool_parser_cls(tokenizer)
 
     def process(self, output: CompletionOutput) -> "ResponsesParser":
         reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
@@ -63,26 +67,27 @@ class ResponsesParser:
             )
 
         function_calls: list[ResponseFunctionToolCall] = []
-        tool_call_info = self.tool_parser_instance.extract_tool_calls(
-            content if content is not None else "",
-            request=self.request,  # type: ignore
-        )
-        if tool_call_info is not None and tool_call_info.tools_called:
-            # extract_tool_calls() returns a list of tool calls.
-            function_calls.extend(
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_uuid()}",
-                    call_id=f"call_{random_uuid()}",
-                    type="function_call",
-                    status="completed",
-                    name=tool_call.function.name,
-                    arguments=tool_call.function.arguments,
-                )
-                for tool_call in tool_call_info.tool_calls
+        if self.tool_parser_instance is not None:
+            tool_call_info = self.tool_parser_instance.extract_tool_calls(
+                content if content is not None else "",
+                request=self.request,  # type: ignore
             )
-            content = tool_call_info.content
-            if content and content.strip() == "":
-                content = None
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    ResponseFunctionToolCall(
+                        id=f"fc_{random_uuid()}",
+                        call_id=f"call_{random_uuid()}",
+                        type="function_call",
+                        status="completed",
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
 
         if content:
             self.response_messages.append(
