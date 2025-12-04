@@ -8,20 +8,17 @@ import warnings
 from vllm.platforms import current_platform
 
 
-def pytest_configure(config):
+def pytest_collection_modifyitems(config, items):
     """Set FLEX_ATTENTION backend for SigLIP tests on ROCm."""
     if not current_platform.is_rocm():
         return
 
-    encoder_sa_patterns = ["test_siglip.py"]
-    matched = [
-        p for p in encoder_sa_patterns if any(p in str(arg) for arg in config.args)
-    ]
+    siglip_tests = [item for item in items if "test_siglip" in item.nodeid]
 
-    if matched:
+    if siglip_tests:
         os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
         warnings.warn(
-            f"ROCm: Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION for {', '.join(matched)}",
+            "ROCm: Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION for SigLIP tests",
             UserWarning,
             stacklevel=1,
         )

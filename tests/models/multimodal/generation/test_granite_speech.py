@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Sequence
 
 import pytest
@@ -35,8 +34,11 @@ MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 audio_lora_path = MODEL_NAME
 models = [MODEL_NAME]
 
-if current_platform.is_rocm():
-    os.environ["VLLM_ATTENTION_BACKEND"] = "TRITON_ATTN"
+
+@pytest.fixture(autouse=True)
+def set_attention_backend_for_rocm(monkeypatch):
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
 
 
 def run_test(
