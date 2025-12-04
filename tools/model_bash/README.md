@@ -9,7 +9,7 @@ uv pip install rust-just
 ```
 
 
-## Generating Decode Traces
+## Generating Performance Analysis Data
 
 - launch vllm
 
