@@ -667,6 +667,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
         trust_remote_code=True,
+        max_transformers_version="4.53.3",
+        transformers_version_reason="HF model uses deprecated transformers API "
+        "(PytorchGELUTanh, DynamicCache.seen_tokens, and more). See: "
+        "https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/discussions/31",
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
         "lightonai/LightOnOCR-1B",
@@ -766,10 +770,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
-    ),
-    "Phi4MultimodalForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-4-multimodal-instruct",
-        revision="refs/pr/70",
     ),
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",
