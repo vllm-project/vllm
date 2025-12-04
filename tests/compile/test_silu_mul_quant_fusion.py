@@ -128,7 +128,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
         return [FUSED_OPS[kNvfp4Quant]]
 
 
-class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
+class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
