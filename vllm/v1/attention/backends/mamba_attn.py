@@ -119,6 +119,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return self.build(0, m)
 
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> M:
+        """
+        Default build implementation for Mamba-like attention backends.
+        Subclasses (e.g., Mamba2) can override to add additional metadata.
+        """
+        return self._compute_common_metadata(common_attn_metadata)
+
     def _compute_prefix_caching_block_indices(
         self,
         common_attn_metadata: CommonAttentionMetadata,
