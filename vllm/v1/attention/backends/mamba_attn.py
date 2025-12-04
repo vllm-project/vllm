@@ -28,7 +28,6 @@ class BaseMambaAttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    num_padded_decodes: int
 
     # The following tensors only contain prefill requests and will be None if
     # the batch has no prefill request.
@@ -53,7 +52,7 @@ class BaseMambaAttentionMetadata:
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     metadata_cls: type[M]
     reorder_batch_threshold: int = 1
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
 
@@ -140,6 +139,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         # -1 in case it's non-computed and causes later issues with indexing
         block_idx_last_computed_token = block_idx_last_computed_token.clamp(min=0)
+        # -1 in the case we have a padded request (0 seq-len)
+        block_idx_last_scheduled_token = block_idx_last_scheduled_token.clamp(min=0)
 
         return (
             block_idx_last_computed_token,
@@ -165,7 +166,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # Need flags to indicate if there are initial states
         has_initial_states_p = None
         query_start_loc_p = None
-        num_padded_decodes = num_decodes
         num_computed_tokens = None
         num_computed_tokens_p = None
 
@@ -230,11 +230,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.full_cuda_graph
         ):
-            num_padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )
-            state_indices_tensor = self.state_indices_tensor[:num_padded_decodes]
+            state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
             if self.vllm_config.cache_config.enable_prefix_caching:
@@ -242,24 +241,21 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     block_idx_last_scheduled_token, non_blocking=True
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :num_padded_decodes
+                    :num_decode_tokens
                 ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
 
                 self.block_idx_last_computed_token[:num_decodes].copy_(
                     block_idx_last_computed_token, non_blocking=True
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :num_padded_decodes
+                    :num_decode_tokens
                 ]
-                block_idx_last_computed_token[num_decodes:] = 0
 
         return self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_padded_decodes=num_padded_decodes,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor=state_indices_tensor,
