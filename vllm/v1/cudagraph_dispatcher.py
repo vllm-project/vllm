@@ -58,12 +58,27 @@ class CudagraphDispatcher:
 
         self.keys_initialized = False
 
+    def _compute_bs_to_padded_graph_size(self) -> None:
+        """Pre-compute the mapping from batch size to padded graph size."""
+        max_size = self.compilation_config.max_cudagraph_capture_size
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
+        for end, start in zip(
+            capture_sizes + [max_size + 1],
+            [0] + capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self._bs_to_padded_graph_size[bs] = start
+                else:
+                    self._bs_to_padded_graph_size[bs] = end
+
     def _create_padded_batch_descriptor(
         self, num_tokens: int, uniform_decode: bool, has_lora: bool
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
-        num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
+        num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
         if uniform_decode and self.cudagraph_mode.has_mode(CUDAGraphMode.FULL):
             num_reqs = num_tokens_padded // uniform_decode_query_len
@@ -140,18 +155,29 @@ class CudagraphDispatcher:
 
         self.keys_initialized = True
 
+        self._compute_bs_to_padded_graph_size()
+
     def dispatch(
         self,
         num_tokens: int,
-        uniform_decode: bool,
-        has_lora: bool,
+        uniform_decode: bool = False,
+        has_lora: bool = False,
         disable_full: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
-        Given conditions(e.g.,batch descriptor and if using cascade attention),
+        Given conditions(e.g.,batch descriptor and if using piecewise only),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.
         A new batch descriptor is returned as we might dispatch a uniform batch
         to a graph that supports a more general batch (uniform to non-uniform).
+
+        Args:
+            num_tokens: Number of tokens in the batch.
+            uniform_decode: Whether the batch is uniform decode (i.e. uniform and query
+                length is uniform_decode_query_len).
+            has_lora: Whether LoRA is active.
+            piecewise_or_eager_only: If True, skip FULL cudagraph checks and
+                return PIECEWISE or NONE only. (can be used for features cascade
+                attention that are not supported by full cudagraphs)
         """
         if (
             not self.keys_initialized
@@ -165,7 +191,7 @@ class CudagraphDispatcher:
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
-        if not disable_full:
+s        if not disable_full:
             # check if key exists for full cudagraph
             if batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc
