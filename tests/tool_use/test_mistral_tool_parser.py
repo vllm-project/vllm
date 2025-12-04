@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Comprehensive tests for the token-based Mistral tool parser.
+Tests for the token-based Mistral tool parser (v11+ models only).
 
 Tests cover:
-1. Non-streaming extraction for pre-v11 and v11+ tokenizers
-2. Streaming extraction with proper JSON delta emission
+1. Non-streaming extraction for v11+ tokenizers
+2. Streaming extraction with proper token-based parsing
 3. Edge cases like content before tool calls, multiple tools, etc.
+
+Note: Pre-v11 models (Mistral-7B-Instruct-v0.1/v0.2/v0.3) are not supported.
 """
 
 import json
@@ -31,22 +33,10 @@ from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 
 
 @pytest.fixture(scope="module")
-def mistral_pre_v11_tokenizer():
-    """Pre-v11 tokenizer using HF format (Mistral-7B-Instruct-v0.3)."""
-    MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
-    return get_tokenizer(tokenizer_name=MODEL)
-
-
-@pytest.fixture(scope="module")
 def mistral_tokenizer():
     """V11+ tokenizer using mistral-common format."""
     MODEL = "mistralai/Mistral-Small-3.2-24B-Instruct-2506"
     return get_tokenizer(tokenizer_name=MODEL, tokenizer_mode="mistral")
-
-
-@pytest.fixture
-def mistral_pre_v11_tool_parser(mistral_pre_v11_tokenizer):
-    return MistralToolParser(mistral_pre_v11_tokenizer)
 
 
 @pytest.fixture
@@ -109,8 +99,8 @@ def fix_tool_call_tokenization(
     if mistral_tool_parser.bot_token_id is not None:
         replacements.append((textual_tool_call_ids, mistral_tool_parser.bot_token_id))
 
-    # [ARGS] token (for v11+)
-    if hasattr(mistral_tool_parser, '_args_token_id') and mistral_tool_parser._args_token_id is not None:
+    # [ARGS] token
+    if mistral_tool_parser._args_token_id is not None:
         textual_args_ids = mistral_tokenizer.encode(
             text="[ARGS]",
             add_special_tokens=False,
@@ -144,72 +134,29 @@ def fix_tool_call_tokenization(
 def stream_delta_message_generator(
     mistral_tool_parser: MistralToolParser,
     mistral_tokenizer: TokenizerLike,
-    model_output: str | None,
-    tools: list[tuple[str, str]] | None,
+    tools: list[tuple[str, str]],
 ) -> Generator[DeltaMessage, None, None]:
     """
     Generate streaming delta messages by tokenizing and processing one token at a time.
 
-    For MistralTokenizer (all versions), we use encode_instruct to get proper
-    tokenization with special tokens. For non-MistralTokenizer, we encode free text.
+    Uses encode_instruct to get proper tokenization with special tokens.
     """
-    if isinstance(mistral_tokenizer, MistralTokenizer):
-        # Use encode_instruct for all MistralTokenizer versions to get proper special tokens
-        if tools is not None:
-            # Use provided tools list
-            assistant_msg = AssistantMessage(
-                tool_calls=[
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name=name,
-                            arguments=arg,
-                        )
-                    )
-                    for (name, arg) in tools
-                ],
-            )
-        elif model_output is not None and "[TOOL_CALLS]" in model_output:
-            # Parse tool calls from model_output for pre-v11 format
-            # Format: [TOOL_CALLS][{"name": "...", "arguments": {...}}, ...]
-            import json as json_module
-            tool_content = model_output.split("[TOOL_CALLS]")[-1].strip()
-            try:
-                tool_calls_data = json_module.loads(tool_content)
-                assistant_msg = AssistantMessage(
-                    tool_calls=[
-                        ToolCall(
-                            function=MistralFunctionCall(
-                                name=tc["name"],
-                                arguments=json_module.dumps(tc["arguments"]),
-                            )
-                        )
-                        for tc in tool_calls_data
-                    ],
-                )
-            except json_module.JSONDecodeError:
-                # Fall back to free text encoding if parsing fails
-                all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
-                all_token_ids = fix_tool_call_tokenization(
-                    all_token_ids, mistral_tool_parser, mistral_tokenizer
-                )
-                assistant_msg = None
-        else:
-            # No tool calls - just encode as content
-            assert model_output is not None
-            all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
-            assistant_msg = None
+    assert isinstance(mistral_tokenizer, MistralTokenizer)
 
-        if assistant_msg is not None:
-            request = InstructRequest(messages=[assistant_msg])
-            all_token_ids = mistral_tokenizer.instruct.encode_instruct(request).tokens
-    else:
-        # Non-MistralTokenizer: encode free text
-        assert model_output is not None, "model_output must be provided for non-MistralTokenizer"
-        all_token_ids = mistral_tokenizer.encode(model_output, add_special_tokens=False)
-        # Fix token IDs to use special tokens
-        all_token_ids = fix_tool_call_tokenization(
-            all_token_ids, mistral_tool_parser, mistral_tokenizer
-        )
+    # Use encode_instruct to get proper special tokens
+    assistant_msg = AssistantMessage(
+        tool_calls=[
+            ToolCall(
+                function=MistralFunctionCall(
+                    name=name,
+                    arguments=arg,
+                )
+            )
+            for (name, arg) in tools
+        ],
+    )
+    request = InstructRequest(messages=[assistant_msg])
+    all_token_ids = mistral_tokenizer.instruct.encode_instruct(request).tokens
 
     # Stream tokens one at a time
     previous_text = ""
@@ -230,7 +177,7 @@ def stream_delta_message_generator(
                 prev_tokens=previous_tokens,
                 prefix_offset=prefix_offset,
                 read_offset=read_offset,
-                skip_special_tokens=isinstance(mistral_tokenizer, MistralTokenizer),
+                skip_special_tokens=True,
                 spaces_between_special_tokens=True,
             )
         )
@@ -266,79 +213,14 @@ def stream_delta_message_generator(
 class TestExtractToolCallsNoTools:
     """Test extraction when no tools are called."""
 
-    def test_no_tool_call_token(self, mistral_pre_v11_tool_parser):
+    def test_no_tool_call_token(self, mistral_tool_parser):
         model_output = "This is a test response without any tool calls."
-        result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        result = mistral_tool_parser.extract_tool_calls(
             model_output, request=None
         )
         assert not result.tools_called
         assert result.tool_calls == []
         assert result.content == model_output
-
-
-class TestExtractToolCallsPreV11:
-    """Test non-streaming extraction for pre-v11 tokenizers."""
-
-    @pytest.mark.parametrize(
-        "model_output,expected_tool_calls,expected_content",
-        [
-            # Single tool call
-            (
-                '[TOOL_CALLS][{"name": "add", "arguments":{"a": 3.5, "b": 4}}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="add",
-                            arguments=json.dumps({"a": 3.5, "b": 4}),
-                        )
-                    )
-                ],
-                None,
-            ),
-            # Tool call with spaces
-            (
-                '[TOOL_CALLS] [{"name": "get_current_weather", "arguments":{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="get_current_weather",
-                            arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
-                            ),
-                        )
-                    )
-                ],
-                None,
-            ),
-            # Arguments before name
-            (
-                '[TOOL_CALLS] [{"arguments":{"city": "San Francisco"}, "name": "get_weather"}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="get_weather",
-                            arguments=json.dumps({"city": "San Francisco"}),
-                        )
-                    )
-                ],
-                None,
-            ),
-        ],
-        ids=["single_tool_add", "single_tool_weather", "argument_before_name"],
-    )
-    def test_extract_tool_calls(
-        self,
-        mistral_pre_v11_tool_parser,
-        model_output,
-        expected_tool_calls,
-        expected_content,
-    ):
-        result = mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=None
-        )
-        assert result.tools_called
-        assert_tool_calls(result.tool_calls, expected_tool_calls)
-        assert result.content == expected_content
 
 
 class TestExtractToolCallsV11Plus:
@@ -347,7 +229,7 @@ class TestExtractToolCallsV11Plus:
     @pytest.mark.parametrize(
         "model_output,expected_tool_calls,expected_content",
         [
-            # Single tool (v11+ format: name{args} without JSON array wrapper)
+            # Single tool (v11+ format: name{args})
             (
                 '[TOOL_CALLS]add_this_and_that{"a": 3.5, "b": 4}',
                 [
@@ -418,7 +300,6 @@ class TestExtractToolCallsV11Plus:
 def _test_extract_tool_calls_streaming(
     tool_parser,
     tokenizer,
-    model_output,
     tools,
     expected_tool_calls,
     expected_content,
@@ -435,7 +316,7 @@ def _test_extract_tool_calls_streaming(
     tool_call_ids: list[str | None] = []
 
     for delta_message in stream_delta_message_generator(
-        tool_parser, tokenizer, model_output, tools
+        tool_parser, tokenizer, tools
     ):
         # Role should never be streamed from tool parser
         assert not delta_message.role
@@ -495,107 +376,6 @@ def _test_extract_tool_calls_streaming(
         )
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
-
-
-class TestStreamingExtractionPreV11:
-    """Test streaming extraction for pre-v11 tokenizers.
-
-    Uses encode_instruct to properly generate special tokens from the
-    pre-v11 format ([TOOL_CALLS][{json array}]).
-    """
-
-    @pytest.mark.parametrize(
-        "model_output,expected_tool_calls,expected_content",
-        [
-            # No tools
-            ("This is a test", [], "This is a test"),
-            # Single tool
-            (
-                '[TOOL_CALLS]  [ {"name":"add" , "arguments" : {"a": 3, "b": 4} } ]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="add",
-                            arguments=json.dumps({"a": 3, "b": 4}),
-                        )
-                    )
-                ],
-                "",
-            ),
-            # String arguments
-            (
-                '[TOOL_CALLS] [{"name": "add", "arguments":{"a": "3", "b": "4"}}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="add",
-                            arguments=json.dumps({"a": "3", "b": "4"}),
-                        )
-                    )
-                ],
-                "",
-            ),
-            # Weather tool with complex args
-            (
-                '[TOOL_CALLS] [{"name": "get_current_weather", "arguments": {"city": "San Francisco", "state": "CA", "unit": "celsius"}}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="get_current_weather",
-                            arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
-                            ),
-                        )
-                    )
-                ],
-                "",
-            ),
-            # Multiple tools
-            (
-                '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 3.5, "b": 4}}, {"name": "get_current_weather", "arguments":{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="add",
-                            arguments=json.dumps({"a": 3.5, "b": 4}),
-                        )
-                    ),
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="get_current_weather",
-                            arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
-                            ),
-                        )
-                    ),
-                ],
-                "",
-            ),
-        ],
-        ids=[
-            "no_tools",
-            "single_tool_add",
-            "single_tool_add_strings",
-            "single_tool_weather",
-            "multiple_tools",
-        ],
-    )
-    def test_streaming_extraction(
-        self,
-        mistral_pre_v11_tool_parser,
-        mistral_pre_v11_tokenizer,
-        model_output,
-        expected_tool_calls,
-        expected_content,
-    ):
-        _test_extract_tool_calls_streaming(
-            mistral_pre_v11_tool_parser,
-            mistral_pre_v11_tokenizer,
-            model_output,
-            None,
-            expected_tool_calls,
-            expected_content,
-        )
 
 
 class TestStreamingExtractionV11Plus:
@@ -671,7 +451,6 @@ class TestStreamingExtractionV11Plus:
         _test_extract_tool_calls_streaming(
             mistral_tool_parser,
             mistral_tokenizer,
-            None,
             tools,
             expected_tool_calls,
             expected_content,
@@ -831,133 +610,6 @@ class TestStreamingOneChunk:
             )
             assert actual["id"] is not None and len(actual["id"]) == 9
 
-        # Content should not be set in v11 streaming (tool calls only)
-        if expected_content == "":
-            # For v11, content before tool call is handled differently
-            pass  # Content handling varies by implementation
-
-
-class TestStreamingOneChunkPreV11:
-    """Test streaming for pre-v11 when all tokens arrive in a single chunk.
-
-    Uses fix_tool_call_tokenization to replace textual token sequences
-    with special token IDs for proper parsing.
-    """
-
-    @pytest.mark.parametrize(
-        "model_output,expected_tool_calls,expected_content",
-        [
-            # No tools
-            ("This is a test", [], "This is a test"),
-            # Single tool
-            (
-                '[TOOL_CALLS]  [ {"name":"add" , "arguments" : {"a": 3, "b": 4} } ]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="add",
-                            arguments=json.dumps({"a": 3, "b": 4}),
-                        )
-                    )
-                ],
-                "",
-            ),
-            # Arguments before name
-            (
-                '[TOOL_CALLS] [{"arguments": {"city": "San Francisco"}, "name": "get_weather"}]',
-                [
-                    ToolCall(
-                        function=MistralFunctionCall(
-                            name="get_weather",
-                            arguments=json.dumps({"city": "San Francisco"}),
-                        )
-                    )
-                ],
-                "",
-            ),
-        ],
-        ids=["no_tools", "single_tool_add", "argument_before_name"],
-    )
-    def test_streaming_one_chunk_pre_v11(
-        self,
-        mistral_pre_v11_tool_parser,
-        mistral_pre_v11_tokenizer,
-        model_output,
-        expected_tool_calls,
-        expected_content,
-    ):
-        """Test pre-v11 streaming with all tokens in one chunk.
-
-        When all tokens arrive at once, we still produce streaming-style
-        output with multiple DeltaToolCall objects. We need to aggregate
-        these to verify the final result.
-        """
-        if isinstance(mistral_pre_v11_tokenizer, MistralTokenizer):
-            all_token_ids = mistral_pre_v11_tokenizer.encode(model_output)
-        else:
-            all_token_ids = mistral_pre_v11_tokenizer.encode(
-                model_output, add_special_tokens=False
-            )
-
-        all_token_ids = fix_tool_call_tokenization(
-            all_token_ids, mistral_pre_v11_tool_parser, mistral_pre_v11_tokenizer
-        )
-
-        delta_message = mistral_pre_v11_tool_parser.extract_tool_calls_streaming(
-            previous_text="",
-            current_text=model_output,
-            delta_text=model_output,
-            previous_token_ids=[],
-            current_token_ids=all_token_ids,
-            delta_token_ids=all_token_ids,
-            request=None,
-        )
-
-        assert isinstance(delta_message, DeltaMessage)
-
-        # Aggregate streaming deltas into final tool calls
-        # Each tool call starts with a name delta, followed by argument deltas
-        tool_call_data: dict[int, dict] = {}  # index -> {id, name, arguments}
-
-        for tc in delta_message.tool_calls or []:
-            idx = tc.index
-            if idx not in tool_call_data:
-                tool_call_data[idx] = {"id": None, "name": "", "arguments": ""}
-
-            if tc.id:
-                tool_call_data[idx]["id"] = tc.id
-
-            func = tc.function
-            func_name = getattr(func, 'name', None) or (func.get('name') if isinstance(func, dict) else None)
-            func_args = getattr(func, 'arguments', None) or (func.get('arguments') if isinstance(func, dict) else None)
-
-            if func_name:
-                tool_call_data[idx]["name"] = func_name
-            if func_args:
-                tool_call_data[idx]["arguments"] += func_args
-
-        # Verify we got the expected number of tool calls
-        assert len(tool_call_data) == len(expected_tool_calls), (
-            f"Expected {len(expected_tool_calls)} tool calls, got {len(tool_call_data)}"
-        )
-
-        # Verify each tool call
-        for i, expected in enumerate(expected_tool_calls):
-            actual = tool_call_data[i]
-            assert actual["name"] == expected.function.name, (
-                f"Expected name '{expected.function.name}', got '{actual['name']}'"
-            )
-            assert actual["arguments"] == expected.function.arguments, (
-                f"Expected args '{expected.function.arguments}', got '{actual['arguments']}'"
-            )
-            assert actual["id"] is not None and len(actual["id"]) == 9
-
-        # Content handling
-        if delta_message.content is None:
-            assert expected_content == ""
-        else:
-            assert delta_message.content == expected_content
-
 
 # =============================================================================
 # Edge case tests
@@ -997,16 +649,6 @@ class TestEdgeCases:
         assert result.tool_calls == []
         assert result.content == ""
 
-    def test_malformed_json(self, mistral_pre_v11_tool_parser):
-        """Test handling of malformed JSON in tool calls."""
-        # Missing closing brace
-        model_output = '[TOOL_CALLS][{"name": "add", "arguments":{"a": 3'
-        result = mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=None
-        )
-        # Should fail gracefully
-        assert not result.tools_called
-
 
 class TestTokenBasedDetection:
     """Test that token-based detection works correctly."""
@@ -1015,6 +657,11 @@ class TestTokenBasedDetection:
         """Verify bot token ID is properly set."""
         assert mistral_tool_parser.bot_token_id is not None
         assert isinstance(mistral_tool_parser.bot_token_id, int)
+
+    def test_args_token_id_exists(self, mistral_tool_parser):
+        """Verify [ARGS] token ID is properly set for v11+."""
+        assert mistral_tool_parser._args_token_id is not None
+        assert isinstance(mistral_tool_parser._args_token_id, int)
 
     def test_streaming_uses_token_ids(self, mistral_tool_parser, mistral_tokenizer):
         """Test that streaming correctly uses token IDs for detection."""
@@ -1035,3 +682,21 @@ class TestTokenBasedDetection:
         assert delta_message is not None
         assert delta_message.content == content_text
         assert not delta_message.tool_calls
+
+
+class TestParserInitialization:
+    """Test parser initialization and validation."""
+
+    def test_rejects_pre_v11_tokenizer(self):
+        """Test that parser rejects pre-v11 MistralTokenizer."""
+        # Get a pre-v11 MistralTokenizer (Mistral-7B-v0.3 uses version 3)
+        pre_v11_tokenizer = get_tokenizer(
+            tokenizer_name="mistralai/Mistral-7B-Instruct-v0.3",
+            tokenizer_mode="mistral",
+        )
+
+        assert isinstance(pre_v11_tokenizer, MistralTokenizer)
+        assert pre_v11_tokenizer.version < 11
+
+        with pytest.raises(RuntimeError, match="requires tokenizer version 11 or higher"):
+            MistralToolParser(pre_v11_tokenizer)
