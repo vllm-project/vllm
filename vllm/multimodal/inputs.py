@@ -830,6 +830,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         pin_memory: bool = False,
         cpu_fields: Set[str] = frozenset(),
     ) -> BatchedTensorInputs:
+        """Construct a dictionary of keyword arguments to pass to the model."""
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
         for modality, items in self.items():
             for i, item in enumerate(items):
