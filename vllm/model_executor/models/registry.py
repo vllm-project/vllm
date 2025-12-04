@@ -374,7 +374,6 @@ _MULTIMODAL_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
-    "Phi4MultimodalForCausalLM": ("phi4_multimodal", "Phi4MultimodalForCausalLM"),  # noqa: E501
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
@@ -507,6 +506,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MotifForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
     "Phi4FlashForCausalLM": "0.10.2",
+    "Phi4MultimodalForCausalLM": "0.12.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "BartModel": "0.10.2",
