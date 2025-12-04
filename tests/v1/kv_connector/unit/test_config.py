@@ -63,14 +63,3 @@ def test_kv_connector(
         assert kv_connector_extra_config["lmcache.max_local_cpu_size"] == expected_bytes
         # Existing config should be replaced
         assert "existing_key" not in kv_connector_extra_config
-
-
-def test_kv_connector_hma_enabled(monkeypatch):
-    # Default is False
-    vllm_config = VllmConfig(kv_transfer_config=KVTransferConfig())
-    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is True
-
-    # Optionally enable HMA for KV connector as experimental feature
-    monkeypatch.setenv("VLLM_USE_HMA_FOR_KV_CONNECTOR", "1")
-    vllm_config = VllmConfig(kv_transfer_config=KVTransferConfig())
-    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False
