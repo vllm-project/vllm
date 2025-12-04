@@ -2843,7 +2843,6 @@ class GPUModelRunner(
             cudagraph_stats,
         )
 
-
     @torch.inference_mode()
     def execute_model(
         self,
