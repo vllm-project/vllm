@@ -965,7 +965,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         image_processor = self.get_image_processor()
-        max_pixels = image_processor.max_pixels
+        max_pixels = image_processor.max_pixels or image_processor.size["longest_edge"]
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 
