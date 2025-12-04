@@ -140,10 +140,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-
         # Check if CUDA Graphs are enabled for prefill.
-        prefill_cudagraph_enabled = (
-            vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
+        prefill_cudagraph_enabled = vllm_config.compilation_config.cudagraph_mode in (
+            CUDAGraphMode.FULL,
         )
 
         # Determine number of speculative tokens.
