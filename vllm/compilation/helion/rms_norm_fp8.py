@@ -183,10 +183,6 @@ class RMSNormFp8Helion(HelionCustomOp):
         """
         return rms_norm_fp8(input, weight, scale, epsilon)
 
-    @property
-    def kernel_name(self) -> str:
-        """Get the kernel name for config selection."""
-        return "rms_norm_fp8_helion"
 
     @property
     def helion_kernel(self):

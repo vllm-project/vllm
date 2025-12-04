@@ -157,10 +157,6 @@ class SiluMulFp8Helion(HelionCustomOp):
         # Use the registered HelionKernelWrapper which handles config internally
         return silu_mul_fp8(input, scale)
 
-    @property
-    def kernel_name(self) -> str:
-        """Get the kernel name for config selection."""
-        return "silu_mul_fp8_helion"
 
     @property
     def helion_kernel(self):
