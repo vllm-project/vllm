@@ -254,6 +254,14 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
+            # Defensive check: ensure the block doesn't have a hash before caching
+            if blk.block_hash is not None:
+                logger.warning(
+                    f"Block {blk.block_id} was dirty before caching. This indicates a "
+                    "potential race condition. Resetting hash to prevent assertion "
+                    "failure.")
+                blk.reset_hash()
+
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
