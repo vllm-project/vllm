@@ -610,7 +610,8 @@ class Mamba2AttentionMetadataBuilder(
 
         # CUDA graph padding for non-spec decode
         elif (
-            num_decodes <= self.decode_cudagraph_max_bs
+            num_spec_decodes == 0
+            and num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad state tensor for CUDA graph (regular decode only)
