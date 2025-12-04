@@ -1198,9 +1198,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             scheduler_stats is not None
             and scheduler_stats.expert_usage_histogram_cpu is not None
         ):
-            histogram = scheduler_stats.expert_usage_histogram_cpu
+            histogram_experts = scheduler_stats.expert_usage_histogram_cpu
 
-            for (i, j), value in np.ndenumerate(histogram.numpy()):
+            for (i, j), value in np.ndenumerate(histogram_experts.numpy()):
                 self.counter_moe_expert_selection_array[i][j].inc(value.item())
 
             if scheduler_stats.per_ep_rank_tokens_histogram_cpu is not None:

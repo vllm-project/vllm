@@ -2392,7 +2392,7 @@ class GPUModelRunner(
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
-    def histogram_logging(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    def expert_logging(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if not envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
             return None, None
 
@@ -3317,10 +3317,12 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
-        # Get the expert usage histogram for MoEs
-        expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu = (
-            self.histogram_logging()
-        )
+
+        with record_function_or_nullcontext("gpu_model_runner: expert_logging"):
+            # Get the expert usage histogram for MoEs
+            expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu = (
+                self.expert_logging()
+            )
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
