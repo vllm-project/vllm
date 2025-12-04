@@ -44,7 +44,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_token_id = self.end_token_id
         return any(input_id == end_token_id for input_id in reversed(input_ids))
-    
+
     def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
         return len(input_ids) > 0 and self.end_token_id == input_ids[-1]
 

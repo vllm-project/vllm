@@ -88,6 +88,7 @@ class ReasoningParser:
             True if the reasoning content ends in the input_ids on a
             decode step.
         """
+        return self.is_reasoning_end(input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
