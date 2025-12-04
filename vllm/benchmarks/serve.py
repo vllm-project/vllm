@@ -1035,7 +1035,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--tokenizer-mode",
         type=str,
         default="auto",
-        choices=["auto", "hf", "slow", "mistral", "custom"],
+        choices=["auto", "hf", "slow", "mistral", "deepseek_v32"],
         help="""Tokenizer mode:\n
         - "auto" will use the tokenizer from `mistral_common` for Mistral models
         if available, otherwise it will use the "hf" tokenizer.\n
