@@ -20,7 +20,7 @@ from vllm.config.multimodal import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import MultiModalInputs
+from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import (
     MistralTokenizer,
@@ -418,4 +418,4 @@ def _assert_inputs_equal(
         a_data.pop(key, None)
         b_data.pop(key, None)
 
-    assert a_data == b_data, msg
+    assert batched_tensors_equal(a_data, b_data), msg

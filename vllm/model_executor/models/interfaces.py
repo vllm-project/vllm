@@ -78,7 +78,7 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
-    merge_by_field_config: ClassVar[bool] = False
+    merge_by_field_config: ClassVar[bool] = True
     """
     A flag that indicates which implementation of
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
