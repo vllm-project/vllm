@@ -352,7 +352,7 @@ def test_speculators_model_integration(
             True,
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
-        (
+        pytest.param(
             (
                 "eagle",
                 "eagle618/deepseek-v3-random",
@@ -361,6 +361,11 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="DeepSeek head_dim=192 not supported by "
+                "AiterFlashAttention on ROCm",
+            ),
         ),
     ],
     ids=[
@@ -389,6 +394,11 @@ def test_eagle_correctness(
             "TREE_ATTN is flaky in the test disable for now until it can be "
             "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
         )
+    if attn_backend == "TRITON_ATTN":
+        pytest.skip(
+            "TRITON_ATTN has illegal memory access issue in the test disable for now "
+            "until it can be resolved (see https://github.com/vllm-project/vllm/issues/27619)"
+        )
 
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
@@ -406,12 +416,6 @@ def test_eagle_correctness(
         else:
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-
-        if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
-            pytest.skip(
-                "TRITON_ATTN does not support "
-                "multi-token eagle spec decode on current platform"
-            )
 
         if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
             if "deepseek" in model_setup[1].lower():
@@ -468,7 +472,15 @@ def test_eagle_correctness(
     ["model_setup", "mm_enabled"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False),
-        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False),
+        pytest.param(
+            ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1),
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="DeepSeek head_dim=192 not supported by "
+                "AiterFlashAttention on ROCm",
+            ),
+        ),
     ],
     ids=["mimo", "deepseek"],
 )

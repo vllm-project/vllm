@@ -422,10 +422,10 @@ def test_load_model(
 def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
+    if attn_backend == "TRITON_ATTN":
         pytest.skip(
-            "TRITON_ATTN does not support "
-            "multi-token eagle spec decode on current platform"
+            "TRITON_ATTN has illegal memory access issue in the test disable for now "
+            "until it can be  resolved (see https://github.com/vllm-project/vllm/issues/27619)"
         )
 
     if attn_backend == "TREE_ATTN":
