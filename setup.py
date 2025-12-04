@@ -346,6 +346,89 @@ class precompiled_wheel_utils:
         return wheels, repo_url
 
     @staticmethod
+    def is_rocm_system() -> bool:
+        """Detect ROCm without relying on torch (for build environment)."""
+        if os.getenv("ROCM_PATH"):
+            return True
+        if os.path.isdir("/opt/rocm"):
+            return True
+        if which("rocminfo") is not None:
+            return True
+        try:
+            import torch
+
+            return torch.version.hip is not None
+        except ImportError:
+            return False
+
+    @staticmethod
+    def find_local_rocm_wheel() -> str | None:
+        """Search for a local vllm wheel in common locations."""
+        import glob
+
+        for pattern in ["/vllm-workspace/dist/vllm-*.whl", "./dist/vllm-*.whl"]:
+            wheels = glob.glob(pattern)
+            if wheels:
+                return sorted(wheels)[-1]
+        return None
+
+    @staticmethod
+    def fetch_wheel_from_pypi_index(index_url: str, package: str = "vllm") -> str:
+        """Fetch the latest wheel URL from a PyPI-style simple index."""
+        import platform
+        from html.parser import HTMLParser
+        from urllib.parse import urljoin
+        from urllib.request import urlopen
+
+        arch = platform.machine()
+
+        class WheelLinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.wheels = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    for name, value in attrs:
+                        if name == "href" and value.endswith(".whl"):
+                            self.wheels.append(value)
+
+        simple_url = f"{index_url.rstrip('/')}/{package}/"
+        print(f"Fetching wheel list from {simple_url}")
+        with urlopen(simple_url) as resp:
+            html = resp.read().decode("utf-8")
+
+        parser = WheelLinkParser()
+        parser.feed(html)
+
+        for wheel in reversed(parser.wheels):
+            if arch in wheel:
+                if wheel.startswith("http"):
+                    return wheel
+                return urljoin(simple_url, wheel)
+
+        raise ValueError(f"No compatible wheel found for {arch} at {simple_url}")
+
+    @staticmethod
+    def determine_wheel_url_rocm() -> tuple[str, str | None]:
+        """Determine the precompiled wheel for ROCm."""
+        # Search for local wheel first
+        local_wheel = precompiled_wheel_utils.find_local_rocm_wheel()
+        if local_wheel is not None:
+            print(f"Found local ROCm wheel: {local_wheel}")
+            return local_wheel, None
+
+        # Fall back to AMD's PyPI index
+        index_url = os.getenv(
+            "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
+        )
+        print(f"Fetching ROCm precompiled wheel from {index_url}")
+        wheel_url = precompiled_wheel_utils.fetch_wheel_from_pypi_index(index_url)
+        download_filename = wheel_url.split("/")[-1].split("#")[0]
+        print(f"Using ROCm precompiled wheel: {wheel_url}")
+        return wheel_url, download_filename
+
+    @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
         """
         Try to determine the precompiled wheel URL or path to use.
@@ -365,6 +448,11 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
+            # ROCm: use local wheel or AMD's PyPI index
+            # TODO: When we have ROCm nightly wheels, we can update this logic.
+            if precompiled_wheel_utils.is_rocm_system():
+                return precompiled_wheel_utils.determine_wheel_url_rocm()
+
             import platform
 
             arch = platform.machine()
@@ -471,6 +559,8 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    # ROCm-specific libraries
+                    "vllm/_rocm_C.abi3.so",
                 ]
 
                 flash_attn_regex = re.compile(
