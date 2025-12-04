@@ -13,10 +13,10 @@ from typing import TYPE_CHECKING, Optional, Union
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.compilation.helion.custom_op import HelionCustomOp
+    from vllm.compilation.helion.register import HelionKernelWrapper
 
-# Type alias for kernel identifier - can be string name or HelionCustomOp class type
-KernelIdentifier = Union[str, "type[HelionCustomOp]"]
+# Type alias for kernel identifier - can be string name or HelionKernelWrapper instance
+KernelIdentifier = Union[str, "HelionKernelWrapper"]
 
 logger = init_logger(__name__)
 
@@ -139,44 +139,29 @@ class ConfigManager:
 
         return None
 
-    def _get_kernel_name(self, kernel_name_or_class: KernelIdentifier) -> str:
+    def _get_kernel_name(self, kernel_name_or_wrapper: KernelIdentifier) -> str:
         """
-        Get kernel name from string or class, using the exact registered name.
+        Get kernel name from string or HelionKernelWrapper instance.
 
         Args:
-            kernel_name_or_class: Either a kernel name string or a HelionCustomOp class
+            kernel_name_or_wrapper: Either a kernel name string or a HelionKernelWrapper instance
 
         Returns:
-            Kernel name as registered in the CustomOp registry
+            Kernel name as registered in the Helion kernel registry
 
         Examples:
-            "silu_mul_fp8_helion" -> "silu_mul_fp8_helion"
-            SiluMulFp8HelionClass -> "silu_mul_fp8_helion" (looks up registry name)
+            "silu_mul_fp8" -> "silu_mul_fp8"
+            HelionKernelWrapper(op_name="silu_mul_fp8") -> "silu_mul_fp8"
         """
-        if isinstance(kernel_name_or_class, type):
-            # If it's a HelionCustomOp class, try to get kernel_name from a temporary instance
-            try:
-                from vllm.compilation.helion.custom_op import HelionCustomOp
+        # Import here to avoid circular imports
+        from vllm.compilation.helion.register import HelionKernelWrapper
 
-                if issubclass(kernel_name_or_class, HelionCustomOp):
-                    # Create temporary instance to get helion kernel name
-                    temp_instance = kernel_name_or_class()
-                    helion_kernel = temp_instance.helion_kernel
-                    if helion_kernel is not None and hasattr(helion_kernel, 'op_name'):
-                        return helion_kernel.op_name
-            except Exception:
-                pass
-
-            # Look up the registered name in CustomOp registry
-            from vllm.model_executor.custom_op import CustomOp
-
-            for name, op_cls in CustomOp.op_registry.items():
-                if op_cls == kernel_name_or_class:
-                    return name
-            # Fallback to class name if not found in registry
-            return kernel_name_or_class.__name__
+        if isinstance(kernel_name_or_wrapper, HelionKernelWrapper):
+            # Direct access to kernel wrapper's op_name
+            return kernel_name_or_wrapper.op_name
         else:
-            return str(kernel_name_or_class)
+            # Assume it's a string
+            return str(kernel_name_or_wrapper)
 
     def get_config_filename(
         self, kernel_name: KernelIdentifier, config_key: str
