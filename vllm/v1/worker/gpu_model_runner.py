@@ -34,6 +34,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
+    set_current_vllm_config,
     update_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -4067,6 +4068,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices,
                 ),
+                set_current_vllm_config(self.vllm_config),
             ):
                 outputs = self.model(
                     input_ids=input_ids,
