@@ -207,10 +207,10 @@ class KVCacheManager:
         self,
         request: Request,
         num_new_tokens: int,
-        num_new_computed_tokens: int = 0,
-        new_computed_blocks: KVCacheBlocks | None = None,
-        num_external_computed_tokens: int = 0,
         num_lookahead_tokens: int = 0,
+        num_new_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
     ) -> KVCacheBlocks | None:
@@ -221,13 +221,13 @@ class KVCacheManager:
             num_new_tokens: The number of tokens to be computed.
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
-            new_computed_blocks: The cached blocks for the above new computed
-                tokens, groups as a tuple by kv cache groups.
             num_external_computed_tokens: The number of tokens that their
                 KV caches are not cached by vLLM but cached by the connector.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
+            new_computed_blocks: The cached blocks for the above new computed
+                tokens, groups as a tuple by kv cache groups.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
@@ -238,7 +238,7 @@ class KVCacheManager:
         Blocks layout:
         ```
         ---------------------------------------------------------------------
-        | < comp > | < new_comp > | < connector > | < new > | < lookahead > |
+        | < comp > | < new_comp > | < ext_comp >  | < new > | < lookahead > |
         ---------------------------------------------------------------------
                                                   |  < to be computed >     |
         ---------------------------------------------------------------------
@@ -272,7 +272,7 @@ class KVCacheManager:
         comp      = request.num_computed_tokens
         new_comp  = num_new_computed_tokens
                   = len(new_computed_blocks) * block_size
-        connector = num_external_computed_tokens
+        ext_comp  = num_external_computed_tokens, cached by the connector
         new       = num_new_tokens
         lookahead = num_lookahead_tokens
         ```
@@ -281,9 +281,9 @@ class KVCacheManager:
         The allocation has three stages:
         - Free unnecessary blocks in `comp` and check
            if we have sufficient free blocks (return None if not).
-        - Handle prefix tokens (`comp + new_comp + connector`):
+        - Handle prefix tokens (`comp + new_comp + ext_comp`):
             - Free unnecessary blocks (e.g. outside sliding window)
-            - Allocate new blocks for `connector` tokens inside
+            - Allocate new blocks for `ext_comp` tokens inside
               sliding window
         - Allocate new blocks for tokens to be computed (`new + lookahead`)
 
@@ -329,10 +329,10 @@ class KVCacheManager:
         )
 
         (
-            num_new_blocks_to_allocate_per_group,
-            num_evictable_blocks_to_allocate_per_group,
-            blocks_to_touch_per_group,
-        ) = self.coordinator.get_num_blocks_to_allocate_per_group(
+            num_new_blocks_to_allocate,
+            num_evictable_blocks_to_allocate,
+            blocks_to_touch,
+        ) = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -340,21 +340,17 @@ class KVCacheManager:
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
         )
-        num_blocks_to_allocate = sum(num_new_blocks_to_allocate_per_group) + sum(
-            num_evictable_blocks_to_allocate_per_group
+        tot_num_blocks_to_allocate = sum(num_new_blocks_to_allocate) + sum(
+            num_evictable_blocks_to_allocate
         )
 
-        print(
-            f"YIFAN: request {request.request_id} needs total {num_tokens_need_slot} tokens, num_local_computed_tokens: {num_local_computed_tokens}, num_external_computed_tokens: {num_external_computed_tokens}, num_new_tokens: {num_new_tokens}, num_lookahead_tokens: {num_lookahead_tokens}"
-        )
-
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        if tot_num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(blocks_to_touch_per_group)
+            self.block_pool.touch(blocks_to_touch)
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -363,9 +359,6 @@ class KVCacheManager:
         if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
-            print(
-                f"YIFAN: saving new computed blocks for request {request.request_id}, lens: {[len(b) for b in new_computed_block_list]}, total_computed_tokens: {num_local_computed_tokens + num_external_computed_tokens}"
-            )
             self.coordinator.save_new_computed_blocks(
                 request_id=request.request_id,
                 new_computed_blocks=new_computed_block_list,
@@ -375,7 +368,7 @@ class KVCacheManager:
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
-            num_new_blocks_to_allocate_per_group,
+            num_new_blocks_to_allocate,
             num_tokens_need_slot,
             num_encoder_tokens,
         )
@@ -487,10 +480,14 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_computed_tokens: int, total_computed_tokens: int
+    ) -> None:
         """Cache the blocks for the request, if enabled."""
         if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+            self.coordinator.cache_blocks(
+                request, num_computed_tokens, total_computed_tokens
+            )
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

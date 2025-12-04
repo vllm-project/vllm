@@ -312,7 +312,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        raise ValueError("YIFAN: should not be called")
+        # NOTE: LMCache overloads request_finished so `block_ids` here can be
+        # either list[int] or tuple[list[int], ...].
         return self._lmcache_engine.request_finished(request, block_ids)
 
     def request_finished_all_groups(
@@ -320,12 +321,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        # NOTE: LMCache overloads request_finished so `block_ids` here can be
+        # either list[int] or tuple[list[int], ...]. This could be changed in
+        # the future to separate these two methods.
         return self._lmcache_engine.request_finished(request, block_ids)
-        # print(
-        #     f"YIFAN: request_finished_all_groups called with request {request.request_id} and blocks {block_ids}"
-        # )
-        # raise NotImplementedError("YIFAN: request_finished_all_groups not implemented")
-        # return False, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """

@@ -115,9 +115,6 @@ class SingleTypeKVCacheManager(ABC):
             # Scheduler relies on evictable blocks being counted in the free
             # capacity check, but allocate_new_blocks will clamp to actual new
             # blocks to avoid double allocation.
-            print(
-                f"YIFAN: request {request_id} needs {num_new_blocks} new blocks, {len(evictable_computed_blocks)} evictable computed blocks"
-            )
             return num_new_blocks, evictable_computed_blocks
 
         # General case: some prefix tokens are skipped by the attention window.
@@ -155,9 +152,6 @@ class SingleTypeKVCacheManager(ABC):
                 if blk.ref_cnt == 0 and not blk.is_null
             ]
 
-        print(
-            f"YIFAN: request {request_id} needs {num_new_blocks} new blocks, {len(evictable_computed_blocks)} evictable computed blocks"
-        )
         return num_new_blocks, evictable_computed_blocks
 
     def save_new_computed_blocks(
@@ -186,9 +180,8 @@ class SingleTypeKVCacheManager(ABC):
                 req_blocks = self.req_to_blocks[request_id]
                 assert len(req_blocks) == 0
                 req_blocks.extend(new_computed_blocks)
-                self.num_cached_block[request_id] = len(
-                    new_computed_blocks
-                )  ## YIFAN: why set to len(new_computed_blocks) rather than len(req_blocks)?
+                ## YIFAN: why len(new_computed_blocks) rather than len(req_blocks)?
+                self.num_cached_block[request_id] = len(new_computed_blocks)
             else:
                 # A running request. Should not have new computed blocks.
                 assert len(new_computed_blocks) == 0
@@ -822,7 +815,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, Sequence[KVCacheBlock]]:
         # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
         if total_computed_tokens > 0:
             logger.warning_once(
@@ -878,7 +871,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(
+        self, request: Request, num_tokens: int, prev_computed_tokens: int
+    ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")
