@@ -598,10 +598,8 @@ class GPUModelRunner(
             envs.VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE
             and self.use_async_scheduling
             and self.num_spec_tokens > 0
-            and self.dcp_world_size == 1
             and not self.cascade_attn_enabled
         )
-        logger.info(f"Async SPS zero bubble mode: {self.async_sps_zero_bubble_mode}, with VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE={envs.VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE} async_scheduling={self.use_async_scheduling} num_spec_tokens={self.num_spec_tokens} dcp_world_size={self.dcp_world_size} cascade_attn_enabled={self.cascade_attn_enabled}")
         self.async_spec_reqs_to_fix: set[str] = set()
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
@@ -4793,6 +4791,11 @@ class GPUModelRunner(
             attention_backend_list, kv_cache_config.kv_cache_groups
         )
 
+        # Check if all backends support async SPS zero bubble mode
+        self._check_async_sps_zero_bubble_support(
+            attention_backend_list, kv_cache_config.kv_cache_groups
+        )
+
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
@@ -4973,6 +4976,35 @@ class GPUModelRunner(
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
+
+    def _check_async_sps_zero_bubble_support(
+        self,
+        attention_backends: list[set[type[AttentionBackend]]],
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> None:
+        """
+        Check if all attention backends support async SPS zero bubble mode.
+        If any backend doesn't support it, disable the mode.
+        """
+        if not self.async_sps_zero_bubble_mode:
+            return
+
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+                if not builder_cls.supports_async_sps_zero_bubble(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                ):
+                    logger.warning(
+                        "Disabling async SPS zero bubble mode: attention backend "
+                        "%s does not support it (build() may depend on correct "
+                        "seq_lens_cpu or num_computed_tokens_cpu values).",
+                        attn_backend.__name__,
+                    )
+                    self.async_sps_zero_bubble_mode = False
+                    return
 
     def calculate_reorder_batch_threshold(self) -> None:
         """

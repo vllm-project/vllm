@@ -251,6 +251,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
     )
+    _supports_async_sps_zero_bubble = True
 
     def __init__(
         self,

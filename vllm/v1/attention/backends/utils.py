@@ -276,6 +276,18 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+
+    # Async SPS zero bubble mode optimistically assumes all speculated tokens
+    # were accepted to avoid CPU-GPU synchronization. The GPU inputs are then
+    # corrected by `_maybe_adjust_inputs_on_gpu()` in gpu_model_runner.
+    # In this mode, the following CPU tensors may be INCORRECT:
+    #   - seq_lens_cpu: will be larger than actual (optimistic assumption)
+    #   - num_computed_tokens_cpu: will be larger than actual
+    # Set to True if the backend's build() method does NOT use seq_lens_cpu
+    # or num_computed_tokens_cpu in ways that would cause incorrect results.
+    # Set to False (default) if the backend depends on these values being correct.
+    _supports_async_sps_zero_bubble: ClassVar[bool] = False
+
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
@@ -302,6 +314,26 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
+
+    @classmethod
+    def supports_async_sps_zero_bubble(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> bool:
+        """Check if this builder supports async SPS zero bubble mode.
+
+        Async SPS zero bubble mode optimistically assumes all speculated tokens
+        were accepted to avoid CPU-GPU sync, then corrects GPU inputs via
+        _maybe_adjust_inputs_on_gpu().
+
+        Returns:
+            True: build() does NOT depend on seq_lens_cpu or num_computed_tokens_cpu
+                for correctness. Safe to use with async SPS zero bubble mode.
+            False: build() depends on correct seq_lens_cpu or num_computed_tokens_cpu.
+                Cannot be used with async SPS zero bubble mode.
+        """
+        return cls._supports_async_sps_zero_bubble
 
     def _init_reorder_batch_threshold(
         self,
