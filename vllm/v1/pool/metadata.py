@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.pooling_params import PoolingParams
+from vllm.tasks import PoolingTask
 from vllm.utils.platform_utils import is_pin_memory_available
 
 pin_memory = is_pin_memory_available()
@@ -40,6 +41,18 @@ class PoolingMetadata:
     pooling_params: list[PoolingParams]
     pooling_cursor: PoolingCursor | None = None
 
+    def __post_init__(self) -> None:
+        pooling_params = self.pooling_params
+
+        tasks: list[PoolingTask] = [
+            task
+            for pooling_param in pooling_params
+            if (task := pooling_param.task) is not None
+        ]
+        assert len(pooling_params) == len(tasks)
+
+        self.tasks = tasks
+
     def __getitem__(self, indices: slice):
         return PoolingMetadata(
             prompt_lens=self.prompt_lens[indices],
@@ -51,6 +64,14 @@ class PoolingMetadata:
             if self.pooling_cursor is None
             else self.pooling_cursor[indices],
         )
+
+    def get_prompt_token_ids(self) -> list[torch.Tensor]:
+        prompt_token_ids = self.prompt_token_ids
+        assert prompt_token_ids is not None, (
+            "Please set `requires_token_ids=True` in `get_pooling_updates`"
+        )
+
+        return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
 
     def build_pooling_cursor(
         self, num_scheduled_tokens: list[int], device: torch.device
