@@ -589,10 +589,12 @@ void moe_lora_align_block_size(
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  const int32_t num_thread = max((int32_t)num_experts, 128);  // WARP_SIZE,
-  TORCH_CHECK(num_thread <= 1024,
-              "num_thread must be less than 1024, "
-              "and fallback is not implemented yet.");
+  int64_t padded_num_experts =
+      ((num_experts + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
+
+  // BlockScan uses 1024 threads and assigns one thread per expert.
+  TORCH_CHECK(padded_num_experts < 1024,
+              "padded_num_experts must be less than 1024");
 
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
@@ -605,14 +607,12 @@ void moe_lora_align_block_size(
             (topk_ids.numel() < 1024) && (num_experts <= 64);
 
         if (small_batch_expert_mode) {
+          const int32_t num_thread = max((int32_t)num_experts, 128);
           const int32_t shared_mem =
               (num_thread + 1) * num_experts * sizeof(int32_t) +
               (num_experts + 1) * sizeof(int32_t);
           if (shared_mem > device_max_shared_mem) {
-            TORCH_CHECK(
-                false,
-                "Shared memory usage exceeds device limit, and global memory "
-                "fallback is not implemented yet.");
+            TORCH_CHECK(false, "Shared memory usage exceeds device limit.");
           }
 
           dim3 blockDim(num_thread);
@@ -633,9 +633,6 @@ void moe_lora_align_block_size(
         } else {
           int num_thread = 1024;
           dim3 blockDim(num_thread);
-
-          int64_t padded_num_experts =
-              ((num_experts + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
           size_t num_warps = CEILDIV(padded_num_experts, WARP_SIZE);
 
           size_t shared_mem_size = num_warps * WARP_SIZE * sizeof(int32_t);
