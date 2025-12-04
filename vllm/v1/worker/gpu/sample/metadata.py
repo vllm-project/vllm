@@ -26,7 +26,7 @@ class SamplingMetadata:
 
     # For penalties
     idx_mapping: torch.Tensor
-    prompt_bin_counts: torch.Tensor
+    prompt_bin_mask: torch.Tensor
     output_bin_counts: torch.Tensor
 
     @classmethod
@@ -57,7 +57,7 @@ class SamplingMetadata:
         # NOTE(woosuk): These are placeholder tensors to avoid None checks in the
         # penalties kernel. We use 2 instead of 1 as vocab_size to avoid Triton
         # specialization and re-compilation at runtime.
-        prompt_bin_counts = torch.zeros(num_reqs, 2, dtype=torch.int32, device=device)
+        prompt_bin_mask = torch.zeros(num_reqs, 2, dtype=torch.int32, device=device)
         output_bin_counts = torch.zeros(num_reqs, 2, dtype=torch.int32, device=device)
 
         return cls(
@@ -71,7 +71,7 @@ class SamplingMetadata:
             pos=pos,
             max_num_logprobs=max_num_logprobs,
             idx_mapping=idx_mapping,
-            prompt_bin_counts=prompt_bin_counts,
+            prompt_bin_mask=prompt_bin_mask,
             output_bin_counts=output_bin_counts,
         )
 
@@ -174,6 +174,6 @@ def expand_sampling_metadata(
         max_num_logprobs=sampling_metadata.max_num_logprobs,
         # TODO(woosuk): Support penalties with spec decoding.
         idx_mapping=sampling_metadata.idx_mapping,
-        prompt_bin_counts=sampling_metadata.prompt_bin_counts,
+        prompt_bin_mask=sampling_metadata.prompt_bin_mask,
         output_bin_counts=sampling_metadata.output_bin_counts,
     )
