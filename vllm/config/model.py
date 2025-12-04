@@ -37,15 +37,13 @@ from vllm.transformers_utils.config import (
     uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
-    maybe_patch_hf_config_from_gguf,
-)
-from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import (
     is_gguf,
     is_remote_gguf,
-    maybe_model_redirect,
+    maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -86,7 +84,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -143,6 +141,7 @@ class ModelConfig:
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
+    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
@@ -1781,20 +1780,22 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["all", "mean", "step", "cls"]:
+                if pooling_type in ["mean", "step", "cls"]:
                     logger.debug(
                         "Pooling models with %s pooling does not "
                         "support chunked prefill.",
                         pooling_type,
                     )
                     return False
-                else:
-                    # pooling_type == "last"
+                elif pooling_type in ["all", "last"]:
                     logger.debug(
-                        "Pooling models with causal attn and last pooling support "
-                        "chunked prefill."
+                        "Pooling models with causal attn and %s pooling support "
+                        "chunked prefill.",
+                        pooling_type,
                     )
                     return True
+                else:
+                    raise ValueError(f"{pooling_type=} not supported.")
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return attn_type != "encoder_decoder"
@@ -1818,20 +1819,22 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["all", "mean", "step", "cls"]:
+                if pooling_type in ["mean", "step", "cls"]:
                     logger.debug(
                         "Pooling models with %s pooling does not "
                         "support prefix caching.",
                         pooling_type,
                     )
                     return False
-                else:
-                    # pooling_type == "last"
+                elif pooling_type in ["all", "last"]:
                     logger.debug(
-                        "Pooling models with causal attn and last pooling support "
-                        "prefix caching."
+                        "Pooling models with causal attn and %s pooling support "
+                        "prefix caching.",
+                        pooling_type,
                     )
                     return True
+                else:
+                    raise ValueError(f"{pooling_type=} not supported.")
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return False
