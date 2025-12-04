@@ -1,6 +1,6 @@
 # Nightly Builds of vLLM Wheels
 
-vLLM maintains a per-commit wheel repository (commonly referred to as "nightly") at `https://wheels.vllm.ai` that provides pre-built wheels for every commit since `v0.5.3`. This document explains how the nightly wheel index mechanism works.
+vLLM maintains a per-commit wheel repository (commonly referred to as "nightly") at `https://wheels.vllm.ai` that provides pre-built wheels for every commit on the `main` branch since `v0.5.3`. This document explains how the nightly wheel index mechanism works.
 
 ## Build and Upload Process on CI
 
@@ -9,7 +9,7 @@ vLLM maintains a per-commit wheel repository (commonly referred to as "nightly")
 Wheels are built in the `Release` pipeline (`.buildkite/release-pipeline.yaml`) after a PR is merged into the main branch, with multiple variants:
 
 - **Backend variants**: `cpu` and `cuXXX` (e.g., `cu129`, `cu130`).
-- **Architecture variants**: x86_64 and aarch64.
+- **Architecture variants**: `x86_64` and `aarch64`.
 
 Each build step:
 
@@ -61,7 +61,7 @@ s3://vllm-wheels/
 All built wheels are stored in `/{commit_hash}/`, while different indices are generated and reference them.
 This avoids duplication of wheel files.
 
-For example, you can use the following URLs to use different indices:
+For example, you can specify the following URLs to use different indices:
 
 - `https://wheels.vllm.ai/nightly/cu130` for the latest main branch wheels built with CUDA 13.0.
 - `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
