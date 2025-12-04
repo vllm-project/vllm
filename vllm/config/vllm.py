@@ -666,17 +666,18 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
-        # if (
-        #     self.compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE OR FULL_AND_PIECEWISE
-        #     and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-        # ):
-        #     logger.info(
-        #         "Cudagraph mode %s is not compatible with compilation mode %s."
-        #         "Overriding to NONE.",
-        #         self.compilation_config.cudagraph_mode,
-        #         self.compilation_config.mode,
-        #     )
-        #     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if (
+            self.compilation_config.cudagraph_mode
+            in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE)
+            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        ):
+            logger.info(
+                "Cudagraph mode %s is not compatible with compilation mode %s."
+                "Overriding to NONE.",
+                self.compilation_config.cudagraph_mode,
+                self.compilation_config.mode,
+            )
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -702,13 +703,19 @@ class VllmConfig:
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif self.model_config.is_encoder_decoder:
-                    pass
-                    # logger.warning_once(
-                    #     "Encoder-decoder models do not support full cudagraphs. "
-                    #     "Overriding cudagraph_mode to PIECEWISE."
-                    # )
-                    # self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                elif (
+                    self.model_config.is_encoder_decoder
+                    and self.compilation_config.cudagraph_mode
+                    not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+                ):
+                    logger.info_once(
+                        "Encoder-decoder models do not support %s. "
+                        "Overriding cudagraph_mode to FULL_DECODE_ONLY.",
+                        self.compilation_config.cudagraph_mode.name,
+                    )
+                    self.compilation_config.cudagraph_mode = (
+                        CUDAGraphMode.FULL_DECODE_ONLY
+                    )
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:

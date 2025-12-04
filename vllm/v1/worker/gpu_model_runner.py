@@ -2766,6 +2766,7 @@ class GPUModelRunner(
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
+        num_encoder_reqs: int = 0,
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
@@ -2782,6 +2783,12 @@ class GPUModelRunner(
             if force_uniform_decode is None
             else force_uniform_decode
         )
+        # Encoder-decoder models only support GC for decoder_step > 0 (no enc_output
+        # is present). Also, chunked-prefill is disabled, so batch are uniform.
+        has_encoder_output = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+        uniform_decode = uniform_decode and not has_encoder_output
 
         has_lora = (
             len(self.input_batch.lora_id_to_lora_request) > 0
@@ -2999,6 +3006,7 @@ class GPUModelRunner(
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     max_num_scheduled_tokens=max_num_scheduled_tokens,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
 
                 logger.debug(
@@ -3075,7 +3083,6 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            # if same_step(prefill and decode_step 0) -> eager o/w call torch.compiled model for subsequent ones
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4157,7 +4164,6 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                 ),
             ):
-            # CALLING MODEL
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
