@@ -11,6 +11,7 @@ from vllm import envs
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import mxfp8_e4m3_quantize_python, block_scaled_matmul, block_scaled_matmul_fake, dequant_mxfp8_to_bf16, mxfp8_e4m3_quantize
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 from vllm.utils.platform_utils import get_cu_count
@@ -490,6 +491,62 @@ class Fp8LinearOp:
             bias=bias,
             output_shape=output_shape,
         )
+
+
+direct_register_custom_op(
+    op_name="block_scaled_matmul2",
+    op_func=block_scaled_matmul,
+    fake_impl=block_scaled_matmul_fake,
+)
+
+direct_register_custom_op(
+    op_name="mxfp8_quantize",
+    op_func=mxfp8_e4m3_quantize,
+    fake_impl=mxfp8_e4m3_quantize_python,
+)
+class MXFp8LinearOp:
+    """
+    This class executes a MXFP8 linear layer using pytorch.
+    It needs to be a class instead of a method so that config can be read
+    in the __init__ method, as reading config is not allowed inside forward.
+    """
+
+    def __init__(
+        self,
+    ):
+        
+        self.preferred_backend = "triton"        
+    def apply(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Apply linear layer in fake MXFP8 with block-wise matmul and dequantization.
+        """
+        fake = False
+        if fake:
+            # q_input, input_scales = mxfp8_e4m3_quantize_python(input, False)
+            # dq_input = dequant_mxfp8_to_bf16(q_input, input_scales)
+            # dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale)
+
+            output = torch.matmul(input, weight.T)
+            return output
+        
+        q_input, input_scales = torch.ops.vllm.mxfp8_quantize(input, True)
+        output = torch.ops.vllm.block_scaled_matmul2(
+            q_input,
+            input_scales,
+            weight,
+            weight_scale,
+            out_dtype,
+            "mxfp8",
+            True,
+        )
+        return output
 
 
 def normalize_e4m3fn_to_e4m3fnuz(

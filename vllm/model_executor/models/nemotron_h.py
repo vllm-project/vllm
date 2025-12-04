@@ -206,6 +206,7 @@ class NemotronHMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            is_gated=config.mlp_hidden_act != "relu2" # Hack to identify non-gated MoE TODO: find a better way
         )
 
         if self.use_latent_moe:

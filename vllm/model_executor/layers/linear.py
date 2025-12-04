@@ -840,7 +840,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
+            weight_block_size = self.weight_block_size if self.weight_block_size else [1, 32]
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (
@@ -1035,7 +1035,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             assert self.quant_method is not None
             # Assume the weight block size has been set by quant method
             assert hasattr(self, "weight_block_size")
-            weight_block_size = self.weight_block_size
+            weight_block_size = self.weight_block_size if self.weight_block_size else [1, 32]
             assert weight_block_size is not None
             block_n, _ = weight_block_size[0], weight_block_size[1]
             shard_offset = (shard_offset + block_n - 1) // block_n

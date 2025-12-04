@@ -1060,6 +1060,7 @@ def create_fp8_scale_parameter(
     input_size_per_partition: int,
     block_size: list[int] | None,
     weight_loader: Callable | None,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.nn.Parameter:
     """Create scale parameter based on quantization strategy."""
     if parameter_type == ChannelQuantScaleParameter:
@@ -1076,7 +1077,7 @@ def create_fp8_scale_parameter(
             data=torch.empty(
                 (output_size_per_partition + block_n - 1) // block_n,
                 (input_size_per_partition + block_k - 1) // block_k,
-                dtype=torch.float32,
+                dtype=dtype,
             ),
             input_dim=1,
             output_dim=0,
@@ -1089,8 +1090,11 @@ def create_fp8_scale_parameter(
         )
     else:
         raise ValueError(f"Unknown parameter type: {parameter_type}")
-
-    scale[:] = torch.finfo(torch.float32).min
+    if dtype == torch.float32:
+        inf_min = torch.finfo(dtype).min
+    else:
+        inf_min = torch.iinfo(dtype).min
+    scale[:] = inf_min
     return scale
 
 
