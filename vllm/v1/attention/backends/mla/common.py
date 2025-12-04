@@ -360,7 +360,6 @@ class MLACommonPrefillMetadata:
     @dataclass
     class PCPMetadata:
         # For PCP
-        pcp_allgather_restore_idx: torch.Tensor | None = None
         kv_head_indices: torch.Tensor | None = None
         kv_tail_indices: torch.Tensor | None = None
         query_head_indices: torch.Tensor | None = None
@@ -443,6 +442,8 @@ class MLACommonMetadata(Generic[D]):
         | CudnnPrefillMetadata
         | None
     ) = None
+
+    pcp_allgather_restore_idx: torch.Tensor | None = None
 
     def __post_init__(self):
         if self.head_dim is not None and not MLACommonBackend.supports_head_size(
@@ -1033,7 +1034,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     output_restore_idx=output_res_idx.to(
                         device, dtype=torch.int32, non_blocking=True
                     ),
-                    pcp_allgather_restore_idx=pcp_allgather_restore_idx,
                 )
 
             prefill_metadata = self.prefill_metadata_cls(
@@ -1099,6 +1099,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            pcp_allgather_restore_idx=pcp_allgather_restore_idx,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
@@ -2143,23 +2144,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_pe = k_pe[:num_actual_toks, ...]
 
         if self.pcp_world_size > 1:
-            if attn_metadata.prefill is not None:
-                pcp_metadata = attn_metadata.prefill.pcp_metadata
-                assert pcp_metadata is not None
-                assert pcp_metadata.pcp_allgather_restore_idx is not None
-                k_c_normed, k_pe = pcp_kv_allgather_and_restore(
-                    k_c_normed,
-                    k_pe,
-                    num_actual_toks,
-                    pcp_metadata.pcp_allgather_restore_idx,
-                    get_pcp_group(),
-                )
-            else:
-                # NOTE(yyj) Skip unnecessary kv all-gather when there are only decode
-                # requests, but token duplication is still required to align with
-                # the padding in slot mapping.
-                k_c_normed = k_c_normed.repeat_interleave(self.pcp_world_size, dim=0)
-                k_pe = k_pe.repeat_interleave(self.pcp_world_size, dim=0)
+            assert attn_metadata.pcp_allgather_restore_idx is not None
+            k_c_normed, k_pe = pcp_kv_allgather_and_restore(
+                k_c_normed,
+                k_pe,
+                num_actual_toks,
+                attn_metadata.pcp_allgather_restore_idx,
+                get_pcp_group(),
+            )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
