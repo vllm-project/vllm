@@ -8,6 +8,7 @@ from typing import TypeVar, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -27,12 +28,13 @@ from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    LinearBase,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -47,6 +49,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadata,
+    dynamic_per_batched_tensor_quant,
     reorg_kvcache,
 )
 from vllm.v1.kv_cache_interface import (
@@ -695,35 +698,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-    # Property accessors for impl weights
-    # (set during process_weights_after_loading in common.py)
-    @property
-    def W_UV(self):
-        return getattr(self.impl, "W_UV", None)
+        # Weight matrices set by process_weights_after_loading
+        # For non-aiter path:
+        self.W_UV: torch.Tensor | None = None
+        self.W_UK_T: torch.Tensor | None = None
+        # For aiter fp8 path:
+        self.W_K: torch.Tensor | None = None
+        self.W_K_scale: torch.Tensor | None = None
+        self.W_V: torch.Tensor | None = None
+        self.W_V_scale: torch.Tensor | None = None
 
-    @property
-    def W_UK_T(self):
-        return getattr(self.impl, "W_UK_T", None)
-
-    @property
-    def W_V(self):
-        return getattr(self.impl, "W_V", None)
-
-    @property
-    def W_V_scale(self):
-        return getattr(self.impl, "W_V_scale", None)
-
-    @property
-    def W_K(self):
-        return getattr(self.impl, "W_K", None)
-
-    @property
-    def W_K_scale(self):
-        return getattr(self.impl, "W_K_scale", None)
-
-    @property
-    def q_pad_num_heads(self):
-        return getattr(self.impl, "q_pad_num_heads", None)
+        # Get q_pad_num_heads from impl (set in impl's __init__)
+        self.q_pad_num_heads: int | None = getattr(self.impl, "q_pad_num_heads", None)
 
     # Property accessors for impl methods
     @property
@@ -758,7 +744,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
+                self.forward_impl(
                     self,
                     q,
                     kv_c_normed,
@@ -769,7 +755,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                return self.impl.forward(
+                return self.forward_impl(
                     self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
@@ -792,8 +778,99 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        if hasattr(self.impl, "process_weights_after_loading"):
-            self.impl.process_weights_after_loading(act_dtype)
+        def get_layer_weight(layer):
+            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+            for attr in WEIGHT_NAMES:
+                if hasattr(layer, attr):
+                    return getattr(layer, attr)
+            raise AttributeError(
+                f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
+            )
+
+        def get_and_maybe_dequant_weights(layer: LinearBase):
+            if not isinstance(layer.quant_method, UnquantizedLinearMethod):
+                # NOTE: This should only be used offline, since it's O(N^3)
+                eye = torch.eye(
+                    layer.input_size_per_partition,
+                    dtype=act_dtype,
+                    device=get_layer_weight(layer).device,
+                )
+                dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
+                del eye
+                # standardize to (output, input)
+                return dequant_weights.T
+            return layer.weight
+
+        # we currently do not have quantized bmm's which are needed for
+        # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
+        # the bmm's in 16-bit, the extra memory overhead of this is fairly low
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        assert kv_b_proj_weight.shape == (
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), (
+            f"{kv_b_proj_weight.shape=}, "
+            f"{self.kv_lora_rank=}, "
+            f"{self.num_heads=}, "
+            f"{self.qk_nope_head_dim=}, "
+            f"{self.v_head_dim=}"
+        )
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+
+        W_UK, W_UV = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            W_K = W_UK.transpose(0, 1)  # 16 512 128
+            W_V = W_UV.permute(1, 2, 0)  # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
+                W_K, dtype=current_platform.fp8_dtype()
+            )
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
+                W_V, dtype=current_platform.fp8_dtype()
+            )
+
+            # The kernel operates on non-padded inputs. Hence, pre-compiling
+            # triton kernel to avoid runtime compilation for unseen batch sizes
+            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+            # On DS-R1, this step adds roughly 50s to the model loading time.
+            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+            pre_compilation_list = list(range(1, max_batch_size + 1))
+            if is_global_first_rank():
+                pre_compilation_list = tqdm(
+                    pre_compilation_list,
+                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                    total=max_batch_size,
+                )
+
+            for m in pre_compilation_list:
+                x = torch.empty(
+                    (self.W_K.shape[0], m, self.W_K.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_K.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
+                )
+
+                x = torch.empty(
+                    (self.W_V.shape[0], m, self.W_V.shape[2]),
+                    dtype=torch.bfloat16,
+                    device=self.W_V.device,
+                )
+                rocm_aiter_ops.triton_fp8_bmm(
+                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
+                )
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def calc_kv_scales(
         self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
@@ -1214,6 +1291,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = decode_q_nope.shape
+                assert self.W_UK_T is not None
                 _, _, L = self.W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
