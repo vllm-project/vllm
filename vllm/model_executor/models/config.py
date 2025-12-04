@@ -495,12 +495,14 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
-        FP16 if not specified.
+        float16 if not specified.
         """
         cache_config = vllm_config.cache_config
         if cache_config.mamba_ssm_cache_dtype == "auto":
             hf_config = vllm_config.model_config.hf_config
-            mamba_ssm_cache_dtype = getattr(hf_config, "mamba_ssm_cache_dtype", "half")
+            mamba_ssm_cache_dtype = getattr(
+                hf_config, "mamba_ssm_cache_dtype", "float16"
+            )
             logger.info(
                 "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
                 mamba_ssm_cache_dtype,
