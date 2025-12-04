@@ -708,8 +708,6 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # logger.info(f"In Scheduler Generate Scheduler Output")
-        # from fpdb import ForkedPdb; ForkedPdb().set_trace()
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -744,8 +742,6 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
-        # logger.info(f"In Scheduler Update After Schedule")
-        # from fpdb import ForkedPdb; ForkedPdb().set_trace()
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
