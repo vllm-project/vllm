@@ -60,9 +60,9 @@ def benchmark_method(
 
 
 @torch.inference_mode()
-def main():
+def run_benchmark(dtype: torch.dtype, dtype_name: str):
+    """Run benchmark for a specific dtype."""
     torch.set_default_device("cuda")
-    dtype = torch.bfloat16
 
     # Batch sizes to test (powers of 2 from 32 to 65536)
     batch_sizes = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
@@ -74,7 +74,7 @@ def main():
         f"Tensor shapes: k_nope=[B, {NUM_HEADS}, {QK_NOPE_HEAD_DIM}], "
         f"k_pe=[B, 1, {PE_DIM}]"
     )
-    print(f"dtype: {dtype}")
+    print(f"dtype: {dtype_name}")
     print()
     print(
         f"{'Batch Size':>12} | {'cat (ms)':>10} | {'direct (ms)':>12} | "
@@ -84,9 +84,13 @@ def main():
 
     results = []
     for batch_size in batch_sizes:
-        # Create input tensors
-        k_nope = torch.randn(batch_size, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=dtype)
-        k_pe = torch.randn(batch_size, 1, PE_DIM, dtype=dtype)
+        # Create input tensors (generate in float32 then convert for FP8 compatibility)
+        k_nope = torch.randn(
+            batch_size, NUM_HEADS, QK_NOPE_HEAD_DIM, dtype=torch.float32, device="cuda"
+        ).to(dtype)
+        k_pe = torch.randn(
+            batch_size, 1, PE_DIM, dtype=torch.float32, device="cuda"
+        ).to(dtype)
 
         # Benchmark both methods
         cat_time = benchmark_method(cat_method, k_nope, k_pe)
@@ -127,6 +131,19 @@ def main():
         avg_large = sum(large_batch_speedups) / len(large_batch_speedups)
         print(f"  - For batch sizes >= 512: avg speedup = {avg_large:.2f}x")
     print("  - MLA prefill typically uses large batches, so optimization is effective")
+
+    return results
+
+
+@torch.inference_mode()
+def main():
+    # Test bfloat16
+    print("\n")
+    run_benchmark(torch.bfloat16, "bfloat16")
+
+    # Test float8_e4m3fn
+    print("\n")
+    run_benchmark(torch.float8_e4m3fn, "float8_e4m3fn")
 
 
 if __name__ == "__main__":
