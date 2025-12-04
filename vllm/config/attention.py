@@ -81,7 +81,7 @@ class AttentionConfig:
             setattr(self, field_name, value)
             logger.warning_once(
                 "Using %s environment variable is deprecated and will be removed in "
-                "v0.13.0 or v1.0.0, whichever is soonest. Please use "
+                "v0.14.0 or v1.0.0, whichever is soonest. Please use "
                 "--attention-config.%s command line argument or "
                 "AttentionConfig(%s=...) config field instead.",
                 env_var_name,
