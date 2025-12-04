@@ -8,11 +8,11 @@ of logging configurations that range from simple-and-inflexible to
 more-complex-and-more-flexible.
 
 - No vLLM logging (simple and inflexible)
-  - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
+    - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
 - vLLM's default logging configuration (simple and inflexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
 - Fine-grained custom logging configuration (more complex, more flexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
 ## Logging Configuration Environment Variables
@@ -169,7 +169,7 @@ option.
 
 ```bash
 vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
-    --disable-access-log-for-endpoints /health /metrics /ping
+    --disable-access-log-for-endpoints /health,/metrics,/ping
 ```
 
 **Common endpoints to consider filtering:**
@@ -184,8 +184,8 @@ vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
 **Notes:**
 
 - This option only affects uvicorn access logs, not vLLM application logs
-- You can specify multiple endpoints by separating them with spaces
-- The filter uses prefix matching, so `/health` will also match `/health?verbose=true`
+- Specify multiple endpoints by separating them with commas (no spaces)
+- The filter uses exact path matching, query parameters are ignored (e.g., `/health?verbose=true` matches `/health`)
 - If you need to completely disable all access logs, use `--disable-uvicorn-access-log` instead
 
 ## Additional resources

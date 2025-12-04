@@ -749,8 +749,14 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     if args.disable_access_log_for_endpoints:
         from vllm.logging_utils import create_uvicorn_log_config
 
+        # Parse comma-separated string into list
+        excluded_paths = [
+            p.strip()
+            for p in args.disable_access_log_for_endpoints.split(",")
+            if p.strip()
+        ]
         return create_uvicorn_log_config(
-            excluded_paths=args.disable_access_log_for_endpoints,
+            excluded_paths=excluded_paths,
             log_level=args.uvicorn_log_level,
         )
 
