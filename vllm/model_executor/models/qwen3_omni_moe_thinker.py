@@ -742,6 +742,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             mm_kwargs = dict(mm_kwargs)
             tok_kwargs = dict(tok_kwargs)
             if Version(TRANSFORMERS_VERSION) < Version("4.58.0"):
+                # Extract audio_sample_rate before restructuring
+                audio_sample_rate = mm_kwargs.pop("audio_sample_rate", None)
+
                 # move truncation to audio_kwargs level to avoid conflict
                 # with tok_kwargs
                 mm_kwargs["audio_kwargs"] = {
@@ -750,6 +753,10 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 mm_kwargs["text_kwargs"] = {
                     "truncation": tok_kwargs.pop("truncation", False)
                 }
+
+                # Put audio_sample_rate into audio_kwargs if it exists
+                if audio_sample_rate is not None:
+                    mm_kwargs["audio_kwargs"]["audio_sample_rate"] = audio_sample_rate
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
