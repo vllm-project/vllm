@@ -27,7 +27,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -131,7 +131,7 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -257,6 +257,7 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class GPUModelRunner(
@@ -2290,20 +2291,6 @@ class GPUModelRunner(
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if self.scheduler_config.enable_chunked_prefill:
-            if "token_embed" in supported_tasks:
-                supported_tasks.remove("token_embed")
-            if "token_classify" in supported_tasks:
-                supported_tasks.remove("token_classify")
-
-            logger.debug_once(
-                "Chunked prefill is not supported with "
-                "token_embed and token_classify tasks "
-                "which using ALL pooling. "
-                "Please turn off chunked prefill by "
-                "`--no-enable-chunked-prefill` before using it."
-            )
-
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
@@ -2380,11 +2367,12 @@ class GPUModelRunner(
         )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
+        seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
+
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
-            num_scheduled_tokens_np.tolist(), device=hidden_states.device
+            num_scheduled_tokens_np.tolist(), seq_lens_cpu, device=hidden_states.device
         )
-        seq_lens_cpu = self.seq_lens.cpu[: self.input_batch.num_reqs]
 
         model = cast(VllmModelForPooling, self.model)
         raw_pooler_output: PoolerOutput = model.pooler(
@@ -2392,7 +2380,7 @@ class GPUModelRunner(
             pooling_metadata=pooling_metadata,
         )
         raw_pooler_output = json_map_leaves(
-            lambda x: x.to("cpu", non_blocking=True),
+            lambda x: x.to("cpu", non_blocking=True) if x is not None else x,
             raw_pooler_output,
         )
         self._sync_device()
@@ -2755,7 +2743,11 @@ class GPUModelRunner(
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
     ) -> tuple[
-        CUDAGraphMode, BatchDescriptor, UBatchSlices | None, torch.Tensor | None
+        CUDAGraphMode,
+        BatchDescriptor,
+        UBatchSlices | None,
+        torch.Tensor | None,
+        CUDAGraphStat | None,
     ]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         uniform_decode = (
@@ -2820,7 +2812,22 @@ class GPUModelRunner(
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
-        return cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp
+        cudagraph_stats = None
+        if self.vllm_config.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_tokens,
+                num_padded_tokens=batch_descriptor.num_tokens,
+                num_paddings=batch_descriptor.num_tokens - num_tokens,
+                runtime_mode=str(cudagraph_mode),
+            )
+
+        return (
+            cudagraph_mode,
+            batch_descriptor,
+            ubatch_slices,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -2918,6 +2925,7 @@ class GPUModelRunner(
                     batch_desc,
                     ubatch_slices,
                     num_tokens_across_dp,
+                    cudagraph_stats,
                 ) = self._determine_batch_execution_and_padding(
                     num_tokens=num_tokens_unpadded,
                     num_reqs=num_reqs,
@@ -3067,6 +3075,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -3102,6 +3111,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -3217,6 +3227,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                cudagraph_stats=cudagraph_stats,
             )
 
         if not self.use_async_scheduling:
@@ -3937,7 +3948,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp = (
+        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -4224,10 +4235,13 @@ class GPUModelRunner(
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
             pooling_params=[dummy_pooling_params] * num_reqs,
+            pooling_states=[PoolingStates() for i in range(num_reqs)],
         )
 
         dummy_metadata.build_pooling_cursor(
-            num_scheduled_tokens_list, device=hidden_states.device
+            num_scheduled_tokens_list,
+            seq_lens_cpu=dummy_prompt_lens,
+            device=hidden_states.device,
         )
 
         try:
@@ -4254,22 +4268,12 @@ class GPUModelRunner(
         supported_pooling_tasks = self.get_supported_pooling_tasks()
 
         if not supported_pooling_tasks:
-            if self.scheduler_config.enable_chunked_prefill:
-                raise RuntimeError(
-                    f"Model {self.model_config.model} does not support "
-                    "any pooling tasks with chunked prefill enabled. "
-                    "Please add --no-enable-chunked-prefill to your "
-                    "config or CLI args. See "
-                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
-                    "to learn more."
-                )
-            else:
-                raise RuntimeError(
-                    f"Model {self.model_config.model} does not support "
-                    "any pooling tasks. See "
-                    "https://docs.vllm.ai/en/latest/models/pooling_models.html "
-                    "to learn more."
-                )
+            raise RuntimeError(
+                f"Model {self.model_config.model} does not support "
+                "any pooling tasks. See "
+                "https://docs.vllm.ai/en/latest/models/pooling_models.html "
+                "to learn more."
+            )
 
         output_size = dict[PoolingTask, float]()
         for task in supported_pooling_tasks:
