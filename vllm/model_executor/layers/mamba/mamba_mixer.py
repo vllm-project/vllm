@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
+from vllm import envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -240,7 +241,10 @@ class MambaMixer(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        prefix_caching_enabled = (
+            not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and self.cache_config.enable_prefix_caching
+        )
 
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
