@@ -10,10 +10,10 @@ set -ex
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"12cecfd"}
 DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
-NVSHMEM_VER=3.3.9
+NVSHMEM_VER=3.3.24  # Suppports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
-
+CUDA_VERSION_MAJOR=$(${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2)
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -75,11 +75,11 @@ ARCH=$(uname -m)
 case "${ARCH,,}" in
   x86_64|amd64)
     NVSHMEM_SUBDIR="linux-x86_64"
-    NVSHMEM_FILE="libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda12-archive.tar.xz"
+    NVSHMEM_FILE="libnvshmem-linux-x86_64-${NVSHMEM_VER}_cuda${CUDA_VERSION_MAJOR}-archive.tar.xz"
     ;;
   aarch64|arm64)
     NVSHMEM_SUBDIR="linux-sbsa"
-    NVSHMEM_FILE="libnvshmem-linux-sbsa-${NVSHMEM_VER}_cuda12-archive.tar.xz"
+    NVSHMEM_FILE="libnvshmem-linux-sbsa-${NVSHMEM_VER}_cuda${CUDA_VERSION_MAJOR}-archive.tar.xz"
     ;;
   *)
     echo "Unsupported architecture: ${ARCH}" >&2
@@ -142,13 +142,6 @@ clone_repo() {
     fi
 }
 
-deepep_cuda13_patch() {
-    cuda_version_major=$(${CUDA_HOME}/bin/nvcc --version | egrep -o "release [0-9]+" | cut -d ' ' -f 2)
-    if [ ${cuda_version_major} -ge 13 ]; then
-        sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
-    fi
-}
-
 do_build() {
     local repo=$1
     local name=$2
@@ -160,8 +153,8 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
-    if [ "$name" == "DeepEP" ]; then
-        deepep_cuda13_patch
+    if [ "$name" == "DeepEP" ] && [ ${CUDA_VERSION_MAJOR} -ge 13 ]; then
+        sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"
     fi
 
     if [ "$MODE" = "install" ]; then
