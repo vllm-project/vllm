@@ -85,12 +85,6 @@ def _dummy_items(
         (_dummy_item("a", {"a1": 100}), 100),
         (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
         (_dummy_items({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
-        (
-            _dummy_items(
-                {"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}
-            ).get_data(),
-            460,
-        ),  # noqa: E501
     ],
 )
 def test_cache_item_size(item, expected_size):
@@ -105,6 +99,9 @@ def test_cache_item_size(item, expected_size):
     assert cache.currsize == expected_size
 
     cache[""] = MultiModalProcessorCacheItemMetadata(item, [prompt_update])
+    assert cache.currsize == expected_size
+
+    cache[""] = item.get_data()
     assert cache.currsize == expected_size
 
 
