@@ -18,7 +18,8 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.transformers_utils.utils import convert_model_repo_to_path, is_gguf
+from vllm.transformers_utils.gguf_utils import is_gguf
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
