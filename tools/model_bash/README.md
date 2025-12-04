@@ -38,6 +38,3 @@ export OUTPUT_LEN=1000
 
 just sweep $MODEL $INPUT_LEN $OUTPUT_LEN
 ```
-
-
-
