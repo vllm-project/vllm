@@ -440,6 +440,18 @@ class BlockPool:
         """
         return self.free_block_queue.num_free_blocks
 
+    def get_num_total_blocks(self) -> int:
+        """Get the total number of blocks in the pool.
+
+        Returns:
+            The total number of GPU blocks available for allocation.
+
+        Note:
+            Excludes 1 block reserved for system use to match
+            internal allocation behavior.
+        """
+        return self.num_gpu_blocks - 1
+
     def get_usage(self) -> float:
         """Get the KV cache usage.
 
