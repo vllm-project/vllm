@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
     VLLM_PROFILER_DELAY_ITERS: str | None = None
     VLLM_PROFILER_MAX_ITERS: str | None = None
+    # End of deprecated env variables for profiling
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
