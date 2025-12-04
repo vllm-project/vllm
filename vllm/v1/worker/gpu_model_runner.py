@@ -1533,6 +1533,7 @@ class GPUModelRunner(
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
         assert num_reqs_padded is not None
+        assert num_tokens_padded is not None
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1653,7 +1654,12 @@ class GPUModelRunner(
                     **extra_attn_metadata_args,
                 )
 
-            attn_metadata_dict = attn_metadata if ubid is None else attn_metadata[ubid]  # type: ignore[index, assignment]
+            if ubid is None:
+                attn_metadata_dict = attn_metadata
+            else:
+                assert isinstance(attn_metadata, list)
+                attn_metadata_dict = attn_metadata[ubid]
+
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
 
