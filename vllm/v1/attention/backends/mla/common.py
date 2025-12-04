@@ -1134,33 +1134,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        """Delegates to the layer's process_weights_after_loading method.
-
-        This method is kept for backward compatibility with tests that call
-        impl.process_weights_after_loading() directly. The actual implementation
-        has been moved to MLAAttention.process_weights_after_loading().
-        """
-        # Try to find the layer from the compilation config
-        vllm_config = get_current_vllm_config()
-        static_forward_context = vllm_config.compilation_config.static_forward_context
-
-        # Find the layer that uses this impl
-        for layer_name, layer in static_forward_context.items():
-            if (
-                hasattr(layer, "impl")
-                and layer.impl is self
-                and hasattr(layer, "process_weights_after_loading")
-            ):
-                layer.process_weights_after_loading(act_dtype)
-                return
-
-        # If we can't find the layer, raise an error
-        raise RuntimeError(
-            "process_weights_after_loading() has been moved to MLAAttention layer. "
-            "Please call it on the layer instance instead of the impl."
-        )
-
 
 class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     """

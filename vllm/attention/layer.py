@@ -872,6 +872,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Convert from (L, N, P) to (N, P, L)
             self.W_UK_T = W_UK.permute(1, 2, 0)
 
+        # Also set weight matrices on impl for sparse backends that have
+        # their own forward() using self.W_UK_T etc.
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            self.impl.W_K = self.W_K
+            self.impl.W_K_scale = self.W_K_scale
+            self.impl.W_V = self.W_V
+            self.impl.W_V_scale = self.W_V_scale
+        else:
+            self.impl.W_UV = self.W_UV
+            self.impl.W_UK_T = self.W_UK_T
+
     def calc_kv_scales(
         self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
     ) -> None:
@@ -972,7 +983,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+            attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
                 prefill=prefill_metadata,
                 chunk_idx=i,
                 q=q,
@@ -1076,7 +1087,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+            attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
                 prefill=prefill_metadata,
                 chunk_idx=i,
                 q=q,
@@ -1125,7 +1136,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        output_prefill = self._run_prefill_new_tokens(
+        output_prefill = self.impl._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
             k=k,
