@@ -323,12 +323,7 @@ class NgramProposerGPU:
             device=self.device,
         )
 
-        combined_mask = (
-            sampled_flags
-            & valid_mask
-            & (num_tokens < self.max_model_len)
-            & (num_tokens >= self.min_n)
-        )
+        combined_mask = sampled_flags & valid_mask & (num_tokens >= self.min_n)
 
         for _ in range(3):
             with set_forward_context(None, self.vllm_config):
