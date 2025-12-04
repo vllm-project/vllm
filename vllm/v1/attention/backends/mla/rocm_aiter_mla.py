@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -15,6 +16,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -52,6 +54,20 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The dtype of MLA out tensor
     attn_out_dtype: torch.dtype = torch.bfloat16
 
+    max_seqlen_qo: int = 1
+
+    work_metadata: torch.Tensor | None = None
+
+    work_info_set: torch.Tensor | None = None
+
+    work_indptr: torch.Tensor | None = None
+
+    reduce_indptr: torch.Tensor | None = None
+
+    reduce_final_map: torch.Tensor | None = None
+
+    reduce_partial_map: torch.Tensor | None = None
+
 
 class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     pass
@@ -60,9 +76,8 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
     def __init__(
         self,
@@ -75,12 +90,46 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             kv_cache_spec, layer_names, vllm_config, device, AiterMLAMetadata
         )
 
+        gpu = torch.cuda.current_device()
+        device_properties = torch.cuda.get_device_properties(gpu)
+        cu_num = device_properties.multi_processor_count
+
         self.compilation_config = vllm_config.compilation_config
         self.decode_attn_out_dtype = vllm_config.model_config.dtype
         # kernel block size is always 1.
         max_num_pages_per_req = vllm_config.model_config.max_model_len
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+
+        # num_mtp = vllm_config.speculative_config.num_speculative_tokens
+        # num_mtp = 1 if num_mtp is None else num_mtp
+        max_seqlen_qo = (
+            1
+            if vllm_config.speculative_config is None
+            else vllm_config.speculative_config.num_speculative_tokens
+        )
+
+        max_qo_tiles_per_batch = int(math.ceil(max_seqlen_qo * self.num_heads / 128))
+        self.work_metadata = torch.empty([10], dtype=torch.uint64, device="cuda")
+        self.work_indptr = torch.empty([cu_num + 1], dtype=torch.int32, device="cuda")
+        self.work_info_set = torch.empty(
+            [max_num_reqs * max_qo_tiles_per_batch * cu_num, 8],
+            dtype=torch.int32,
+            device="cuda",
+        ).fill_(-1)
+        self.reduce_indptr = torch.empty(
+            [max_num_reqs * max_qo_tiles_per_batch + 1],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.reduce_final_map = torch.empty(
+            [max_num_reqs * max_qo_tiles_per_batch, 2], dtype=torch.int32, device="cuda"
+        )
+        self.reduce_partial_map = torch.empty(
+            [max_num_reqs * max_qo_tiles_per_batch * cu_num],
+            dtype=torch.int32,
+            device="cuda",
+        )
 
         # Preparing persistent buffers
         # TODO: we can disambiguate between decode and mixed-prefill decode here
@@ -128,6 +177,32 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 seq_lens_device.cumsum(dim=0, dtype=torch.int32),
             ]
         )
+        kv_indptr = torch.zeros(
+            [query_start_loc_cpu.size(0)], dtype=torch.int32, device="cuda"
+        )
+        torch.cumsum(seq_lens_device, dim=0, out=kv_indptr[1:])
+        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        max_seqlen_qo = torch.max(query_lens).item()
+
+        import aiter
+
+        aiter.get_mla_metadata_v1(
+            query_start_loc_device,
+            kv_indptr,
+            self.num_heads // self.kv_cache_spec.num_kv_heads,
+            self.kv_cache_spec.num_kv_heads,
+            True,
+            self.work_metadata,
+            self.work_info_set,
+            self.work_indptr,
+            self.reduce_indptr,
+            self.reduce_final_map,
+            self.reduce_partial_map,
+            kv_granularity=max(self.kv_cache_spec.block_size, 16),
+            max_seqlen_qo=max_seqlen_qo,
+            uni_seqlen_qo=max_seqlen_qo,
+            fast_mode=True,
+        )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             num_actual_pages = paged_kv_indices.size(0)
@@ -166,6 +241,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
             attn_out_dtype=self.decode_attn_out_dtype,
+            max_seqlen_qo=max_seqlen_qo,
+            work_metadata=self.work_metadata,
+            work_info_set=self.work_info_set,
+            work_indptr=self.work_indptr,
+            reduce_indptr=self.reduce_indptr,
+            reduce_final_map=self.reduce_final_map,
+            reduce_partial_map=self.reduce_partial_map,
         )
 
         return attn_metadata
@@ -200,11 +282,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_sharing_target_layer_name,
             **mla_args,
         )
-        assert num_heads == 16 or num_heads == 128, (
-            f"Aiter MLA only supports 16 or 128 number of heads.\n"
-            f"Provided {num_heads} number of heads.\n"
-            "Try adjusting tensor_parallel_size value."
-        )
+        # assert num_heads == 16 or num_heads == 128, (
+        #     f"Aiter MLA only supports 16 or 128 number of heads.\n"
+        #     f"Provided {num_heads} number of heads.\n"
+        #     "Try adjusting tensor_parallel_size value."
+        # )
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
@@ -257,17 +339,22 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # max_seqlen_qo must be 1 except for MTP
         # TODO: Find the best value for MTP
-        max_seqlen_qo = 1
         rocm_aiter_ops.mla_decode_fwd(
             q,
             kv_buffer,
             o,
             self.scale,
             attn_metadata.decode.qo_indptr,
-            max_seqlen_qo,
+            attn_metadata.decode.max_seqlen_qo,
             attn_metadata.decode.paged_kv_indptr,
             attn_metadata.decode.paged_kv_indices,
             attn_metadata.decode.paged_kv_last_page_len,
+            work_meta_data=attn_metadata.decode.work_metadata,
+            work_indptr=attn_metadata.decode.work_indptr,
+            work_info_set=attn_metadata.decode.work_info_set,
+            reduce_indptr=attn_metadata.decode.reduce_indptr,
+            reduce_final_map=attn_metadata.decode.reduce_final_map,
+            reduce_partial_map=attn_metadata.decode.reduce_partial_map,
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
         )
