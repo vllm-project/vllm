@@ -25,7 +25,6 @@ from typing_extensions import TypeVar, assert_never
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -80,9 +79,9 @@ def _cached_encode(
     tokenizer: TokenizerLike,
     text: str,
     *,
-    add_special_tokens: bool | None = None,
+    add_special_tokens: bool = True,
 ) -> list[int]:
-    return encode_tokens(tokenizer, text, add_special_tokens=add_special_tokens)
+    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 @lru_cache(maxsize=2048)
@@ -90,11 +89,9 @@ def _cached_decode(
     tokenizer: TokenizerLike,
     token_ids: tuple[int, ...],
     *,
-    skip_special_tokens: bool | None = None,
+    skip_special_tokens: bool = False,
 ) -> str:
-    return decode_tokens(
-        tokenizer, list(token_ids), skip_special_tokens=skip_special_tokens
-    )
+    return tokenizer.decode(list(token_ids), skip_special_tokens=skip_special_tokens)
 
 
 def _seq2text(
@@ -110,7 +107,7 @@ def _seq2text(
         raise ValueError("You cannot decode tokens when `skip_tokenizer_init=True`")
 
     if not use_cache:
-        return decode_tokens(tokenizer, seq)
+        return tokenizer.decode(seq)
 
     return _cached_decode(tokenizer, tuple(seq))
 
@@ -126,7 +123,7 @@ def _seq2tokens(
             raise ValueError("You cannot encode text when `skip_tokenizer_init=True`")
 
         if not use_cache:
-            return encode_tokens(tokenizer, seq, add_special_tokens=False)
+            return tokenizer.encode(seq, add_special_tokens=False)
 
         return _cached_encode(tokenizer, seq, add_special_tokens=False)
 
@@ -1687,7 +1684,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
-                for i, item in enumerate(items):
+                for i, item in enumerate(items.get_all_items_for_hash()):
                     item_uuid = mm_uuids_per_modality[i]
 
                     # NOTE: Even if a item_uuid is provided, we still compute a
@@ -2198,8 +2195,8 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
         if isinstance(decoder_prompt_raw, str):
-            decoder_prompt_ids = encode_tokens(
-                tokenizer, decoder_prompt_raw, add_special_tokens=False
+            decoder_prompt_ids = tokenizer.encode(
+                decoder_prompt_raw, add_special_tokens=False
             )
         else:
             decoder_prompt_ids = decoder_prompt_raw
