@@ -27,7 +27,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationMode,
@@ -257,6 +257,7 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
+    cudagraph_stats: CUDAGraphStat | None
 
 
 class GPUModelRunner(
@@ -774,7 +775,14 @@ class GPUModelRunner(
         # they will be scheduled again sometime in the future.
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
-        unscheduled_req_ids = cached_req_ids - scheduled_req_ids
+        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        # NOTE(zhuohan): cached_req_ids and resumed_req_ids are usually disjoint,
+        # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids` holds
+        # apart from the forced-preemption case in reset_prefix_cache. And in
+        # that case we include the resumed_req_ids in the unscheduled set so
+        # that they get cleared from the persistent batch before being re-scheduled
+        # in the normal resumed request path.
+        unscheduled_req_ids = cached_req_ids - (scheduled_req_ids - resumed_req_ids)
         # NOTE(woosuk): The persistent batch optimization assumes that
         # consecutive batches contain mostly the same requests. If batches
         # have low request overlap (e.g., alternating between two distinct
@@ -2410,10 +2418,7 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if (
-            self.compilation_config.pass_config.enable_sequence_parallelism
-            and tp_size > 1
-        ):
+        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -2432,16 +2437,13 @@ class GPUModelRunner(
     ]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
+        is_encoder_decoder = self.model_config.is_encoder_decoder
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         ec_connector_output = None
 
-        if (
-            self.supports_mm_inputs
-            and is_first_rank
-            and not self.model_config.is_encoder_decoder
-        ):
+        if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
             # Run the multimodal encoder if any.
             with self.maybe_get_ec_connector_output(
                 scheduler_output,
@@ -2519,10 +2521,7 @@ class GPUModelRunner(
                 num_input_tokens, intermediate_tensors, True
             )
 
-        if (
-            self.model_config.is_encoder_decoder
-            and scheduler_output.scheduled_encoder_inputs
-        ):
+        if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
             # Run the encoder, just like we do with other multimodal inputs.
             # For an encoder-decoder model, our processing here is a bit
             # simpler, because the outputs are just passed to the decoder.
@@ -2757,7 +2756,11 @@ class GPUModelRunner(
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
     ) -> tuple[
-        CUDAGraphMode, BatchDescriptor, UBatchSlices | None, torch.Tensor | None
+        CUDAGraphMode,
+        BatchDescriptor,
+        UBatchSlices | None,
+        torch.Tensor | None,
+        CUDAGraphStat | None,
     ]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         uniform_decode = (
@@ -2822,7 +2825,22 @@ class GPUModelRunner(
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
-        return cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp
+        cudagraph_stats = None
+        if self.vllm_config.observability_config.cudagraph_metrics:
+            cudagraph_stats = CUDAGraphStat(
+                num_unpadded_tokens=num_tokens,
+                num_padded_tokens=batch_descriptor.num_tokens,
+                num_paddings=batch_descriptor.num_tokens - num_tokens,
+                runtime_mode=str(cudagraph_mode),
+            )
+
+        return (
+            cudagraph_mode,
+            batch_descriptor,
+            ubatch_slices,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -2920,6 +2938,7 @@ class GPUModelRunner(
                     batch_desc,
                     ubatch_slices,
                     num_tokens_across_dp,
+                    cudagraph_stats,
                 ) = self._determine_batch_execution_and_padding(
                     num_tokens=num_tokens_unpadded,
                     num_reqs=num_reqs,
@@ -3069,6 +3088,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -3104,6 +3124,7 @@ class GPUModelRunner(
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
+            cudagraph_stats,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -3219,6 +3240,7 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                cudagraph_stats=cudagraph_stats,
             )
 
         if not self.use_async_scheduling:
@@ -3939,7 +3961,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp = (
+        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -3999,7 +4021,7 @@ class GPUModelRunner(
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices,
-                for_cudagraph_capture=True,
+                for_cudagraph_capture=is_graph_capturing,
             )
 
         with self.maybe_dummy_run_with_lora(
