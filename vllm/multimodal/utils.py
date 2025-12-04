@@ -67,8 +67,9 @@ class MediaConnector:
                              to set num_frames for video, set
                              `--media-io-kwargs '{"video":{"num_frames":40}}'`
             connection: HTTP connection client to download media contents.
-            allowed_local_media_path: A local directory to load media files
-                                      from.
+            allowed_local_media_path: A local directory to load media files from.
+            allowed_media_domains: If set, only media URLs that belong to this
+                                   domain can be used for multi-modal inputs.
         """
         super().__init__()
 
@@ -123,16 +124,16 @@ class MediaConnector:
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.path))
+        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
-                f"of `--allowed-local-media-path` {allowed_local_media_path}."
+                f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
         return media_io.load_file(filepath)
 
-    def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+    def _assert_url_in_allowed_media_domains(self, url_spec: ParseResult) -> None:
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -489,9 +490,16 @@ def fetch_audio(
     Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_audio(audio_url)
 
 
@@ -503,9 +511,16 @@ def fetch_image(
     Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_image(image_url)
 
 
@@ -517,7 +532,14 @@ def fetch_video(
     Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_video(video_url)

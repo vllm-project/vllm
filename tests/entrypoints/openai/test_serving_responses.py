@@ -17,6 +17,7 @@ from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
 from vllm.entrypoints.openai.serving_responses import (
     OpenAIServingResponses,
+    _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
 from vllm.entrypoints.tool_server import ToolServer
@@ -254,3 +255,98 @@ class TestValidateGeneratorInput:
         # Should return an ErrorResponse
         assert result is not None
         assert isinstance(result, ErrorResponse)
+
+
+class TestExtractAllowedToolsFromMcpRequests:
+    """Test class for _extract_allowed_tools_from_mcp_requests function"""
+
+    def test_extract_allowed_tools_basic_formats(self):
+        """Test extraction with list format, object format, and None."""
+        from openai.types.responses.tool import McpAllowedToolsMcpToolFilter
+
+        tools = [
+            # List format
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["tool1", "tool2"],
+            ),
+            # Object format
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=McpAllowedToolsMcpToolFilter(
+                    tool_names=["tool3", "tool4"]
+                ),
+            ),
+            # None (no filter)
+            Mcp(
+                type="mcp",
+                server_label="server3",
+                allowed_tools=None,
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        assert result == {
+            "server1": ["tool1", "tool2"],
+            "server2": ["tool3", "tool4"],
+            "server3": None,
+        }
+
+    def test_extract_allowed_tools_star_normalization(self):
+        """Test that '*' wildcard is normalized to None (select all tools).
+
+        This is the key test requested by reviewers to explicitly demonstrate
+        that the "*" select-all scenario is handled correctly.
+        """
+        from openai.types.responses.tool import McpAllowedToolsMcpToolFilter
+
+        tools = [
+            # Star in list format
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["*"],
+            ),
+            # Star mixed with other tools in list
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=["tool1", "*"],
+            ),
+            # Star in object format
+            Mcp(
+                type="mcp",
+                server_label="server3",
+                allowed_tools=McpAllowedToolsMcpToolFilter(tool_names=["*"]),
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        # All should be normalized to None (allows all tools)
+        assert result == {
+            "server1": None,
+            "server2": None,
+            "server3": None,
+        }
+
+    def test_extract_allowed_tools_filters_non_mcp(self):
+        """Test that non-MCP tools are ignored during extraction."""
+        tools = [
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["tool1"],
+            ),
+            LocalShell(type="local_shell"),  # Non-MCP tool should be ignored
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=["tool2"],
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        # Non-MCP tools should be ignored
+        assert result == {
+            "server1": ["tool1"],
+            "server2": ["tool2"],
+        }
