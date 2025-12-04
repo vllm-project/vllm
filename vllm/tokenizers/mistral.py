@@ -311,7 +311,7 @@ class MistralTokenizer(TokenizerLike):
 
     def num_special_tokens_to_add(self) -> int:
         # called from RandomDataset.sample() with mode test, so we only add bos, not eos,<INST>,</INST>
-        return 1
+        return len(self.encode(""))
 
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
