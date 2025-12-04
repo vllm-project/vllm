@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import multiprocessing
 import tempfile
 from contextlib import contextmanager
 
@@ -137,3 +139,67 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
                 artifacts = compiled_mod.aot_compiled_fn._artifacts
                 guards_string = artifacts.compiled_fn.shape_env.format_guards()
                 assert guards_string == " - s77 <= 42\n - Eq(Mod(s77, 2), 0)"
+
+
+@pytest.mark.skipif(
+    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+)
+@use_vllm_config(make_vllm_config())
+def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that compiling gpt2 twice results in a cache hit and
+    capture torch dynamic symbol creations to ensure make_symbol
+    not called on cache hit.
+    """
+
+    import torch.fx.experimental.symbolic_shapes as symbolic_shapes_module
+    from torch.utils._sympy.symbol import make_symbol
+
+    from vllm import LLM
+
+    create_symbol_counter = multiprocessing.Value("i", 0)
+    original_make_symbol = make_symbol
+
+    @functools.wraps(original_make_symbol)
+    def counting_make_symbol(prefix, idx, **kwargs):
+        with create_symbol_counter.get_lock():
+            create_symbol_counter.value += 1
+        return original_make_symbol(prefix, idx, **kwargs)
+
+    symbolic_shapes_module.make_symbol = counting_make_symbol
+    try:
+        with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
+            m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+            m.setenv("VLLM_USE_AOT_COMPILE", "1")
+            # First compilation - initialize model and generate
+            llm_model = LLM(
+                model="gpt2",
+                compilation_config=CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                ),
+                max_model_len=256,
+            )
+
+            llm_model.generate("Hello, my name is")
+            assert create_symbol_counter.value == 2
+            create_symbol_counter.value = 0
+
+            # Clean up first model
+            del llm_model
+
+            # Second compilation - should hit cache
+            m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+            llm_model = LLM(
+                model="gpt2",
+                compilation_config=CompilationConfig(
+                    mode=CompilationMode.VLLM_COMPILE,
+                ),
+                max_model_len=256,
+            )
+            llm_model.generate("Hello, my name is")
+
+            assert create_symbol_counter.value == 0
+
+    finally:
+        # Restore original method
+        symbolic_shapes_module.make_symbol = original_make_symbol
