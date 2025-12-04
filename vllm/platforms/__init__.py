@@ -155,6 +155,24 @@ def xpu_platform_plugin() -> str | None:
     return "vllm.platforms.xpu.XPUPlatform" if is_xpu else None
 
 
+def mps_platform_plugin() -> str | None:
+    is_mps = False
+    logger.debug("Checking if MPS platform is available.")
+    try:
+        import sys
+
+        import torch
+
+        # Only available on macOS with Apple Silicon
+        if sys.platform.startswith("darwin") and torch.backends.mps.is_available():
+            is_mps = True
+            logger.debug("Confirmed MPS platform is available.")
+    except Exception as e:
+        logger.debug("MPS platform is not available because: %s", str(e))
+
+    return "vllm.platforms.mps.MpsPlatform" if is_mps else None
+
+
 def cpu_platform_plugin() -> str | None:
     is_cpu = False
     logger.debug("Checking if CPU platform is available.")
@@ -164,14 +182,20 @@ def cpu_platform_plugin() -> str | None:
             logger.debug(
                 "Confirmed CPU platform is available because vLLM is built with CPU."
             )
+        # Note: On macOS, MPS takes precedence over CPU if available
         if not is_cpu:
             import sys
 
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
-                logger.debug(
-                    "Confirmed CPU platform is available because the machine is MacOS."
-                )
+            # Only use CPU platform on Darwin if MPS is not available
+            if sys.platform.startswith("darwin"):
+                import torch
+
+                if not torch.backends.mps.is_available():
+                    is_cpu = True
+                    logger.debug(
+                        "Confirmed CPU platform is available because "
+                        "the machine is MacOS without MPS."
+                    )
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
@@ -184,6 +208,7 @@ builtin_platform_plugins = {
     "cuda": cuda_platform_plugin,
     "rocm": rocm_platform_plugin,
     "xpu": xpu_platform_plugin,
+    "mps": mps_platform_plugin,
     "cpu": cpu_platform_plugin,
 }
 
