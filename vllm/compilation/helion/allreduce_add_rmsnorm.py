@@ -612,11 +612,11 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
 
 
     @property
-    def helion_kernel(self):
-        """Return the Helion kernel wrapper for autotuning."""
+    def helion_kernels(self):
+        """Return the list of Helion kernel wrappers for autotuning."""
         if HELION_AVAILABLE:
-            return allreduce_add_rmsnorm
-        return None
+            return [allreduce_add_rmsnorm]
+        return []
 
 
 class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):

@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Script to autotune Helion kernels using the CustomOp registry.
+Script to autotune Helion kernels using the kernel registry.
 
-This script discovers all registered Helion kernels and runs autotuning
-to generate optimized configurations for different input shapes.
+This script discovers all registered Helion kernels via @register_kernel decorator
+and runs autotuning to generate optimized configurations for different input shapes.
 
 Usage:
     # Autotune all Helion kernels
     python scripts/autotune_helion_kernels.py
 
-    # Autotune specific kernel
-    python scripts/autotune_helion_kernels.py --kernel silu_mul_fp8_helion
+    # Autotune specific kernel by name
+    python scripts/autotune_helion_kernels.py --kernel silu_mul_fp8
 
     # Autotune with custom output directory
     python scripts/autotune_helion_kernels.py --output-dir ./my_configs
@@ -36,12 +36,11 @@ import torch
 # Add vLLM to path if not already available
 try:
     from vllm.compilation.helion.config_manager import ConfigManager
-    from vllm.compilation.helion.custom_op import HelionCustomOp
+    from vllm.compilation.helion.register import get_registered_kernels, get_kernel_by_name, HELION_AVAILABLE
     from vllm.config import VllmConfig
     from vllm.config.compilation import CompilationConfig
     from vllm.config.vllm import set_current_vllm_config
     from vllm.logger import init_logger
-    from vllm.model_executor.custom_op import CustomOp
 except ImportError as e:
     print(f"Error importing vLLM: {e}")
     print("Please ensure vLLM is installed and in your Python path")
@@ -61,20 +60,14 @@ def get_default_config_dir() -> str:
     return str(config_manager.get_base_dir())
 
 
-def get_helion_kernels() -> dict[str, type[HelionCustomOp]]:
+def get_helion_kernels() -> dict[str, "HelionKernelWrapper"]:
     """
     Discover all registered Helion kernels.
 
     Returns:
-        Dictionary mapping kernel names to their classes
+        Dictionary mapping kernel names to HelionKernelWrapper instances
     """
-    helion_kernels = {}
-
-    for name, op_cls in CustomOp.op_registry.items():
-        if issubclass(op_cls, HelionCustomOp):
-            helion_kernels[name] = op_cls
-
-    return helion_kernels
+    return get_registered_kernels()
 
 
 def list_kernels():
@@ -88,11 +81,10 @@ def list_kernels():
     print("Available Helion kernels:")
     print("=" * 50)
 
-    for name, op_cls in kernels.items():
-        doc = op_cls.__doc__ or "No description available"
-        # Extract first line of docstring
-        first_line = doc.strip().split("\n")[0]
-        print(f"  {name:<30} - {first_line}")
+    for name, kernel_wrapper in kernels.items():
+        # Get description from the kernel wrapper
+        full_op_name = kernel_wrapper.full_op_name
+        print(f"  {name:<30} - {full_op_name}")
 
     print(f"\nTotal: {len(kernels)} kernels")
 
@@ -110,7 +102,7 @@ def check_requirements() -> bool:
         return False
 
     # Check Helion availability
-    if not HelionCustomOp.is_helion_available():
+    if not HELION_AVAILABLE:
         logger.error("Helion is not installed. Please install Helion package.")
         return False
 
@@ -118,14 +110,14 @@ def check_requirements() -> bool:
 
 
 def autotune_kernel(
-    kernel_name: str, op_cls: type[HelionCustomOp], output_dir: str, force: bool = False
+    kernel_name: str, kernel_wrapper: "HelionKernelWrapper", output_dir: str, force: bool = False
 ) -> bool:
     """
     Autotune a specific Helion kernel.
 
     Args:
         kernel_name: Name of the kernel
-        op_cls: Kernel class
+        kernel_wrapper: HelionKernelWrapper instance
         output_dir: Output directory for configs
         force: Force re-autotuning even if configs exist
 
@@ -133,18 +125,10 @@ def autotune_kernel(
         True if successful, False otherwise
     """
     try:
-        # Create kernel instance
         logger.info("Autotuning kernel: %s", kernel_name)
 
-        # Skip enabled check during autotuning - we want to force autotune for
-        # Helion kernels. The issue is that the compilation config is being
-        # reset to ['none'] by system defaults
-        logger.info("Forcing autotuning for %s (bypassing enabled check)", kernel_name)
-
-        kernel_instance = op_cls()
-
         # Get autotune inputs to check what will be generated
-        autotune_inputs = kernel_instance.helion_kernel.get_autotune_inputs()
+        autotune_inputs = kernel_wrapper.get_autotune_inputs()
         logger.info(
             "Will generate %d configs: %s",
             len(autotune_inputs),
@@ -159,7 +143,7 @@ def autotune_kernel(
             configs_to_autotune = {}
 
             for config_key, inputs in autotune_inputs.items():
-                if config_manager.config_exists(kernel_instance.__class__, config_key):
+                if config_manager.config_exists(kernel_name, config_key):
                     existing_configs.append(config_key)
                     logger.info("Config %s already exists, skipping", config_key)
                 else:
@@ -189,7 +173,7 @@ def autotune_kernel(
 
         # Run autotuning with filtered inputs
         start_time = time.time()
-        configs = kernel_instance.autotune(configs_to_autotune)
+        configs = kernel_wrapper.run_autotune(configs_to_autotune)
         end_time = time.time()
 
         # Save the generated configs
@@ -200,7 +184,7 @@ def autotune_kernel(
         for config_key, config in configs.items():
             try:
                 config_path = config_manager.save_config(
-                    kernel_instance.__class__, config_key, config
+                    kernel_name, config_key, config
                 )
                 saved_configs.append(config_key)
                 logger.info("Saved config %s to: %s", config_key, config_path)
@@ -326,8 +310,8 @@ def main():
 
     logger.info("Starting autotuning for %d kernel(s)", total_kernels)
 
-    for kernel_name, op_cls in helion_kernels.items():
-        if autotune_kernel(kernel_name, op_cls, output_dir, args.force):
+    for kernel_name, kernel_wrapper in helion_kernels.items():
+        if autotune_kernel(kernel_name, kernel_wrapper, output_dir, args.force):
             successful += 1
         else:
             logger.warning("Skipped or failed: %s", kernel_name)

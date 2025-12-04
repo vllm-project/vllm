@@ -310,10 +310,36 @@ except ImportError:
     HELION_AVAILABLE = False
 
 
+# Global registry for tracking all registered HelionKernelWrapper instances
+_REGISTERED_KERNELS: dict[str, "HelionKernelWrapper"] = {}
+
+
+def get_registered_kernels() -> dict[str, "HelionKernelWrapper"]:
+    """
+    Get all registered Helion kernel wrappers from the global registry.
+
+    Returns:
+        Dictionary mapping kernel names to HelionKernelWrapper instances
+    """
+    return _REGISTERED_KERNELS.copy()
+
+
+def get_kernel_by_name(kernel_name: str) -> "HelionKernelWrapper | None":
+    """
+    Get a specific registered kernel by name.
+
+    Args:
+        kernel_name: Name of the kernel to retrieve
+
+    Returns:
+        HelionKernelWrapper instance if found, None otherwise
+    """
+    return _REGISTERED_KERNELS.get(kernel_name)
+
+
 def register_kernel(
-    op_name: str,
+    op_name: str | None = None,
     *,
-    namespace: str = "vllm_helion",
     device_types: str = "cuda",
     mutates_args: tuple = (),
     fake_impl: Callable | None = None,
@@ -322,14 +348,14 @@ def register_kernel(
     Decorator to register a Helion kernel as a PyTorch custom operation.
 
     This decorator automatically:
-    1. Registers the kernel as a PyTorch custom op under the specified namespace
+    1. Registers the kernel as a PyTorch custom op under the vllm_helion namespace
     2. Generates a fake implementation by running the kernel with _launcher=lambda *args, **kwargs: None
        OR uses the provided fake_impl if specified
     3. Provides proper error handling when Helion is not available
 
     Args:
-        op_name: Name of the operation (will be registered as namespace::op_name)
-        namespace: PyTorch custom op namespace (default: "vllm_helion")
+        op_name: Name of the operation (will be registered as vllm_helion::op_name).
+                If None or empty string, automatically uses the decorated function's __name__.
         device_types: Target device types (default: "cuda")
         mutates_args: Tuple of argument names that are mutated (default: empty)
         fake_impl: Optional custom fake implementation. If provided, uses this instead
@@ -340,11 +366,17 @@ def register_kernel(
         Decorator function that registers the Helion kernel
 
     Examples:
-        # Auto-generated fake kernel (uses _launcher approach):
+        # Explicit op name:
         @helion.kernel(...)
         @register_kernel("silu_mul_fp8")
         def silu_mul_fp8_kernel(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
             pass
+
+        # Auto-detect op name from function name:
+        @helion.kernel(...)
+        @register_kernel()
+        def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+            pass  # Will be registered as "silu_mul_fp8"
 
         # Custom fake kernel (for compatibility with symbolic shapes):
         def my_fake_impl(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -357,13 +389,19 @@ def register_kernel(
         def silu_mul_fp8_kernel(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
             pass
 
-        # Now accessible as: torch.ops.vllm_helion.silu_mul_fp8(input, scale)
+        # Always accessible as: torch.ops.vllm_helion.silu_mul_fp8(input, scale)
     """
 
     def decorator(helion_kernel_func: Callable) -> Callable:
+        # Determine the operation name
+        final_op_name = op_name
+        if final_op_name is None or final_op_name == "":
+            # Auto-detect from function name
+            final_op_name = helion_kernel_func.__name__
+
         if not HELION_AVAILABLE:
             logger.warning(
-                "Helion not available, skipping registration of kernel '%s'", op_name
+                "Helion not available, skipping registration of kernel '%s'", final_op_name
             )
             return helion_kernel_func
 
@@ -376,7 +414,8 @@ def register_kernel(
             )
 
         # Create the HelionKernelWrapper that will be registered as PyTorch custom op
-        kernel_wrapper = HelionKernelWrapper(helion_kernel_func, op_name, namespace)
+        namespace = "vllm_helion"  # Fixed namespace for all Helion kernels
+        kernel_wrapper = HelionKernelWrapper(helion_kernel_func, final_op_name, namespace)
 
         # Register the wrapper as PyTorch custom op
         pytorch_op_wrapper = torch.library.custom_op(
@@ -434,6 +473,9 @@ def register_kernel(
             helion_kernel_func.__name__,
             kernel_wrapper.full_op_name,
         )
+
+        # Register in global registry for fast lookup
+        _REGISTERED_KERNELS[final_op_name] = kernel_wrapper
 
         # Return the HelionKernelWrapper - this is what fusion passes will use
         return kernel_wrapper

@@ -260,11 +260,11 @@ class RMSNormFp8Helion(HelionCustomOp):
 
 
     @property
-    def helion_kernel(self):
-        """Return the Helion kernel wrapper for autotuning."""
+    def helion_kernels(self):
+        """Return the list of Helion kernel wrappers for autotuning."""
         if HELION_AVAILABLE:
-            return rms_norm_fp8
-        return None
+            return [rms_norm_fp8]
+        return []
 
 
 class RMSNormFp8Benchmark(KernelBenchmark):
