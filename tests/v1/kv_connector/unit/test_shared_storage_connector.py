@@ -3,12 +3,14 @@
 from dataclasses import asdict
 from typing import NamedTuple
 
+import pytest
 from PIL import Image
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import KVTransferConfig
 from vllm.multimodal.utils import encode_image_base64
+from vllm.platforms import current_platform
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
@@ -108,6 +110,13 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         print("-" * 50)
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason=(
+        "hipErrorLaunchFailure when running this test, see issue:"
+        "https://github.com/ROCm/pytorch/issues/2822"
+    ),
+)
 def test_shared_storage_connector_hashes(tmp_path):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
