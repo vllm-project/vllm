@@ -15,6 +15,7 @@ text-based parsing with partial JSON handling. Users should upgrade to v11+
 models for reliable tool calling support.
 """
 
+import contextlib
 import json
 from collections.abc import Sequence
 from enum import Enum, auto
@@ -115,20 +116,18 @@ class MistralToolParser(ToolParser):
             self._args_token_id = self._mistral_base_tokenizer.get_control_token(
                 "[ARGS]"
             )
-        except Exception:
+        except Exception as err:
             raise RuntimeError(
                 "Mistral Tool Parser could not locate the [ARGS] token. "
                 "This token is required for v11+ tool call parsing."
-            )
+            ) from err
 
         self._call_id_token_id: int | None = None
-        try:
+        with contextlib.suppress(Exception):
+            # [CALL_ID] is optional - some models may not have it
             self._call_id_token_id = self._mistral_base_tokenizer.get_control_token(
                 "[CALL_ID]"
             )
-        except Exception:
-            # [CALL_ID] is optional - some models may not have it
-            pass
 
         # Regex for non-streaming parsing: name{args}
         self.fn_name_regex = re.compile(r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\}+)", re.DOTALL)
