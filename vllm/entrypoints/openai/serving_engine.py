@@ -1130,6 +1130,7 @@ class OpenAIServing:
             )
         elif isinstance(tokenizer, DeepseekV32Tokenizer):
             request_prompt = tokenizer.apply_chat_template(
+                messages=messages,
                 conversation=conversation,
                 model_config=model_config,
                 **_chat_template_kwargs,
