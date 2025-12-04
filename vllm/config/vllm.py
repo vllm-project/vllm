@@ -889,26 +889,16 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
+        # Runtime-dependent disable of hybrid kv cache manager logic.
         if not self.scheduler_config.disable_hybrid_kv_cache_manager:
+            # Forcely disable HMA even if explicitly enabled by user (None/False).
+            prev_disable_hma = self.scheduler_config.disable_hybrid_kv_cache_manager
+
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
             if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector for now.
-                # TODO(Kuntai): have a more elegent solution to check and
-                # turn off HMA for connector that does not support HMA.
-                logger.warning(
-                    "Turning off hybrid kv cache manager because "
-                    "`--kv-transfer-config` is set. This will reduce the "
-                    "performance of vLLM on LLMs with sliding window attention "
-                    "or Mamba attention. If you are a developer of kv connector"
-                    ", please consider supporting hybrid kv cache manager for "
-                    "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
-                )
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
@@ -934,6 +924,39 @@ class VllmConfig:
                     # Hybrid KV cache manager is not yet supported with chunked
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+            if (
+                prev_disable_hma is False
+                and self.scheduler_config.disable_hybrid_kv_cache_manager is True
+            ):
+                logger.info(
+                    "Hybrid KV cache manager explicitly enabled but not supported in "
+                    "this configuration; falling back to standard manager. Consider "
+                    "omitting this setting to let vLLM decide automatically."
+                )
+
+        if (
+            self.scheduler_config.disable_hybrid_kv_cache_manager is None
+            and self.kv_transfer_config is not None
+        ):
+            # Disable HMA logic but only if the user didn't express a preference.
+            # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
+            # TODO(Kuntai): have a more elegent solution to check and
+            # turn off HMA for connector that does not support HMA.
+            logger.warning(
+                "Turning off hybrid kv cache manager because "
+                "`--kv-transfer-config` is set. This will reduce the "
+                "performance of vLLM on LLMs with sliding window attention "
+                "or Mamba attention. If you are a developer of kv connector"
+                ", please consider supporting hybrid kv cache manager for "
+                "your connector by making sure your connector is a subclass"
+                " of `SupportsHMA` defined in kv_connector/v1/base.py."
+            )
+            self.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+            # Default to enable HMA if not explicitly disabled by user or logic above.
+            self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
