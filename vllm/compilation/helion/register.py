@@ -96,6 +96,15 @@ class HelionKernelWrapper:
 
         return self._compiled_kernel(*args, **kwargs)
 
+    def autotune(self, *args, **kwargs):
+        """
+        Delegate autotuning to the underlying Helion kernel function.
+
+        This method forwards the autotune call to the wrapped helion_kernel_func,
+        which has the @helion.kernel decorator and supports autotuning.
+        """
+        return self.helion_kernel_func.autotune(*args, **kwargs)
+
 
 # Try to import Helion - it's an optional dependency
 try:
