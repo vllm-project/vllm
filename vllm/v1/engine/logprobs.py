@@ -221,7 +221,7 @@ class LogprobsProcessor:
 
         # Process each generated token (may be > 1 in speculative decoding)
         num_tokens = logprobs_array.shape[0]
-        for token_id in self.track_token_ids:
+        for token_id in self.tracked_logprobs:
             if token_id in token_id_to_idx:
                 idx = token_id_to_idx[token_id]
                 # Append logprobs for all generated tokens
