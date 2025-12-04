@@ -95,8 +95,10 @@ def tool_calls_to_openai_format(tool_calls):
 def encode_arguments_to_dsml(tool_call: dict[str, str]) -> str:
     p_dsml_template = """<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>"""
     P_dsml_strs = []
-
-    arguments = json.loads(tool_call["arguments"])
+    if isinstance(tool_call["arguments"], str):
+        arguments = json.loads(tool_call["arguments"])
+    else:
+        arguments = tool_call["arguments"]
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(
