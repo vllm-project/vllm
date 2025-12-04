@@ -761,6 +761,10 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[1] == layer_1
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Attention backend FLASHINFER is not supported on ROCm.",
+)
 def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     """
     The GPU model runner creates different views into the
