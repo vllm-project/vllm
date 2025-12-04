@@ -3,7 +3,6 @@ ninja
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
---extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
 torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"
 scons; platform_machine == "aarch64"    # needed to build Arm Compute Library (ACL)
