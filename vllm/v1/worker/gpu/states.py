@@ -7,55 +7,16 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import is_uva_available
+from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.sample.penalties import bincount
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
 NO_LORA_ID = 0
-
-
-@dataclass
-class SamplingMetadata:
-    temperature: torch.Tensor
-
-    top_p: torch.Tensor | None
-    top_k: torch.Tensor | None
-
-    seeds: torch.Tensor
-    pos: torch.Tensor
-
-    # None means no logprobs, 0 means sampled token logprobs only
-    max_num_logprobs: int | None
-
-    @classmethod
-    def make_dummy(
-        cls,
-        num_reqs: int,
-        device: torch.device,
-    ) -> "SamplingMetadata":
-        assert num_reqs > 0
-        temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
-        temperature[0] = 0.5
-        # TODO(woosuk): Use top-p and top-k for dummy sampler.
-        # Currently, they are disabled because of memory usage.
-        # top_p = torch.full((num_reqs,), 0.95, dtype=torch.float32, device=device)
-        # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
-        top_p = None
-        top_k = None
-        seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
-        pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
-        max_num_logprobs = 20
-
-        return cls(
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            seeds=seeds,
-            pos=pos,
-            max_num_logprobs=max_num_logprobs,
-        )
 
 
 class RequestState:
@@ -83,12 +44,15 @@ class RequestState:
         self.extra_data: dict[str, ExtraData] = {}
 
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.prefill_token_ids = np.zeros(
-            (self.max_num_reqs, self.max_model_len),
-            dtype=np.int32,
+        # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
+        # depending on the configured max_num_reqs and max_model_len.
+        self.prefill_token_ids = UvaBuffer(
+            self.max_num_reqs, self.max_model_len, dtype=torch.int32
         )
+        # NOTE(woosuk): We don't use UVA for prefill_len because its GPU view
+        # can be used outside of update_states and prepare_inputs.
+        # Without async barrier, using UVA can cause race conditions.
         self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = torch.zeros(
@@ -110,6 +74,9 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+        self.next_prefill_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
 
         # LoRA.
         self.lora_ids = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -119,12 +86,25 @@ class RequestState:
         self.temperature = self._make_param(self.max_num_reqs, torch.float32)
         self.top_p = self._make_param(self.max_num_reqs, torch.float32)
         self.top_k = self._make_param(self.max_num_reqs, torch.int32)
+        self.repetition_penalty = self._make_param(self.max_num_reqs, torch.float32)
+        self.frequency_penalty = self._make_param(self.max_num_reqs, torch.float32)
+        self.presence_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.seeds = self._make_param(self.max_num_reqs, torch.int64)
 
         self.num_logprobs = np.empty(self.max_num_reqs, dtype=np.int32)
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(-1)
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
+
+        # Statistics for penalties.
+        # TODO(woosuk): These tensors are rarely used but can be extremely large.
+        # Optimize the memory usage.
+        self.prompt_bin_counts = torch.zeros(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+        )
+        self.output_bin_counts = torch.zeros(
+            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+        )
 
     def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
         return Param(size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
@@ -159,7 +139,7 @@ class RequestState:
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
+        self.prefill_token_ids.np[req_idx, :prefill_len] = prefill_token_ids
 
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         # FIXME(woosuk): This triggers a GPU operation whenever adding a new request.
@@ -178,6 +158,18 @@ class RequestState:
         else:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
+        self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
+        self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
+        self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
+
+        if use_penalty(sampling_params):
+            bincount(
+                self.prefill_token_ids.gpu[req_idx],
+                prefill_len,
+                prompt_len,
+                self.prompt_bin_counts[req_idx],
+                self.output_bin_counts[req_idx],
+            )
 
         if sampling_params.seed is not None:
             seed = sampling_params.seed
@@ -206,24 +198,32 @@ class RequestState:
 
     def make_sampling_metadata(
         self,
-        idx_mapping: np.ndarray,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> SamplingMetadata:
-        temperature = self.temperature.np[idx_mapping]
+        temperature = self.temperature.np[idx_mapping_np]
         temperature = self.temperature.copy_np_to_gpu(temperature)
 
-        top_p = self.top_p.np[idx_mapping]
+        top_p = self.top_p.np[idx_mapping_np]
         no_top_p = np.all(top_p == 1.0)
         top_p = self.top_p.copy_np_to_gpu(top_p) if not no_top_p else None
 
-        top_k = self.top_k.np[idx_mapping]
+        top_k = self.top_k.np[idx_mapping_np]
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
-        seeds = self.seeds.np[idx_mapping]
+        rep_penalty = self.repetition_penalty.np[idx_mapping_np]
+        rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
+        freq_penalty = self.frequency_penalty.np[idx_mapping_np]
+        freq_penalty = self.frequency_penalty.copy_np_to_gpu(freq_penalty)
+        pres_penalty = self.presence_penalty.np[idx_mapping_np]
+        pres_penalty = self.presence_penalty.copy_np_to_gpu(pres_penalty)
+
+        seeds = self.seeds.np[idx_mapping_np]
         seeds = self.seeds.copy_np_to_gpu(seeds)
 
-        num_logprobs = self.num_logprobs[idx_mapping]
+        num_logprobs = self.num_logprobs[idx_mapping_np]
         max_num_logprobs: int | None = int(np.max(num_logprobs))
         if max_num_logprobs == -1:
             max_num_logprobs = None
@@ -232,20 +232,15 @@ class RequestState:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            repetition_penalty=rep_penalty,
+            frequency_penalty=freq_penalty,
+            presence_penalty=pres_penalty,
             seeds=seeds,
             pos=pos,
             max_num_logprobs=max_num_logprobs,
-        )
-
-    def expand_sampling_metadata(
-        self,
-        sampling_metadata: SamplingMetadata,
-        cu_num_logits: torch.Tensor,
-    ) -> SamplingMetadata:
-        # For draft tokens, we need to expand the sampling param tensors as
-        # each request samples multiple tokens in each step.
-        return expand_sampling_metadata(
-            sampling_metadata, cu_num_logits, self.num_speculative_steps
+            idx_mapping=idx_mapping,
+            prompt_bin_counts=self.prompt_bin_counts,
+            output_bin_counts=self.output_bin_counts,
         )
 
     def make_lora_inputs(
@@ -294,73 +289,17 @@ class ExtraData:
     in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
 
 
-# NOTE(woosuk): Re-compilation can happen at runtime since top_p and top_k can be None.
-@triton.jit
-def _expand_sampling_metadata_kernel(
-    temp_ptr,
-    expanded_temp_ptr,
-    top_p_ptr,
-    expanded_top_p_ptr,
-    top_k_ptr,
-    expanded_top_k_ptr,
-    seeds_ptr,
-    expanded_seeds_ptr,
-    cu_num_logits_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    num_tokens = end_idx - start_idx
-
-    block = tl.arange(0, BLOCK_SIZE)
-    mask = block < num_tokens
-
-    temp = tl.load(temp_ptr + req_idx)
-    tl.store(expanded_temp_ptr + start_idx + block, temp, mask=mask)
-
-    if top_p_ptr is not None:
-        top_p = tl.load(top_p_ptr + req_idx)
-        tl.store(expanded_top_p_ptr + start_idx + block, top_p, mask=mask)
-
-    if top_k_ptr is not None:
-        top_k = tl.load(top_k_ptr + req_idx)
-        tl.store(expanded_top_k_ptr + start_idx + block, top_k, mask=mask)
-
-    seed = tl.load(seeds_ptr + req_idx)
-    tl.store(expanded_seeds_ptr + start_idx + block, seed, mask=mask)
+class UvaBuffer:
+    def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
+        assert is_uva_available()
+        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
+        self.np = self.cpu.numpy()
+        self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
 
 
-def expand_sampling_metadata(
-    sampling_metadata: SamplingMetadata,
-    cu_num_logits: torch.Tensor,
-    num_speculative_steps: int,
-) -> SamplingMetadata:
-    total_num_logits = sampling_metadata.pos.shape[0]
-    create_empty = lambda x: x.new_empty(total_num_logits) if x is not None else None
-    expanded_temp = create_empty(sampling_metadata.temperature)
-    expanded_top_p = create_empty(sampling_metadata.top_p)
-    expanded_top_k = create_empty(sampling_metadata.top_k)
-    expanded_seeds = create_empty(sampling_metadata.seeds)
-
-    num_reqs = cu_num_logits.shape[0] - 1
-    _expand_sampling_metadata_kernel[(num_reqs,)](
-        sampling_metadata.temperature,
-        expanded_temp,
-        sampling_metadata.top_p,
-        expanded_top_p,
-        sampling_metadata.top_k,
-        expanded_top_k,
-        sampling_metadata.seeds,
-        expanded_seeds,
-        cu_num_logits,
-        BLOCK_SIZE=triton.next_power_of_2(num_speculative_steps + 1),
-    )
-    return SamplingMetadata(
-        temperature=expanded_temp,
-        top_p=expanded_top_p,
-        top_k=expanded_top_k,
-        seeds=expanded_seeds,
-        pos=sampling_metadata.pos,
-        max_num_logprobs=sampling_metadata.max_num_logprobs,
+def use_penalty(sampling_params: SamplingParams) -> bool:
+    return (
+        sampling_params.repetition_penalty != 1.0
+        or sampling_params.frequency_penalty != 0.0
+        or sampling_params.presence_penalty != 0.0
     )

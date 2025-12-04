@@ -258,52 +258,46 @@ def mistral_tokenizer(request) -> MistralTokenizer:
 )
 class TestMistralTokenizer:
     def test_all_special_tokens(self, mistral_tokenizer: MistralTokenizer):
-        attributes = [
-            mistral_tokenizer.all_special_tokens,
-            mistral_tokenizer.all_special_tokens_extended,
-        ]
-
-        for attribute in attributes:
-            if mistral_tokenizer.is_tekken:
-                assert attribute == [
-                    "<unk>",
-                    "<s>",
-                    "</s>",
-                    "[INST]",
-                    "[/INST]",
-                    "[AVAILABLE_TOOLS]",
-                    "[/AVAILABLE_TOOLS]",
-                    "[TOOL_RESULTS]",
-                    "[/TOOL_RESULTS]",
-                    "[TOOL_CALLS]",
-                    "[IMG]",
-                    "<pad>",
-                    "[IMG_BREAK]",
-                    "[IMG_END]",
-                    "[PREFIX]",
-                    "[MIDDLE]",
-                    "[SUFFIX]",
-                    "[SYSTEM_PROMPT]",
-                    "[/SYSTEM_PROMPT]",
-                    "[TOOL_CONTENT]",
-                ] + [f"<SPECIAL_{i}>" for i in range(20, 32)] + [
-                    "[ARGS]",
-                    "[CALL_ID]",
-                    "[THINK]",
-                    "[/THINK]",
-                ] + [f"<SPECIAL_{i}>" for i in range(36, 1000)]
-            else:
-                assert attribute == [
-                    "<s>",
-                    "</s>",
-                    "[INST]",
-                    "[/INST]",
-                    "[TOOL_CALLS]",
-                    "[AVAILABLE_TOOLS]",
-                    "[/AVAILABLE_TOOLS]",
-                    "[TOOL_RESULTS]",
-                    "[/TOOL_RESULTS]",
-                ] + [f"[control_{i}]" for i in range(8, 769)]
+        if mistral_tokenizer.is_tekken:
+            assert mistral_tokenizer.all_special_tokens == [
+                "<unk>",
+                "<s>",
+                "</s>",
+                "[INST]",
+                "[/INST]",
+                "[AVAILABLE_TOOLS]",
+                "[/AVAILABLE_TOOLS]",
+                "[TOOL_RESULTS]",
+                "[/TOOL_RESULTS]",
+                "[TOOL_CALLS]",
+                "[IMG]",
+                "<pad>",
+                "[IMG_BREAK]",
+                "[IMG_END]",
+                "[PREFIX]",
+                "[MIDDLE]",
+                "[SUFFIX]",
+                "[SYSTEM_PROMPT]",
+                "[/SYSTEM_PROMPT]",
+                "[TOOL_CONTENT]",
+            ] + [f"<SPECIAL_{i}>" for i in range(20, 32)] + [
+                "[ARGS]",
+                "[CALL_ID]",
+                "[THINK]",
+                "[/THINK]",
+            ] + [f"<SPECIAL_{i}>" for i in range(36, 1000)]
+        else:
+            assert mistral_tokenizer.all_special_tokens == [
+                "<s>",
+                "</s>",
+                "[INST]",
+                "[/INST]",
+                "[TOOL_CALLS]",
+                "[AVAILABLE_TOOLS]",
+                "[/AVAILABLE_TOOLS]",
+                "[TOOL_RESULTS]",
+                "[/TOOL_RESULTS]",
+            ] + [f"[control_{i}]" for i in range(8, 769)]
 
     def get_vocab(self, mistral_tokenizer: MistralTokenizer):
         assert (
@@ -331,6 +325,7 @@ class TestMistralTokenizer:
             )
             == token_ids
         )
+        assert mistral_tokenizer.encode_one("") == []
 
     def test_encode(self, mistral_tokenizer: MistralTokenizer):
         token_ids = (
@@ -370,6 +365,51 @@ class TestMistralTokenizer:
             mistral_tokenizer.encode("Hello world !", add_special_tokens=False)
             == token_ids[1:]
         )
+        assert mistral_tokenizer.encode("", add_special_tokens=False) == []
+
+    def test_call(self, mistral_tokenizer: MistralTokenizer):
+        token_ids = (
+            [1, 22177, 4304, 2662]
+            if mistral_tokenizer.is_tekken
+            else [1, 23325, 2294, 1686]
+        )
+        attn_mask = [1 for _ in range(len(token_ids))]
+
+        # Test 1: default
+        assert mistral_tokenizer("Hello world !") == {
+            "attention_mask": attn_mask[1:],
+            "input_ids": token_ids[1:],
+        }
+        # Test 2: special tokens
+        assert mistral_tokenizer("Hello world !", add_special_tokens=True) == {
+            "attention_mask": attn_mask,
+            "input_ids": token_ids,
+        }
+        # Test 3: special tokens + truncation
+        assert mistral_tokenizer(
+            "Hello world !", add_special_tokens=True, truncation=True, max_length=3
+        ) == {
+            "attention_mask": attn_mask[:-1],
+            "input_ids": token_ids[:-1],
+        }
+        # Test 4: special tokens + no truncation + max length
+        assert mistral_tokenizer(
+            "Hello world !", add_special_tokens=True, max_length=3
+        ) == {
+            "attention_mask": attn_mask,
+            "input_ids": token_ids,
+        }
+        # Test 5: empty string
+        assert mistral_tokenizer("") == {
+            "attention_mask": [],
+            "input_ids": [],
+        }
+
+        with pytest.raises(
+            ValueError,
+            match=(r"`text_pair` is not supported by `MistralTokenizer.__call__`."),
+        ):
+            mistral_tokenizer("Hello world !", "invalid pair")
 
     @pytest.mark.parametrize(
         "openai_request,add_generation_prompt,continue_final_message,expected_output,decoded_expected_output",
@@ -1087,6 +1127,24 @@ class TestMistralTokenizer:
             )
             == expected_tokens[mistral_tokenizer.is_tekken]
         )
+        assert (
+            mistral_tokenizer.decode(
+                ids[mistral_tokenizer.is_tekken],
+                skip_special_tokens=skip_special_tokens,
+            )
+            == expected_tokens[mistral_tokenizer.is_tekken]
+        )
+
+    def test_decode_empty(
+        self,
+        mistral_tokenizer: MistralTokenizer,
+    ):
+        assert (
+            mistral_tokenizer.decode(
+                [],
+            )
+            == ""
+        )
 
     def test_decode_int(
         self,
@@ -1389,6 +1447,8 @@ class TestMistralTokenizer:
             )
             == expected_strings[mistral_tokenizer.is_tekken]
         )
+
+        assert mistral_tokenizer.convert_tokens_to_string([]) == ""
 
     @pytest.mark.parametrize(
         "skip_special_tokens,tuple_expected_tokens",
@@ -2220,3 +2280,5 @@ class TestMistralTokenizer:
             ids, skip_special_tokens=skip_special_tokens
         )
         assert actual_tokens == expected_tokens
+
+        assert mistral_tokenizer.convert_ids_to_tokens([]) == []
