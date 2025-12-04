@@ -52,14 +52,13 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-#ifndef USE_ROCM
 void merge_attn_states(torch::Tensor& output,
                        std::optional<torch::Tensor> output_lse,
                        const torch::Tensor& prefix_output,
                        const torch::Tensor& prefix_lse,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
-
+#ifndef USE_ROCM
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
     torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
@@ -91,6 +90,12 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
+
+void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps, torch::Tensor& q_weight,
+                        torch::Tensor& k_weight, torch::Tensor& cos_sin_cache,
+                        bool is_neox, torch::Tensor& position_ids);
 
 void apply_repetition_penalties_(torch::Tensor& logits,
                                  const torch::Tensor& prompt_mask,

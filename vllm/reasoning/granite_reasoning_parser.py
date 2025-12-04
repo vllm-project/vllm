@@ -49,7 +49,7 @@ class GraniteReasoningParser(ReasoningParser):
             len(think_start) for think_start in self.valid_think_starts
         )
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
@@ -67,12 +67,12 @@ class GraniteReasoningParser(ReasoningParser):
         re_match = self.reasoning_regex.findall(model_output)
         if not re_match:
             return None, model_output
-        reasoning_content, response_content = re_match[0]
+        reasoning, response_content = re_match[0]
         if not response_content:
-            return reasoning_content, None
-        return reasoning_content, response_content
+            return reasoning, None
+        return reasoning, response_content
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -107,12 +107,10 @@ class GraniteReasoningParser(ReasoningParser):
             Union[DeltaMessage, None]
                 DeltaMessage with either reasoning content or content, or None.
         """
-        reasoning_content, resp_seq_len, content = self._get_content_sections(
-            current_text
-        )
+        reasoning, resp_seq_len, content = self._get_content_sections(current_text)
         # Either we haven't finished the start of the reasoning sequence,
         # or the model is generating something unexpected.
-        if not reasoning_content:
+        if not reasoning:
             delta_message = self._get_delta_message_with_no_reasoning_bounds(
                 current_text, delta_text
             )
@@ -120,16 +118,16 @@ class GraniteReasoningParser(ReasoningParser):
         # the start of response sequence.
         elif not content:
             delta_message = self._get_delta_message_with_no_response_bounds(
-                current_text, reasoning_content, delta_text
+                current_text, reasoning, delta_text
             )
         # We've finished both the start of reasoning and start of response seq.
         else:
             # This should never happen since we matched on the response
             assert resp_seq_len is not None
             delta_message = self._get_delta_message_with_both_bounds(
-                delta_text, reasoning_content, content, current_text, resp_seq_len
+                delta_text, reasoning, content, current_text, resp_seq_len
             )
-        if not delta_message.content and not delta_message.reasoning_content:
+        if not delta_message.content and not delta_message.reasoning:
             return None
         return delta_message
 
@@ -185,20 +183,20 @@ class GraniteReasoningParser(ReasoningParser):
         # message and append everything to content in the future.
         if was_substr and not is_substr:
             return DeltaMessage(
-                reasoning_content=None,
+                reasoning=None,
                 content=current_text,
             )
         if is_substr:
             # Might still be in the special token sequence; return nothing
-            return DeltaMessage(reasoning_content=None, content=None)
+            return DeltaMessage(reasoning=None, content=None)
         # Otherwise the sequence has already been broken and we already
         # corrected; just return the delta text as normal content.
-        return DeltaMessage(reasoning_content=None, content=delta_text)
+        return DeltaMessage(reasoning=None, content=delta_text)
 
     def _get_delta_message_with_no_response_bounds(
         self,
         current_text: str,
-        reasoning_content: str,
+        reasoning: str,
         delta_text: str,
     ) -> DeltaMessage:
         """Parse the delta message when the current text has both reasoning
@@ -208,7 +206,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             current_text (str): The full previous + delta text.
-            reasoning_content (str): reasoning content from current_text.
+            reasoning (str): reasoning content from current_text.
             delta_text (str): Text to consider and parse content from.
 
         Returns:
@@ -222,12 +220,12 @@ class GraniteReasoningParser(ReasoningParser):
             current_text.endswith(response_start)
             for response_start in self.valid_response_starts
         )
-        if reasoning_content is None or ends_with_start_response_seq:
-            return DeltaMessage(reasoning_content=None, content=None)
+        if reasoning is None or ends_with_start_response_seq:
+            return DeltaMessage(reasoning=None, content=None)
 
         # Consider previous / current text only within context of the reasoning
-        previous_text = reasoning_content[: -len(delta_text)]
-        current_text = reasoning_content
+        previous_text = reasoning[: -len(delta_text)]
+        current_text = reasoning
 
         # We need to be careful about adding unfinished response sequences;
         # Find the place at which we MIGHT be starting a response sequence
@@ -253,32 +251,30 @@ class GraniteReasoningParser(ReasoningParser):
 
         # Delta only contains potential continued response sequence text.
         if delta_continues_substr:
-            return DeltaMessage(reasoning_content=None, content=None)
+            return DeltaMessage(reasoning=None, content=None)
 
         if not prev_was_substr:
             # Delta may be starting a new response seq but has other text too.
             if delta_new_substr:
-                return DeltaMessage(
-                    reasoning_content=delta_text[:delta_idx], content=None
-                )
+                return DeltaMessage(reasoning=delta_text[:delta_idx], content=None)
             # Normal case for most reasoning text (no potential special seqs).
-            return DeltaMessage(reasoning_content=delta_text, content=None)
+            return DeltaMessage(reasoning=delta_text, content=None)
         # The substring that previously seemed to be a potential response
         # seq wasn't one; we need to add the content to the delta message,
         # and also slice off the potential response sequence
         elif delta_new_substr:
-            reasoning_content = previous_text[prev_idx:] + delta_text[:delta_idx]
-            return DeltaMessage(reasoning_content=reasoning_content, content=None)
+            reasoning = previous_text[prev_idx:] + delta_text[:delta_idx]
+            return DeltaMessage(reasoning=reasoning, content=None)
         # No new substring yet, and we broke our old one; take the whole delta
         return DeltaMessage(
-            reasoning_content=previous_text[prev_idx:] + delta_text,
+            reasoning=previous_text[prev_idx:] + delta_text,
             content=None,
         )
 
     def _get_delta_message_with_both_bounds(
         self,
         delta_text: str,
-        reasoning_content: str,
+        reasoning: str,
         response_content: str,
         current_text: str,
         response_seq_len: int,
@@ -288,7 +284,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             delta_text: Text to consider and parse content from.
-            reasoning_content: reasoning content from current_text.
+            reasoning: reasoning content from current_text.
             response_content: response content from current_text.
             current_text: The full previous + delta text.
             response_seq_len: Len of the complete response sequence used.
@@ -301,20 +297,20 @@ class GraniteReasoningParser(ReasoningParser):
         reasoning_end_idx = len(delta_text) - (len(response_content) + response_seq_len)
 
         if reasoning_end_idx < 0:
-            delta_reasoning_content = None
+            delta_reasoning = None
         else:
             # Get the starting offset
-            start_reasoning_content_idx = (
-                len(reasoning_content) + response_seq_len + len(response_content) - 1
+            start_reasoning_idx = (
+                len(reasoning) + response_seq_len + len(response_content) - 1
             )
             delta_offset = len(current_text) - len(delta_text)
-            start_offset = start_reasoning_content_idx - delta_offset
+            start_offset = start_reasoning_idx - delta_offset
             if start_offset < 0:
                 start_offset = 0
-            delta_reasoning_content = delta_text[start_offset:reasoning_end_idx]
+            delta_reasoning = delta_text[start_offset:reasoning_end_idx]
 
         return DeltaMessage(
-            reasoning_content=delta_reasoning_content,
+            reasoning=delta_reasoning,
             content=delta_content,
         )
 
@@ -333,7 +329,7 @@ class GraniteReasoningParser(ReasoningParser):
             (if there is one) and the non-reasoning content.
         """
         current_chunk_start = 0
-        start_reasoning_content = None
+        start_reasoning = None
         parsed_content = False
         delimiter_idxs = [
             idx
@@ -344,10 +340,10 @@ class GraniteReasoningParser(ReasoningParser):
         for current_chunk_end in delimiter_idxs:
             current_chunk = current_text[current_chunk_start:current_chunk_end]
             # Check to see if the start of reasoning seq if complete
-            if start_reasoning_content is None:
+            if start_reasoning is None:
                 for think_start in self.valid_think_starts:
                     if current_chunk == think_start[:-1]:
-                        start_reasoning_content = current_chunk_end + 1
+                        start_reasoning = current_chunk_end + 1
                         current_chunk_start = current_chunk_end + 1
                         break
 
@@ -357,13 +353,11 @@ class GraniteReasoningParser(ReasoningParser):
                     if current_chunk[-len(response_start) + 1 :] == response_start[:-1]:
                         # Mark end of reasoning and start response content
                         # after the start of response sequence.
-                        end_reasoning_content = current_chunk_end - len(response_start)
-                        reasoning_content = current_text[
-                            start_reasoning_content:end_reasoning_content
-                        ]
+                        end_reasoning = current_chunk_end - len(response_start)
+                        reasoning = current_text[start_reasoning:end_reasoning]
                         response_content = current_text[current_chunk_end + 1 :]
-                        return reasoning_content, len(response_start), response_content
+                        return reasoning, len(response_start), response_content
 
-        if start_reasoning_content and not parsed_content:
-            return current_text[start_reasoning_content:], None, None
+        if start_reasoning and not parsed_content:
+            return current_text[start_reasoning:], None, None
         return None, None, None

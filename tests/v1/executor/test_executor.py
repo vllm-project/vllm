@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -28,12 +29,19 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
+        kv_output_aggregator: KVOutputAggregator = None,
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
         return super().collective_rpc(
-            method, timeout, args, kwargs, non_block, unique_reply_rank
+            method,
+            timeout,
+            args,
+            kwargs,
+            non_block,
+            unique_reply_rank,
+            kv_output_aggregator,
         )
 
 

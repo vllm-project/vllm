@@ -7,6 +7,7 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
 )
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -17,7 +18,6 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -91,7 +91,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         """
@@ -135,6 +135,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Get the set of block IDs that failed to load.
+
+        Returns:
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
+        """
+        method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
+        if callable(method):
+            return method()
+
+        # Fallback for older versions that don't support this method
+        return set()
 
     # ==============================
     # Scheduler-side methods

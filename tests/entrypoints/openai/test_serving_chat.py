@@ -14,7 +14,7 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
@@ -353,6 +353,7 @@ class MockModelConfig:
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
+    logits_processors: list[str] | None = None
     logits_processor_pattern = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
@@ -398,7 +399,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
 @dataclass
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
-    processor: MagicMock = field(default_factory=MagicMock)
+    input_processor: MagicMock = field(default_factory=MagicMock)
     io_processor: MagicMock = field(default_factory=MagicMock)
 
 
@@ -428,7 +429,7 @@ async def test_serving_chat_returns_correct_model_name():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -458,7 +459,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -491,7 +492,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
@@ -536,7 +537,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
@@ -582,7 +583,7 @@ async def test_serving_chat_could_load_correct_generation_config():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     # Initialize the serving chat
@@ -628,7 +629,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = mock_model_config
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -661,7 +662,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     # Mock the generate method to return an async generator

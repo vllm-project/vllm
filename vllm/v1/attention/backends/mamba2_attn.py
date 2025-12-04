@@ -108,6 +108,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
+    block_idx_last_computed_token: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
@@ -202,6 +203,7 @@ class Mamba2AttentionMetadataBuilder(
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
         prep_initial_states = False
+        block_idx_last_computed_token = None
 
         # Compute seq_idx for prefill only
         if common.num_prefills > 0:
@@ -244,6 +246,9 @@ class Mamba2AttentionMetadataBuilder(
                 device=common_attn_metadata.query_start_loc.device,
                 dtype=torch.int32,
             )
+            block_idx_last_computed_token = self.block_idx_last_computed_token[
+                :num_decode_tokens
+            ]
 
         return replace(
             common,
@@ -252,4 +257,5 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
+            block_idx_last_computed_token=block_idx_last_computed_token
         )

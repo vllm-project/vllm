@@ -81,7 +81,7 @@ class UniProcExecutor(Executor):
                 if (async_thread := self.async_output_thread) is not None:
                     get_output = result.get_output
                     if not single_value:
-                        get_output = lambda: [get_output()]
+                        get_output = lambda go=result.get_output: [go()]
                     return async_thread.submit(get_output)
                 result = result.get_output()
             future = Future[Any]()
