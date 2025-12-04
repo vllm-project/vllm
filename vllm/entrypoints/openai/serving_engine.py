@@ -1088,11 +1088,6 @@ class OpenAIServing:
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
     ]:
-        if tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
-
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -1105,7 +1100,6 @@ class OpenAIServing:
         conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
             messages,
             model_config,
-            tokenizer,
             content_format=resolved_content_format,
         )
 

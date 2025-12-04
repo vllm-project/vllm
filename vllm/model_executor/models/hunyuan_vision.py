@@ -62,6 +62,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ImageSize,
+    ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -570,7 +571,7 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ):
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,

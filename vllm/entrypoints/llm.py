@@ -834,7 +834,6 @@ class LLM:
             conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
-                tokenizer,
                 content_format=resolved_content_format,
             )
 
