@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -53,7 +54,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     DeepseekOCRProcessor,
     count_tiles,
 )
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
@@ -161,7 +161,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             )
 
     def is_argmax_invariant(self) -> bool:
-        return True
+        return False
 
     def new_req_logits_processor(
         self,
@@ -557,9 +557,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

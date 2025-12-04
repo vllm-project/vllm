@@ -73,12 +73,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    cached_tokenizer_from_config,
-    encode_tokens,
-)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import _merge_multimodal_embeddings
@@ -284,7 +280,7 @@ class BaseNanoNemotronVLProcessor(ABC):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *args,
         max_num_tiles: int | None = None,
         **kwargs,
@@ -434,7 +430,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *,
         max_num_tiles: int | None = None,
         min_dynamic_patch: int | None = None,
@@ -457,14 +453,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     @property
@@ -645,7 +639,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         tokens_per_frame: list[int],
         frames_indices: list[int],
         frame_duration_ms: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         img_start_token_ids: list[int],
         img_end_token_ids: list[int],
         img_context_token_ids: list[int],
@@ -655,7 +649,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         The replacement returned is not actually used to replace the placeholder
         tokens - it's just used to make sure we allocate the correct number
         of tokens.
-        Actual replacement is done in get_multimodal_embeddings of
+        Actual replacement is done in embed_multimodal of
         NemotronH_Nano_VL_V2
         (specifically in _process_video_input -> _create_final_video_embeddings).
         There, we create the final embeddings with text embeddings for indicator tokens
@@ -670,7 +664,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             tokens_per_frame (list[int]): number of tokens per frame
             frames_indices (list[int]): frame indices
             frame_duration_ms (int): duration of each frame in milliseconds
-            tokenizer (AnyTokenizer): tokenizer to use for tokenizing frame separators
+            tokenizer (TokenizerLike): tokenizer to use for tokenizing frame separators
             img_start_token_ids (list[int]): pre-tokenized IMG_START tokens
             img_end_token_ids (list[int]): pre-tokenized IMG_END tokens
             img_context_token_ids (list[int]): pre-tokenized IMG_CONTEXT tokens
@@ -1182,14 +1176,12 @@ class NemotronH_Nano_VL_V2(
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
         tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        self._img_start_token_ids = encode_tokens(
-            tokenizer, IMG_START, add_special_tokens=False
+        self._img_start_token_ids = tokenizer.encode(
+            IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = encode_tokens(
-            tokenizer, IMG_END, add_special_tokens=False
-        )
-        self._img_context_token_ids = encode_tokens(
-            tokenizer, IMG_CONTEXT, add_special_tokens=False
+        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
+        self._img_context_token_ids = tokenizer.encode(
+            IMG_CONTEXT, add_special_tokens=False
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -1401,7 +1393,7 @@ class NemotronH_Nano_VL_V2(
 
         # Create final video embeddings, merging text embeddings for indicator
         # tokens with video embeddings
-        text_embeddings = self.get_language_model().get_input_embeddings(repl_token_ids)
+        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
         final_video_embeddings = _merge_multimodal_embeddings(
             inputs_embeds=text_embeddings,
             multimodal_embeddings=video_embeddings,
@@ -1465,14 +1457,14 @@ class NemotronH_Nano_VL_V2(
 
         return modalities
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Validate the multimodal input keyword arguments
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if modalities is None:
             return []
 
         # # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary

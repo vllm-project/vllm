@@ -4,6 +4,6 @@
 
 --8<-- "docs/cli/json_tip.inc.md"
 
-## Options
+## Arguments
 
---8<-- "docs/argparse/run-batch.md"
+--8<-- "docs/argparse/run-batch.inc.md"
