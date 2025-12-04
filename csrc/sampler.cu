@@ -524,7 +524,8 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
       outLogits[i] = reinterpret_cast<float*>(smemOutput + topK)[i];
     } else {
       if (stride1 == 1) {
-        // stride1 == 1 will use vectorized_process, which indexes already skip the rowStart.
+        // stride1 == 1 will use vectorized_process, which indexes already skip
+        // the rowStart.
         outIndices[i] = smemOutput[i];
       } else {
         outIndices[i] = smemOutput[i] - rowStart;
