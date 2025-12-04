@@ -1294,7 +1294,7 @@ class Scheduler(SchedulerInterface):
             orig_num_spec_tokens = len(spec_token_ids)
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                assert metadata.grammar is not None
+                assert metadata is not None and metadata.grammar is not None
                 spec_token_ids = metadata.grammar.validate_tokens(
                     spec_token_ids,
                 )

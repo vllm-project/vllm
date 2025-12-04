@@ -1263,7 +1263,6 @@ class GPUModelRunner(
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
-        # self._draft_token_ids = None
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -3141,6 +3140,7 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        # Mask out invalid spec tokens for async scheduling + structured outputs.
         if (
             grammar_output is not None
             and grammar_output.num_invalid_tokens_per_req is not None
@@ -3179,7 +3179,7 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                 )
                 self._copy_draft_token_ids_to_cpu(self._draft_token_ids)
-                self._draft_token_req_ids = deepcopy(self.input_batch.req_ids)
+                self._draft_token_req_ids = self.input_batch.req_ids.copy()
 
         spec_config = self.speculative_config
         use_padded_batch_for_eagle = (
