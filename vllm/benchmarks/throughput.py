@@ -14,20 +14,16 @@ from typing import Any
 import torch
 import uvloop
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
-    BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
     MultiModalConversationDataset,
-    PrefixRepetitionRandomDataset,
-    RandomDataset,
     SampleRequest,
-    ShareGPTDataset,
-    SonnetDataset,
     VisionArenaDataset,
+    get_samples,
 )
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
@@ -35,6 +31,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
 
 
@@ -246,12 +243,15 @@ async def run_vllm_async(
 def run_hf(
     requests: list[SampleRequest],
     model: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
 ) -> float:
+    assert isinstance(tokenizer, PreTrainedTokenizerBase), (
+        "the hf backend only supports HF tokenizers"
+    )
     llm = AutoModelForCausalLM.from_pretrained(
         model, dtype=torch.float16, trust_remote_code=trust_remote_code
     )
@@ -325,76 +325,6 @@ def save_to_pytorch_benchmark_format(
         # Don't use json suffix here as we don't want CI to pick it up
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
         write_to_json(pt_file, pt_records)
-
-
-def get_requests(args, tokenizer):
-    # Common parameters for all dataset types.
-    common_kwargs = {
-        "dataset_path": args.dataset_path,
-        "random_seed": args.seed,
-    }
-    sample_kwargs = {
-        "tokenizer": tokenizer,
-        "lora_path": args.lora_path,
-        "max_loras": args.max_loras,
-        "num_requests": args.num_prompts,
-        "input_len": args.input_len,
-        "output_len": args.output_len,
-    }
-
-    if args.dataset_path is None or args.dataset_name == "random":
-        sample_kwargs["range_ratio"] = args.random_range_ratio
-        sample_kwargs["prefix_len"] = args.prefix_len
-        dataset_cls = RandomDataset
-    elif args.dataset_name == "sharegpt":
-        dataset_cls = ShareGPTDataset
-        if args.backend == "vllm-chat":
-            sample_kwargs["enable_multimodal_chat"] = True
-    elif args.dataset_name == "sonnet":
-        assert tokenizer.chat_template or tokenizer.default_chat_template, (
-            "Tokenizer/model must have chat template for sonnet dataset."
-        )
-        dataset_cls = SonnetDataset
-        sample_kwargs["prefix_len"] = args.prefix_len
-        sample_kwargs["return_prompt_formatted"] = True
-    elif args.dataset_name == "burstgpt":
-        dataset_cls = BurstGPTDataset
-    elif args.dataset_name == "hf":
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = VisionArenaDataset
-            common_kwargs["dataset_subset"] = None
-            common_kwargs["dataset_split"] = "train"
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = InstructCoderDataset
-            common_kwargs["dataset_split"] = "train"
-        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = MultiModalConversationDataset
-            common_kwargs["dataset_subset"] = args.hf_subset
-            common_kwargs["dataset_split"] = args.hf_split
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = ConversationDataset
-            common_kwargs["dataset_subset"] = args.hf_subset
-            common_kwargs["dataset_split"] = args.hf_split
-            sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
-            dataset_cls = AIMODataset
-            common_kwargs["dataset_subset"] = None
-            common_kwargs["dataset_split"] = "train"
-    elif args.dataset_name == "prefix_repetition":
-        dataset_cls = PrefixRepetitionRandomDataset
-        sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
-        sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
-        sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
-        sample_kwargs["output_len"] = args.prefix_repetition_output_len
-    else:
-        raise ValueError(f"Unknown dataset name: {args.dataset_name}")
-    # Remove None values
-    sample_kwargs = {k: v for k, v in sample_kwargs.items() if v is not None}
-    requests = dataset_cls(**common_kwargs).sample(**sample_kwargs)
-    requests = filter_requests_for_dp(requests, args.data_parallel_size)
-    return requests
 
 
 def filter_requests_for_dp(requests, data_parallel_size):
@@ -692,17 +622,24 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.tokenizer is None:
-        args.tokenizer = args.model
     validate_args(args)
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code
+    if (
+        args.backend == "hf" or args.backend == "mii"
+    ) and args.tokenizer_mode == "auto":
+        # mistral_common tokenizer is only supported on vllm and vllm-chat backends;
+        # for hf and mii backends, we use hf tokenizer
+        args.tokenizer_mode = "hf"
+    tokenizer = get_tokenizer(
+        args.tokenizer,
+        tokenizer_mode=args.tokenizer_mode,
+        trust_remote_code=args.trust_remote_code,
     )
-    requests = get_requests(args, tokenizer)
+    requests = get_samples(args, tokenizer)
+    requests = filter_requests_for_dp(requests, args.data_parallel_size)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
     request_outputs: list[RequestOutput] | None = None
     if args.backend == "vllm":
