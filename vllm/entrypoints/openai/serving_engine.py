@@ -1206,6 +1206,7 @@ class OpenAIServing:
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
         priority: int,
+        data_parallel_rank: int | None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
@@ -1221,6 +1222,7 @@ class OpenAIServing:
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
+            data_parallel_rank=data_parallel_rank,
         )
         return engine_request, tokenization_kwargs
 
@@ -1255,6 +1257,7 @@ class OpenAIServing:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                data_parallel_rank=None,
             )
 
             generator = self.engine_client.generate(
