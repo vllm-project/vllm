@@ -6,11 +6,10 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
-from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -46,8 +45,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -142,10 +144,11 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        if not cls.supported_kernel_block_sizes:
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
             return True
 
-        for supported_size in cls.supported_kernel_block_sizes:
+        for supported_size in supported_kernel_block_sizes:
             if isinstance(supported_size, MultipleOf):
                 supported_size = supported_size.base
             # With hybrid_blocks feature, the framework-level block size
@@ -174,8 +177,6 @@ class AttentionBackend(ABC):
         By default, only supports decoder attention.
         Backends should override this to support other attention types.
         """
-        from vllm.attention import AttentionType
-
         return attn_type == AttentionType.DECODER
 
     @classmethod
@@ -356,7 +357,7 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -408,7 +409,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
+        kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
     ) -> None:
         raise NotImplementedError

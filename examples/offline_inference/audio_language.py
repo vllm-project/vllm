@@ -425,6 +425,13 @@ def parse_args():
         default=None,
         help="Set the seed when initializing `vllm.LLM`.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
 
     return parser.parse_args()
 
@@ -433,6 +440,12 @@ def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
+
+    if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {args.tensor_parallel_size}"
+        )
 
     audio_count = args.num_audios
     req_data = model_example_map[model](
@@ -446,6 +459,8 @@ def main(args):
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    if args.tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)
 
     # We set temperature to 0.2 so that outputs can be different

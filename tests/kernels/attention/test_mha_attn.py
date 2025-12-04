@@ -24,17 +24,13 @@ from vllm.platforms.rocm import RocmPlatform
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
-    # Clear xformers availability cache
-    import vllm.attention.layer as layer_module
-
-    layer_module.USE_XFORMERS_OPS = None
 
 
 devices = ["cpu"]
 if current_platform.is_cuda():
     devices.append("cuda")
 if current_platform.is_rocm():
-    devices.append("rocm")
+    devices.append("hip")
 
 
 @pytest.mark.parametrize("device", devices)
