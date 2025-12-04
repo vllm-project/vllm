@@ -34,7 +34,7 @@ try:
     HELION_IMPORT_AVAILABLE = True
 except ImportError:
     HELION_IMPORT_AVAILABLE = False
-    SiluMulFp8Helion = None
+    SiluMulFp8Helion = None  # type: ignore[assignment,misc]
 
 logger = init_logger(__name__)
 
@@ -102,7 +102,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
         if HELION_IMPORT_AVAILABLE:
             self.helion_op = SiluMulFp8Helion()
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass, vllm_config: VllmConfig = None):
         def pattern(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -118,8 +118,16 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             # Check if Helion is enabled using the CustomOp's enabled() method
             # This encapsulates all the enable/disable logic in one place
             if self.helion_op is not None and self.helion_op.enabled():
-                # Call the Helion CustomOp's forward method
-                # This will internally call the decorated Helion kernel directly
+                # vLLM config should always be available in fusion passes
+                assert vllm_config is not None, (
+                    "vllm_config must be provided to fusion replacement function"
+                )
+
+                # Configure the HelionCustomOp with optimal config
+                # This sets the config on the kernel, doesn't return anything
+                self.helion_op.configure(vllm_config.model_config)
+
+                # Call the configured operation directly
                 return self.helion_op.forward_helion(input, scale)
             else:
                 d = input.shape[-1] // 2
@@ -211,7 +219,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
 
         # SiluMul+FP8 fusion automatically uses Helion if available
         pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
-        pattern_silu_mul_fp8.register(self.patterns)
+        pattern_silu_mul_fp8.register(self.patterns, config)
 
         if silu_and_mul_nvfp4_quant_supported:
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()

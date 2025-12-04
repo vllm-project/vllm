@@ -57,7 +57,7 @@ def get_default_config_dir() -> str:
     Returns:
         Default path for Helion configs
     """
-    config_manager = ConfigManager()
+    config_manager = ConfigManager.get_instance()
     return str(config_manager.get_base_dir())
 
 

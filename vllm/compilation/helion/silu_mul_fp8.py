@@ -113,6 +113,7 @@ if HELION_AVAILABLE:
 
     # Note: PyTorch custom op registration is handled by @register_kernel decorator
     # with custom fake implementation for symbolic shape compatibility
+    # The decorator returns a HelionKernelWrapper that stores configs
 
 
 # Now define the vLLM CustomOp wrapper
@@ -144,7 +145,7 @@ class SiluMulFp8Helion(HelionCustomOp):
 
     def forward_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
-        Helion kernel implementation.
+        Helion kernel implementation using the registered wrapper.
 
         Args:
             input: Input tensor with shape (num_tokens, 2 * hidden_size)
@@ -153,12 +154,20 @@ class SiluMulFp8Helion(HelionCustomOp):
         Returns:
             Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
         """
-        if not HELION_AVAILABLE:
-            raise ImportError(
-                "Helion is not installed. Please install Helion to use SiluMulFp8Helion. "
-                "Alternatively, use the CUDA baseline implementation."
-            )
+        # Use the registered HelionKernelWrapper which handles config internally
         return silu_mul_fp8(input, scale)
+
+    @property
+    def kernel_name(self) -> str:
+        """Get the kernel name for config selection."""
+        return "silu_mul_fp8_helion"
+
+    @property
+    def helion_kernel(self):
+        """Return the Helion kernel function for autotuning."""
+        if HELION_AVAILABLE:
+            return silu_mul_fp8
+        return None
 
     def get_autotune_inputs(self) -> dict[str, tuple]:
         """
@@ -232,13 +241,6 @@ class SiluMulFp8Helion(HelionCustomOp):
         except Exception:
             # If parsing fails, just return the first available config
             return next(iter(available_configs.values()))
-
-    @property
-    def helion_kernel(self):
-        """The Helion kernel function for autotuning."""
-        if HELION_AVAILABLE:
-            return silu_mul_fp8._helion_kernel
-        return None
 
 
 class SiluMulFp8Benchmark(KernelBenchmark):
