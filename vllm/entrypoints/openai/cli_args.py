@@ -85,6 +85,12 @@ class FrontendArgs:
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_access_log_for_endpoints: list[str] | None = None
+    """List of endpoint paths to exclude from uvicorn access logs.
+    This is useful to reduce log noise from high-frequency endpoints like
+    health checks. Example: ["/health", "/metrics", "/ping"].
+    When set, access logs for requests to these paths will be suppressed
+    while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
