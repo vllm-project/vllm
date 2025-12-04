@@ -23,6 +23,7 @@ ktc = KVTransferConfig(
 
 # Initialize LLM with LMCache configuration
 # Adjust gpu_memory_utilization based on your GPU memory
+# Parameters below are for 80GB GPUs
 llm = LLM(
     model="google/gemma-3-4b-it",
     kv_transfer_config=ktc,
@@ -38,27 +39,29 @@ llm = LLM(
 sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
 # Run inference
+print("Generate request 1. This will store long prefix in LMCache.")
 outputs = llm.generate("hi" * 70000 + "\nhow are you?", sampling_params)
 generated_text = outputs[0].outputs[0].text
 print(f"Generated text: {generated_text!r}")
 
-# This requires loading KV cache and will success
+# This requires loading KV cache and will succeed
+print("Generate request 2. This will load prefix from LMCache and succeed.")
 outputs = llm.generate("hi" * 10000 + "\nTell me a story.", sampling_params)
 generated_text = outputs[0].outputs[0].text
 print(f"Generated text: {generated_text!r}")
 
 # flush out prefix cache in GPU
+print("Generate request 3. This will evict prefix cache in GPU.")
 outputs = llm.generate("1" + "hi" * 70000 + "\nhow are you?", sampling_params)
 generated_text = outputs[0].outputs[0].text
 print(f"Generated text: {generated_text!r}")
 
-print("YIFAN: finish request 2")
-
 # This requires loading KV cache
 # but this request cannot be executed as vLLM cannot allocate for long prefix
 # stored by LMCache
+print("Generate request 4. This will attempt to load long prefix from LMCache.")
 outputs = llm.generate("hi" * 70000 + "\nTell me a story.", sampling_params)
 generated_text = outputs[0].outputs[0].text
 print(f"Generated text: {generated_text!r}")
 
-print("YIFAN: finished")
+print("All requests finished.")
