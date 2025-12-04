@@ -25,6 +25,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
+from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
@@ -304,14 +305,20 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
+    rope_theta = getattr(config, "rope_theta", None)
+    rope_parameters = getattr_iter(config, ("rope_parameters", "rope_scaling"), None)
     if Version(version("transformers")) < Version("5.0.0.dev0"):
         # Transformers v4 installed, legacy config fields may be present
-        if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
-            config.rope_parameters = rope_scaling
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+        if rope_parameters is not None:
+            config.rope_parameters = rope_parameters
+        if rope_theta is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
+    elif rope_theta is not None or rope_parameters is not None:
+        # Transformers v5 installed
+        config.standardize_rope_params()
+        config.validate_rope()
 
     # No RoPE parameters to patch
     if getattr(config, "rope_parameters", None) is None:
