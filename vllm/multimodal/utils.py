@@ -19,7 +19,6 @@ from PIL import Image, UnidentifiedImageError
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
@@ -67,8 +66,9 @@ class MediaConnector:
                              to set num_frames for video, set
                              `--media-io-kwargs '{"video":{"num_frames":40}}'`
             connection: HTTP connection client to download media contents.
-            allowed_local_media_path: A local directory to load media files
-                                      from.
+            allowed_local_media_path: A local directory to load media files from.
+            allowed_media_domains: If set, only media URLs that belong to this
+                                   domain can be used for multi-modal inputs.
         """
         super().__init__()
 
@@ -123,16 +123,16 @@ class MediaConnector:
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.path))
+        filepath = Path(url2pathname(url_spec.netloc + url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
-                f"of `--allowed-local-media-path` {allowed_local_media_path}."
+                f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
         return media_io.load_file(filepath)
 
-    def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+    def _assert_url_in_allowed_media_domains(self, url_spec: ParseResult) -> None:
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -426,59 +426,25 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    if merge_by_field_config is None:
-        raise RuntimeError(
-            "`group_mm_kwargs_by_modality` now requires "
-            "`merge_by_field_config` arg, please update your model runner "
-            "according to https://github.com/vllm-project/vllm/pull/25676."
-        )
-    if merge_by_field_config is False:
+    # TODO: After v0.13, remove merge_by_field_config attribute from model impls
+    if merge_by_field_config is not None:
         logger.warning_once(
-            "The legacy code for batching multi-modal kwargs is deprecated and "
-            "will be removed in v0.12. Please update your model with "
-            "`merge_by_field_config=True` to use the new code defined by "
-            "`MultiModalFieldConfig`. You can refer to "
-            "https://github.com/vllm-project/vllm/issues/26149 "
-            "for some examples on how to do this."
+            "The `merge_by_field_config` argument of `group_mm_kwargs_by_modality` "
+            "is deprecated and will be removed in v0.13."
         )
 
-    from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
+    from vllm.multimodal.inputs import MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
+        mm_kwargs_items = MultiModalKwargsItems.from_seq(items_lst)
+        mm_kwargs_data = mm_kwargs_items.get_data(
+            device=device,
+            pin_memory=pin_memory,
+            cpu_fields=multimodal_cpu_fields,
+        )
 
-        if merge_by_field_config:
-            mm_kwargs_group: BatchedTensorInputs = dict(
-                MultiModalKwargsItems.from_seq(items_lst).get_data(
-                    pin_memory=pin_memory
-                )
-            )
-
-            if device is not None:
-                mm_kwargs_group = {
-                    k: json_map_leaves(
-                        lambda x: x.to(device=device, non_blocking=True)
-                        if isinstance(x, torch.Tensor)
-                        else x,
-                        v,
-                    )
-                    if k not in multimodal_cpu_fields
-                    else v
-                    for k, v in mm_kwargs_group.items()
-                }
-        else:
-            mm_kwargs_group = MultiModalKwargs.as_kwargs(
-                MultiModalKwargs.batch(
-                    [
-                        MultiModalKwargsItems.from_seq([item]).get_data()
-                        for item in items_lst
-                    ],
-                    pin_memory=pin_memory,
-                ),
-                device=device,
-            )
-
-        yield modality, len(items_lst), mm_kwargs_group
+        yield modality, len(items_lst), mm_kwargs_data
 
 
 def fetch_audio(
@@ -489,9 +455,16 @@ def fetch_audio(
     Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_audio(audio_url)
 
 
@@ -503,9 +476,16 @@ def fetch_image(
     Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_image(image_url)
 
 
@@ -517,7 +497,14 @@ def fetch_video(
     Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_video(video_url)
