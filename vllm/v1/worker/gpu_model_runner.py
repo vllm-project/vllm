@@ -2845,6 +2845,11 @@ class GPUModelRunner(
         )
 
     def _register_layerwise_nvtx_hooks(self) -> None:
+        """
+        Register layerwise NVTX hooks if --enable-layerwise-nvtx-tracing is enabled
+        to trace detailed information of each layer or module in the model.
+        """
+
         if (
             self.vllm_config.observability_config.enable_layerwise_nvtx_tracing
             and not self.layerwise_nvtx_hooks_registered
@@ -4158,10 +4163,9 @@ class GPUModelRunner(
                     is_graph_capturing=is_graph_capturing,
                 )
 
-        # Register layerwise NVTX hooks if --enable-layerwise-nvtx-tracing is enabled.
-        # We do this here after the first dynamo tracing is done to
-        # avoid nvtx operations in hook functions being traced by torch dynamo
-        # and causing graph breaks.
+        # We register layerwise NVTX hooks here after the first dynamo tracing is
+        # done to avoid nvtx operations in hook functions being traced by
+        # torch dynamo and causing graph breaks.
         # Note that for DYNAMO_ONCE and VLLM_COMPILE mode,
         # compiled model's dynamo tracing is only done once and the compiled model's
         # __call__ function is replaced by calling the compiled function.
