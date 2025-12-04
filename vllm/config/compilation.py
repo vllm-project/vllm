@@ -4,7 +4,7 @@
 import enum
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import asdict, field
+from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config, handle_deprecated
+from vllm.config.utils import config, get_hash_factors, handle_deprecated, hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -196,7 +196,7 @@ class PassConfig:
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        d = asdict(self)
+
         ignored_fields = [
             "enable_fusion",
             "enable_attn_fusion",
@@ -205,10 +205,7 @@ class PassConfig:
             "enable_async_tp",
             "enable_fi_allreduce_fusion",
         ]
-
-        for old_flag in ignored_fields:
-            d.pop(old_flag, None)
-        return InductorPass.hash_dict(d)
+        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
 
     @field_validator(
         "fuse_norm_quant",
