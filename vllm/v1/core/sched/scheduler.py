@@ -1042,6 +1042,7 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
+        per_request_spec_decoding_stats: dict[str, SpecDecodingStats] = {}
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
@@ -1101,6 +1102,11 @@ class Scheduler(SchedulerInterface):
                     request.num_output_placeholders -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted,
+                )
+                per_request_spec_decoding_stats[req_id] = self.make_spec_decoding_stats(
+                    None,
                     num_draft_tokens=num_draft_tokens,
                     num_accepted_tokens=num_accepted,
                 )
@@ -1165,6 +1171,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        spec_decoding_stats=per_request_spec_decoding_stats.get(req_id),
                     )
                 )
             else:
