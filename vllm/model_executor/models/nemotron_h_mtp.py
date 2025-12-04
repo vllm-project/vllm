@@ -264,7 +264,11 @@ class NemotronHMultiTokenPredictor(nn.Module):
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         # Use the MTP layer (cycling for multi-step)
-        layer_idx_str = str(spec_step_idx % self.num_mtp_layers)
+        if spec_step_idx == 0:
+            layer_idx_str = "0"
+        else:
+            layer_idx_str = "1"
+
         hidden_states = self.layers[layer_idx_str](
             inputs_embeds,
             positions,
@@ -332,11 +336,17 @@ class NemotronHMTP(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        spec_step_idx: int = 0,
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
         hidden_states = self.model(
-            input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            hidden_states,
+            intermediate_tensors,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
@@ -350,6 +360,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
             "lm_head not initialized - must be shared from target model"
         )
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def should_use_spec_step_idx(self) -> bool:
+        return True if len(self.model.layers) > 1 else False
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -388,9 +401,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
-        # if get_tensor_model_parallel_rank() == 0:
-        #     print(f"SMOR: params_dict.keys: {params_dict.keys()}")
 
         for name, loaded_weight in weights:
             # Only process MTP weights - skip all non-MTP weights
@@ -438,7 +448,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
                 if stacked_name not in params_dict:
                     # Might be that mapping failed or param doesn't exist
-                    # print(f"SMOR: Warning stacked param {stacked_name} not in dict")
                     continue
 
                 param = params_dict[stacked_name]
@@ -488,7 +497,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
                 continue
 
             if name not in params_dict:
-                # print(f"SMOR: Warning param {name} not in dict")
                 continue
 
             param = params_dict[name]
