@@ -430,8 +430,11 @@ class InputBatch:
                     sampling_params.bad_words_token_ids
                 )
         elif pooling_params := request.pooling_params:
+            pooling_states = request.pooling_states
+            assert pooling_states is not None
+
             self.pooling_params[req_id] = pooling_params
-            self.pooling_states[req_id] = request.pooling_states
+            self.pooling_states[req_id] = pooling_states
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids
             )

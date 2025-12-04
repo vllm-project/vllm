@@ -765,7 +765,6 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         request.num_preemptions += 1
-
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
