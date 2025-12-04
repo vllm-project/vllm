@@ -581,4 +581,9 @@ class KVConnectorBase_V1(ABC):
         Returns:
             bool: True if the cache was successfully reset, False otherwise.
         """
+        logger.debug(
+            "Connector cache reset requested, but %s does not implement reset_cache().",
+            type(self).__name__,
+        )
+
         return None
