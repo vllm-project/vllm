@@ -51,12 +51,13 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
       if (node_id != -1) {
         node_ids.insert(node_id);
       }
-      TORCH_WARN(node_id == mem_node_id, "CPU ", cpu_id, " is on NUMA node ",
-                 node_id, ", but CPU ", omp_cpu_ids.front(),
-                 " is on NUMA node ", mem_node_id,
-                 ". All CPUs should be on the same NUMA node for optimal "
-                 "performance. Memory will be bound to NUMA node ",
-                 mem_node_id, ".");
+      if (node_id != mem_node_id) {
+        TORCH_WARN("CPU ", cpu_id, " is on NUMA node ", node_id, ", but CPU ",
+                   omp_cpu_ids.front(), " is on NUMA node ", mem_node_id,
+                   ". All CPUs should be on the same NUMA node for optimal "
+                   "performance. Memory will be bound to NUMA node ",
+                   mem_node_id, ".");
+      }
     }
     // Concatenate all node_ids into a single comma-separated string
     if (!node_ids.empty()) {
