@@ -23,13 +23,13 @@ After uploading each wheel, the `.buildkite/scripts/upload-wheels.sh` script:
 
 1. **Lists all existing wheels** in the commit directory from S3
 2. **Generates indices** using `.buildkite/scripts/generate-nightly-index.py`:
-   - Parses wheel filenames to extract metadata (version, variant, platform tags).
-   - Creates HTML index files (`index.html`) for PyPI compatibility.
-   - Generates machine-readable `metadata.json` files.
+    - Parses wheel filenames to extract metadata (version, variant, platform tags).
+    - Creates HTML index files (`index.html`) for PyPI compatibility.
+    - Generates machine-readable `metadata.json` files.
 3. **Uploads indices** to multiple locations (overriding existing ones):
-   - `/{commit_hash}/` - Always uploaded for commit-specific access.
-   - `/nightly/` - Only for commits on `main` branch (not PRs).
-   - `/{version}/` - Only for release wheels (no `dev` in its version).
+    - `/{commit_hash}/` - Always uploaded for commit-specific access.
+    - `/nightly/` - Only for commits on `main` branch (not PRs).
+    - `/{version}/` - Only for release wheels (no `dev` in its version).
 
 !!! tip "Handling Concurrent Builds"
     The index generation script can handle multiple variants being built concurrently by always listing all wheels in the commit directory before generating indices, avoiding race conditions.
@@ -90,23 +90,20 @@ The variant is extracted from the wheel filename (as described in the [file name
 The `generate-nightly-index.py` script performs the following:
 
 1. **Parses wheel filenames** using regex to extract:
-   - Package name
-   - Version (with variant extracted)
-   - Python tag, ABI tag, platform tag
-   - Build tag (if present)
-
+    - Package name
+    - Version (with variant extracted)
+    - Python tag, ABI tag, platform tag
+    - Build tag (if present)
 2. **Groups wheels by variant**, then by package name:
-   - Currently only `vllm` is built, but the structure supports multiple packages in the future.
-
+    - Currently only `vllm` is built, but the structure supports multiple packages in the future.
 3. **Generates HTML indices** (compliant with the [Simple repository API](https://packaging.python.org/en/latest/specifications/simple-repository-api/#simple-repository-api)):
-   - Top-level `index.html`: Lists all packages and variant subdirectories
-   - Package-level `index.html`: Lists all wheel files for that package
-   - Uses relative paths to wheel files for portability
-
+    - Top-level `index.html`: Lists all packages and variant subdirectories
+    - Package-level `index.html`: Lists all wheel files for that package
+    - Uses relative paths to wheel files for portability
 4. **Generates metadata.json**:
-   - Machine-readable JSON containing all wheel metadata
-   - Includes `path` field with URL-encoded relative path to wheel file
-   - Used by `setup.py` to locate compatible pre-compiled wheels during Python-only builds
+    - Machine-readable JSON containing all wheel metadata
+    - Includes `path` field with URL-encoded relative path to wheel file
+    - Used by `setup.py` to locate compatible pre-compiled wheels during Python-only builds
 
 ### Special Handling for AWS Services
 
@@ -119,34 +116,30 @@ Since S3 does not provide proper directory listing, to support PyPI-compatible s
 
 For example, the following requests would be handled as:
 
-- `/nightly` --> `/nightly/index.html`
-- `/nightly/cu130/` --> `/nightly/cu130/index.html`
-- `/nightly/index.html` or `/nightly/vllm.whl` --> unchanged
+- `/nightly` -> `/nightly/index.html`
+- `/nightly/cu130/` -> `/nightly/cu130/index.html`
+- `/nightly/index.html` or `/nightly/vllm.whl` -> unchanged
 
 !!! note "AWS S3 Filename Escaping"
 
-    S3 will automatically escape filenames upon upload according to its [naming rule](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html). The direct impact on vllm is that `+` in filenames will be escaped to `%2B`. We take special care in both the index generation script to do the proper escaping when generating the HTML indices and JSON metadata to ensure the URLs are correct.
+    S3 will automatically escape filenames upon upload according to its [naming rule](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-keys.html). The direct impact on vllm is that `+` in filenames will be converted to `%2B`. We take special care in the index generation script to escape filenames properly when generating the HTML indices and JSON metadata, to ensure the URLs are correct and can be directly used.
 
 ## Usage of precompiled wheels in `setup.py` {#precompiled-wheels-usage}
 
 When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
 
 1. **Determines wheel location** via `precompiled_wheel_utils.determine_wheel_url()`:
-   - Env var `VLLM_PRECOMPILED_WHEEL_LOCATION` (user-specified URL/path) always takes precedence and skips all other steps.
-   - Determines the variant from `VLLM_MAIN_CUDA_VERSION` (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_VARIANT`); the default variant will also be tried as a fallback.
-   - Determines the _base commit_ (explained later) of this branch (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_COMMIT`).
-
+    - Env var `VLLM_PRECOMPILED_WHEEL_LOCATION` (user-specified URL/path) always takes precedence and skips all other steps.
+    - Determines the variant from `VLLM_MAIN_CUDA_VERSION` (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_VARIANT`); the default variant will also be tried as a fallback.
+    - Determines the _base commit_ (explained later) of this branch (can be overridden with env var `VLLM_PRECOMPILED_WHEEL_COMMIT`).
 2. **Fetches metadata** from `https://wheels.vllm.ai/{commit}/vllm/metadata.json` (for the default variant) or `https://wheels.vllm.ai/{commit}/{variant}/vllm/metadata.json` (for a specific variant).
-
 3. **Selects compatible wheel** based on:
-   - Package name (`vllm`)
-   - Platform tag (architecture match)
-
+    - Package name (`vllm`)
+    - Platform tag (architecture match)
 4. **Downloads and extracts** precompiled binaries from the wheel:
-   - C++ extension modules (`.so` files)
-   - Flash Attention Python modules
-   - Triton kernel Python files
-
+    - C++ extension modules (`.so` files)
+    - Flash Attention Python modules
+    - Triton kernel Python files
 5. **Patches package_data** to include extracted files in the installation
 
 !!! note "What is the base commit?"
@@ -154,6 +147,8 @@ When installing vLLM with `VLLM_USE_PRECOMPILED=1`, the `setup.py` script:
     The base commit is determined by finding the merge-base
     between the current branch and upstream `main`, ensuring
     compatibility between source code and precompiled binaries.
+
+_Note: it's users' responsibility to ensure there is no native code (e.g., C++ or CUDA) changes before using precompiled wheels._
 
 ## Implementation Files
 
