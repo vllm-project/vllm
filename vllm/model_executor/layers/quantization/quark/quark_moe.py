@@ -64,7 +64,6 @@ class QuarkMoEMethod(FusedMoEMethodBase):
             )
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
-        print("CHecking for layer: ", layer_name, flush=True)
         if quant_config._is_fp8_w4a8(weight_config, input_config):
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_fp8_w8a8(weight_config, input_config):

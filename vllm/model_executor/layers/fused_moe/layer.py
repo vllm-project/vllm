@@ -1346,7 +1346,6 @@ class FusedMoE(CustomOp):
 
         # Case model weights
         if "weight" in weight_name:
-            # print(f"{weight_name}. {param.name} expert_id: {expert_id} expert_data.shape: {expert_data.shape}, loaded_weight.shape: {loaded_weight.shape}", flush=True)  # Debug print
             self._load_model_weight_or_group_weight_scale(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
