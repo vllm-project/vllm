@@ -98,6 +98,9 @@ class GptOssReasoningParser(ReasoningParser):
                         return True
         return False
 
+    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
+        return self.is_reasoning_end(input_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         _, content, _ = parse_chat_output(input_ids)
         if content is None:

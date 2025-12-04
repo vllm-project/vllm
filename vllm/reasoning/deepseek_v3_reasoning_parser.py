@@ -35,6 +35,9 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
 
+    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
+        return self._parser.is_reasoning_end_on_decode_step(input_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
 
