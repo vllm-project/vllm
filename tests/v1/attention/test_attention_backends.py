@@ -16,7 +16,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import ModelConfig, set_current_vllm_config
+from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
@@ -450,74 +450,73 @@ def _test_backend_correctness(
     # 4. Run vLLM backends and compare
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
-    with set_current_vllm_config(vllm_config):
-        for backend_name in backend_to_test:
-            # FlashAttentionm + FlexAttention:
-            #   [2, num_blocks, block_size, num_kv_heads, head_size]
-            # FlashInfer + Triton:
-            #   [num_blocks, 2, block_size, num_kv_heads, head_size]
-            # Select the appropriate KV cache format for each backend
-            kv_cache_for_backend = kv_cache
-            reset_kv_cache_layout = False
-            if backend_name in (
-                AttentionBackendEnum.FLASHINFER,
-                AttentionBackendEnum.TRITON_ATTN,
-            ):
-                kv_cache_for_backend = kv_cache.transpose(0, 1)
+    for backend_name in backend_to_test:
+        # FlashAttentionm + FlexAttention:
+        #   [2, num_blocks, block_size, num_kv_heads, head_size]
+        # FlashInfer + Triton:
+        #   [num_blocks, 2, block_size, num_kv_heads, head_size]
+        # Select the appropriate KV cache format for each backend
+        kv_cache_for_backend = kv_cache
+        reset_kv_cache_layout = False
+        if backend_name in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TRITON_ATTN,
+        ):
+            kv_cache_for_backend = kv_cache.transpose(0, 1)
 
-            if backend_name == AttentionBackendEnum.FLASHINFER:
-                # For FlashInfer default to HND layout and
-                kv_cache_for_backend = (
-                    kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
-                )
-                set_kv_cache_layout("HND")
-                reset_kv_cache_layout = True
-            elif backend_name == AttentionBackendEnum.TRITON_ATTN:
-                kv_cache_for_backend = kv_cache_for_backend.contiguous()
-
-            try:
-                backend_output = run_attention_backend(
-                    backend_name,
-                    kv_cache_spec,
-                    ["placeholder"],
-                    vllm_config,
-                    device,
-                    common_attn_metadata,
-                    query_vllm,
-                    key_vllm,
-                    value_vllm,
-                    kv_cache_for_backend,
-                    sliding_window=sliding_window,
-                )
-            finally:
-                if reset_kv_cache_layout:
-                    set_kv_cache_layout(None)
-
-            # Check shape and dtype consistency
-            assert backend_output.shape == sdpa_output.shape, (
-                f"[{backend_name}] shape {backend_output.shape} != "
-                f"SDPA shape {sdpa_output.shape}"
+        if backend_name == AttentionBackendEnum.FLASHINFER:
+            # For FlashInfer default to HND layout and
+            kv_cache_for_backend = (
+                kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
             )
-            assert backend_output.dtype == sdpa_output.dtype, (
-                f"[{backend_name}] dtype {backend_output.dtype} != "
-                f"SDPA dtype {sdpa_output.dtype}"
-            )
+            set_kv_cache_layout("HND")
+            reset_kv_cache_layout = True
+        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
+            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
-            assert torch.isfinite(backend_output).all(), (
-                f"[{backend_name}] produced non-finite values"
+        try:
+            backend_output = run_attention_backend(
+                backend_name,
+                kv_cache_spec,
+                ["placeholder"],
+                vllm_config,
+                device,
+                common_attn_metadata,
+                query_vllm,
+                key_vllm,
+                value_vllm,
+                kv_cache_for_backend,
+                sliding_window=sliding_window,
             )
+        finally:
+            if reset_kv_cache_layout:
+                set_kv_cache_layout(None)
 
-            # Check numerical similarity
-            def error_msg(msg: str, backend_name: str):
-                return f"[{backend_name}] output differs from SDPA baseline. {msg}"
+        # Check shape and dtype consistency
+        assert backend_output.shape == sdpa_output.shape, (
+            f"[{backend_name}] shape {backend_output.shape} != "
+            f"SDPA shape {sdpa_output.shape}"
+        )
+        assert backend_output.dtype == sdpa_output.dtype, (
+            f"[{backend_name}] dtype {backend_output.dtype} != "
+            f"SDPA dtype {sdpa_output.dtype}"
+        )
 
-            torch.testing.assert_close(
-                backend_output,
-                sdpa_output,
-                rtol=rtol,
-                atol=atol,
-                msg=partial(error_msg, backend_name=backend_name),
-            )
+        assert torch.isfinite(backend_output).all(), (
+            f"[{backend_name}] produced non-finite values"
+        )
+
+        # Check numerical similarity
+        def error_msg(msg: str, backend_name: str):
+            return f"[{backend_name}] output differs from SDPA baseline. {msg}"
+
+        torch.testing.assert_close(
+            backend_output,
+            sdpa_output,
+            rtol=rtol,
+            atol=atol,
+            msg=partial(error_msg, backend_name=backend_name),
+        )
 
 
 @pytest.mark.parametrize(

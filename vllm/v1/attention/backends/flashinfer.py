@@ -505,7 +505,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        vllm_config = get_current_vllm_config()
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
