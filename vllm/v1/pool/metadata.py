@@ -41,6 +41,18 @@ class PoolingMetadata:
     pooling_params: list[PoolingParams]
     pooling_cursor: PoolingCursor | None = None
 
+    def __post_init__(self) -> None:
+        pooling_params = self.pooling_params
+
+        tasks: list[PoolingTask] = [
+            task
+            for pooling_param in pooling_params
+            if (task := pooling_param.task) is not None
+        ]
+        assert len(pooling_params) == len(tasks)
+
+        self.tasks = tasks
+
     def __getitem__(self, indices: slice):
         return PoolingMetadata(
             prompt_lens=self.prompt_lens[indices],
@@ -60,18 +72,6 @@ class PoolingMetadata:
         )
 
         return [prompt_token_ids[i, :num] for i, num in enumerate(self.prompt_lens)]
-
-    def get_tasks(self) -> list[PoolingTask]:
-        pooling_params = self.pooling_params
-
-        tasks: list[PoolingTask] = [
-            task
-            for pooling_param in pooling_params
-            if (task := pooling_param.task) is not None
-        ]
-        assert len(pooling_params) == len(tasks)
-
-        return tasks
 
     def build_pooling_cursor(
         self, num_scheduled_tokens: list[int], device: torch.device
