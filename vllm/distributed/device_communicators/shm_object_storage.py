@@ -127,9 +127,7 @@ class SingleWriterShmRingBuffer:
 
         if create:
             # we are creating a buffer
-            self.metadata = {
-                self.monotonic_id_end: self.data_buffer_end
-            }  # monotonic_id -> start address
+            self.metadata: dict[int, int] = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.data_buffer_size, name=name)
         else:
@@ -274,7 +272,14 @@ class SingleWriterShmRingBuffer:
                     del self.metadata[self.monotonic_id_start]
                     self.monotonic_id_start = ((self.monotonic_id_start + 1) %
                                                self.ID_MAX)
-                    self.data_buffer_start = address
+                    if self.monotonic_id_start in self.metadata:
+                        # pointing to the start addr of next allocation
+                        self.data_buffer_start += (
+                            self.metadata[self.monotonic_id_start] -
+                            self.data_buffer_start) % self.data_buffer_size
+                    else:
+                        # no remaining allocation, reset to zero
+                        self.data_buffer_start = self.data_buffer_end = 0
                     freed_bytes += metadata[1]
                 else:
                     # there are still readers, we cannot free the buffer
@@ -601,6 +606,45 @@ class SingleWriterShmObjectStorage:
                 assert self.is_writer
 
         return obj
+
+    def touch(
+        self,
+        key: str,
+        address: int = 0,
+        monotonic_id: int = 0,
+    ) -> None:
+        """
+        Touch an existing cached item to update its eviction status.
+
+        For writers (ShmObjectStoreSenderCache): Increment writer_flag
+        For readers (ShmObjectStoreReceiverCache): Increment reader_count
+
+        Args:
+            key: String key of the object to touch
+            address: Address of the object (only for readers)
+            monotonic_id: Monotonic ID of the object (only for readers)
+
+        """
+        if self._reader_lock is None:
+            if key not in self.key_index:
+                return None
+            address, monotonic_id = self.key_index[key]
+            # Writer side: increment writer_flag to raise eviction threshold
+            self.increment_writer_flag(monotonic_id)
+        else:
+            with (
+                    self._reader_lock,
+                    self.ring_buffer.access_buf(address) as (data_view, _),
+            ):
+                reader_count = self.ring_buffer.byte2int(
+                    data_view[:self.flag_bytes])
+
+                # NOTE(Long):
+                # Avoid increasing flag on newly added item (sync with sender)
+                # Since when a new item is added
+                # pre-touch has no effect on writer side
+                if reader_count >= self.n_readers:
+                    self.increment_reader_flag(data_view[:self.flag_bytes])
 
     def handle(self):
         """Get handle for sharing across processes."""
