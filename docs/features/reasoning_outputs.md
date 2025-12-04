@@ -299,9 +299,6 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
         def is_reasoning_end(self, input_ids: list[int]) -> bool:
             return self.end_token_id in input_ids
-
-        def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
-            return len(input_ids) > 0 and self.end_token_id == input_ids[-1]
         ...
     ```
 

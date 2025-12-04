@@ -52,7 +52,9 @@ class ReasoningParser:
         Check if the reasoning content ends in the input_ids.
 
         It is used in structured engines like `xgrammar` to check if the
-        reasoning content ends in the model output.
+        reasoning content ends in the model output. `input_ids` can be
+        either the entire model output or the last few computed tokens of
+        the model output (like during a decode step).
 
         Parameters:
         input_ids: list[int]
@@ -62,33 +64,6 @@ class ReasoningParser:
         bool
             True if the reasoning content ends in the input_ids.
         """
-
-    @abstractmethod
-    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
-        """
-        Check if the reasoning content ends in the input_ids on a
-        decode step.
-
-        It is used in structured engines like `xgrammar` to check if the
-        reasoning content ends in the model output before applying the
-        structured output.
-
-        Notes:
-            - The first time the reasoning content ends during a decode step, this
-            method returns True. StructuredOutputManager then caches the result.
-            - Subsequent decode steps for the same reasoning segment can return
-            False or True.
-
-        Parameters:
-        input_ids: list[int]
-            The input_ids of the model output at the current decode step.
-
-        Returns:
-        bool
-            True if the reasoning content ends in the input_ids on a
-            decode step.
-        """
-        return self.is_reasoning_end(input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

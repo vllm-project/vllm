@@ -74,9 +74,6 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return True
         return False
 
-    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
-        return len(input_ids) > 0 and self.end_token_id == input_ids[-1]
-
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens
