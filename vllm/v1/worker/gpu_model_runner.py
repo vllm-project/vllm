@@ -2131,6 +2131,7 @@ class GPUModelRunner(
                         group_mm_kwargs_by_modality(
                             [video_mm_kwargs_item],
                             device=self.device,
+                            pin_memory=self.pin_memory,
                             multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
