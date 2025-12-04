@@ -76,7 +76,7 @@ class CommonAttentionMetadata:
     max_query_len: int
     """Longest query in batch"""
     max_seq_len: int
-    """Longest context length (may be an upper bound when seq_lens_cpu is missing)"""
+    """Longest context length (may be an upper bound)"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
