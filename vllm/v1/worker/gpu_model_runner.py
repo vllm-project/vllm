@@ -595,11 +595,13 @@ class GPUModelRunner(
         )
 
         self.async_sps_zero_bubble_mode = (
-            self.use_async_scheduling
+            envs.VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE
+            and self.use_async_scheduling
             and self.num_spec_tokens > 0
             and self.dcp_world_size == 1
             and not self.cascade_attn_enabled
         )
+        logger.info(f"Async SPS zero bubble mode: {self.async_sps_zero_bubble_mode}, with VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE={envs.VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE} async_scheduling={self.use_async_scheduling} num_spec_tokens={self.num_spec_tokens} dcp_world_size={self.dcp_world_size} cascade_attn_enabled={self.cascade_attn_enabled}")
         self.async_spec_reqs_to_fix: set[str] = set()
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
