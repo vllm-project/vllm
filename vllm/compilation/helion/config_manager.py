@@ -40,7 +40,7 @@ class ConfigManager:
     - Config loading and saving
     - Kernel name normalization
 
-    File naming convention: helion_{kernel_name}_{config_key}.json
+    File naming convention: {kernel_name}_{config_key}.json
 
     Singleton pattern: Use ConfigManager.get_instance() to get the shared instance.
     """
@@ -159,9 +159,11 @@ class ConfigManager:
                 from vllm.compilation.helion.custom_op import HelionCustomOp
 
                 if issubclass(kernel_name_or_class, HelionCustomOp):
-                    # Create temporary instance to get kernel_name
+                    # Create temporary instance to get helion kernel name
                     temp_instance = kernel_name_or_class()
-                    return temp_instance.kernel_name
+                    helion_kernel = temp_instance.helion_kernel
+                    if helion_kernel is not None and hasattr(helion_kernel, 'op_name'):
+                        return helion_kernel.op_name
             except Exception:
                 pass
 
@@ -187,14 +189,14 @@ class ConfigManager:
             config_key: Configuration key (e.g., "4096", "h4096_s8")
 
         Returns:
-            Config filename: helion_{kernel_name}_{config_key}.json
+            Config filename: {kernel_name}_{config_key}.json
 
         Examples:
-            get_config_filename("silu_mul_fp8_helion", "4096")
-            -> "helion_silu_mul_fp8_helion_4096.json"
+            get_config_filename("silu_mul_fp8", "4096")
+            -> "silu_mul_fp8_4096.json"
         """
         kernel_name_str = self._get_kernel_name(kernel_name)
-        return f"helion_{kernel_name_str}_{config_key}.json"
+        return f"{kernel_name_str}_{config_key}.json"
 
     def get_config_path(self, kernel_name: KernelIdentifier, config_key: str) -> Path:
         """
@@ -319,7 +321,7 @@ class ConfigManager:
             return {}
 
         # Find all config files for this kernel
-        pattern = f"helion_{kernel_name_str}_*.json"
+        pattern = f"{kernel_name_str}_*.json"
         config_files = list(self.base_dir.glob(pattern))
 
         if not config_files:
@@ -331,10 +333,10 @@ class ConfigManager:
         # Load all configs at once
         for config_file in config_files:
             try:
-                # Parse config key from filename: helion_{kernel}_{config_key}.json
-                # Remove the "helion_{kernel}_" prefix to get just the config_key
+                # Parse config key from filename: {kernel}_{config_key}.json
+                # Remove the "{kernel}_" prefix to get just the config_key
                 filename_stem = config_file.stem
-                prefix = f"helion_{kernel_name_str}_"
+                prefix = f"{kernel_name_str}_"
 
                 if filename_stem.startswith(prefix):
                     config_key = filename_stem[len(prefix) :]
@@ -383,16 +385,16 @@ class ConfigManager:
             return {}
 
         configs: dict[str, dict[str, Path]] = {}
-        pattern = "helion_*.json"
+        pattern = "*.json"
 
         for config_file in self.base_dir.glob(pattern):
             try:
-                # Parse filename: helion_{kernel}_{config_key}.json
+                # Parse filename: {kernel}_{config_key}.json
                 name_parts = config_file.stem.split("_")
-                if len(name_parts) < 3 or name_parts[0] != "helion":
+                if len(name_parts) < 2:
                     continue
 
-                file_kernel_name = "_".join(name_parts[1:-1])
+                file_kernel_name = "_".join(name_parts[:-1])
                 config_key = name_parts[-1]
 
                 # Filter by kernel if requested
