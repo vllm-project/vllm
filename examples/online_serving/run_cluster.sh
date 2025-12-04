@@ -80,7 +80,19 @@ RAY_START_CMD="ray start --block"
 if [ "${NODE_TYPE}" == "--head" ]; then
     RAY_START_CMD+=" --head --node-ip-address=${HEAD_NODE_ADDRESS} --port=6379"
 else
-    RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379 --node-ip-address=${VLLM_HOST_IP}"
+    # Parse VLLM_HOST_IP from additional args if present
+    VLLM_HOST_IP=""
+    for arg in "${ADDITIONAL_ARGS[@]}"; do
+        if [[ $arg == VLLM_HOST_IP=* ]]; then
+            VLLM_HOST_IP="${arg#VLLM_HOST_IP=}"
+            break
+        fi
+    done
+
+    RAY_START_CMD+=" --address=${HEAD_NODE_ADDRESS}:6379"
+    if [ -n "${VLLM_HOST_IP}" ]; then
+        RAY_START_CMD+=" --node-ip-address=${VLLM_HOST_IP}"
+    fi
 fi
 
 # Launch the container with the assembled parameters.
