@@ -11,8 +11,7 @@ launch MODEL TP_SIZE:
     VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 \
         vllm serve {{MODEL}} --port {{PORT}} -tp {{TP_SIZE}}
 
-bench_decode MODEL BATCH_SIZE:
-    NUM_PROMPTS := BATCH_SIZE * 2 \
+bench_decode MODEL BATCH_SIZE NUM_PROMPTS:
     vllm bench serve \
         --port {{PORT}} \
         --model {{MODEL}} \
@@ -20,7 +19,7 @@ bench_decode MODEL BATCH_SIZE:
         --dataset-name random \
         --random-input-len 2 \
         --random-output-len 100 \
-        --num-prompts {{NUM_PROMPTS}} \
+        --num-prompts $((BATCH_SIZE * 2)) \
         --seed $(date +%s) \
         --ignore-eos
 
