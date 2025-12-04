@@ -341,6 +341,40 @@ def test_get_num_blocks_to_allocate():
     )
 
 
+def test_evictable_cached_blocks_not_double_allocated():
+    block_size = 2
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+
+    block_pool = BlockPool(
+        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    request_id = "req"
+    evictable_block = block_pool.blocks[1]  # ref_cnt == 0, eviction candidate
+
+    num_blocks = manager.get_num_blocks_to_allocate(
+        request_id=request_id,
+        num_tokens=4,  # requires 2 blocks
+        new_computed_blocks=[evictable_block],  # one cached block hit
+        total_computed_tokens=0,
+    )
+    # Free capacity check should count evictable cached blocks (so return 2),
+    # but allocation should only allocate the truly new block.
+    assert num_blocks == 2
+
+    manager.save_new_computed_blocks(request_id, [evictable_block])
+    new_blocks = manager.allocate_new_blocks(request_id, num_blocks, num_tokens=4)
+    assert len(new_blocks) == 1
+    assert len(manager.req_to_blocks[request_id]) == 2
+
+
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
     attention_spec = ChunkedLocalAttentionSpec(

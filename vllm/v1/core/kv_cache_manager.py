@@ -331,6 +331,7 @@ class KVCacheManager:
         (
             num_new_blocks_to_allocate_per_group,
             num_evictable_blocks_to_allocate_per_group,
+            blocks_to_touch_per_group,
         ) = self.coordinator.get_num_blocks_to_allocate_per_group(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
@@ -353,7 +354,7 @@ class KVCacheManager:
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_block_list)
+            self.block_pool.touch(blocks_to_touch_per_group)
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -362,8 +363,14 @@ class KVCacheManager:
         if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
+            print(
+                f"YIFAN: saving new computed blocks for request {request.request_id}, lens: {[len(b) for b in new_computed_block_list]}, total_computed_tokens: {num_local_computed_tokens + num_external_computed_tokens}"
+            )
             self.coordinator.save_new_computed_blocks(
-                request.request_id, new_computed_block_list
+                request_id=request.request_id,
+                new_computed_blocks=new_computed_block_list,
+                total_computed_tokens=num_local_computed_tokens
+                + num_external_computed_tokens,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
@@ -387,7 +394,12 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        self.coordinator.cache_blocks(
+            request,
+            num_tokens_to_cache,
+            total_computed_tokens=num_local_computed_tokens
+            + num_external_computed_tokens,
+        )
 
         return self.create_kv_cache_blocks(new_blocks)
 

@@ -595,9 +595,6 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-                print(f"YIFAN: schedule request {request.request_id} new_blocks")
-                for i, group in enumerate(new_blocks.blocks):
-                    print(f"group {i} len(group): {len(group)}")
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
