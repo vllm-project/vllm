@@ -178,9 +178,7 @@ class BambaAttentionDecoderLayer(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        if hasattr(config, "partial_rotary_factor"):
-            rotary_dim = int(self.head_dim * config.partial_rotary_factor)
-        elif hasattr(config, "attn_rotary_emb"):
+        if hasattr(config, "attn_rotary_emb"):
             rotary_dim = config.attn_rotary_emb  # for backward compatibility
         else:
             rotary_dim = self.head_dim  # default

@@ -122,7 +122,6 @@ class DeciLMAttention(LlamaAttention):
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
