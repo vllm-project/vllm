@@ -43,6 +43,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
+    get_num_sampled_and_rejected,
     post_update,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
@@ -54,10 +55,7 @@ from vllm.v1.worker.gpu.sample.metadata import (
 )
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
-from vllm.v1.worker.gpu.spec_decode.rejection_sample import (
-    get_num_rejected,
-    rejection_sample,
-)
+from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -621,16 +619,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Sample tokens and compute logprobs (if needed).
         sampler_output = self.sampler(logits, sampling_metadata)
 
-        # Get the number of sampled tokens.
-        prefill_len = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
-        is_chunked_prefilling = input_batch.seq_lens < prefill_len
         if input_batch.num_draft_tokens == 0:
             # No draft tokens (common case).
-            # 0 if chunked-prefilling, 1 if not.
-            num_sampled = (~is_chunked_prefilling).int()
-            num_rejected = torch.zeros_like(num_sampled)
+            num_sampled = torch.ones(
+                input_batch.num_reqs, dtype=torch.int32, device=self.device
+            )
         else:
-            # Draft tokens for spec decoding.
+            # Rejection sampling for spec decoding.
             input_ids = input_batch.input_ids[input_batch.logits_indices]
             sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
@@ -638,13 +633,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.cu_num_logits,
                 self.num_speculative_steps,
             )
-            num_sampled *= ~is_chunked_prefilling
-            num_rejected = get_num_rejected(
-                input_batch.cu_num_logits,
-                num_sampled,
-            )
             sampler_output.sampled_token_ids = sampled_tokens
-            # TODO(woosuk): Support logprobs with spec decoding.
+
+        # Get the number of sampled and rejected tokens.
+        # For chunked prefills, num_sampled and num_rejected are both 0.
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len.gpu,
+        )
         return sampler_output, num_sampled, num_rejected
 
     def compute_prompt_logprobs(
