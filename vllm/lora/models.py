@@ -11,6 +11,7 @@ import safetensors.torch
 import torch
 from torch import nn
 
+from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
@@ -42,6 +43,7 @@ from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.worker.utils import MultiModalBudget
 
 logger = init_logger(__name__)
 
@@ -302,7 +304,7 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        model_config: ModelConfig | None,
+        vllm_config: VllmConfig,
         device: torch.device,
     ):
         """Create a LoRAModelManager and adapter for a given model.
@@ -340,7 +342,7 @@ class LoRAModelManager:
         f" {self.model.__class__.__name__}."
 
         self.packed_modules_mapping = get_packed_modules_mapping(self.model)
-        self._init_multimodal_config(model_config)
+        self._init_multimodal_config(vllm_config)
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
@@ -351,7 +353,7 @@ class LoRAModelManager:
 
         self.model.lora_manager = self
 
-    def _init_multimodal_config(self, model_config):
+    def _init_multimodal_config(self, vllm_config: VllmConfig):
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -359,25 +361,27 @@ class LoRAModelManager:
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping")
         )
-        # For v0 compatibility
-        self.supports_mm_lora = False
-        if model_config is not None:
-            self.mm_registry = MULTIMODAL_REGISTRY
-            self.info = self.mm_registry.create_processor(model_config).info
-            self.supports_mm_lora = self.supports_mm and hasattr(
-                self.info, "get_num_mm_encoder_tokens"
-            )
+
+        model_config: ModelConfig = vllm_config.model_config
+        self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
+        self.supports_mm_lora = self.supports_mm and hasattr(
+            self.info, "get_num_mm_encoder_tokens"
+        )
 
         if not self.supports_mm_lora:
             return
 
+        mm_budget = MultiModalBudget(
+            model_config,
+            vllm_config.scheduler_config,
+            MULTIMODAL_REGISTRY,
+        )
         self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
-        self.mm_config = model_config.multimodal_config
         limit_per_prompt: int = max(self.info.get_allowed_mm_limits().values())
 
         # For vision tower
         num_encoder_tokens = self.info.get_num_mm_encoder_tokens(
-            self.max_num_batched_tokens
+            mm_budget.get_encoder_budget()
         )
         self.mm_punica_wrapper_mapping = {
             name: get_punica_wrapper(
@@ -911,7 +915,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        model_config: ModelConfig,
+        vllm_config: VllmConfig,
         device: torch.device,
     ):
         super().__init__(
@@ -920,7 +924,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             max_num_batched_tokens,
             vocab_size,
             lora_config,
-            model_config,
+            vllm_config,
             device,
         )
         self._registered_adapters: LoRALRUCache = LoRALRUCache(
@@ -994,7 +998,7 @@ def create_lora_manager(
     max_num_batched_tokens: int,
     vocab_size: int,
     lora_config: LoRAConfig,
-    model_config: ModelConfig,
+    vllm_config: VllmConfig,
     device: torch.device,
     lora_manager_cls: type[LoRAModelManager] = LoRAModelManager,
     **kwargs,
@@ -1008,7 +1012,7 @@ def create_lora_manager(
         max_num_batched_tokens=max_num_batched_tokens,
         vocab_size=vocab_size,
         lora_config=lora_config,
-        model_config=model_config,
+        vllm_config=vllm_config,
         device=device,
         **kwargs,
     )

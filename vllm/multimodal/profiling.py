@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -59,7 +58,6 @@ class DummyDecoderData(NamedTuple):
     prompt_token_ids: list[int]
     multi_modal_data: MultiModalKwargsItems
     multi_modal_placeholders: MultiModalPlaceholderDict
-    multi_modal_token_ids: list[int]
 
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -324,13 +322,10 @@ class MultiModalProfiler(Generic[_I]):
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))
 
-        multi_modal_token_ids = copy.deepcopy(prompt_token_ids)
-
         return DummyDecoderData(
             prompt_token_ids=prompt_token_ids,
             multi_modal_data=mm_inputs["mm_kwargs"].require_data(),
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
-            multi_modal_token_ids=multi_modal_token_ids,
         )
 
     def _get_mm_max_tokens(

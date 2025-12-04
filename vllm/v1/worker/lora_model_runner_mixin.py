@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
@@ -33,7 +33,6 @@ class LoRAModelRunnerMixin:
         model: nn.Module,
         vllm_config: VllmConfig,
         device: torch.device,
-        model_config: ModelConfig | None = None,
     ) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
@@ -44,7 +43,7 @@ class LoRAModelRunnerMixin:
             device,
             model.embedding_modules,
         )
-        return self.lora_manager.create_lora_manager(model, model_config)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def _set_active_loras(
         self,

@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import torch
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.models import (
     LoRAModel,
@@ -69,7 +69,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -79,7 +79,7 @@ class WorkerLoRAManager:
             lora_config=self.lora_config,
             device=self.device,
             lora_manager_cls=self._manager_cls,
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
@@ -212,7 +212,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         lora_manager = create_lora_manager(
             model,
@@ -222,7 +222,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
         self._adapter_manager = lora_manager
         return lora_manager.model
