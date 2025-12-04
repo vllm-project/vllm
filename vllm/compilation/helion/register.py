@@ -8,6 +8,7 @@ as PyTorch custom operations with automatic fake kernel generation.
 """
 
 from collections.abc import Callable
+from typing import Optional
 
 import torch
 
@@ -37,6 +38,10 @@ class HelionKernelWrapper:
         # References for advanced use and debugging (set later by register_kernel)
         self._pytorch_op_wrapper = None
         self._helion_kernel = None
+
+        # Registered implementations for autotuning methods
+        self._autotune_inputs_generator = None
+        self._config_picker = None
 
         # Copy attributes needed for PyTorch schema inference
         self.__name__ = getattr(helion_kernel_func, "__name__", op_name)
@@ -105,6 +110,195 @@ class HelionKernelWrapper:
         """
         return self.helion_kernel_func.autotune(*args, **kwargs)
 
+    def register_autotune_inputs_generator(self, generator_func):
+        """
+        Register a function to generate autotune inputs.
+
+        Args:
+            generator_func: Function that returns dict[str, tuple] where:
+                - key: Configuration identifier (e.g., "4096", "h4096_s8")
+                - value: Tuple of concrete arguments to pass to forward()
+
+        Returns:
+            The registered function (for decorator usage)
+
+        Example:
+            @kernel_wrapper.register_autotune_inputs_generator
+            def generate_inputs():
+                return {
+                    "4096": (input_tensor, scale),
+                    "8192": (larger_input_tensor, scale)
+                }
+        """
+        self._autotune_inputs_generator = generator_func
+        return generator_func
+
+    def register_config_picker(self, picker_func):
+        """
+        Register a function to pick the best config from available options.
+
+        Args:
+            picker_func: Function that takes (model_config, available_configs) and
+                        returns the best helion.Config or None
+
+        Returns:
+            The registered function (for decorator usage)
+
+        Example:
+            @kernel_wrapper.register_config_picker
+            def pick_config(model_config, available_configs):
+                target_size = model_config.get_hidden_size()
+                return available_configs.get(str(target_size))
+        """
+        self._config_picker = picker_func
+        return picker_func
+
+    def get_autotune_inputs(self) -> dict[str, tuple]:
+        """
+        Return dictionary of inputs for autotuning.
+
+        Returns:
+            Dict where:
+            - key: Configuration identifier (e.g., "4096", "h4096_s8")
+            - value: Tuple of concrete arguments to pass to forward()
+
+        Example:
+            {
+                "4096": (input_tensor, scale),
+                "8192": (larger_input_tensor, scale)
+            }
+        """
+        if self._autotune_inputs_generator is None:
+            raise NotImplementedError(
+                f"No autotune inputs generator registered for kernel '{self.op_name}'. "
+                f"Use @{self.op_name}.register_autotune_inputs_generator to register one."
+            )
+        return self._autotune_inputs_generator()
+
+    def get_best_config(
+        self, model_config, available_configs: dict[str, "helion.Config"]
+    ) -> Optional["helion.Config"]:
+        """
+        Select the best config for model_config from available options.
+
+        This is a pure function that performs config selection logic without any I/O.
+        The registered picker function should implement kernel-specific selection strategies.
+
+        Args:
+            model_config: vLLM ModelConfig instance
+            available_configs: Dictionary mapping config keys to loaded Helion configs
+
+        Returns:
+            Best matching Helion config from available_configs, or None if no suitable match
+        """
+        if self._config_picker is None:
+            raise NotImplementedError(
+                f"No config picker registered for kernel '{self.op_name}'. "
+                f"Use @{self.op_name}.register_config_picker to register one."
+            )
+        return self._config_picker(model_config, available_configs)
+
+    def run_autotune(
+        self, autotune_inputs: dict[str, tuple], tuner_kwargs: dict | None = None
+    ) -> dict[str, "helion.Config"]:
+        """
+        Run autotuning and return configs (without saving).
+
+        Args:
+            autotune_inputs: Dictionary mapping config keys to input tuples for autotuning
+            tuner_kwargs: Additional arguments for Helion tuner
+
+        Returns:
+            Dictionary mapping config keys to tuned Helion configs
+        """
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not available. Please install Helion to use autotuning."
+            )
+
+        # Get the Helion kernel function
+        kernel_fn = self.helion_kernel_func
+        if kernel_fn is None:
+            raise RuntimeError(
+                f"No Helion kernel available for {self.op_name}"
+            )
+
+        # Set reasonable defaults for tuner
+        tuner_kwargs = tuner_kwargs or {}
+        default_tuner_kwargs = {
+            "initial_population": 200,
+            "copies": 10,
+            "max_generations": 40,
+        }
+        default_tuner_kwargs.update(tuner_kwargs)
+
+        results = {}
+
+        for config_key, inputs in autotune_inputs.items():
+            logger.info(
+                f"Autotuning {self.op_name} for config: {config_key}"
+            )
+
+            try:
+                # Use Helion's built-in autotune method
+                config = kernel_fn.autotune(inputs, **default_tuner_kwargs)
+                results[config_key] = config
+
+            except Exception as e:
+                logger.error(
+                    f"Autotuning failed for {self.op_name} config {config_key}: {e}"
+                )
+
+        return results
+
+    def configure(self, model_config=None, config_manager=None):
+        """
+        Configure the kernel with optimal config for the given model.
+
+        This is the main entry point for fusion passes - they call this method
+        to configure the kernel with the best config, then can call the kernel directly.
+
+        Args:
+            model_config: vLLM ModelConfig for optimal config selection
+            config_manager: ConfigManager instance for loading configs
+
+        Example:
+            # In fusion pass:
+            helion_kernel.configure(vllm_config.model_config, config_manager)
+            return helion_kernel(input, scale)
+        """
+        # Handle config selection logic here
+        assert model_config is not None, (
+            f"{self.op_name}.configure() requires model_config to be provided"
+        )
+
+        assert config_manager is not None, (
+            f"{self.op_name}.configure() requires config_manager to be provided"
+        )
+
+        kernel_name = self.op_name
+        assert kernel_name, (
+            f"{self.op_name}.op_name returned None or empty string"
+        )
+
+        # Load available configs using ConfigManager
+        available_configs = config_manager.load_all_configs(kernel_name)
+
+        assert available_configs, (
+            f"No configs available for kernel '{kernel_name}' - ensure configs are properly saved"
+        )
+
+        # Use our selection logic
+        optimal_config = self.get_best_config(model_config, available_configs)
+
+        # get_best_config() must return a config if configs are available
+        assert optimal_config is not None, (
+            f"{self.op_name}.get_best_config() returned None with {len(available_configs)} configs available"
+        )
+
+        # Set the config on the kernel
+        self.set_config(optimal_config)
+
 
 # Try to import Helion - it's an optional dependency
 try:
@@ -112,6 +306,7 @@ try:
 
     HELION_AVAILABLE = True
 except ImportError:
+    helion = None
     HELION_AVAILABLE = False
 
 

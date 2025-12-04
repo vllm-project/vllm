@@ -49,7 +49,7 @@ if HELION_AVAILABLE:
         """
         return torch.empty_like(input, dtype=torch.float8_e4m3fn)
 
-    # Pure Helion kernel for autotuning with new @register_kernel decorator
+    # Pure Helion kernel for autotuning
     @register_kernel("rms_norm_fp8", fake_impl=_rms_norm_fp8_custom_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
@@ -135,8 +135,83 @@ if HELION_AVAILABLE:
 
         return out
 
-    # Note: PyTorch custom op registration is handled by @register_kernel decorator
-    # with custom fake implementation for symbolic shape compatibility
+    # Register autotune inputs generator
+    @rms_norm_fp8.register_autotune_inputs_generator
+    def generate_rms_norm_fp8_autotune_inputs() -> dict[str, tuple]:
+        """
+        Generate autotune inputs for common hidden_size values.
+
+        Returns:
+            Dictionary mapping hidden_size strings to input tuples
+        """
+        inputs = {}
+        hidden_sizes = [2048, 4096, 5120, 8192]
+        batch_size = 256  # Representative batch size for autotuning
+
+        for hidden_size in hidden_sizes:
+            input_tensor = torch.randn(
+                batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            weight = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
+            scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
+
+            inputs[str(hidden_size)] = (input_tensor, weight, scale, 1e-5)
+
+        return inputs
+
+    # Register config picker
+    @rms_norm_fp8.register_config_picker
+    def pick_rms_norm_fp8_config(
+        model_config, available_configs: dict[str, "helion.Config"]
+    ):
+        """
+        Select config by exact hidden_size match with closest fallback.
+
+        Args:
+            model_config: vLLM ModelConfig instance
+            available_configs: Dictionary mapping config keys to loaded Helion configs
+
+        Returns:
+            Best matching Helion config from available_configs, or None if no suitable match
+        """
+        if not available_configs:
+            return None
+
+        target_hidden_size = model_config.get_hidden_size()
+
+        # Try exact match first
+        exact_key = str(target_hidden_size)
+        if exact_key in available_configs:
+            return available_configs[exact_key]
+
+        # Find closest match from available configs
+        try:
+            # Parse hidden sizes from available config keys (assuming they're numeric strings)
+            available_sizes = []
+            for key in available_configs:
+                try:
+                    size = int(key)
+                    available_sizes.append((size, key))
+                except ValueError:
+                    continue  # Skip non-numeric keys
+
+            if not available_sizes:
+                return None
+
+            # Find closest size
+            closest_size, closest_key = min(
+                available_sizes, key=lambda x: abs(x[0] - target_hidden_size)
+            )
+
+            logger.warning(
+                f"No exact config for hidden_size={target_hidden_size}, "
+                f"using closest match: {closest_size}"
+            )
+            return available_configs[closest_key]
+
+        except Exception:
+            # If parsing fails, just return the first available config
+            return next(iter(available_configs.values()))
 
 
 # Now define the vLLM CustomOp wrapper
@@ -186,84 +261,10 @@ class RMSNormFp8Helion(HelionCustomOp):
 
     @property
     def helion_kernel(self):
-        """Return the Helion kernel function for autotuning."""
+        """Return the Helion kernel wrapper for autotuning."""
         if HELION_AVAILABLE:
             return rms_norm_fp8
         return None
-
-    def get_autotune_inputs(self) -> dict[str, tuple]:
-        """
-        Generate autotune inputs for common hidden_size values.
-
-        Returns:
-            Dictionary mapping hidden_size strings to input tuples
-        """
-        inputs = {}
-        hidden_sizes = [2048, 4096, 5120, 8192]
-        batch_size = 512  # Slightly larger batch for RMS norm
-
-        for hidden_size in hidden_sizes:
-            input_tensor = torch.randn(
-                batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
-            )
-            weight = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
-            scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
-
-            inputs[str(hidden_size)] = (input_tensor, weight, scale, 1e-5)
-
-        return inputs
-
-    def get_best_config(
-        self, model_config, available_configs: dict[str, "helion.Config"]
-    ):
-        """
-        Select config with closest match fallback.
-
-        Args:
-            model_config: vLLM ModelConfig instance
-            available_configs: Dictionary mapping config keys to loaded Helion configs
-
-        Returns:
-            Best matching Helion config from available_configs, or None if no suitable match
-        """
-        if not available_configs:
-            return None
-
-        target_hidden_size = model_config.get_hidden_size()
-
-        # Try exact match first
-        exact_key = str(target_hidden_size)
-        if exact_key in available_configs:
-            return available_configs[exact_key]
-
-        # Find closest match from available configs
-        try:
-            # Parse hidden sizes from available config keys (assuming they're numeric strings)
-            available_sizes = []
-            for key in available_configs:
-                try:
-                    size = int(key)
-                    available_sizes.append((size, key))
-                except ValueError:
-                    continue  # Skip non-numeric keys
-
-            if not available_sizes:
-                return None
-
-            # Find closest size
-            closest_size, closest_key = min(
-                available_sizes, key=lambda x: abs(x[0] - target_hidden_size)
-            )
-
-            logger.warning(
-                f"No exact config for hidden_size={target_hidden_size}, "
-                f"using closest match: {closest_size}"
-            )
-            return available_configs[closest_key]
-
-        except Exception:
-            # If parsing fails, just return the first available config
-            return next(iter(available_configs.values()))
 
 
 class RMSNormFp8Benchmark(KernelBenchmark):
