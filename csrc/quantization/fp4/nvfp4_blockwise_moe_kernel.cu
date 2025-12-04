@@ -357,6 +357,9 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
+// SM120 FP4 MoE requires TMA support for float_e2m1_t (CUDA 12.7+)
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120 && \
+    defined(CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B)
 void run_fp4_blockwise_scaled_group_mm_sm120(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
@@ -530,6 +533,7 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
   status = gemm_op.run(args, workspace.data_ptr(), stream);
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
+#endif  // ENABLE_NVFP4_SM120 && CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
 
 template <typename OutType>
 void run_fp4_blockwise_scaled_group_mm(
@@ -539,7 +543,8 @@ void run_fp4_blockwise_scaled_group_mm(
     const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets, int M,
     int N, int K) {
   int32_t version_num = get_sm_version_num();
-#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+#if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120 && \
+    defined(CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B)
   if (version_num >= 120 && version_num < 130) {
     run_fp4_blockwise_scaled_group_mm_sm120(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
@@ -618,7 +623,8 @@ void cutlass_fp4_group_mm(
         output, a, b, a_blockscale, b_blockscales, alphas, problem_sizes,
         expert_offsets, sf_offsets, M, N, K);
   } else {
-  #if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+  #if defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120 && \
+      defined(CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B)
     int32_t version_num = get_sm_version_num();
     if (version_num >= 120 && version_num < 130) {
       TORCH_CHECK_NOT_IMPLEMENTED(
