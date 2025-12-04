@@ -443,7 +443,7 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
         print(generated_text)
     ```
 
-For Qwen3-VL, the  ```image_embeds``` should contain both the base image embedding and deepstack features.
+For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
 
 #### Audio Embeddings
 
