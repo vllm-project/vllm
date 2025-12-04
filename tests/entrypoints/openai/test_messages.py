@@ -69,8 +69,19 @@ async def test_anthropic_streaming(client: anthropic.AsyncAnthropic):
         stream=True,
     )
 
+    first_chunk = None
+    chunk_count = 0
     async for chunk in resp:
+        chunk_count += 1
+        if first_chunk is None and chunk.type == "message_start":
+            first_chunk = chunk
         print(chunk.model_dump_json())
+
+    assert chunk_count > 0
+    assert first_chunk is not None, "message_start chunk was never observed"
+    assert first_chunk.usage is not None, "first chunk should include usage stats"
+    assert first_chunk.usage["output_tokens"] == 0
+    assert first_chunk.usage["input_tokens"] > 5
 
 
 @pytest.mark.asyncio

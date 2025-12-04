@@ -183,7 +183,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         if anthropic_request.stream:
             req.stream = anthropic_request.stream
-            req.stream_options = StreamOptions.validate({"include_usage": True})
+            req.stream_options = StreamOptions.validate(
+                {"include_usage": True, "continuous_usage_stats": True}
+            )
 
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
@@ -322,6 +324,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     id=origin_chunk.id,
                                     content=[],
                                     model=origin_chunk.model,
+                                ),
+                                usage=AnthropicUsage(
+                                    input_tokens=origin_chunk.usage.prompt_tokens
+                                    if origin_chunk.usage
+                                    else 0,
+                                    output_tokens=0,
                                 ),
                             )
                             first_item = False
