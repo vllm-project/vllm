@@ -795,14 +795,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    from vllm.utils.serial_utils import tensor2base64
+
     image_embedding = torch.load(...)
     grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
 
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = tensor2base64(image_embedding)
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")

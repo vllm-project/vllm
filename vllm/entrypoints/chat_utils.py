@@ -536,7 +536,7 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -593,7 +593,7 @@ def resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -627,11 +627,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig, tokenizer: TokenizerLike):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
 
         self._model_config = model_config
-        self._tokenizer = tokenizer
 
         self._items_by_modality = defaultdict[str, list[_T | None]](list)
         self._uuids_by_modality = defaultdict[str, list[str | None]](list)
@@ -1612,7 +1611,6 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1620,7 +1618,7 @@ def parse_chat_messages(
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1644,7 +1642,6 @@ def parse_chat_messages(
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1652,7 +1649,7 @@ def parse_chat_messages_futures(
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = AsyncMultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
