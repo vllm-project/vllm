@@ -163,14 +163,14 @@ class PoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         raise NotImplementedError
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         pooling_cursor = pooling_metadata.pooling_cursor
         return self.forward_all(hidden_states, pooling_cursor)
 
@@ -183,7 +183,7 @@ class CLSPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with CLS pooling"
         )
@@ -199,7 +199,7 @@ class LastPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         return hidden_states[pooling_cursor.last_token_indices_gpu]
 
 
@@ -217,7 +217,7 @@ class AllPool(PoolingMethod):
 
     def forward_all(
         self, hidden_states: torch.Tensor, pooling_cursor: PoolingCursor
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         raise NotImplementedError(
             "forward_all is not implemented for AllPool. Use forward instead."
         )
@@ -226,7 +226,7 @@ class AllPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         pooling_cursor = pooling_metadata.pooling_cursor
         pooling_params = get_pooling_params(pooling_metadata)
         is_finished = pooling_cursor.is_finished()
@@ -242,18 +242,18 @@ class AllPool(PoolingMethod):
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
         for pooling_param, hs_chunk in zip(pooling_params, hidden_states_lst):
-            pooling_param.internal_states.hidden_states_cache.append(hs_chunk)
+            pooling_param.pooling_states.hidden_states_cache.append(hs_chunk)
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
-        output_list = []
+        output_list: PoolerOutput = []
         for pooling_param, finished in zip(pooling_params, is_finished):
             if finished:
-                hidden_states_cache = pooling_param.internal_states.hidden_states_cache
+                hidden_states_cache = pooling_param.pooling_states.hidden_states_cache
                 if len(hidden_states_cache) == 1:
                     output_list.append(hidden_states_cache[0])
                 else:
                     output_list.append(torch.concat(hidden_states_cache, dim=0))
-                pooling_param.clean_internal_states()
+                pooling_param.clean_pooling_states()
             else:
                 output_list.append(None)
 
@@ -268,7 +268,7 @@ class MeanPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
-    ) -> list[torch.Tensor] | torch.Tensor:
+    ) -> PoolerOutput:
         assert not pooling_cursor.is_partial_prefill(), (
             "partial prefill not supported with MEAN pooling"
         )
@@ -473,7 +473,7 @@ class PoolerHead(nn.Module):
         self,
         pooled_data: list[torch.Tensor] | torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ):
+    ) -> PoolerOutput:
         return self.activation(pooled_data)
 
 
@@ -492,7 +492,7 @@ class EmbeddingPoolerHead(PoolerHead):
         self,
         pooled_data: list[torch.Tensor] | torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ):
+    ) -> PoolerOutput:
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
@@ -773,7 +773,7 @@ class StepPooler(Pooler):
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
         pooling_params = get_pooling_params(pooling_metadata)
 
-        pooled_data: list[torch.Tensor | None] = []
+        pooled_data: PoolerOutput = []
         for data, token_id, pooling_param in zip(
             pooled_data_lst, prompt_token_ids, pooling_params
         ):

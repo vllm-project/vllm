@@ -4234,7 +4234,7 @@ class GPUModelRunner(
         pooling_params = []
         for i in range(num_reqs):
             p = dummy_pooling_params.clone()
-            p.reset_internal_states()
+            p.reset_pooling_states()
             pooling_params.append(p)
 
         dummy_metadata = PoolingMetadata(

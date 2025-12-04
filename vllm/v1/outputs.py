@@ -89,7 +89,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = torch.Tensor | list[torch.Tensor] | None
+PoolerOutput = torch.Tensor | list[torch.Tensor] | list[None] | None
 
 
 @dataclass

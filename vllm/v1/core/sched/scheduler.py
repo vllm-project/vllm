@@ -771,7 +771,7 @@ class Scheduler(SchedulerInterface):
         # If the request is preempted, the hidden_states_cache
         # needs to be cleared and recalculated.
         if request.pooling_params is not None:
-            request.pooling_params.reset_internal_states()
+            request.pooling_params.reset_pooling_states()
 
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
