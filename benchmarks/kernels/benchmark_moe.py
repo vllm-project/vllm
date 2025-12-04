@@ -288,10 +288,8 @@ def prune_cuda_search_space(
     # Currently we only prune mm1 split_k configs for cuda
     # We should add more heuristics here in future and
     # expand original search space
-    pruned_space_1 = prune_cuda_configs(
-        num_tokens * topk, N1, K1, search_space
-    )
-    search_space = merge_unique_dicts(pruned_space_1, []) # placeholder for mm2
+    pruned_space_1 = prune_cuda_configs(num_tokens * topk, N1, K1, search_space)
+    search_space = merge_unique_dicts(pruned_space_1, [])  # placeholder for mm2
     return search_space
 
 
@@ -303,6 +301,7 @@ def prune_cuda_configs(M, N, K, configs):
             continue
         pruned_configs.append(config)
     return pruned_configs
+
 
 def prune_rocm_search_space(
     num_tokens, shard_intermediate_size, hidden_size, search_space, is_fp16, topk

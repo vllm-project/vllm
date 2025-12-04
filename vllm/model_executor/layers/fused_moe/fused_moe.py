@@ -317,7 +317,7 @@ def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
-    c_ptr, # Note: _zero_output pre-run hook assumes c_ptr is at args[2]
+    c_ptr,
     b_bias_ptr,
     a_scale_ptr,
     b_scale_ptr,
@@ -492,12 +492,12 @@ def fused_moe_kernel(
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
         k_remaining = K - k * BLOCK_SIZE_K * SPLIT_K
-        a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-                    other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=(offs_k[:, None] < k_remaining),
-                    other=0.0)
+        a = tl.load(
+            a_ptrs,
+            mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+            other=0.0,
+        )
+        b = tl.load(b_ptrs, mask=(offs_k[:, None] < k_remaining), other=0.0)
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -545,18 +545,10 @@ def fused_moe_kernel(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 
-    if (SPLIT_K == 1):
+    if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
         tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
-
-
-def _zero_output(*args, **kwargs):
-    if kwargs["SPLIT_K"] != 1:
-      args[2].zero_()
-
-
-fused_moe_kernel.add_pre_run_hook(_zero_output)
 
 
 def invoke_fused_moe_kernel(
@@ -613,7 +605,7 @@ def invoke_fused_moe_kernel(
         # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
         # and we can skip some invalid blocks.
         EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
-    
+
     HAS_BIAS = B_bias is not None
     if (
         (use_int8_w8a16 or use_int4_w4a16)
@@ -708,9 +700,9 @@ def invoke_fused_moe_kernel(
         )
     else:
         grid = lambda META: (
-            META['SPLIT_K']
-            * triton.cdiv(EM, META['BLOCK_SIZE_M'])
-            * triton.cdiv(B.size(1), META['BLOCK_SIZE_N']),
+            META["SPLIT_K"]
+            * triton.cdiv(EM, META["BLOCK_SIZE_M"])
+            * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
         )
         config = config.copy()
         config["SPLIT_K"] = 1
@@ -720,6 +712,8 @@ def invoke_fused_moe_kernel(
 
         if not do_split_k:
             config["SPLIT_K"] = 1
+        else:
+            C.zero_()
 
         fused_moe_kernel[grid](
             A,
