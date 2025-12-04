@@ -4,7 +4,6 @@
 numba == 0.61.2; platform_machine != "s390x" # Required for N-gram speculative decoding
 
 # Dependencies for CPUs
---extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
 torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"
 
