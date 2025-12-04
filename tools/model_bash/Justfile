@@ -19,7 +19,7 @@ bench_decode MODEL BATCH_SIZE:
         --dataset-name random \
         --random-input-len 2 \
         --random-output-len 100 \
-        --num-prompts $((BATCH_SIZE * 2)) \
+        --num-prompts $(({{BATCH_SIZE}} * 2)) \
         --seed $(date +%s) \
         --ignore-eos
 
@@ -40,11 +40,11 @@ start_profile:
 
 trace_decode MODEL BATCH_SIZE:
     just start_profile && \
-    just bench_decode MODEL BATCH_SIZE
+    just bench_decode {{MODEL}} {{BATCH_SIZE}}
 
 trace_prefill MODEL INPUT_LEN:
     just start_profile && \
-    just bench_prefill MODEL INPUT_LEN
+    just bench_prefill {{MODEL}} {{INPUT_LEN}}
 
 sweep MODEL INPUT_LEN OUTPUT_LEN:
     MODEL={{MODEL}} INPUT_LEN={{INPUT_LEN}} OUTPUT_LEN={{OUTPUT_LEN}} ./sweep.sh
