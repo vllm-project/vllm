@@ -58,9 +58,6 @@ def _create_vllm_config(
         )
 
         compilation_config.post_init_cudagraph_sizes()
-        mock_config.pad_for_cudagraph = (
-            lambda batch_size: compilation_config.bs_to_padded_graph_size[batch_size]
-        )
 
     return mock_config
 
@@ -161,10 +158,13 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. Cascade attention should have a fall back mode
+        # 4. piecewise_or_eager_only should have a fall back mode
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, use_cascade_attn=True
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            piecewise_or_eager_only=True,
         )
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
@@ -357,7 +357,7 @@ class TestCudagraphIntegration:
         ):
             full_wrapper(input_1)
 
-        rt_mode, key = self.dispatcher.dispatch(desc_1)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_1.num_tokens)
         # 1. Capture first shape
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "capture_global"
@@ -366,7 +366,7 @@ class TestCudagraphIntegration:
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "replay"
 
-        rt_mode, key = self.dispatcher.dispatch(desc_2)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_2.num_tokens)
         # 3. Capture second shape
         action = self._run_and_monitor_call(full_wrapper, input_2, rt_mode, key)
         assert action == "capture_global"
@@ -378,7 +378,7 @@ class TestCudagraphIntegration:
         assert action == "replay"
 
         # 5. Bypass if no key match
-        rt_mode, key = self.dispatcher.dispatch(desc_3_unseen)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_3_unseen.num_tokens)
         assert rt_mode == CUDAGraphMode.NONE
         action = self._run_and_monitor_call(full_wrapper, input_3, rt_mode, key)
         assert action == "bypass"
