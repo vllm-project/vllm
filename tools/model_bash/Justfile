@@ -11,7 +11,7 @@ launch MODEL TP_SIZE:
     VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 \
         vllm serve {{MODEL}} --port {{PORT}} -tp {{TP_SIZE}}
 
-bench_decode MODEL BATCH_SIZE NUM_PROMPTS:
+bench_decode MODEL BATCH_SIZE:
     vllm bench serve \
         --port {{PORT}} \
         --model {{MODEL}} \
@@ -23,12 +23,28 @@ bench_decode MODEL BATCH_SIZE NUM_PROMPTS:
         --seed $(date +%s) \
         --ignore-eos
 
+bench_prefill MODEL INPUT_LEN:
+    vllm bench serve \
+        --port {{PORT}} \
+        --model {{MODEL}} \
+        --max-concurrency 1 \
+        --dataset-name random \
+        --random-input-len {{INPUT_LEN}} \
+        --random-output-len 1 \
+        --num-prompts 100 \
+        --seed $(date +%s) \
+        --ignore-eos
+
 start_profile:
     curl -X POST http://localhost:{{PORT}}/start_profile
 
 trace_decode MODEL BATCH_SIZE:
     just start_profile && \
     just bench_decode MODEL BATCH_SIZE
+
+trace_prefill MODEL INPUT_LEN:
+    just start_profile && \
+    just bench_prefill MODEL INPUT_LEN
 
 sweep MODEL INPUT_LEN OUTPUT_LEN:
     MODEL={{MODEL}} INPUT_LEN={{INPUT_LEN}} OUTPUT_LEN={{OUTPUT_LEN}} ./sweep.sh
