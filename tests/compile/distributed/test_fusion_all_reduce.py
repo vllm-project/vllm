@@ -295,7 +295,7 @@ def all_reduce_fusion_pass_on_test_model(
         )
     )
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True, enable_noop=True
+        fuse_allreduce_rms=True, eliminate_noops=True
     )
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path
