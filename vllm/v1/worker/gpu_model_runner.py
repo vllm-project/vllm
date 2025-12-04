@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
 import gc
 import itertools
 import time
@@ -243,6 +244,26 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
         return output
+
+
+class ForceAttention(enum.Enum):
+    """
+    This enum determines whether we want to force attention execution during
+    a dummy run of the model by constructing attention metadata. This is
+    necessary because we want the kvcache op to be included in cudagraphs, but
+    some backends do not always support building attention metadata for
+    a capture run.
+    This restriction can be removed when we remove
+    the build_for_cudagraph_capture method:
+    https://github.com/vllm-project/vllm/issues/22945
+    """
+
+    ALL = enum.auto()
+    """Construct attention metadata for all layers."""
+    SEPARATE_KV_UPDATE_ONLY = enum.auto()
+    """Construct attention metadata for split attention and kvcache update layers."""
+    NONE = enum.auto()
+    """Do not construct attention metadata for any layers"""
 
 
 class ExecuteModelState(NamedTuple):
@@ -1514,6 +1535,8 @@ class GPUModelRunner(
         max_query_len: int,
         num_tokens_padded: int | None = None,
         num_reqs_padded: int | None = None,
+        force_attention: ForceAttention = ForceAttention.NONE,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
@@ -1587,6 +1610,10 @@ class GPUModelRunner(
         for kv_cache_gid, kv_cache_group in enumerate(
             self.kv_cache_config.kv_cache_groups
         ):
+            if force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY and isinstance(
+                kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec
+            ):
+                continue
             encoder_seq_lens, encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
@@ -1663,6 +1690,15 @@ class GPUModelRunner(
                         ],
                     )
 
+                # Only capture attention for backends that split KV Cache
+                # update and attention op, unless cudagraph_runtime_mode is
+                # FULL.
+                if (
+                    force_attention == ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    and cudagraph_runtime_mode != CUDAGraphMode.FULL
+                    and attn_group.backend.forward_includes_kv_cache
+                ):
+                    continue
                 if ubatch_slices is not None:
                     common_attn_metadata_list = split_attn_metadata(
                         ubatch_slices, common_attn_metadata
@@ -3856,7 +3892,7 @@ class GPUModelRunner(
         self,
         num_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
-        force_attention: bool = False,
+        force_attention: ForceAttention = ForceAttention.NONE,
         uniform_decode: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
@@ -3982,9 +4018,17 @@ class GPUModelRunner(
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        # We always capture attention if cudagraph_runtime_mode is FULL.
+        # Otherwise, if force_attention is not ALL, we capture attention
+        # for all backends. If it's SEPARATE_KV_UPDATE_ONLY, we capture
+        # attention only for backends that split KV Cache update and
+        # attention op.
+        # TODO get rid of build_for_cudagraph_capture
+        # https://github.com/vllm-project/vllm/issues/22945
+        if (
+            force_attention != ForceAttention.NONE
+            or cudagraph_runtime_mode == CUDAGraphMode.FULL
+        ):
             if create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
                 # shorter sequence lengths to run faster.
@@ -4004,6 +4048,8 @@ class GPUModelRunner(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
+                force_attention=force_attention,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 ubatch_slices=ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
             )
@@ -4511,17 +4557,42 @@ class GPUModelRunner(
                 )
             )
 
+            # Force attention for all cudagraph modes when the backend forward
+            # op doesn't include KV cache update. This is required
+            # for KV cache update to be captured correctly in cases where
+            # the KV cache update and attention are two separate custom ops.
+            # Keep in mind that when we use `FULL` cudagraph mode, we capture
+            # all attention regardless of the `force_attention_*` variables.
+            has_separate_kv_update = not all(
+                all(g.backend.forward_includes_kv_cache for g in self.attn_groups[id])
+                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            )
+            force_attention_dummy = (
+                ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                if has_separate_kv_update
+                else ForceAttention.NONE
+            )
+            force_attention_warmup = (
+                ForceAttention.ALL
+                if (cudagraph_runtime_mode == CUDAGraphMode.FULL)
+                else (
+                    ForceAttention.SEPARATE_KV_UPDATE_ONLY
+                    if (
+                        has_separate_kv_update
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
+                    else ForceAttention.NONE
+                )
+            )
+
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
-                # But be careful, warm up with `NONE`is orthogonal to
-                # if we want to warm up attention or not. This is
-                # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
-                force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                # This is independent from how we want to warm up the attention.
                 self._dummy_run(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
+                    force_attention=force_attention_warmup,
                     uniform_decode=uniform_decode,
                     allow_microbatching=allow_microbatching,
                     skip_eplb=True,
@@ -4531,6 +4602,7 @@ class GPUModelRunner(
             self._dummy_run(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                force_attention=force_attention_dummy,
                 uniform_decode=uniform_decode,
                 allow_microbatching=allow_microbatching,
                 skip_eplb=True,
