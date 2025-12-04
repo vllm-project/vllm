@@ -217,15 +217,15 @@ def test_fusion_silu_and_mul_quant(
     )
 
     with set_current_vllm_config(config):
-        fusion_pass = ActivationQuantFusionPass(config)
-        if model_class == TestAiterSiluMulGroupFp8QuantModel:
+        fusion_passes = [ActivationQuantFusionPass(config)]
+        if AITER_FOUND:
             from vllm.compilation.rocm_aiter_fusion import (
                 RocmAiterSiluMulFp8GroupQuantFusionPass,
             )
 
-            fusion_pass = RocmAiterSiluMulFp8GroupQuantFusionPass(config)
+            fusion_pass += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-        passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
+        passes = [NoOpEliminationPass(config), *fusion_passes, PostCleanupPass(config)]
         backend = TestBackend(*passes)
         model = model_class(
             hidden_size=hidden_size, cuda_force_torch=cuda_force_torch, x=x
