@@ -182,9 +182,7 @@ class KVCacheCoordinator(ABC):
             for i, manager in enumerate(self.single_type_managers)
         )
 
-    def cache_blocks(
-        self, request: Request, num_computed_tokens: int, total_computed_tokens: int
-    ) -> None:
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
@@ -195,7 +193,7 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens, total_computed_tokens)
+            manager.cache_blocks(request, num_computed_tokens)
 
     def free(self, request_id: str) -> None:
         """
