@@ -144,7 +144,7 @@ def autotune_kernel(
         kernel_instance = op_cls()
 
         # Get autotune inputs to check what will be generated
-        autotune_inputs = kernel_instance.get_autotune_inputs()
+        autotune_inputs = kernel_instance.helion_kernel.get_autotune_inputs()
         logger.info(
             "Will generate %d configs: %s",
             len(autotune_inputs),

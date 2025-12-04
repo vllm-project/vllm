@@ -262,7 +262,7 @@ if HELION_AVAILABLE:
         )
         return out, residual_out
 
-    # Apply @register_kernel to the actual Helion kernel
+    # Apply @helion.kernel decorator to the actual Helion kernel
     @register_kernel("allreduce_add_rmsnorm", fake_impl=_allreduce_add_rmsnorm_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
@@ -374,6 +374,97 @@ if HELION_AVAILABLE:
             out[tile_m, :] = normalized
 
         return out, residual_out
+
+    # Register autotune inputs generator
+    @allreduce_add_rmsnorm.register_autotune_inputs_generator
+    def generate_allreduce_add_rmsnorm_autotune_inputs() -> dict[str, tuple]:
+        """
+        Generate autotune inputs for common hidden_size values.
+
+        Returns:
+            Dictionary mapping hidden_size strings to input tuples
+        """
+        inputs = {}
+        hidden_sizes = [2048, 4096, 5120, 8192]
+        batch_size = 512  # Larger batch for this more complex operation
+        splits_per_rank = 4
+
+        for hidden_size in hidden_sizes:
+            allreduce_buf = torch.randn(
+                batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            residual = torch.randn(
+                batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            rms_gamma = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
+            progress = torch.zeros(
+                splits_per_rank, dtype=torch.uint32, device="cuda"
+            )
+
+            inputs[str(hidden_size)] = (
+                allreduce_buf,
+                residual,
+                rms_gamma,
+                progress,
+                1e-6,
+                splits_per_rank,
+            )
+
+        return inputs
+
+    # Register config picker
+    @allreduce_add_rmsnorm.register_config_picker
+    def pick_allreduce_add_rmsnorm_config(
+        model_config, available_configs: dict[str, "helion.Config"]
+    ):
+        """
+        Select config by exact hidden_size match with closest fallback.
+
+        Args:
+            model_config: vLLM ModelConfig instance
+            available_configs: Dictionary mapping config keys to loaded Helion configs
+
+        Returns:
+            Best matching Helion config from available_configs, or None if no suitable match
+        """
+        if not available_configs:
+            return None
+
+        target_hidden_size = model_config.get_hidden_size()
+
+        # Try exact match first
+        exact_key = str(target_hidden_size)
+        if exact_key in available_configs:
+            return available_configs[exact_key]
+
+        # Find closest match from available configs
+        try:
+            # Parse hidden sizes from available config keys (assuming they're numeric strings)
+            available_sizes = []
+            for key in available_configs:
+                try:
+                    size = int(key)
+                    available_sizes.append((size, key))
+                except ValueError:
+                    continue  # Skip non-numeric keys
+
+            if not available_sizes:
+                return None
+
+            # Find closest size
+            closest_size, closest_key = min(
+                available_sizes, key=lambda x: abs(x[0] - target_hidden_size)
+            )
+
+            logger.warning(
+                f"No exact config for hidden_size={target_hidden_size}, "
+                f"using closest match: {closest_size}"
+            )
+            return available_configs[closest_key]
+
+        except Exception:
+            # If parsing fails, just return the first available config
+            return next(iter(available_configs.values()))
 
 
 def helion_allreduce_add_rmsnorm(
@@ -522,136 +613,9 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
 
     @property
     def helion_kernel(self):
-        """Return the Helion kernel function for autotuning."""
+        """Return the Helion kernel wrapper for autotuning."""
         if HELION_AVAILABLE:
             return allreduce_add_rmsnorm
-        return None
-
-    def get_autotune_inputs(self) -> dict[str, tuple]:
-        """
-        Generate autotune inputs for hidden_size + splits combinations.
-
-        Returns:
-            Dictionary mapping config keys to input tuples
-        """
-        inputs = {}
-        hidden_sizes = [4096, 8192]  # Only larger models use distributed
-        splits_per_rank_options = [4, 8]
-        batch_size = 256
-
-        for hidden_size in hidden_sizes:
-            for splits in splits_per_rank_options:
-                # Create symmetric memory tensors for distributed
-                allreduce_buf = torch.randn(
-                    batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
-                )
-                residual = torch.randn(
-                    batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
-                )
-                rms_gamma = torch.randn(
-                    hidden_size, dtype=torch.bfloat16, device="cuda"
-                )
-
-                # Progress tensor for tracking AllReduce completion
-                progress = torch.zeros(splits, dtype=torch.uint32, device="cuda")
-                rms_eps = 1e-6
-
-                # Key includes both hidden_size and splits
-                key = f"h{hidden_size}_s{splits}"
-                inputs[key] = (
-                    allreduce_buf,
-                    residual,
-                    rms_gamma,
-                    progress,
-                    rms_eps,
-                    splits,
-                )
-
-        return inputs
-
-    def get_best_config(
-        self, model_config, available_configs: dict[str, "helion.Config"]
-    ):
-        """
-        Select config using hidden_size + splits_per_rank with fallback.
-
-        Args:
-            model_config: vLLM ModelConfig instance
-            available_configs: Dictionary mapping config keys to loaded Helion configs
-
-        Returns:
-            Best matching Helion config from available_configs, or None if no suitable match
-        """
-        if not available_configs:
-            return None
-
-        target_hidden_size = model_config.get_hidden_size()
-        splits = getattr(self, "splits_per_rank", 4)
-
-        # Try exact match first
-        exact_key = f"h{target_hidden_size}_s{splits}"
-        if exact_key in available_configs:
-            return available_configs[exact_key]
-
-        # Fallback: try different splits for same hidden_size
-        for fallback_splits in [4, 8]:
-            if fallback_splits != splits:
-                fallback_key = f"h{target_hidden_size}_s{fallback_splits}"
-                if fallback_key in available_configs:
-                    logger.warning(
-                        f"No config for splits={splits}, using splits={fallback_splits}"
-                    )
-                    return available_configs[fallback_key]
-
-        # Fallback: try closest hidden_size from available configs
-        try:
-            # Parse available hidden sizes from config keys (format: h{size}_s{splits})
-            available_sizes = []
-            for key in available_configs:
-                try:
-                    if key.startswith("h") and "_s" in key:
-                        size_str = key.split("_s")[0][1:]  # Remove 'h' prefix
-                        size = int(size_str)
-                        available_sizes.append((size, key))
-                except (ValueError, IndexError):
-                    continue  # Skip malformed keys
-
-            if not available_sizes:
-                # If no parseable keys, just return first available config
-                return next(iter(available_configs.values()))
-
-            # Find closest hidden size, preferring exact splits match
-            best_match = None
-            best_distance = float("inf")
-
-            for size, key in available_sizes:
-                distance = abs(size - target_hidden_size)
-
-                # Prefer configs with matching splits, then by distance
-                key_splits = int(key.split("_s")[1]) if "_s" in key else 4
-                splits_match = key_splits == splits
-
-                if distance < best_distance or (
-                    distance == best_distance
-                    and splits_match
-                    and (best_match is None or not best_match[2])
-                ):
-                    best_match = (size, key, splits_match)
-                    best_distance = distance
-
-            if best_match:
-                closest_size, best_key, _ = best_match
-                if closest_size != target_hidden_size:
-                    logger.warning(
-                        f"No config for hidden_size={target_hidden_size}, "
-                        f"using closest match: {closest_size}"
-                    )
-                return available_configs[best_key]
-
-        except Exception:
-            # If parsing fails, just return the first available config
-            return next(iter(available_configs.values()))
-
         return None
 
 
