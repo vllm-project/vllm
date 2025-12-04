@@ -145,6 +145,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         prefill_cudagraph_enabled = (
             vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
         )
+
+        # Determine number of speculative tokens.
         speculative_config = vllm_config.speculative_config
         num_spec_tokens = (
             speculative_config.num_speculative_tokens
@@ -152,6 +154,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             else 0
         )
 
+        # Select the appropriate CUDA graph support mode.
         if prefill_cudagraph_enabled and (num_spec_tokens > 0):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         else:
