@@ -574,9 +574,9 @@ class LoRAModelManager:
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA), (
-            f"Module {module_name} must be a BaseLayerWithLoRA instance,"
+            f"Module {module_name} must be a BaseLayerWithLoRA instance, "
+            f"got {type(module)}"
         )
-        f" got {type(module)}"
         self.modules[module_name] = module
 
     def create_dummy_lora(
