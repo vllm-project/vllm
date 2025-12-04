@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
+    VLLM_FORCE_NUM_KV_SPLITS: int = 0
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_PROFILER_DELAY_ITERS: int = 0
@@ -113,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_MLA_PREFILL: bool = False
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -577,6 +579,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # to load will result in a hard error when this is enabled.
     # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
     "VLLM_FORCE_AOT_LOAD": lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
+    # Force num kv splits. Only works for some backends.
+    "VLLM_FORCE_NUM_KV_SPLITS": lambda: (
+        int(os.getenv("VLLM_FORCE_NUM_KV_SPLITS", "0"))
+    ),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -958,6 +964,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Use AITER's prefill attention in Triton MLA
+    "VLLM_ROCM_USE_AITER_MLA_PREFILL": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MLA_PREFILL", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.
