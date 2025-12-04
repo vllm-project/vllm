@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
@@ -389,6 +390,19 @@ class AttentionImpl(ABC, Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+    if TYPE_CHECKING:
+        W_K: torch.Tensor | None
+        W_K_scale: torch.Tensor | None
+        W_V: torch.Tensor | None
+        W_V_scale: torch.Tensor | None
+        W_UV: torch.Tensor | None
+        W_UK_T: torch.Tensor | None
+
+        # Optional methods for prefill operations
+        # These are set dynamically in MLACommonImpl.__init__()
+        _run_prefill_context_chunk: Callable | None
+        _run_prefill_new_tokens: Callable | None
+
     @abstractmethod
     def __init__(
         self,

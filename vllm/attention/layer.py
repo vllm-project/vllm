@@ -983,6 +983,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
+            assert self.impl._run_prefill_context_chunk is not None
             attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
                 prefill=prefill_metadata,
                 chunk_idx=i,
@@ -1087,6 +1088,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
+            assert self.impl._run_prefill_context_chunk is not None
             attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
                 prefill=prefill_metadata,
                 chunk_idx=i,
@@ -1136,6 +1138,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
+        assert self.impl._run_prefill_new_tokens is not None
         output_prefill = self.impl._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
             q=q,
