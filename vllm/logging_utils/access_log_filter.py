@@ -9,6 +9,7 @@ production environments.
 """
 
 import logging
+from urllib.parse import urlparse
 
 
 class UvicornAccessLogFilter(logging.Filter):
@@ -16,7 +17,8 @@ class UvicornAccessLogFilter(logging.Filter):
     A logging filter that excludes access logs for specified endpoint paths.
 
     This filter is designed to work with uvicorn's access logger. It checks
-    the log message for the presence of excluded paths and filters them out.
+    the log record's arguments for the request path and filters out records
+    matching the excluded paths.
 
     Uvicorn access log format:
         '%s - "%s %s HTTP/%s" %d'
@@ -27,13 +29,13 @@ class UvicornAccessLogFilter(logging.Filter):
 
     Args:
         excluded_paths: A list of URL paths to exclude from logging.
-                       Paths are matched using prefix matching.
+                       Paths are matched exactly.
                        Example: ["/health", "/metrics"]
     """
 
     def __init__(self, excluded_paths: list[str] | None = None):
         super().__init__()
-        self.excluded_paths = excluded_paths or []
+        self.excluded_paths = set(excluded_paths or [])
 
     def filter(self, record: logging.LogRecord) -> bool:
         """
@@ -48,20 +50,20 @@ class UvicornAccessLogFilter(logging.Filter):
         if not self.excluded_paths:
             return True
 
-        # Get the log message
-        # For uvicorn access logs, the message contains the request path
-        message = record.getMessage()
+        # This filter is specific to uvicorn's access logs.
+        if record.name != "uvicorn.access":
+            return True
 
-        # Check if any excluded path appears in the log message
-        # The format is: '... "METHOD /path HTTP/..." ...'
-        for path in self.excluded_paths:
-            # Match patterns like "GET /health" or "POST /metrics"
-            # We check for the path after a space and HTTP method
-            if f" {path} " in message or f" {path}?" in message:
-                return False
-            # Also check for exact path at end before HTTP version
-            if f'"{path} ' in message or f" {path} HTTP/" in message:
-                return False
+        # The path is the 3rd argument in the log record's args tuple.
+        # See uvicorn's access logging implementation for details.
+        log_args = record.args
+        if isinstance(log_args, tuple) and len(log_args) >= 3:
+            path_with_query = log_args[2]
+            # Get path component without query string.
+            if isinstance(path_with_query, str):
+                path = urlparse(path_with_query).path
+                if path in self.excluded_paths:
+                    return False
 
         return True
 

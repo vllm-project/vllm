@@ -255,9 +255,9 @@ class TestIntegration:
     """Integration tests for the access log filter."""
 
     def test_filter_with_real_logger(self):
-        """Test filter works with a real Python logger."""
-        # Create a logger with our filter
-        logger = logging.getLogger("test.uvicorn.access")
+        """Test filter works with a real Python logger simulating uvicorn."""
+        # Create a logger with our filter (simulating uvicorn.access)
+        logger = logging.getLogger("uvicorn.access")
         logger.setLevel(logging.INFO)
 
         # Clear any existing handlers
@@ -276,13 +276,96 @@ class TestIntegration:
         handler.addFilter(filter)
         logger.addHandler(handler)
 
-        # Log various messages
-        logger.info('127.0.0.1:12345 - "GET /health HTTP/1.1" 200')
-        logger.info('127.0.0.1:12345 - "GET /v1/completions HTTP/1.1" 200')
-        logger.info('127.0.0.1:12345 - "GET /metrics HTTP/1.1" 200')
-        logger.info('127.0.0.1:12345 - "POST /v1/chat/completions HTTP/1.1" 200')
+        # Log using uvicorn's format with args tuple
+        # Format: '%s - "%s %s HTTP/%s" %d'
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "GET",
+            "/health",
+            "1.1",
+            200,
+        )
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "GET",
+            "/v1/completions",
+            "1.1",
+            200,
+        )
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "GET",
+            "/metrics",
+            "1.1",
+            200,
+        )
+        logger.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "127.0.0.1:12345",
+            "POST",
+            "/v1/chat/completions",
+            "1.1",
+            200,
+        )
 
         # Verify only non-excluded endpoints were logged
         assert len(logged_messages) == 2
         assert "/v1/completions" in logged_messages[0]
         assert "/v1/chat/completions" in logged_messages[1]
+
+    def test_filter_allows_non_uvicorn_access_logs(self):
+        """Test filter allows logs from non-uvicorn.access loggers."""
+        filter = UvicornAccessLogFilter(excluded_paths=["/health"])
+
+        # Log record from a different logger name
+        record = logging.LogRecord(
+            name="uvicorn.error",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Some error message about /health",
+            args=(),
+            exc_info=None,
+        )
+
+        # Should allow because it's not from uvicorn.access
+        assert filter.filter(record) is True
+
+    def test_filter_handles_malformed_args(self):
+        """Test filter handles log records with unexpected args format."""
+        filter = UvicornAccessLogFilter(excluded_paths=["/health"])
+
+        # Log record with insufficient args
+        record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Some message",
+            args=("only", "two"),
+            exc_info=None,
+        )
+
+        # Should allow because args doesn't have expected format
+        assert filter.filter(record) is True
+
+    def test_filter_handles_non_tuple_args(self):
+        """Test filter handles log records with non-tuple args."""
+        filter = UvicornAccessLogFilter(excluded_paths=["/health"])
+
+        # Log record with None args
+        record = logging.LogRecord(
+            name="uvicorn.access",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Some message without args",
+            args=None,
+            exc_info=None,
+        )
+
+        # Should allow because args is None
+        assert filter.filter(record) is True
