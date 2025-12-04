@@ -38,17 +38,12 @@ class DeepseekV32Tokenizer(HfTokenizer):
         )
         return DeepseekV32Tokenizer(tokenizer)
 
-    def apply_chat_template(
-        self,
-        messages,
-        conversation,
-        tools=None,
-        **kwargs,
-    ):
+    def apply_chat_template(self, messages, tools=None, **kwargs):
         thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
+        conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
         drop_thinking = True
         if tools is not None and len(tools) > 0:
