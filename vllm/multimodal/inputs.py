@@ -224,7 +224,7 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
 BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
-[`MultiModalKwargs.batch`][vllm.multimodal.inputs.MultiModalKwargs.batch].
+[`MultiModalKwargsItems.get_data`][vllm.multimodal.inputs.MultiModalKwargsItems.get_data].
 """
 
 
@@ -829,7 +829,7 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         device: torch.types.Device = None,
         pin_memory: bool = False,
         cpu_fields: Set[str] = frozenset(),
-    ) -> dict[str, NestedTensors]:
+    ) -> BatchedTensorInputs:
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
         for modality, items in self.items():
             for i, item in enumerate(items):
