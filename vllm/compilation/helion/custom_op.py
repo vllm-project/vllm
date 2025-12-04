@@ -247,10 +247,15 @@ class HelionCustomOp(CustomOp):
             f"{self.__class__.__name__}.configure() requires model_config to be provided"
         )
 
-        # Get kernel name for config loading
-        kernel_name = self.kernel_name
+        # Get kernel name for config loading from the helion kernel
+        helion_kernel = self.helion_kernel
+        assert helion_kernel is not None, (
+            f"{self.__class__.__name__}.helion_kernel returned None - ensure Helion is available"
+        )
+
+        kernel_name = helion_kernel.op_name
         assert kernel_name, (
-            f"{self.__class__.__name__}.kernel_name returned None or empty string"
+            f"{self.__class__.__name__}.helion_kernel.op_name returned None or empty string"
         )
 
         # Load available configs using ConfigManager (its core responsibility)
@@ -271,20 +276,6 @@ class HelionCustomOp(CustomOp):
         # Set the config on the kernel
         self.helion_kernel.set_config(optimal_config)
 
-    @property
-    @abstractmethod
-    def kernel_name(self) -> str:
-        """
-        Get the kernel name for config selection.
-
-        Subclasses must override this to return their specific kernel name.
-        This name is used for config file loading and should match the
-        registered CustomOp name.
-
-        Returns:
-            Kernel name string (e.g., "silu_mul_fp8_helion")
-        """
-        raise NotImplementedError
 
     @property
     @abstractmethod

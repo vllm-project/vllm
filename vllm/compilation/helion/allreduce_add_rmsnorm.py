@@ -519,10 +519,6 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
             input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
         )
 
-    @property
-    def kernel_name(self) -> str:
-        """Get the kernel name for config selection."""
-        return "allreduce_add_rmsnorm_helion"
 
     @property
     def helion_kernel(self):
