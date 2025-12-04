@@ -77,7 +77,6 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -112,17 +111,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.prefill_cudagraph_enabled = (
             self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
         )
-        speculative_config = vllm_config.speculative_config
-        self.num_spec_tokens = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            else 0
-        )
-        assert not (self.prefill_cudagraph_enabled and (self.num_spec_tokens > 0)), (
-            "Triton Attention Backend does currently not support FULL CUDA Graph mode "
-            "when combined with speculative decoding."
-        )
-
         self.split_launch = self.prefill_cudagraph_enabled
 
         # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
@@ -145,6 +133,29 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 capture_sizes,
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["TritonAttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+
+        # Check if CUDA Graphs are enabled for prefill.
+        prefill_cudagraph_enabled = (
+            vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL,)
+        )
+        speculative_config = vllm_config.speculative_config
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+
+        if prefill_cudagraph_enabled and (num_spec_tokens > 0):
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        else:
+            return AttentionCGSupport.ALWAYS
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
