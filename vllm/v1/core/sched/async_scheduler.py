@@ -65,6 +65,5 @@ class AsyncScheduler(Scheduler):
             self.kv_cache_manager.cache_blocks(
                 request,
                 request.num_computed_tokens - request.num_output_placeholders,
-                total_computed_tokens=request.num_computed_tokens,
             )
         return new_token_ids, stopped

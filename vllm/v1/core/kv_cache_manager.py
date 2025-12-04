@@ -387,12 +387,7 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(
-            request,
-            num_tokens_to_cache,
-            total_computed_tokens=num_local_computed_tokens
-            + num_external_computed_tokens,
-        )
+        self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
 
@@ -480,14 +475,16 @@ class KVCacheManager:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
 
-    def cache_blocks(
-        self, request: Request, num_computed_tokens: int, total_computed_tokens: int
-    ) -> None:
-        """Cache the blocks for the request, if enabled."""
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        """Cache the blocks for the request, if enabled.
+
+        Args:
+            request: The request to cache the blocks.
+            num_computed_tokens: The number of computed tokens, including tokens
+                that are already cached and tokens to be cached.
+        """
         if self.enable_caching:
-            self.coordinator.cache_blocks(
-                request, num_computed_tokens, total_computed_tokens
-            )
+            self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]
