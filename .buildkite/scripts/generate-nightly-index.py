@@ -21,7 +21,7 @@ if not sys.version_info >= (3, 12):
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
-  <!-- Generated on {time}{comment} -->
+  <!-- {comment} -->
   <meta name="pypi:repository-version" content="1.0">
   <body>
 {items}
@@ -100,10 +100,7 @@ def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
     for name in sorted(subdir_names):
         name = name.strip("/").strip(".")
         href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
-    comment_str = f" ({comment})" if comment else ""
-    return INDEX_HTML_TEMPLATE.format(
-        items="\n".join(href_tags), time=datetime.now().isoformat(), comment=comment_str
-    )
+    return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
 
 
 def generate_package_index_and_metadata(
@@ -128,10 +125,7 @@ def generate_package_index_and_metadata(
         file_meta = asdict(file)
         file_meta["path"] = file_path_quoted
         metadata.append(file_meta)
-    comment_str = f" ({comment})" if comment else ""
-    index_str = INDEX_HTML_TEMPLATE.format(
-        items="\n".join(href_tags), time=datetime.now().isoformat(), comment=comment_str
-    )
+    index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
     metadata_str = json.dumps(metadata, indent=2)
     return index_str, metadata_str
 
@@ -247,6 +241,10 @@ def generate_index_and_metadata(
             variant_to_files[alias_to_default] = variant_to_files["default"].copy()
             print(f"Alias variant '{alias_to_default}' created for default variant.")
 
+    # Generate comment in HTML header
+    comment_str = f" ({comment})" if comment else ""
+    comment_tmpl = f"Generated on {datetime.now().isoformat()}{comment_str}"
+
     # Generate index for each variant
     subdir_names = set()
     for variant, files in variant_to_files.items():
@@ -266,7 +264,7 @@ def generate_index_and_metadata(
             subdir_names = subdir_names.union(packages)
         else:
             # generate project list for this variant directly
-            project_list_str = generate_project_list(sorted(packages), comment)
+            project_list_str = generate_project_list(sorted(packages), comment_tmpl)
             with open(variant_dir / "index.html", "w") as f:
                 f.write(project_list_str)
 
@@ -284,7 +282,7 @@ def generate_index_and_metadata(
                 f.write(metadata_str)
 
     # Generate top-level project list index
-    project_list_str = generate_project_list(sorted(subdir_names), comment)
+    project_list_str = generate_project_list(sorted(subdir_names), comment_tmpl)
     with open(index_base_dir / "index.html", "w") as f:
         f.write(project_list_str)
 
