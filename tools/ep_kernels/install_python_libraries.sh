@@ -64,6 +64,24 @@ mkdir -p "$WHEEL_DIR"
 
 pushd "$WORKSPACE"
 
+# Auto-detect CUDA version if not provided
+if [ -z "$CUDA_VERSION" ]; then
+    CUDA_VERSION=$(${CUDA_HOME}/bin/nvcc --version | grep "release" | sed -n 's/.*release \([0-9]\+\.[0-9]\+\).*/\1/p')
+    echo "Auto-detected CUDA version: $CUDA_VERSION"
+fi
+
+# Extract major and minor version numbers
+CUDA_MAJOR="${CUDA_VERSION%%.*}"
+CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+CUDA_MINOR="${CUDA_MINOR%%.*}"
+echo "CUDA version: $CUDA_VERSION (major: $CUDA_MAJOR, minor: $CUDA_MINOR)"
+
+# Check CUDA version requirement
+if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 8 ]; }; then
+    echo "Skipping DeepEP build/installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
+    exit 0
+fi
+
 # install dependencies if not installed
 if [ -z "$VIRTUAL_ENV" ]; then
   uv pip install --system cmake torch ninja
