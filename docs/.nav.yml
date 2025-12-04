@@ -5,11 +5,7 @@ nav:
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
-    - Examples:
-      - examples/README.md
-      - Offline Inference: examples/offline_inference
-      - Online Serving: examples/online_serving
-      - Others: examples/others
+      - Examples: examples
     - General:
       - usage/v1_guide.md
       - usage/*

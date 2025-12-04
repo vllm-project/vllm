@@ -130,10 +130,9 @@ def create_batched_mm_kwargs(
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()
-    items = [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+
     return group_mm_kwargs_by_modality(
-        items,
-        merge_by_field_config=model_cls.merge_by_field_config,
+        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
     )
 
 
