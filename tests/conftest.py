@@ -376,7 +376,7 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast = (
+            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
                     model_name,
                     dtype=dtype,
@@ -577,7 +577,7 @@ class HfRunner:
 
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
-            output: GenerateOutput = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
@@ -659,7 +659,7 @@ class HfRunner:
         all_output_strs: list[str] = []
 
         for inputs in all_inputs:
-            output: GenerateOutput = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
