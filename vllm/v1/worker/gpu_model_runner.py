@@ -397,8 +397,12 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
+        async_sps_zero_bubble_mode = False
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
+            async_sps_zero_bubble_mode = (
+                self.speculative_config.async_sps_zero_bubble_mode
+            )
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -595,7 +599,7 @@ class GPUModelRunner(
         )
 
         self.async_sps_zero_bubble_mode = (
-            envs.VLLM_ASYNC_SPS_ZERO_BUBBLE_MODE
+            async_sps_zero_bubble_mode
             and self.use_async_scheduling
             and self.num_spec_tokens > 0
             and not self.cascade_attn_enabled
