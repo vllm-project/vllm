@@ -66,9 +66,9 @@ class HelionCustomOp(CustomOp):
     """
 
     def __init__(self, *args, **kwargs):
-        """Initialize with ConfigManager."""
+        """Initialize with singleton ConfigManager."""
         super().__init__(*args, **kwargs)
-        self._config_manager = ConfigManager()
+        self._config_manager = ConfigManager.get_instance()
 
     @abstractmethod
     def forward_helion(self, *args, **kwargs) -> torch.Tensor:
@@ -88,6 +88,11 @@ class HelionCustomOp(CustomOp):
 
     def forward_cuda(self, *args, **kwargs) -> torch.Tensor:
         """Route CUDA backend to Helion implementation."""
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                f"Helion is not installed. Please install Helion to use {self.__class__.__name__}. "
+                "Alternatively, use the native implementation via forward_native()."
+            )
         return self.forward_helion(*args, **kwargs)
 
     @classmethod
@@ -217,6 +222,69 @@ class HelionCustomOp(CustomOp):
                 )
 
         return results
+
+    def configure(self, model_config=None):
+        """
+        Configure the kernel with optimal config for the given model.
+
+        This is the main entry point for fusion passes - they call this method
+        to configure the kernel with the best config, then can call the kernel directly.
+
+        Args:
+            model_config: vLLM ModelConfig for optimal config selection
+
+        Example:
+            # In fusion pass:
+            helion_op.configure(vllm_config.model_config)
+            return helion_op.forward_helion(input, scale)
+        """
+        assert self.enabled(), (
+            f"{self.__class__.__name__} HelionCustomOp must be enabled"
+        )
+
+        # Handle config selection logic here (HelionCustomOp responsibility)
+        assert model_config is not None, (
+            f"{self.__class__.__name__}.configure() requires model_config to be provided"
+        )
+
+        # Get kernel name for config loading
+        kernel_name = self.kernel_name
+        assert kernel_name, (
+            f"{self.__class__.__name__}.kernel_name returned None or empty string"
+        )
+
+        # Load available configs using ConfigManager (its core responsibility)
+        available_configs = self._config_manager.load_all_configs(kernel_name)
+
+        assert available_configs, (
+            f"No configs available for kernel '{kernel_name}' - ensure configs are properly saved"
+        )
+
+        # Use our own selection logic (HelionCustomOp responsibility)
+        optimal_config = self.get_best_config(model_config, available_configs)
+
+        # get_best_config() must return a config if configs are available
+        assert optimal_config is not None, (
+            f"{self.__class__.__name__}.get_best_config() returned None with {len(available_configs)} configs available"
+        )
+
+        # Set the config on the kernel
+        self.helion_kernel.set_config(optimal_config)
+
+    @property
+    @abstractmethod
+    def kernel_name(self) -> str:
+        """
+        Get the kernel name for config selection.
+
+        Subclasses must override this to return their specific kernel name.
+        This name is used for config file loading and should match the
+        registered CustomOp name.
+
+        Returns:
+            Kernel name string (e.g., "silu_mul_fp8_helion")
+        """
+        raise NotImplementedError
 
     @property
     @abstractmethod

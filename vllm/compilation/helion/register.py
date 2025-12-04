@@ -15,6 +15,88 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
+class HelionKernelWrapper:
+    """
+    Wrapper for Helion kernels that stores selected config and compiles accordingly.
+
+    This wrapper is what gets registered as PyTorch custom op, not the raw Helion kernel.
+    Fusion passes can set the config, and the __call__ method compiles with that config.
+    """
+
+    def __init__(self, helion_kernel_func, op_name, namespace):
+        self.helion_kernel_func = helion_kernel_func
+        self.op_name = op_name
+        self.namespace = namespace
+        self.full_op_name = f"{namespace}::{op_name}"
+        self.config = None
+
+        # Compilation cache: compile once when config is set
+        self._compiled_kernel = None
+
+        # References for advanced use and debugging (set later by register_kernel)
+        self._pytorch_op_wrapper = None
+        self._helion_kernel = None
+
+        # Copy attributes needed for PyTorch schema inference
+        self.__name__ = getattr(helion_kernel_func, "__name__", op_name)
+        self.__globals__ = getattr(helion_kernel_func, "__globals__", {})
+        self.__annotations__ = getattr(helion_kernel_func, "__annotations__", {})
+
+        # Import here to avoid circular imports
+        import inspect
+
+        try:
+            # Copy the original function's signature for PyTorch schema inference
+            self.__signature__ = inspect.signature(helion_kernel_func)
+        except (ValueError, TypeError):
+            # If signature extraction fails, PyTorch will handle schema inference differently
+            pass
+
+    def set_config(self, config):
+        """
+        Set the config to use for this kernel execution.
+
+        Can only be called once - subsequent calls will raise an error.
+        This ensures consistent kernel behavior and simplifies caching.
+        """
+        if self.config is not None:
+            raise RuntimeError(
+                f"Config already set for kernel '{self.op_name}'. "
+                "Kernel wrappers only allow setting config once to ensure consistent behavior."
+            )
+
+        self.config = config
+        logger.debug(f"Config set for kernel '{self.op_name}'")
+
+    def __call__(self, *args, **kwargs):
+        """
+        Execute the Helion kernel with the selected config.
+
+        This method compiles the kernel once when first called, then reuses
+        the compiled runner for all subsequent calls. Much simpler than
+        cache invalidation since config can only be set once.
+        """
+        # Config must be set via set_config() before calling
+        assert self.config is not None, (
+            f"Config not set for kernel '{self.op_name}'. Call set_config() first."
+        )
+
+        logger.debug(f"Using configured config for {self.op_name}")
+
+        # Compile once and cache the compiled kernel
+        if self._compiled_kernel is None:
+            logger.debug(
+                f"First execution: compiling kernel {self.op_name} with config: {self.config}"
+            )
+            bound = self.helion_kernel_func.bind(args)
+            self._compiled_kernel = bound.compile_config(self.config)
+        else:
+            logger.debug(f"Reusing compiled kernel for {self.op_name}")
+
+        return self._compiled_kernel(*args, **kwargs)
+
+
 # Try to import Helion - it's an optional dependency
 try:
     import helion
@@ -30,7 +112,7 @@ def register_kernel(
     namespace: str = "vllm_helion",
     device_types: str = "cuda",
     mutates_args: tuple = (),
-    fake_impl: Callable = None,
+    fake_impl: Callable | None = None,
 ) -> Callable:
     """
     Decorator to register a Helion kernel as a PyTorch custom operation.
@@ -89,15 +171,15 @@ def register_kernel(
                 "Make sure to apply @helion.kernel decorator before @register_kernel."
             )
 
-        # Full operation name with namespace
-        full_op_name = f"{namespace}::{op_name}"
+        # Create the HelionKernelWrapper that will be registered as PyTorch custom op
+        kernel_wrapper = HelionKernelWrapper(helion_kernel_func, op_name, namespace)
 
-        # Apply the PyTorch custom op decorator
+        # Register the wrapper as PyTorch custom op
         pytorch_op_wrapper = torch.library.custom_op(
-            full_op_name,
+            kernel_wrapper.full_op_name,
             mutates_args=mutates_args,
             device_types=device_types,
-        )(helion_kernel_func)
+        )(kernel_wrapper)
 
         # Register fake implementation
         if fake_impl is not None:
@@ -113,14 +195,13 @@ def register_kernel(
                 """
                 Run the Helion kernel with a dummy launcher to generate correct output shapes.
                 Uses the proper Helion bind/compile pattern: _launcher is an argument of CompiledConfig.
-                This MUST work or the registration fails - no fallbacks.
+
+                Note: This fake kernel only generates shapes for compilation - config selection
+                happens in fusion passes where the actual Helion ops are inserted.
                 """
                 bound = helion_kernel_func.bind(args)
 
-                # Compile with a default configs should be fine as we are skipping all
-                # on-device compute
-                # TODO(gmagogsfm): In prod, we need to pick the right config before being
-                # able to compile to config and run it.
+                # Use default config for fake execution (only for shape inference)
                 config = (
                     helion_kernel_func.configs[0]
                     if hasattr(helion_kernel_func, "configs")
@@ -140,37 +221,17 @@ def register_kernel(
                 helion_kernel_func.__name__,
             )
 
-        # Add a __call__ method to the pytorch_op_wrapper for direct invocation
-        def pytorch_op_call_method(*args, **kwargs):
-            """
-            Convenience method to call the registered PyTorch custom op directly.
-
-            This allows users to call the PyTorch wrapper directly like a function.
-
-            Example:
-                # Instead of: torch.ops.vllm_helion.silu_mul_fp8(input, scale)
-                # You can do: decorated_kernel(input, scale)
-            """
-            # Get the registered op from torch.ops
-            namespace_ops = getattr(torch.ops, namespace)
-            registered_op = getattr(namespace_ops, op_name)
-            return registered_op(*args, **kwargs)
-
-        # Attach the call method to the pytorch_op_wrapper
-        pytorch_op_wrapper.__call__ = pytorch_op_call_method
-
-        # Preserve references for advanced use
-        pytorch_op_wrapper._helion_kernel = helion_kernel_func
-        pytorch_op_wrapper._op_name = op_name
-        pytorch_op_wrapper._namespace = namespace
+        # Preserve references for advanced use and debugging
+        kernel_wrapper._pytorch_op_wrapper = pytorch_op_wrapper
+        kernel_wrapper._helion_kernel = helion_kernel_func
 
         logger.info(
             "Registered Helion kernel '%s' as PyTorch custom op '%s'",
             helion_kernel_func.__name__,
-            full_op_name,
+            kernel_wrapper.full_op_name,
         )
 
-        # Return the pytorch_op_wrapper instead of the Helion kernel
-        return pytorch_op_wrapper
+        # Return the HelionKernelWrapper - this is what fusion passes will use
+        return kernel_wrapper
 
     return decorator

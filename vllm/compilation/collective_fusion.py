@@ -50,7 +50,7 @@ try:
     HELION_IMPORT_AVAILABLE = True
 except ImportError:
     HELION_IMPORT_AVAILABLE = False
-    AllReduceAddRMSNormHelion = None
+    AllReduceAddRMSNormHelion = None  # type: ignore[assignment,misc]
 
 logger = init_logger(__name__)
 
