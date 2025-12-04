@@ -74,6 +74,10 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
     assert torch.allclose(scale, ref_scale)
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
@@ -108,7 +112,7 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="Cutlass only supported on CUDA platform."
+    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
 @torch.inference_mode()
 def test_w8a8_block_fp8_cutlass_matmul():
@@ -158,6 +162,10 @@ def test_w8a8_block_fp8_cutlass_matmul():
     assert rel_diff < 0.001
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
