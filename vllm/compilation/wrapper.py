@@ -14,11 +14,7 @@ import torch._C._dynamo.guards
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.utils.nvtx_pytorch_hooks import (
-    construct_marker_dict,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
+from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
 
 logger = init_logger(__name__)
 
@@ -101,25 +97,14 @@ class TorchCompileWithNoGuardsWrapper:
         if self.layerwise_nvtx_tracing_enabled:
             args_list = list(args)
             kwargs_dict = dict(kwargs)
-            marker_dict = construct_marker_dict(
+            with layerwise_nvtx_marker_context(
                 "Torch Compiled Module (input):{}".format(self.__class__.__name__),
                 self,
                 in_tensor=args_list,
                 kwargs=kwargs_dict,
-            )
-            nvtx_range_push(marker_dict)
-            results = callable_fn(*args, **kwargs)
-            nvtx_range_pop()
-            marker_dict = construct_marker_dict(
-                "Torch Compiled Module (output):{}".format(self.__class__.__name__),
-                self,
-                in_tensor=None,
-                kwargs=None,
-                out_tensor=results,
-            )
-            nvtx_range_push(marker_dict)
-            nvtx_range_pop()
-            return results
+            ) as ctx:
+                ctx.result = callable_fn(*args, **kwargs)
+            return ctx.result
         return callable_fn(*args, **kwargs)
 
     def __init__(self):

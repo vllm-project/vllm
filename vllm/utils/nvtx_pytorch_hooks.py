@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager
+
 import torch
 import torch.cuda.nvtx as nvtx
 
@@ -133,7 +135,7 @@ def process_layer_params(module_obj):
     return param_info
 
 
-def construct_marker_dict(
+def construct_marker_dict_and_push(
     module_name, module_obj, in_tensor, kwargs=None, out_tensor=None
 ):
     marker_dict = {}
@@ -165,15 +167,50 @@ def construct_marker_dict(
     param_info = process_layer_params(module_obj)
     if param_info:
         marker_dict["StaticParams"] = param_info
-    return marker_dict
-
-
-def nvtx_range_push(marker_dict):
     nvtx.range_push("{}".format(marker_dict))
 
 
-def nvtx_range_pop():
-    nvtx.range_pop()
+class ResultHolder:
+    """Holder for storing results from within a context manager."""
+
+    result = None
+
+
+@contextmanager
+def layerwise_nvtx_marker_context(module_name, module_obj, in_tensor=None, kwargs=None):
+    """Context manager for NVTX markers that automatically pushes on enter
+    and pops on exit.
+
+    Example:
+        with nvtx_marker_context("Module:MyModule", module, in_tensor=args,
+                                 kwargs=kwargs) as ctx:
+            ctx.result = module(*args, **kwargs)
+        return ctx.result
+    """
+    holder = ResultHolder()
+
+    # Push input marker
+    construct_marker_dict_and_push(
+        module_name,
+        module_obj,
+        in_tensor=in_tensor,
+        kwargs=kwargs,
+    )
+    try:
+        yield holder
+    finally:
+        # Pop input marker
+        nvtx.range_pop()
+        # Push and pop output marker
+        output_name = module_name.replace("(input)", "(output)")
+        construct_marker_dict_and_push(
+            output_name,
+            module_obj,
+            in_tensor=None,
+            kwargs=None,
+            out_tensor=holder.result,
+        )
+        nvtx.range_pop()
 
 
 class PytHooks:
@@ -202,13 +239,12 @@ class PytHooks:
         Records the module name and tensor information.
         Called after the module executes the forward method.
         """
-        nvtx_range_pop()
+        nvtx.range_pop()
         module_name = self.module_to_name_map.get(module_obj, "unknown")
-        marker_dict = construct_marker_dict(
+        construct_marker_dict_and_push(
             module_name, module_obj, in_tensor=None, kwargs=None, out_tensor=out_tensor
         )
-        nvtx_range_push(marker_dict)
-        nvtx_range_pop()
+        nvtx.range_pop()
         return
 
     def module_fwd_pre_hook(self, module_obj, in_tensor, kwargs):
@@ -216,10 +252,9 @@ class PytHooks:
         This function is called before the module executes.
         """
         module_name = self.module_to_name_map.get(module_obj, "unknown")
-        marker_dict = construct_marker_dict(
+        construct_marker_dict_and_push(
             module_name, module_obj, in_tensor=in_tensor, kwargs=kwargs, out_tensor=None
         )
-        nvtx_range_push(marker_dict)
         return
 
     def register_hooks(self, network_model, module_prefix="top"):
