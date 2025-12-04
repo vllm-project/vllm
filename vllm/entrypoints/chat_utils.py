@@ -49,9 +49,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
 from vllm.utils.func_utils import supports_kw
 
@@ -536,7 +536,7 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -593,7 +593,7 @@ def resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -627,7 +627,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig, tokenizer: AnyTokenizer):
+    def __init__(self, model_config: ModelConfig, tokenizer: TokenizerLike):
         super().__init__()
 
         self._model_config = model_config
@@ -1139,10 +1139,18 @@ def validate_chat_template(chat_template: Path | str | None):
             not any(c in chat_template for c in JINJA_CHARS)
             and not Path(chat_template).exists()
         ):
-            raise ValueError(
-                f"The supplied chat template string ({chat_template}) "
-                f"appears path-like, but doesn't exist!"
+            # Try to find the template in the built-in templates directory
+            from vllm.transformers_utils.chat_templates.registry import (
+                CHAT_TEMPLATES_DIR,
             )
+
+            builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
+            if not builtin_template_path.exists():
+                raise ValueError(
+                    f"The supplied chat template string ({chat_template}) "
+                    f"appears path-like, but doesn't exist! "
+                    f"Tried: {chat_template} and {builtin_template_path}"
+                )
 
     else:
         raise TypeError(f"{type(chat_template)} is not a valid chat template type")
@@ -1173,12 +1181,23 @@ def _load_chat_template(
 
         JINJA_CHARS = "{}\n"
         if not any(c in chat_template for c in JINJA_CHARS):
-            msg = (
-                f"The supplied chat template ({chat_template}) "
-                f"looks like a file path, but it failed to be "
-                f"opened. Reason: {e}"
+            # Try to load from the built-in templates directory
+            from vllm.transformers_utils.chat_templates.registry import (
+                CHAT_TEMPLATES_DIR,
             )
-            raise ValueError(msg) from e
+
+            builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
+            try:
+                with open(builtin_template_path) as f:
+                    return f.read()
+            except OSError:
+                msg = (
+                    f"The supplied chat template ({chat_template}) "
+                    f"looks like a file path, but it failed to be opened. "
+                    f"Tried: {chat_template} and {builtin_template_path}. "
+                    f"Reason: {e}"
+                )
+                raise ValueError(msg) from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly
@@ -1530,6 +1549,7 @@ def _parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning") or message.get("reasoning_content")
+
     if content is None:
         content = []
     elif isinstance(content, str):
@@ -1592,7 +1612,7 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1624,7 +1644,7 @@ def parse_chat_messages(
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],

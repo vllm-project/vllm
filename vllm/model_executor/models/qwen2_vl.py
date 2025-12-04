@@ -91,7 +91,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -1533,7 +1533,7 @@ class Tarsier2Processor(Qwen2VLProcessor):
     def __init__(
         self,
         vision_config: dict,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         **kwargs,
     ):
         self.image_processor = Tarsier2ImageProcessor(**vision_config)
@@ -1575,15 +1575,6 @@ class Tarsier2ForConditionalGeneration(Qwen2VLForConditionalGeneration):
             "vision_tower.": "visual.",
         }
     )
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # Tarsier2 uses llava as model_type, which will create a Qwen2VLConfig
-        # as text_config, we need to reconstruct Qwen2VLConfig from LlavaConfig.
-        config = vllm_config.model_config.hf_config
-        qwen2vl_config = config.text_config
-        qwen2vl_config.architectures = config.architectures
-        vllm_config.model_config.hf_config = qwen2vl_config
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         skip_prefixes = []
