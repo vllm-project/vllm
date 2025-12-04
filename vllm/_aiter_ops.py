@@ -50,6 +50,17 @@ def if_aiter_supported(func: Callable) -> Callable:
 
     return wrapper
 
+def is_aiter_function_found(function_name: str) -> bool:
+    """Check if aiter module exists and has the specified function."""
+    # First check if module exists
+    if IS_AITER_FOUND:
+        import aiter
+        return hasattr(aiter, function_name)
+    return False
+
+AITER_TOPK_SIGMOID_FOUND = is_aiter_function_found("topk_sigmoid")
+
+
 
 # Can't use dtypes.fp8 directly inside an op
 # because it returns wrong result on gfx942.
@@ -750,6 +761,35 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_topk_sigmoid_impl(
+    gating_output: torch.Tensor, topk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import topk_sigmoid
+
+    tokens, _ = gating_output.shape
+    router_scores = torch.empty(
+        (tokens, topk), dtype=torch.float32, device=gating_output.device
+    )
+    router_indices = torch.empty(
+        (tokens, topk), dtype=torch.int32, device=gating_output.device
+    )
+    topk_sigmoid(router_scores, router_indices, gating_output)
+    return router_scores, router_indices
+
+
+def _rocm_aiter_topk_sigmoid_fake(
+    gating_output: torch.Tensor, topk: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    tokens, _ = gating_output.shape
+    router_scores = torch.empty(
+        (tokens, topk), dtype=torch.float32, device=gating_output.device
+    )
+    router_indices = torch.empty(
+        (tokens, topk), dtype=torch.int32, device=gating_output.device
+    )
+    return router_scores, router_indices
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1066,6 +1106,14 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
+			if AITER_TOPK_SIGMOID_FOUND:
+				direct_register_custom_op(
+					op_name="rocm_aiter_topk_sigmoid",
+					op_func=_rocm_aiter_topk_sigmoid_impl,
+					mutates_args=[],
+					fake_impl=_rocm_aiter_topk_sigmoid_fake,
+					dispatch_key=current_platform.dispatch_key,
+				)
 
             _OPS_REGISTERED = True
 
@@ -1424,6 +1472,13 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, ...]:
         assert group_size == 128, "Group size must be 128"
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
+
+	@staticmethod
+    def topk_sigmoid(
+        gating_output: torch.Tensor,
+        topk: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_topk_sigmoid(gating_output, topk)
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
