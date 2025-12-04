@@ -11,7 +11,7 @@ import time
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 # Select a equi-probable random priority

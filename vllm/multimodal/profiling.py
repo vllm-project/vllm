@@ -9,7 +9,6 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-import vllm.envs as envs
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -223,7 +222,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                         height,
                     )
                 height = min(height, overrides.height)
-        video = np.full((num_frames, width, height, 3), 255)
+        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         return [video] * num_videos
 
 
@@ -306,18 +305,6 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper allows total_len > seq_len.
-        elif total_len > seq_len and not envs.VLLM_USE_V1:
-            # `max_num_batched_tokens` is defined by `SchedulerConfig`
-            logger.warning_once(
-                "The encoder sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
-                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
-                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
-                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
-                seq_len,
-                total_len,
-                str(self._get_mm_num_tokens(mm_inputs)),
-            )
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
@@ -355,7 +342,11 @@ class MultiModalProfiler(Generic[_I]):
             mm_counts=mm_counts,
         )
         if max_tokens_per_item is not None:
-            return max_tokens_per_item
+            return {
+                modality: max_tokens
+                for modality, max_tokens in max_tokens_per_item.items()
+                if mm_counts.get(modality, 0) > 0
+            }
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs, mm_embeddings_only=mm_embeddings_only)
@@ -364,7 +355,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
-    ):
+    ) -> Mapping[str, int]:
         """
         Returns the maximum length of the multimodal (image placeholders+text)
         tokens, including any break/text tokens in-between image embeddings.
@@ -375,5 +366,4 @@ class MultiModalProfiler(Generic[_I]):
         This is important to take into account when profiling and
         initializing the encoder cache size.
         """
-
         return self._get_mm_max_tokens(seq_len, mm_counts, mm_embeddings_only=False)

@@ -50,16 +50,30 @@ def test_hf_model_weights_mapper(model_arch: str):
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
+    is_mistral_model = model_arch in [
+        "Mistral3ForConditionalGeneration",
+        "PixtralForConditionalGeneration",
+        "VoxtralForConditionalGeneration",
+    ]
+
+    if not is_mistral_model or model_info.tokenizer_mode == "mistral":
+        tokenizer_mode = model_info.tokenizer_mode
+    else:
+        tokenizer_mode = "hf"
+
     model_id = model_info.default
 
     model_config = ModelConfig(
         model_id,
         tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )

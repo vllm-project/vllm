@@ -6,9 +6,11 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Generic, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
+from vllm.sampling_params import SamplingParams
 
 IOProcessorInput = TypeVar("IOProcessorInput")
 IOProcessorOutput = TypeVar("IOProcessorOutput")
@@ -62,6 +64,11 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     @abstractmethod
     def parse_request(self, request: Any) -> IOProcessorInput:
         raise NotImplementedError
+
+    def validate_or_generate_params(
+        self, params: SamplingParams | PoolingParams | None = None
+    ) -> SamplingParams | PoolingParams:
+        return params or PoolingParams()
 
     @abstractmethod
     def output_to_response(

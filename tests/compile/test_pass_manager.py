@@ -7,7 +7,7 @@ import torch
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.compilation.pass_manager import PostGradPassManager
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 
 
 # dummy custom pass that doesn't inherit
@@ -42,7 +42,8 @@ class ProperPass(InductorPass):
     ],
 )
 def test_pass_manager_uuid(callable):
-    config = VllmConfig()
+    # Some passes need dtype to be set
+    config = VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
 
     pass_manager = PostGradPassManager()
     pass_manager.configure(config)
@@ -63,8 +64,11 @@ def test_pass_manager_uuid(callable):
 
     # UUID should be different due to config change
     config2 = copy.deepcopy(config)
-    config2.compilation_config.pass_config.enable_fusion = (
-        not config2.compilation_config.pass_config.enable_fusion
+    config2.compilation_config.pass_config.fuse_norm_quant = (
+        not config2.compilation_config.pass_config.fuse_norm_quant
+    )
+    config2.compilation_config.pass_config.fuse_act_quant = (
+        not config2.compilation_config.pass_config.fuse_act_quant
     )
     pass_manager3 = PostGradPassManager()
     pass_manager3.configure(config2)

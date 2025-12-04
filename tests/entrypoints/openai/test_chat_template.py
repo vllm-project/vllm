@@ -6,7 +6,7 @@ import pytest
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import apply_hf_chat_template, load_chat_template
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import VLLM_PATH
@@ -114,7 +114,9 @@ def test_get_gen_prompt(
         trust_remote_code=model_info.trust_remote_code,
         revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
