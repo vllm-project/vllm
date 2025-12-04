@@ -49,7 +49,6 @@ if HELION_AVAILABLE:
         output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
         return torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
 
-    # Helion kernel with automatic PyTorch custom op registration and custom fake
     @register_kernel("silu_mul_fp8", fake_impl=_silu_mul_fp8_custom_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
@@ -111,61 +110,9 @@ if HELION_AVAILABLE:
 
         return out
 
-    # Note: PyTorch custom op registration is handled by @register_kernel decorator
-    # with custom fake implementation for symbolic shape compatibility
-    # The decorator returns a HelionKernelWrapper that stores configs
-
-
-# Now define the vLLM CustomOp wrapper
-@CustomOp.register("silu_mul_fp8_helion")
-class SiluMulFp8Helion(HelionCustomOp):
-    """
-    Fused SiLU-and-mul with FP8 quantization using Helion.
-
-    This operation computes:
-        quantize_fp8(SiLU(input[:, :d]) * input[:, d:2*d])
-
-    where d = hidden_size.
-
-    The operation combines:
-    1. Split input into two halves along last dimension
-    2. Apply SiLU activation to first half: x * sigmoid(x)
-    3. Multiply with second half (gating)
-    4. Quantize result to FP8 format
-
-    Shapes:
-        input: (num_tokens, 2 * hidden_size)
-        scale: (1,) - scalar scale factor for FP8 quantization
-        output: (num_tokens, hidden_size) with dtype float8_e4m3fn
-    """
-
-    def __init__(self):
-        """Initialize the SiluMulFp8Helion operation."""
-        super().__init__()
-
-    def forward_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        """
-        Helion kernel implementation using the registered wrapper.
-
-        Args:
-            input: Input tensor with shape (num_tokens, 2 * hidden_size)
-            scale: Scale tensor (scalar) for FP8 quantization
-
-        Returns:
-            Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
-        """
-        # Use the registered HelionKernelWrapper which handles config internally
-        return silu_mul_fp8(input, scale)
-
-
-    @property
-    def helion_kernel(self):
-        """Return the Helion kernel function for autotuning."""
-        if HELION_AVAILABLE:
-            return silu_mul_fp8
-        return None
-
-    def get_autotune_inputs(self) -> dict[str, tuple]:
+    # Register autotune inputs generator
+    @silu_mul_fp8.register_autotune_inputs_generator
+    def generate_silu_mul_fp8_autotune_inputs() -> dict[str, tuple]:
         """
         Generate autotune inputs for common hidden_size values.
 
@@ -186,8 +133,10 @@ class SiluMulFp8Helion(HelionCustomOp):
 
         return inputs
 
-    def get_best_config(
-        self, model_config, available_configs: dict[str, "helion.Config"]
+    # Register config picker
+    @silu_mul_fp8.register_config_picker
+    def pick_silu_mul_fp8_config(
+        model_config, available_configs: dict[str, "helion.Config"]
     ):
         """
         Select config by exact hidden_size match with closest fallback.
@@ -237,6 +186,56 @@ class SiluMulFp8Helion(HelionCustomOp):
         except Exception:
             # If parsing fails, just return the first available config
             return next(iter(available_configs.values()))
+
+
+# Now define the vLLM CustomOp wrapper
+@CustomOp.register("silu_mul_fp8_helion")
+class SiluMulFp8Helion(HelionCustomOp):
+    """
+    Fused SiLU-and-mul with FP8 quantization using Helion.
+
+    This operation computes:
+        quantize_fp8(SiLU(input[:, :d]) * input[:, d:2*d])
+
+    where d = hidden_size.
+
+    The operation combines:
+    1. Split input into two halves along last dimension
+    2. Apply SiLU activation to first half: x * sigmoid(x)
+    3. Multiply with second half (gating)
+    4. Quantize result to FP8 format
+
+    Shapes:
+        input: (num_tokens, 2 * hidden_size)
+        scale: (1,) - scalar scale factor for FP8 quantization
+        output: (num_tokens, hidden_size) with dtype float8_e4m3fn
+    """
+
+    def __init__(self):
+        """Initialize the SiluMulFp8Helion operation."""
+        super().__init__()
+
+    def forward_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """
+        Helion kernel implementation using the registered wrapper.
+
+        Args:
+            input: Input tensor with shape (num_tokens, 2 * hidden_size)
+            scale: Scale tensor (scalar) for FP8 quantization
+
+        Returns:
+            Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
+        """
+        # Use the registered HelionKernelWrapper which handles config internally
+        return silu_mul_fp8(input, scale)
+
+
+    @property
+    def helion_kernel(self):
+        """Return the Helion kernel wrapper for autotuning."""
+        if HELION_AVAILABLE:
+            return silu_mul_fp8
+        return None
 
 
 class SiluMulFp8Benchmark(KernelBenchmark):

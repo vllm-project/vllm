@@ -133,48 +133,13 @@ class HelionCustomOp(CustomOp):
 
     # Autotuning and Config Management Methods
 
-    @abstractmethod
-    def get_autotune_inputs(self) -> dict[str, tuple]:
-        """
-        Return dictionary of inputs for autotuning.
-
-        Returns:
-            Dict where:
-            - key: Configuration identifier (e.g., "4096", "h4096_s8")
-            - value: Tuple of concrete arguments to pass to forward()
-
-        Example:
-            {
-                "4096": (input_tensor, scale),
-                "8192": (larger_input_tensor, scale)
-            }
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_best_config(
-        self, model_config, available_configs: dict[str, "helion.Config"]
-    ) -> Optional["helion.Config"]:
-        """
-        Select the best config for model_config from available options.
-
-        This is a pure function that performs config selection logic without any I/O.
-        Subclasses should implement kernel-specific selection strategies.
-
-        Args:
-            model_config: vLLM ModelConfig instance
-            available_configs: Dictionary mapping config keys to loaded Helion configs
-
-        Returns:
-            Best matching Helion config from available_configs, or None if no suitable match
-        """
-        raise NotImplementedError
-
     def autotune(
         self, autotune_inputs: dict[str, tuple], tuner_kwargs: dict | None = None
     ) -> dict[str, "helion.Config"]:
         """
         Run autotuning and return configs (without saving).
+
+        Delegates to the helion_kernel's run_autotune method.
 
         Args:
             autotune_inputs: Dictionary mapping config keys to input tuples for autotuning
@@ -183,45 +148,12 @@ class HelionCustomOp(CustomOp):
         Returns:
             Dictionary mapping config keys to tuned Helion configs
         """
-        if not HELION_AVAILABLE:
-            raise ImportError(
-                "Helion is not available. Please install Helion to use autotuning."
-            )
+        helion_kernel = self.helion_kernel
+        assert helion_kernel is not None, (
+            f"{self.__class__.__name__}.helion_kernel returned None - ensure Helion is available"
+        )
 
-        # Get the Helion kernel function
-        kernel_fn = self.helion_kernel
-        if kernel_fn is None:
-            raise RuntimeError(
-                f"No Helion kernel available for {self.__class__.__name__}"
-            )
-
-        # Set reasonable defaults for tuner
-        tuner_kwargs = tuner_kwargs or {}
-        default_tuner_kwargs = {
-            "initial_population": 200,
-            "copies": 10,
-            "max_generations": 40,
-        }
-        default_tuner_kwargs.update(tuner_kwargs)
-
-        results = {}
-
-        for config_key, inputs in autotune_inputs.items():
-            logger.info(
-                f"Autotuning {self.__class__.__name__} for config: {config_key}"
-            )
-
-            try:
-                # Use Helion's built-in autotune method
-                config = kernel_fn.autotune(inputs, **default_tuner_kwargs)
-                results[config_key] = config
-
-            except Exception as e:
-                logger.error(
-                    f"Autotuning failed for {self.__class__.__name__} config {config_key}: {e}"
-                )
-
-        return results
+        return helion_kernel.run_autotune(autotune_inputs, tuner_kwargs)
 
     def configure(self, model_config=None):
         """
@@ -242,39 +174,17 @@ class HelionCustomOp(CustomOp):
             f"{self.__class__.__name__} HelionCustomOp must be enabled"
         )
 
-        # Handle config selection logic here (HelionCustomOp responsibility)
         assert model_config is not None, (
             f"{self.__class__.__name__}.configure() requires model_config to be provided"
         )
 
-        # Get kernel name for config loading from the helion kernel
+        # Delegate to helion_kernel's configure method
         helion_kernel = self.helion_kernel
         assert helion_kernel is not None, (
             f"{self.__class__.__name__}.helion_kernel returned None - ensure Helion is available"
         )
 
-        kernel_name = helion_kernel.op_name
-        assert kernel_name, (
-            f"{self.__class__.__name__}.helion_kernel.op_name returned None or empty string"
-        )
-
-        # Load available configs using ConfigManager (its core responsibility)
-        available_configs = self._config_manager.load_all_configs(kernel_name)
-
-        assert available_configs, (
-            f"No configs available for kernel '{kernel_name}' - ensure configs are properly saved"
-        )
-
-        # Use our own selection logic (HelionCustomOp responsibility)
-        optimal_config = self.get_best_config(model_config, available_configs)
-
-        # get_best_config() must return a config if configs are available
-        assert optimal_config is not None, (
-            f"{self.__class__.__name__}.get_best_config() returned None with {len(available_configs)} configs available"
-        )
-
-        # Set the config on the kernel
-        self.helion_kernel.set_config(optimal_config)
+        helion_kernel.configure(model_config, self._config_manager)
 
 
     @property
