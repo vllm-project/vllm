@@ -595,8 +595,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #   SM120/SM121 (RTX 50 / DGX Spark) via flashinfer#2738
 ARG FLASHINFER_VERSION=0.6.7
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}" CUDA_MINOR="${CUDA_MINOR%%.*}"; \
+    && if [ "$CUDA_MAJOR" -lt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -lt 8 ]; }; then \
+      echo "Skipping flashinfer-jit-cache installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"; \
+    else \
+      uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi \
     && flashinfer show-config
 
 # Pre-download FlashInfer TRTLLM BMM headers for air-gapped environments.
