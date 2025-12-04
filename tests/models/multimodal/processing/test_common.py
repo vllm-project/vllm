@@ -396,28 +396,6 @@ def test_processing_correctness(
     )
 
 
-# Phi4MultimodalForCausalLM share same model repo with original format
-# Phi4MMForCausalLM, so we add it as a separate test case
-# Remove this test after conversion PR merged:
-# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
-@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-def test_processing_correctness_phi4_multimodal(
-    model_arch: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
-):
-    _test_processing_correctness(
-        model_arch,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
-    )
-
-
 def _assert_inputs_equal(
     a: MultiModalInputs,
     b: MultiModalInputs,
