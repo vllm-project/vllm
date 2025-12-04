@@ -3,7 +3,6 @@
 
 import copy
 import getpass
-import json
 import os
 import tempfile
 import threading
@@ -25,7 +24,6 @@ from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
-from vllm.utils.hashing import safe_hash
 
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -41,7 +39,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import CompileFactors, SupportsCompileFactors, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -224,7 +222,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    additional_config: dict | SupportsHash = Field(default_factory=dict)
+    additional_config: dict | SupportsCompileFactors = Field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform
     you are using. Contents must be hashable."""
@@ -236,7 +234,7 @@ class VllmConfig:
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
@@ -248,81 +246,43 @@ class VllmConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-
-        # summarize vllm config
-        vllm_factors: list[Any] = []
         from vllm import __version__
 
-        vllm_factors.append(__version__)
-        if self.model_config:
-            vllm_factors.append(self.model_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.cache_config:
-            vllm_factors.append(self.cache_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.parallel_config:
-            vllm_factors.append(self.parallel_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.scheduler_config:
-            vllm_factors.append(self.scheduler_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.device_config:
-            vllm_factors.append(self.device_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.load_config:
-            vllm_factors.append(self.load_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.lora_config:
-            vllm_factors.append(self.lora_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.speculative_config:
-            vllm_factors.append(self.speculative_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.structured_outputs_config:
-            vllm_factors.append(self.structured_outputs_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        vllm_factors.append(self.observability_config.compute_hash())
-        if self.quant_config:
-            pass  # should be captured by model_config.quantization
-        if self.compilation_config:
-            vllm_factors.append(self.compilation_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.kv_transfer_config:
-            vllm_factors.append(self.kv_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.ec_transfer_config:
-            vllm_factors.append(self.ec_transfer_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.additional_config:
-            if isinstance(additional_config := self.additional_config, dict):
-                additional_config_hash = safe_hash(
-                    json.dumps(additional_config, sort_keys=True).encode(),
-                    usedforsecurity=False,
-                ).hexdigest()
-            else:
-                additional_config_hash = additional_config.compute_hash()
-            vllm_factors.append(additional_config_hash)
-        else:
-            vllm_factors.append("None")
-        factors.append(vllm_factors)
+        def _compile(config_obj: SupportsCompileFactors | None) -> CompileFactors:
+            if config_obj is None:
+                return {}
+            return config_obj.compile_factors()
 
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
-        return hash_str
+        factors: dict[str, Any] = {
+            "version": __version__,
+            "model": _compile(self.model_config),
+            "cache": _compile(self.cache_config),
+            "parallel": _compile(self.parallel_config),
+            "scheduler": _compile(self.scheduler_config),
+            "device": _compile(self.device_config),
+            "load": _compile(self.load_config),
+            "speculative": _compile(self.speculative_config),
+            "structured_outputs": _compile(self.structured_outputs_config),
+            "observability": self.observability_config.compile_factors(),
+            "compilation": _compile(self.compilation_config),
+            "kv_transfer": _compile(self.kv_transfer_config),
+            "ec_transfer": _compile(self.ec_transfer_config),
+            "lora": _compile(self.lora_config),
+        }
+
+        factors["max_num_batched_tokens"] = self.scheduler_config.max_num_batched_tokens
+
+        if self.additional_config:
+            additional_config = self.additional_config
+            if isinstance(additional_config, dict):
+                factors["additional"] = additional_config
+            else:
+                assert isinstance(additional_config, SupportsCompileFactors)
+                factors["additional"] = additional_config.compile_factors()
+        else:
+            factors["additional"] = {}
+
+        return factors
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
         # if batch_size > self.compilation_config.max_cudagraph_capture_size,

@@ -15,7 +15,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.utils.hashing import safe_hash
+from vllm.config.utils import CompileFactors
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -46,17 +46,17 @@ class CompilerInterface:
         """
         pass
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
         """
-        Gather all the relevant information from the vLLM config,
-        to compute a hash so that we can cache the compiled model.
+        Gather compiler-specific factors that influence the generated code.
 
-        See [`VllmConfig.compute_hash`][vllm.config.VllmConfig.compute_hash]
-        to check what information
-        is already considered by default. This function should only
-        consider the information that is specific to the compiler.
+        See [`VllmConfig.compile_factors`][vllm.config.VllmConfig.compile_factors]
+        for the base configuration factors. This method should return any
+        additional data that uniquely identifies the compiler's contribution to
+        the cache key. Subclasses must return a dictionary; use an empty dict
+        when no compiler-specific data is needed.
         """
-        return ""
+        return {}
 
     def compile(
         self,
@@ -195,12 +195,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
     def __init__(self, save_format: Literal["binary", "unpacked"]):
         self.save_format = save_format
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor_standalone": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
@@ -284,12 +280,8 @@ class InductorAdaptor(CompilerInterface):
 
     name = "inductor"
 
-    def compute_hash(self, vllm_config: VllmConfig) -> str:
-        factors = get_inductor_factors()
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
-        return hash_str
+    def compile_factors(self, vllm_config: VllmConfig) -> CompileFactors:
+        return {"inductor": get_inductor_factors()}
 
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
