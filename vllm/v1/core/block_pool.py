@@ -210,7 +210,7 @@ class BlockPool:
         self,
         request: Request,
         blocks: list[KVCacheBlock],
-        num_cached_or_skipped_blocks: int,
+        num_cached_blocks: int,
         num_full_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
@@ -226,16 +226,15 @@ class BlockPool:
         Args:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
-            num_cached_or_skipped_blocks: The number of blocks that are already
-                cached or skipped.
+            num_cached_blocks: The number of blocks that are already cached.
             num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
         """
-        if num_cached_or_skipped_blocks >= num_full_blocks:
+        if num_cached_blocks >= num_full_blocks:
             return
-        new_full_blocks = blocks[num_cached_or_skipped_blocks:num_full_blocks]
+        new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
         if block_size == self.hash_block_size:
             # Common case.
@@ -250,15 +249,22 @@ class BlockPool:
                 request.block_hashes, self.hash_block_size, block_size
             )
 
-        new_block_hashes = block_hashes[num_cached_or_skipped_blocks:]
+        new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+
+        # Some blocks may be null blocks when enabling sparse attention or sliding
+        # window attention. For now, we only have sliding window attention, and
+        # null blocks must be at the beginning.
+        first_non_null_blk_idx = 0
         for i, blk in enumerate(new_full_blocks):
-            if blk.is_null:
-                # May happen when both sparse attention (e.g., sliding
-                # window) and connector are enabled.
-                continue
+            if not blk.is_null:
+                first_non_null_blk_idx = i
+                break
+
+        for i, blk in enumerate(new_full_blocks[first_non_null_blk_idx:]):
+            assert not blk.is_null
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
@@ -272,20 +278,21 @@ class BlockPool:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
-            if num_cached_or_skipped_blocks == 0:
+            if num_cached_blocks == 0:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block_hash = maybe_convert_block_hash(
-                    block_hashes[num_cached_or_skipped_blocks - 1]
+                    block_hashes[num_cached_blocks - 1]
                 )
 
             self.kv_event_queue.append(
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
+                    ## TODO(Yifan): here token_ids may be over-estimated when
+                    ## using sliding window
                     token_ids=request.all_token_ids[
-                        num_cached_or_skipped_blocks * block_size : num_full_blocks
-                        * block_size
+                        num_cached_blocks * block_size : num_full_blocks * block_size
                     ],
                     block_size=block_size,
                     lora_id=request.lora_request.adapter_id

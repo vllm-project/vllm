@@ -242,9 +242,7 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(
-        self, request: Request, num_tokens: int, prev_computed_tokens: int
-    ) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
         Cache the blocks for the request.
 
@@ -254,9 +252,6 @@ class SingleTypeKVCacheManager(ABC):
                 (including tokens that are already cached).
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
-        num_skipped_blocks = (
-            self.get_num_skipped_tokens(prev_computed_tokens) // self.block_size
-        )
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
@@ -265,7 +260,7 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
-            num_cached_or_skipped_blocks=max(num_cached_blocks, num_skipped_blocks),
+            num_cached_blocks=num_cached_blocks,
             num_full_blocks=num_full_blocks,
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
@@ -871,9 +866,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
 
-    def cache_blocks(
-        self, request: Request, num_tokens: int, prev_computed_tokens: int
-    ) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")

@@ -1614,11 +1614,7 @@ class Scheduler(SchedulerInterface):
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(
-                    request,
-                    request.num_computed_tokens,
-                    total_computed_tokens=request.num_computed_tokens,
-                )
+                self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
             else:
                 # No valid computed tokens, release allocated blocks.
                 # There may be a local cache hit on retry.
@@ -1634,9 +1630,7 @@ class Scheduler(SchedulerInterface):
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1
             # This will cache the blocks iff caching is enabled.
-            self.kv_cache_manager.cache_blocks(
-                request, num_computed_tokens, total_computed_tokens=num_computed_tokens
-            )
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
 
             # Update the request state for scheduling.
             request.num_computed_tokens = num_computed_tokens
