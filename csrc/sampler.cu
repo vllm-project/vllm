@@ -57,7 +57,6 @@ static inline __device__ uint32_t extractBinIdx(float x) {
     bits = (bits & 0x8000) ? bits : ~bits & 0x7fff;
     return bits >> 5;
   } else {
-    return bits & 0x3ff;
     uint32_t bits = __float_as_uint(x);
     bits = (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
 
@@ -524,7 +523,12 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
       outIndices[i] = smemOutput[i];
       outLogits[i] = reinterpret_cast<float*>(smemOutput + topK)[i];
     } else {
-      outIndices[i] = smemOutput[i] - rowStart;
+      if (stride1 == 1) {
+        // stride1 == 1 will use vectorized_process, which indexes already skip the rowStart.
+        outIndices[i] = smemOutput[i];
+      } else {
+        outIndices[i] = smemOutput[i] - rowStart;
+      }
     }
   }
 }
