@@ -63,10 +63,10 @@ A simplified version of the example (`llama-multinode`) looks like:
 
 - `spec.replicas: 1` – one `ServingGroup` (one logical model deployment).
 - `roles`:
-  - `entryTemplate` – defines **leader** pods that run:
-    - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
-    - vLLM **OpenAI-compatible API server**.
-  - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
+    - `entryTemplate` – defines **leader** pods that run:
+        - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
+        - vLLM **OpenAI-compatible API server**.
+    - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
 
 Key points from the example YAML:
 
@@ -102,7 +102,6 @@ Key points from the example YAML:
 
 ### 3.1 Prepare the Manifest
 
-
 **Recommended**: use a Secret instead of a raw env var:
 
 ```bash
@@ -110,7 +109,6 @@ kubectl create secret generic hf-token \
   -n default \
   --from-literal=HUGGING_FACE_HUB_TOKEN='<your-token>'
 ```
-
 
 ### 3.2 Apply the `ModelServing`
 
@@ -333,3 +331,4 @@ If you’re done with the entire stack:
 helm uninstall kthena -n kthena-system   # or your Kthena release name
 helm uninstall volcano -n volcano-system
 ```
+
