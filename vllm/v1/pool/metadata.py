@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.utils.platform_utils import is_pin_memory_available
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_input_batch import PoolingStates
-else:
-    PoolingStates = Any
 
 pin_memory = is_pin_memory_available()
 
@@ -40,6 +34,15 @@ class PoolingCursor:
 
     def is_finished(self):
         return self.prompt_lens_cpu == self.seq_lens_cpu
+
+
+class PoolingStates:
+    def __init__(self):
+        # for chunked prefill with ALL pooling
+        self.hidden_states_cache: list[torch.Tensor] = []
+
+    def clean(self):
+        self.hidden_states_cache.clear()
 
 
 @dataclass
