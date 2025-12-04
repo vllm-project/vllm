@@ -415,21 +415,28 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str, Any], moe: FusedMoEConfig):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
-        assert rocm_aiter_ops.is_fused_moe_enabled(), "W4A8 FP8 MoE requires ROCm AITER fused MoE support."
+        assert rocm_aiter_ops.is_fused_moe_enabled(), (
+            "W4A8 FP8 MoE requires ROCm AITER fused MoE support."
+        )
 
     def create_weights(
         self,
         layer: torch.nn.Module,
-        num_experts: int, 
-        hidden_size: int, 
-        intermediate_size_per_partition: int, 
-        params_dtype: torch.dtype, 
-        **extra_weight_attrs
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
     ):
         params_dtype = torch.uint32
         w13_weight = torch.nn.Parameter(
@@ -464,9 +471,9 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        extra_weight_attrs.update({
-            "quant_method": FusedMoeWeightScaleSupported.TENSOR.value
-        })
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -485,9 +492,9 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         )
         layer.register_parameter("w13_weight_scale_2", w13_weight_scale_2)
         layer.register_parameter("w2_weight_scale_2", w2_weight_scale_2)
-        extra_weight_attrs.update({
-            "quant_method": FusedMoeWeightScaleSupported.CHANNEL.value
-        })
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
+        )
         set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
@@ -512,15 +519,16 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
                     int4_rescale = (
                         layer.w13_weight_scale[expert_id][shard_id] / max_w13_scale_fp8
                     )
-                    layer.w13_weight_scale_2[expert_id][
-                        start : start + shard_size
-                    ] *= int4_rescale
+                    layer.w13_weight_scale_2[expert_id][start : start + shard_size] *= (
+                        int4_rescale
+                    )
                 start += shard_size
 
         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales, requires_grad=False)
 
-        # special hack to asm_moe, which takes (weight_scale1 * weight_scale) as post GEMM scaling
-        # optimal design - shall apply per-column weight_scale1 before GEMM, and weight_scale post
+        # special hack to asm_moe, which takes (weight_scale1 * weight_scale) as post
+        # GEMM scaling optimal design - shall apply per-column weight_scale1 before
+        # GEMM, and weight_scale post
         for expert_id in range(layer.local_num_experts):
             layer.w13_weight_scale_2[expert_id] *= max_w13_scales[expert_id]
             layer.w2_weight_scale_2[expert_id] *= layer.w2_weight_scale[expert_id]
@@ -560,19 +568,9 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
                 "EPLB not supported for `QuarkW4A8Fp8MoEMethod` yet."
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
@@ -590,6 +588,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             quant_config=self.moe_quant_config,
             expert_map=expert_map,
         )
+
 
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def __init__(
