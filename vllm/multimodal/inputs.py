@@ -201,8 +201,10 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 
 
 def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
-    """Equality check between
-    [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects."""
+    """
+    Equality check between
+    [`NestedTensors`][vllm.multimodal.inputs.NestedTensors] objects.
+    """
     if isinstance(a, torch.Tensor):
         return isinstance(b, torch.Tensor) and torch.equal(a, b)
     elif isinstance(b, torch.Tensor):
@@ -226,6 +228,20 @@ BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
 A dictionary containing nested tensors which have been batched via
 [`MultiModalKwargsItems.get_data`][vllm.multimodal.inputs.MultiModalKwargsItems.get_data].
 """
+
+
+def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> bool:
+    """
+    Equality check between
+    [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
+    """
+    for k in a:
+        if k not in b:
+            return False
+        if not nested_tensors_equal(a[k], b[k]):
+            return False
+
+    return True
 
 
 @dataclass
