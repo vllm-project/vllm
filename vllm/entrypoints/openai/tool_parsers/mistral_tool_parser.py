@@ -162,8 +162,8 @@ class MistralToolParser(ToolParser):
 
         try:
             # Get content before tool calls
-            content = model_output.split(self.bot_token)[0]
-            content = content if content.strip() else None
+            content_str = model_output.split(self.bot_token)[0]
+            content: str | None = content_str if content_str.strip() else None
 
             # Parse tool calls from each segment after [TOOL_CALLS]
             function_call_arr = []
@@ -246,6 +246,7 @@ class MistralToolParser(ToolParser):
         from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
         # Find where [TOOL_CALLS] appears in this delta
+        assert self.bot_token_id is not None  # Validated in __init__
         try:
             bot_idx = list(delta_token_ids).index(self.bot_token_id)
         except ValueError:
