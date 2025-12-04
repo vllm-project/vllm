@@ -1083,9 +1083,7 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
-# TODO(Lucas): rename MLACommonBaseImpl -> MLACommonImpl,
-# and MLACommonImpl -> MLACommonDenseImpl or somthing like that
-class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
+class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -1133,16 +1131,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
-
-
-class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -1424,6 +1412,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
+    @abstractmethod
     def forward(
         self,
         layer: AttentionLayer,
@@ -1431,32 +1420,24 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: M,
+        attn_metadata: A,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward method that delegates to the layer's forward_impl."""
-        # The implementation has been moved to MLAAttention.forward_impl()
-        # This method delegates to maintain the interface contract
-        return layer.forward_impl(
-            layer,
-            q,
-            k_c_normed,
-            k_pe,
-            kv_cache,
-            attn_metadata,
-            output,
-            output_scale,
-            output_block_scale,
-        )
+        """Forward method required by abstract base class.
+
+        Sparse backends (ROCMAiterMLASparseImpl, FlashMLASparseImpl) implement this.
+        Dense backends use MLAAttention.forward_impl() instead.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def _forward_decode(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: M,
+        attn_metadata: A,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
