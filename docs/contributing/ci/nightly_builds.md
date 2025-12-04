@@ -63,9 +63,9 @@ This avoids duplication of wheel files.
 
 For example, you can use the following URLs to use different indices:
 
-* `https://wheels.vllm.ai/nightly/cu130` for the latest main branch wheels built with CUDA 13.0.
-* `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
-* `https://wheels.vllm.ai/0.12.0/cpu` for 0.12.0 release wheels built for CPU variant.
+- `https://wheels.vllm.ai/nightly/cu130` for the latest main branch wheels built with CUDA 13.0.
+- `https://wheels.vllm.ai/{commit_hash}` for wheels built at a specific commit (default variant).
+- `https://wheels.vllm.ai/0.12.0/cpu` for 0.12.0 release wheels built for CPU variant.
 
 Please note that not all variants are present on every commit. The available variants are subject to change over time, e.g., changing cu130 to cu131.
 
@@ -78,11 +78,12 @@ Indices are organized by variant:
 - **Alias to default**: The default variant can have an alias (e.g., `cu129` for now) for consistency and convenience.
 
 The variant is extracted from the wheel filename (as described in the [file name convention](https://packaging.python.org/en/latest/specifications/binary-distribution-format/#file-name-convention)):
+
 - The variant is encoded in the local version identifier (e.g. `+cu129` or `dev<N>+g<hash>.cu130`).
 - Examples:
-  - `vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl` → default variant
-  - `vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl` → `cu129` variant
-  - `vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl` → `cu130` variant
+    - `vllm-0.11.2.dev278+gdbc3d9991-cp38-abi3-manylinux1_x86_64.whl` → default variant
+    - `vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl` → `cu129` variant
+    - `vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl` → `cu130` variant
 
 ## Index Generation Details
 
@@ -113,14 +114,14 @@ The wheels and indices are directly stored on AWS S3, and we use AWS CloudFront 
 
 Since S3 does not provide proper directory listing, to support PyPI-compatible simple repository API behavior, we deploy a CloudFront Function that:
 
-* redirects any URL that does not end with `/` and does not look like a file (i.e., does not contain a dot `.` in the last path segment) to the same URL with a trailing `/`
-* appends `/index.html` to any URL that ends with `/`
+- redirects any URL that does not end with `/` and does not look like a file (i.e., does not contain a dot `.` in the last path segment) to the same URL with a trailing `/`
+- appends `/index.html` to any URL that ends with `/`
 
 For example, the following requests would be handled as:
 
-* `/nightly` --> `/nightly/index.html`
-* `/nightly/cu130/` --> `/nightly/cu130/index.html`
-* `/nightly/index.html` or `/nightly/vllm.whl` --> unchanged
+- `/nightly` --> `/nightly/index.html`
+- `/nightly/cu130/` --> `/nightly/cu130/index.html`
+- `/nightly/index.html` or `/nightly/vllm.whl` --> unchanged
 
 !!! note "AWS S3 Filename Escaping"
 
