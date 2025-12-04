@@ -619,7 +619,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             else:
                 w13_weight = layer.w13_weight
                 w2_weight = layer.w2_weight
-            # print(f'>>> quant_config: {self.get_fused_moe_quant_config(layer)} {w13_weight.dtype=} {w2_weight.dtype=}')
 
             out = rocm_aiter_fused_experts(
                 x,
@@ -629,18 +628,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 topk_ids=topk_ids,
                 activation=activation,
                 quant_config=self.get_fused_moe_quant_config(layer),
-                # expert_map=expert_map,
+                expert_map=expert_map,
             )
-
-            # out = rocm_aiter_fused_experts(
-            #     x,
-            #     layer.w13_weight,
-            #     layer.w2_weight,
-            #     topk_weights=topk_weights,
-            #     topk_ids=topk_ids,
-            #     activation=activation,
-            #     quant_config=self.get_fused_moe_quant_config(layer),
-            # )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
