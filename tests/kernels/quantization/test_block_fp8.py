@@ -54,6 +54,10 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,seed",
     itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS),
@@ -103,6 +107,9 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Cutlass only supported on CUDA platform."
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_cutlass_matmul():
     # Test simple case where weight.shape % 128 != 0,
