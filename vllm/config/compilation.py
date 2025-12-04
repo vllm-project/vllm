@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -701,6 +702,10 @@ class CompilationConfig:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        self.compile_cache_save_format = (
+            envs.VLLM_COMPILE_CACHE_SAVE_FORMAT or self.compile_cache_save_format
+        )
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:

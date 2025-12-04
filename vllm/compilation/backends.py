@@ -48,7 +48,9 @@ from .pass_manager import PostGradPassManager
 logger = init_logger(__name__)
 
 
-def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
+def make_compiler(
+    compilation_config: CompilationConfig, dp_rank: int = 0
+) -> CompilerInterface:
     if compilation_config.backend == "inductor":
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
@@ -59,8 +61,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         ):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
-                envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
-                or compilation_config.compile_cache_save_format
+                compilation_config.compile_cache_save_format
+                if dp_rank == 0
+                else "binary"
             )
         else:
             logger.debug("Using InductorAdaptor")
@@ -90,11 +93,11 @@ class CompilerManager:
     support int as key.
     """
 
-    def __init__(self, compilation_config: CompilationConfig):
+    def __init__(self, compilation_config: CompilationConfig, dp_rank: int = 0):
         self.cache: dict[tuple[int | None, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
-        self.compiler = make_compiler(compilation_config)
+        self.compiler = make_compiler(compilation_config, dp_rank)
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         return self.compiler.compute_hash(vllm_config)
@@ -563,7 +566,7 @@ class VllmBackend:
         self.compilation_config = vllm_config.compilation_config
 
         self.compiler_manager: CompilerManager = CompilerManager(
-            self.compilation_config
+            self.compilation_config, vllm_config.parallel_config.data_parallel_rank
         )
 
         # Deepcopy the inductor config to detach the post-grad custom pass
@@ -643,7 +646,16 @@ class VllmBackend:
         self.compilation_config.cache_dir = cache_dir
         rank = vllm_config.parallel_config.rank
         dp_rank = vllm_config.parallel_config.data_parallel_rank
-        local_cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}", self.prefix)
+
+        if (
+            dp_rank == 0
+            and self.compilation_config.compile_cache_save_format == "unpacked"
+        ):
+            dir_name = f"rank_{rank}_unpacked"
+        else:
+            dir_name = f"rank_{rank}"
+
+        local_cache_dir = os.path.join(cache_dir, dir_name, self.prefix)
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
