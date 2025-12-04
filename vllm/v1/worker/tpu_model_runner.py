@@ -1004,7 +1004,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            merge_by_field_config=model.merge_by_field_config,
             multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Run the encoder.
@@ -2093,7 +2092,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                merge_by_field_config=model.merge_by_field_config,
                 multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
