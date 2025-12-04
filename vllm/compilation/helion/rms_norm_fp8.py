@@ -181,12 +181,19 @@ class RMSNormFp8Helion(HelionCustomOp):
             Output tensor with shape (num_tokens, hidden_size) and dtype
             float8_e4m3fn
         """
-        if not HELION_AVAILABLE:
-            raise ImportError(
-                "Helion is not installed. Please install Helion to use RMSNormFp8Helion. "
-                "Alternatively, use the CUDA baseline implementation."
-            )
         return rms_norm_fp8(input, weight, scale, epsilon)
+
+    @property
+    def kernel_name(self) -> str:
+        """Get the kernel name for config selection."""
+        return "rms_norm_fp8_helion"
+
+    @property
+    def helion_kernel(self):
+        """Return the Helion kernel function for autotuning."""
+        if HELION_AVAILABLE:
+            return rms_norm_fp8
+        return None
 
     def get_autotune_inputs(self) -> dict[str, tuple]:
         """
@@ -261,13 +268,6 @@ class RMSNormFp8Helion(HelionCustomOp):
         except Exception:
             # If parsing fails, just return the first available config
             return next(iter(available_configs.values()))
-
-    @property
-    def helion_kernel(self):
-        """The Helion kernel function for autotuning."""
-        if HELION_AVAILABLE:
-            return rms_norm_fp8._helion_kernel
-        return None
 
 
 class RMSNormFp8Benchmark(KernelBenchmark):

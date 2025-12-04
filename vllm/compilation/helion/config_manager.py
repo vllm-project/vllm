@@ -41,17 +41,61 @@ class ConfigManager:
     - Kernel name normalization
 
     File naming convention: helion_{kernel_name}_{config_key}.json
+
+    Singleton pattern: Use ConfigManager.get_instance() to get the shared instance.
     """
+
+    _instance: Optional["ConfigManager"] = None
+    _initialized: bool = False
+
+    def __new__(cls, base_dir: str | Path | None = None):
+        """Singleton pattern: return existing instance or create new one."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self, base_dir: str | Path | None = None):
         """
-        Initialize ConfigManager.
+        Initialize ConfigManager (singleton pattern).
 
         Args:
             base_dir: Base directory for configs. If None, uses smart detection
                      to find vllm_repo_root/vllm/compilation/helion/configs
+
+        Note: After first initialization, subsequent calls ignore base_dir parameter.
         """
-        self.base_dir = self._resolve_base_dir(base_dir)
+        # Only initialize once (singleton pattern)
+        if not ConfigManager._initialized:
+            self.base_dir = self._resolve_base_dir(base_dir)
+            ConfigManager._initialized = True
+            logger.debug(
+                f"ConfigManager singleton initialized with base_dir: {self.base_dir}"
+            )
+
+    @classmethod
+    def get_instance(cls, base_dir: str | Path | None = None) -> "ConfigManager":
+        """
+        Get the singleton instance of ConfigManager.
+
+        Args:
+            base_dir: Base directory for configs (only used on first call)
+
+        Returns:
+            The singleton ConfigManager instance
+        """
+        if cls._instance is None:
+            cls._instance = cls(base_dir)
+        return cls._instance
+
+    @classmethod
+    def reset_instance(cls):
+        """
+        Reset the singleton instance (mainly for testing).
+
+        Warning: This should only be used in tests or special circumstances.
+        """
+        cls._instance = None
+        cls._initialized = False
 
     def _resolve_base_dir(self, base_dir: str | Path | None) -> Path:
         """
@@ -110,6 +154,17 @@ class ConfigManager:
             SiluMulFp8HelionClass -> "silu_mul_fp8_helion" (looks up registry name)
         """
         if isinstance(kernel_name_or_class, type):
+            # If it's a HelionCustomOp class, try to get kernel_name from a temporary instance
+            try:
+                from vllm.compilation.helion.custom_op import HelionCustomOp
+
+                if issubclass(kernel_name_or_class, HelionCustomOp):
+                    # Create temporary instance to get kernel_name
+                    temp_instance = kernel_name_or_class()
+                    return temp_instance.kernel_name
+            except Exception:
+                pass
+
             # Look up the registered name in CustomOp registry
             from vllm.model_executor.custom_op import CustomOp
 
@@ -181,6 +236,9 @@ class ConfigManager:
 
         Returns:
             Loaded Helion config, or None if file doesn't exist or Helion unavailable
+
+        Note: If you need all configs for a kernel, use load_all_configs() instead
+              as it's more efficient than multiple load_config() calls.
         """
         if not HELION_AVAILABLE:
             logger.warning("Helion not available, cannot load configs")
@@ -229,6 +287,79 @@ class ConfigManager:
 
         return config_path
 
+    def load_all_configs(
+        self, kernel_name: KernelIdentifier
+    ) -> dict[str, "helion.Config"]:
+        """
+        Load all available configs for a kernel.
+
+        This is more efficient than list_configs() + multiple load_config() calls
+        since we typically need all configs anyway.
+
+        Args:
+            kernel_name: Kernel name string or HelionCustomOp class
+
+        Returns:
+            Dictionary mapping config keys to loaded Helion configs.
+            Empty dict if no configs found or Helion unavailable.
+
+        Example:
+            configs = config_manager.load_all_configs("silu_mul_fp8_helion")
+            # Returns: {"4096": Config(...), "8192": Config(...)}
+        """
+        if not HELION_AVAILABLE:
+            logger.debug("Helion not available, cannot load configs")
+            return {}
+
+        kernel_name_str = self._get_kernel_name(kernel_name)
+        configs: dict[str, helion.Config] = {}
+
+        if not self.base_dir.exists():
+            logger.debug(f"Config directory does not exist: {self.base_dir}")
+            return {}
+
+        # Find all config files for this kernel
+        pattern = f"helion_{kernel_name_str}_*.json"
+        config_files = list(self.base_dir.glob(pattern))
+
+        if not config_files:
+            logger.debug(
+                f"No config files found for kernel '{kernel_name_str}' with pattern '{pattern}'"
+            )
+            return {}
+
+        # Load all configs at once
+        for config_file in config_files:
+            try:
+                # Parse config key from filename: helion_{kernel}_{config_key}.json
+                # Remove the "helion_{kernel}_" prefix to get just the config_key
+                filename_stem = config_file.stem
+                prefix = f"helion_{kernel_name_str}_"
+
+                if filename_stem.startswith(prefix):
+                    config_key = filename_stem[len(prefix) :]
+
+                    # Load the config
+                    config = helion.Config.load(str(config_file))
+                    if config is not None:
+                        configs[config_key] = config
+                        logger.debug(
+                            f"Loaded config '{config_key}' for kernel '{kernel_name_str}'"
+                        )
+
+            except Exception as e:
+                logger.warning(f"Failed to load config from {config_file}: {e}")
+                continue
+
+        if configs:
+            logger.debug(
+                f"Loaded {len(configs)} configs for kernel '{kernel_name_str}': {list(configs.keys())}"
+            )
+        else:
+            logger.debug(f"No configs could be loaded for kernel '{kernel_name_str}'")
+
+        return configs
+
     def list_configs(
         self, kernel_name: KernelIdentifier | None = None
     ) -> dict[str, dict[str, Path]]:
@@ -244,6 +375,9 @@ class ConfigManager:
                 "silumulfp8": {"4096": Path(...), "8192": Path(...)},
                 "rmsnormfp8": {"2048": Path(...)}
             }
+
+        Note: Consider using load_all_configs() instead if you need the actual config objects,
+              as it's more efficient than list_configs() + multiple load_config() calls.
         """
         if not self.base_dir.exists():
             return {}

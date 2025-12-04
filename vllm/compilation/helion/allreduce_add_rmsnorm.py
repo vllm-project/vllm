@@ -515,15 +515,21 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
             - normalized_output: RMSNorm(AllReduce(input) + residual)
             - updated_residual: AllReduce(input) + residual
         """
-        if not HELION_AVAILABLE:
-            raise ImportError(
-                "Helion is not installed. Please install Helion to use "
-                "AllReduceAddRMSNormHelion. Alternatively, use FlashInfer's "
-                "trtllm_allreduce_fusion or call AllReduce and RMSNorm separately."
-            )
         return helion_allreduce_add_rmsnorm(
             input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
         )
+
+    @property
+    def kernel_name(self) -> str:
+        """Get the kernel name for config selection."""
+        return "allreduce_add_rmsnorm_helion"
+
+    @property
+    def helion_kernel(self):
+        """Return the Helion kernel function for autotuning."""
+        if HELION_AVAILABLE:
+            return allreduce_add_rmsnorm
+        return None
 
     def get_autotune_inputs(self) -> dict[str, tuple]:
         """
@@ -650,13 +656,6 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
             # If parsing fails, just return the first available config
             return next(iter(available_configs.values()))
 
-        return None
-
-    @property
-    def helion_kernel(self):
-        """The Helion kernel function for autotuning."""
-        if HELION_AVAILABLE:
-            return allreduce_add_rmsnorm._helion_kernel
         return None
 
 
