@@ -330,6 +330,7 @@ def save_to_pytorch_benchmark_format(
         pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
         write_to_json(pt_file, pt_records)
 
+
 def get_requests(args, tokenizer):
     # Common parameters for all dataset types.
     common_kwargs = {
@@ -398,6 +399,7 @@ def get_requests(args, tokenizer):
     requests = dataset_cls(**common_kwargs).sample(**sample_kwargs)
     requests = filter_requests_for_dp(requests, args.data_parallel_size)
     return requests
+
 
 def filter_requests_for_dp(requests, data_parallel_size):
     # Note(zhuohan): The way we get data_parallel_rank is hacky and only
