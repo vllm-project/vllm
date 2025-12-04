@@ -2409,34 +2409,25 @@ class GPUModelRunner(
             or envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
         )
 
+        # Collect expert selection stats per rank.
         hist_shape = self.expert_usage_histogram.shape
-        if self.parallel_config.enable_expert_parallel:
-            # Collect expert selection stats per rank.
 
-            from vllm.distributed.parallel_state import get_ep_group
+        from vllm.distributed.parallel_state import get_ep_group
+        self.expert_usage_histogram = self.expert_usage_histogram.reshape(
+            [hist_shape[0], get_ep_group().world_size, -1]
+        )
+        histogram_sum = torch.sum(self.expert_usage_histogram, dim=-1)
 
-            self.expert_usage_histogram = self.expert_usage_histogram.reshape(
-                [hist_shape[0], get_ep_group().world_size, -1]
+        if should_all_reduce:
+            torch.distributed.all_reduce(
+                histogram_sum, group=get_tp_group().device_group
             )
-            histogram_sum = torch.sum(self.expert_usage_histogram, dim=-1)
-
-            if should_all_reduce:
-                torch.distributed.all_reduce(
-                    histogram_sum, group=get_tp_group().device_group
-                )
-            per_ep_rank_tokens_histogram_cpu = histogram_sum.cpu()
+        per_ep_rank_tokens_histogram_cpu = histogram_sum.cpu()
         self.expert_usage_histogram = self.expert_usage_histogram.reshape(hist_shape)
 
         if self.parallel_config.enable_eplb:
             assert self.eplb_state is not None
-            if hasattr(self, "drafter") and self.drafter is not None:
-                eplb_state = self.eplb_state.model_states[
-                    self.vllm_config.speculative_config.draft_model_config.compute_hash()
-                ]
-            else:
-                eplb_state = self.eplb_state.model_states[
-                    self.model_config.compute_hash()
-                ]
+            eplb_state = self.eplb_state.model_states[self.model_config.compute_hash()]
 
             # When eplb enabled remap physical to logical experts.
             logical_expert_usage_histogram = torch.zeros(

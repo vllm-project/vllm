@@ -1173,7 +1173,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         top_k: int,
         renormalize: bool,
-        layer_index: int,
         use_grouped_topk: bool = False,
         topk_group: int | None = None,
         num_expert_group: int | None = None,

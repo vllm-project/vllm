@@ -1664,7 +1664,7 @@ class FusedMoE(CustomOp):
 
         if expert_usage_histogram is not None:
             collect_expert_usage_histogram(
-                topk_ids, expert_usage_histogram[layer_index]
+                topk_ids, expert_usage_histogram[self.layer_index]
             )
 
         return topk_weights, topk_ids, zero_expert_result
@@ -1820,7 +1820,6 @@ class FusedMoE(CustomOp):
                 router_logits=staged_router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
-                layer_index=self.layer_index,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
@@ -1985,7 +1984,6 @@ class FusedMoE(CustomOp):
                 router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
-                layer_index=layer_index,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
