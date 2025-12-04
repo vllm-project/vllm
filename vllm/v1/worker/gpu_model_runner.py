@@ -4231,10 +4231,16 @@ class GPUModelRunner(
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
 
+        pooling_params = []
+        for i in range(num_reqs):
+            p = dummy_pooling_params.clone()
+            p.reset_internal_states()
+            pooling_params.append(p)
+
         dummy_metadata = PoolingMetadata(
             prompt_lens=dummy_prompt_lens,
             prompt_token_ids=dummy_token_ids,
-            pooling_params=[dummy_pooling_params.clone() for i in range(num_reqs)],
+            pooling_params=pooling_params,
         )
 
         dummy_metadata.build_pooling_cursor(

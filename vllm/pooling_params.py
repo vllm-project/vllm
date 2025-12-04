@@ -13,6 +13,12 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
 
 
+class PoolingParamsInternalStates:
+    def __init__(self):
+        # for chunked prefill with ALL pooling
+        self.hidden_states_cache: list[torch.Tensor] = []
+
+
 class PoolingParams(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -61,9 +67,7 @@ class PoolingParams(
     skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
-
-    # for chunked prefill with ALL pooling
-    hidden_states_cache: list[torch.Tensor] = msgspec.field(default_factory=list)
+    _internal_states: PoolingParamsInternalStates | None = None
 
     @property
     def all_parameters(self) -> list[str]:
@@ -232,3 +236,17 @@ class PoolingParams(
         assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
             "For pooling output_kind has to be FINAL_ONLY"
         )
+
+    #####################################################################
+    # can only be used in the core process.
+
+    def reset_internal_states(self):
+        self._internal_states = PoolingParamsInternalStates()
+
+    def clean_internal_states(self):
+        self._internal_states = None
+
+    @property
+    def internal_states(self) -> PoolingParamsInternalStates:
+        assert self._internal_states is not None
+        return self._internal_states

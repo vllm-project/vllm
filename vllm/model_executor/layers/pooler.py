@@ -242,18 +242,18 @@ class AllPool(PoolingMethod):
         # If chunked_prefill is enabled
         # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
         for pooling_param, hs_chunk in zip(pooling_params, hidden_states_lst):
-            pooling_param.hidden_states_cache.append(hs_chunk)
+            pooling_param.internal_states.hidden_states_cache.append(hs_chunk)
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
         output_list = []
         for pooling_param, finished in zip(pooling_params, is_finished):
             if finished:
-                hidden_states_cache = pooling_param.hidden_states_cache
+                hidden_states_cache = pooling_param.internal_states.hidden_states_cache
                 if len(hidden_states_cache) == 1:
                     output_list.append(hidden_states_cache[0])
                 else:
                     output_list.append(torch.concat(hidden_states_cache, dim=0))
-                pooling_param.hidden_states_cache.clear()
+                pooling_param.clean_internal_states()
             else:
                 output_list.append(None)
 

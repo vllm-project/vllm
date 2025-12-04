@@ -286,6 +286,7 @@ class EngineCore:
 
             # Ensure that no multiple requests share the same pooling_params
             request.pooling_params = request.pooling_params.clone()
+            request.pooling_params.reset_internal_states()
 
         if request.kv_transfer_params is not None and (
             not self.scheduler.get_kv_connector()
