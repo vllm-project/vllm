@@ -49,7 +49,7 @@ if HELION_AVAILABLE:
         output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
         return torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
 
-    @register_kernel("silu_mul_fp8", fake_impl=_silu_mul_fp8_custom_fake)
+    @register_kernel(fake_impl=_silu_mul_fp8_custom_fake)
     @helion.kernel(
         autotune_baseline_atol=0.0,
         autotune_baseline_rtol=0.0,
@@ -231,11 +231,11 @@ class SiluMulFp8Helion(HelionCustomOp):
 
 
     @property
-    def helion_kernel(self):
-        """Return the Helion kernel wrapper for autotuning."""
+    def helion_kernels(self):
+        """Return the list of Helion kernel wrappers for autotuning."""
         if HELION_AVAILABLE:
-            return silu_mul_fp8
-        return None
+            return [silu_mul_fp8]
+        return []
 
 
 class SiluMulFp8Benchmark(KernelBenchmark):

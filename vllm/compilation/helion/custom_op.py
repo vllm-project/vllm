@@ -131,36 +131,14 @@ class HelionCustomOp(CustomOp):
         except ImportError:
             return False
 
-    # Autotuning and Config Management Methods
-
-    def autotune(
-        self, autotune_inputs: dict[str, tuple], tuner_kwargs: dict | None = None
-    ) -> dict[str, "helion.Config"]:
-        """
-        Run autotuning and return configs (without saving).
-
-        Delegates to the helion_kernel's run_autotune method.
-
-        Args:
-            autotune_inputs: Dictionary mapping config keys to input tuples for autotuning
-            tuner_kwargs: Additional arguments for Helion tuner
-
-        Returns:
-            Dictionary mapping config keys to tuned Helion configs
-        """
-        helion_kernel = self.helion_kernel
-        assert helion_kernel is not None, (
-            f"{self.__class__.__name__}.helion_kernel returned None - ensure Helion is available"
-        )
-
-        return helion_kernel.run_autotune(autotune_inputs, tuner_kwargs)
+    # Config Management Methods
 
     def configure(self, model_config=None):
         """
-        Configure the kernel with optimal config for the given model.
+        Configure all kernels with optimal config for the given model.
 
         This is the main entry point for fusion passes - they call this method
-        to configure the kernel with the best config, then can call the kernel directly.
+        to configure all kernels with the best config, then can call the kernels directly.
 
         Args:
             model_config: vLLM ModelConfig for optimal config selection
@@ -178,25 +156,26 @@ class HelionCustomOp(CustomOp):
             f"{self.__class__.__name__}.configure() requires model_config to be provided"
         )
 
-        # Delegate to helion_kernel's configure method
-        helion_kernel = self.helion_kernel
-        assert helion_kernel is not None, (
-            f"{self.__class__.__name__}.helion_kernel returned None - ensure Helion is available"
+        # Delegate to all helion kernels' configure methods
+        helion_kernels = self.helion_kernels
+        assert helion_kernels is not None and len(helion_kernels) > 0, (
+            f"{self.__class__.__name__}.helion_kernels returned empty list - ensure Helion is available"
         )
 
-        helion_kernel.configure(model_config, self._config_manager)
+        for kernel in helion_kernels:
+            kernel.configure(model_config, self._config_manager)
 
 
     @property
     @abstractmethod
-    def helion_kernel(self):
+    def helion_kernels(self):
         """
-        The Helion kernel function for autotuning.
+        The Helion kernel functions for this custom operation.
 
-        Subclasses should override this to return their specific Helion kernel function
-        (the one decorated with @helion.kernel).
+        Subclasses should override this to return a list of their specific Helion kernel functions
+        (those decorated with @helion.kernel). For single-kernel operations, return a list with one element.
 
         Returns:
-            The Helion kernel function, or None if not available
+            List[HelionKernelWrapper]: List of Helion kernel wrappers, or empty list if not available
         """
         raise NotImplementedError
