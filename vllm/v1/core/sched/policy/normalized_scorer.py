@@ -27,7 +27,8 @@ class ScoreDim:
 
 class NormalizedScorer:
     """
-    Normalize unbounded N-dimensional values into a composite score using the Sigmoid function.
+    Normalize unbounded N-dimensional values into a composite score using the Sigmoid
+    function.
     """
 
     def __init__(self, dim_list: list[ScoreDim]) -> None:
@@ -48,7 +49,9 @@ class NormalizedScorer:
 
     @staticmethod
     def _inv_sigmoid_normalize(value, median, norm_scale):
-        """Inverse Sigmoid: Used for dimensions where a larger value yields a lower score."""
+        """Inverse Sigmoid: Used for dimensions where a larger value yields a lower
+        score.
+        """
         # Equivalent to sigmoid(-x), but more numerically stable.
         return 1 / (1 + math.exp(norm_scale * (value - median)))
 
@@ -74,12 +77,7 @@ class NormalizedScorer:
                 score = self._sigmoid_normalize(
                     dim_value, dim_info.median, dim_info.norm_scale
                 )
-            logger.debug(
-                "%s(%s) : %.10f",
-                dim_info.name,
-                dim_info.reverse,
-                score
-            )
+            logger.debug("%s(%s) : %.10f", dim_info.name, dim_info.reverse, score)
 
             # Weighted summation.
             final_score += score * dim_info.weight
@@ -88,7 +86,8 @@ class NormalizedScorer:
 
 class TimeAndLengthScorer(NormalizedScorer):
     """
-    Scorer for time and length dimensions; defaults to forward scoring with equal weights (0.5 each).
+    Scorer for time and length dimensions; defaults to forward scoring with equal
+    weights (0.5 each).
     """
 
     def __init__(
