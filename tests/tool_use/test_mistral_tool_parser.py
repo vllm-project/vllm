@@ -50,30 +50,37 @@ def assert_tool_calls(
 ):
     """Assert that actual tool calls match expected ones."""
     assert len(actual_tool_calls) == len(expected_tool_calls), (
-        f"Expected {len(expected_tool_calls)} tool calls, "
-        f"got {len(actual_tool_calls)}"
+        f"Expected {len(expected_tool_calls)} tool calls, got {len(actual_tool_calls)}"
     )
 
     for actual, expected in zip(actual_tool_calls, expected_tool_calls):
         # Check ID format
-        assert isinstance(actual.id, str), f"Tool call ID should be string, got {type(actual.id)}"
-        assert len(actual.id) == 9, f"Tool call ID should be 9 chars, got {len(actual.id)}"
-        assert actual.id.isalnum(), f"Tool call ID should be alphanumeric, got {actual.id}"
+        assert isinstance(actual.id, str), (
+            f"Tool call ID should be string, got {type(actual.id)}"
+        )
+        assert len(actual.id) == 9, (
+            f"Tool call ID should be 9 chars, got {len(actual.id)}"
+        )
+        assert actual.id.isalnum(), (
+            f"Tool call ID should be alphanumeric, got {actual.id}"
+        )
 
         # Check function
         assert actual.function is not None
         # Handle both Pydantic model and dict-like access
         func = actual.function
-        actual_name = getattr(func, 'name', None) or (func.get('name') if isinstance(func, dict) else None)
-        actual_args = getattr(func, 'arguments', None) or (func.get('arguments') if isinstance(func, dict) else None)
+        actual_name = getattr(func, "name", None) or (
+            func.get("name") if isinstance(func, dict) else None
+        )
+        actual_args = getattr(func, "arguments", None) or (
+            func.get("arguments") if isinstance(func, dict) else None
+        )
 
         assert actual_name == expected.function.name, (
-            f"Expected function name '{expected.function.name}', "
-            f"got '{actual_name}'"
+            f"Expected function name '{expected.function.name}', got '{actual_name}'"
         )
         assert actual_args == expected.function.arguments, (
-            f"Expected arguments '{expected.function.arguments}', "
-            f"got '{actual_args}'"
+            f"Expected arguments '{expected.function.arguments}', got '{actual_args}'"
         )
 
 
@@ -215,9 +222,7 @@ class TestExtractToolCallsNoTools:
 
     def test_no_tool_call_token(self, mistral_tool_parser):
         model_output = "This is a test response without any tool calls."
-        result = mistral_tool_parser.extract_tool_calls(
-            model_output, request=None
-        )
+        result = mistral_tool_parser.extract_tool_calls(model_output, request=None)
         assert not result.tools_called
         assert result.tool_calls == []
         assert result.content == model_output
@@ -244,13 +249,18 @@ class TestExtractToolCallsV11Plus:
             ),
             # Weather tool
             (
-                '[TOOL_CALLS]get_current_weather{"city": "San Francisco", "state": "CA", "unit": "celsius"}',
+                "[TOOL_CALLS]get_current_weather"
+                '{"city": "San Francisco", "state": "CA", "unit": "celsius"}',
                 [
                     ToolCall(
                         function=MistralFunctionCall(
                             name="get_current_weather",
                             arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
+                                {
+                                    "city": "San Francisco",
+                                    "state": "CA",
+                                    "unit": "celsius",
+                                }
                             ),
                         )
                     )
@@ -315,9 +325,7 @@ def _test_extract_tool_calls_streaming(
     tool_call_idx: int = -1
     tool_call_ids: list[str | None] = []
 
-    for delta_message in stream_delta_message_generator(
-        tool_parser, tokenizer, tools
-    ):
+    for delta_message in stream_delta_message_generator(tool_parser, tokenizer, tools):
         # Role should never be streamed from tool parser
         assert not delta_message.role
 
@@ -348,8 +356,12 @@ def _test_extract_tool_calls_streaming(
             if tool_call.function:
                 # DeltaFunctionCall may be a Pydantic model or dict-like
                 func = tool_call.function
-                func_name = getattr(func, 'name', None) or (func.get('name') if isinstance(func, dict) else None)
-                func_args = getattr(func, 'arguments', None) or (func.get('arguments') if isinstance(func, dict) else None)
+                func_name = getattr(func, "name", None) or (
+                    func.get("name") if isinstance(func, dict) else None
+                )
+                func_args = getattr(func, "arguments", None) or (
+                    func.get("arguments") if isinstance(func, dict) else None
+                )
 
                 if func_name:
                     function_names.append(func_name)
@@ -430,7 +442,11 @@ class TestStreamingExtractionV11Plus:
                         function=MistralFunctionCall(
                             name="get_current_weather",
                             arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
+                                {
+                                    "city": "San Francisco",
+                                    "state": "CA",
+                                    "unit": "celsius",
+                                }
                             ),
                         )
                     ),
@@ -465,7 +481,7 @@ class TestStreamingOneChunk:
         [
             # Single tool - v11 format includes [ARGS] between name and JSON
             (
-                "[TOOL_CALLS]add_this_and_that[ARGS]{\"a\": 3.5, \"b\": 4}",
+                '[TOOL_CALLS]add_this_and_that[ARGS]{"a": 3.5, "b": 4}',
                 [
                     ToolCall(
                         function=MistralFunctionCall(
@@ -478,13 +494,18 @@ class TestStreamingOneChunk:
             ),
             # Weather tool
             (
-                '[TOOL_CALLS]get_current_weather[ARGS]{"city": "San Francisco", "state": "CA", "unit": "celsius"}',
+                "[TOOL_CALLS]get_current_weather[ARGS]"
+                '{"city": "San Francisco", "state": "CA", "unit": "celsius"}',
                 [
                     ToolCall(
                         function=MistralFunctionCall(
                             name="get_current_weather",
                             arguments=json.dumps(
-                                {"city": "San Francisco", "state": "CA", "unit": "celsius"}
+                                {
+                                    "city": "San Francisco",
+                                    "state": "CA",
+                                    "unit": "celsius",
+                                }
                             ),
                         )
                     )
@@ -497,7 +518,8 @@ class TestStreamingOneChunk:
             # encoding from free text. In real inference, the model generates
             # special tokens directly, avoiding this issue.
             pytest.param(
-                '[TOOL_CALLS]add[ARGS]{"a": 3.5, "b": 4}[TOOL_CALLS]multiply[ARGS]{"a": 3, "b": 6}',
+                '[TOOL_CALLS]add[ARGS]{"a": 3.5, "b": 4}'
+                '[TOOL_CALLS]multiply[ARGS]{"a": 3, "b": 6}',
                 [
                     ToolCall(
                         function=MistralFunctionCall(
@@ -586,8 +608,12 @@ class TestStreamingOneChunk:
                 tool_call_data[idx]["id"] = tc.id
 
             func = tc.function
-            func_name = getattr(func, 'name', None) or (func.get('name') if isinstance(func, dict) else None)
-            func_args = getattr(func, 'arguments', None) or (func.get('arguments') if isinstance(func, dict) else None)
+            func_name = getattr(func, "name", None) or (
+                func.get("name") if isinstance(func, dict) else None
+            )
+            func_args = getattr(func, "arguments", None) or (
+                func.get("arguments") if isinstance(func, dict) else None
+            )
 
             if func_name:
                 tool_call_data[idx]["name"] = func_name
@@ -606,7 +632,8 @@ class TestStreamingOneChunk:
                 f"Expected name '{expected.function.name}', got '{actual['name']}'"
             )
             assert actual["arguments"] == expected.function.arguments, (
-                f"Expected args '{expected.function.arguments}', got '{actual['arguments']}'"
+                f"Expected args '{expected.function.arguments}', "
+                f"got '{actual['arguments']}'"
             )
             assert actual["id"] is not None and len(actual["id"]) == 9
 
@@ -673,7 +700,9 @@ class TestTokenBasedDetection:
         """Test that streaming correctly uses token IDs for detection."""
         # Content without tool call
         content_text = "Hello, how can I help you?"
-        content_tokens = mistral_tokenizer.encode(content_text, add_special_tokens=False)
+        content_tokens = mistral_tokenizer.encode(
+            content_text, add_special_tokens=False
+        )
 
         delta_message = mistral_tool_parser.extract_tool_calls_streaming(
             previous_text="",
@@ -704,5 +733,7 @@ class TestParserInitialization:
         assert isinstance(pre_v11_tokenizer, MistralTokenizer)
         assert pre_v11_tokenizer.version < 11
 
-        with pytest.raises(RuntimeError, match="requires tokenizer version 11 or higher"):
+        with pytest.raises(
+            RuntimeError, match="requires tokenizer version 11 or higher"
+        ):
             MistralToolParser(pre_v11_tokenizer)

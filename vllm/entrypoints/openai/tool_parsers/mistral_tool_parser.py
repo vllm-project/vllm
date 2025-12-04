@@ -131,9 +131,7 @@ class MistralToolParser(ToolParser):
             pass
 
         # Regex for non-streaming parsing: name{args}
-        self.fn_name_regex = re.compile(
-            r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\}+)", re.DOTALL
-        )
+        self.fn_name_regex = re.compile(r"([a-zA-Z0-9_-]+)(\{[\s\S]*?\}+)", re.DOTALL)
 
         # Streaming state
         self._streaming_state = StreamingState.CONTENT
@@ -275,9 +273,7 @@ class MistralToolParser(ToolParser):
         else:
             return tool_result
 
-    def _stream_tool_calls(
-        self, delta_token_ids: Sequence[int]
-    ) -> DeltaMessage | None:
+    def _stream_tool_calls(self, delta_token_ids: Sequence[int]) -> DeltaMessage | None:
         """
         Stream tool calls using token-based parsing.
 
@@ -364,9 +360,9 @@ class MistralToolParser(ToolParser):
                 delta_tool_calls.append(
                     DeltaToolCall(
                         index=self._current_tool_index,
-                        function=DeltaFunctionCall(
-                            arguments=token_str
-                        ).model_dump(exclude_none=True),
+                        function=DeltaFunctionCall(arguments=token_str).model_dump(
+                            exclude_none=True
+                        ),
                     )
                 )
 
