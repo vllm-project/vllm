@@ -104,7 +104,7 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
 
