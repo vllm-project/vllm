@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoProcessor
 
+from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
 from ...utils import RemoteOpenAIServer
@@ -111,7 +112,11 @@ def get_hf_prompt_tokens(model_name, content, image_url):
             "content": f"{placeholder}{content}",
         }
     ]
-    images = [fetch_image(image_url)]
+    image = fetch_image(image_url)
+    # Unwrap MediaWithBytes if present
+    if isinstance(image, MediaWithBytes):
+        image = image.media
+    images = [image]
 
     prompt = processor.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True

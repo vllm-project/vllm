@@ -33,7 +33,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
@@ -326,7 +326,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         num_prompts: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
@@ -511,7 +511,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
         choices: list[CompletionResponseChoice] = []
@@ -622,7 +622,7 @@ class OpenAIServingCompletion(OpenAIServing):
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -642,9 +642,15 @@ class OpenAIServingCompletion(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
-                token = tokenizer.decode(token_id)
                 if should_return_as_token_id:
                     token = f"token_id:{token_id}"
+                else:
+                    if tokenizer is None:
+                        raise ValueError(
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
+                        )
+
+                    token = tokenizer.decode(token_id)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(None)
