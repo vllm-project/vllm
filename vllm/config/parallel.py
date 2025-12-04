@@ -593,10 +593,14 @@ class ParallelConfig:
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
             )
-        if self.distributed_executor_backend not in ("mp", "uni") and self.nnodes > 1:
+        allowed_backends = ("mp", "uni", "external_launcher")
+        if (
+            self.distributed_executor_backend not in allowed_backends
+            and self.nnodes > 1
+        ):
             raise ValueError(
                 "nnodes > 1 can only be set when distributed executor "
-                "backend is mp or uni."
+                "backend is mp, uni or external_launcher."
             )
 
     @property
