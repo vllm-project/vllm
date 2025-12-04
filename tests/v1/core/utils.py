@@ -137,14 +137,12 @@ def create_scheduler(
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
     )
+    spec = FullAttentionSpec(block_size, 1, 1, torch.float32, False)
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"], FullAttentionSpec(block_size, 1, 1, torch.float32, False)
-            )
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+        kv_bytes_per_block=spec.page_size_bytes,
     )
     cache_config.num_gpu_blocks = num_blocks
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler

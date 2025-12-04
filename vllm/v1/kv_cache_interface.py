@@ -402,3 +402,5 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+    """The number of KV bytes per block, across all workers"""
+    kv_bytes_per_block: int
