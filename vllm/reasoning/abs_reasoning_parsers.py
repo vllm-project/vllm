@@ -160,7 +160,7 @@ class ReasoningParserManager:
         if name in cls.lazy_parsers:
             return cls._load_lazy_parser(name)
 
-        registered = ", ".join(ReasoningParserManager.list_registered())
+        registered = ", ".join(cls.list_registered())
         raise KeyError(
             f"Reasoning parser '{name}' not found.\nAvailable parsers: {registered}"
         )
