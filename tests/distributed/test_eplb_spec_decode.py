@@ -6,6 +6,7 @@ import lm_eval
 import pytest
 
 from tests.utils import large_gpu_mark
+from vllm.platforms import current_platform
 
 
 def get_model_args(
@@ -43,6 +44,12 @@ def get_model_args(
         "max_model_len": model_max_len,
     }
     return model_args
+
+
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="EPLB with Spec Decode is a work in progress on ROCm.",
+)
 
 
 @pytest.mark.parametrize(
