@@ -852,7 +852,6 @@ direct_register_custom_op(
 )
 
 
-@maybe_transfer_kv_layer
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
