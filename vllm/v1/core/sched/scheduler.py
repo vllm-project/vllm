@@ -449,10 +449,7 @@ class Scheduler(SchedulerInterface):
                 # Streaming: skip request if still waiting for next streaming req.
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
                     if request.streaming_queue:
-                        finished = self._update_session(request)
-                        if finished:
-                            self.waiting.pop_request()
-                            continue
+                        self._update_session(request)
                     else:
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
@@ -815,32 +812,27 @@ class Scheduler(SchedulerInterface):
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
 
-    def _update_session(self, session: Request) -> bool:
+    def _update_session(self, session: Request) -> None:
         """
         Updates the waiting session with the next streaming request.
 
-        Closes the session if the streaming request has `continue_session=False`.
-        Otherwise, removes the last output token (which hasn't been scheduled) from
-        `_all_token_ids`, as the new request's prompt tokens will replace it. Typically
-        decoding outputs are scheduled as the next input in autoregressive decoding.
-        When we receive a new streaming request, the new prompt becomes our next input,
-        so the last output token is no longer needed and will not join the kv cache.
-        This also guarantees correct calculation of `num_new_tokens` in `schedule`.
+        Removes the last output token (not yet scheduled) from `_all_token_ids`
+        because the new request's prompt tokens will replace it. Typically the decoded
+        outputs are scheduled as the next input in autoregressive decoding. When we
+        receive a new streaming request, the new prompt becomes our next input, so the
+        last output token is no longer needed and will not join the kv cache. This
+        ensures correct calculation of `num_new_tokens` in `schedule`.
         """
         assert session.streaming_queue is not None
         request = session.streaming_queue.popleft()
-        if not request.continue_session:
-            session.status = RequestStatus.FINISHED_STOPPED
-            session.continue_session = False
-            self._free_request(session)
-            return True
 
         num_new_tokens = session.num_tokens - session.num_computed_tokens
-        assert num_new_tokens in {0, 1}
+        assert num_new_tokens in {0, 1}, f"got {num_new_tokens=}"
         if num_new_tokens == 1:
             assert session._all_token_ids[-1] == session._output_token_ids[-1]
             del session._all_token_ids[-1]
 
+        session.continue_session = request.continue_session
         if request.mm_features:
             base = session.num_tokens
             for mm_feature in request.mm_features:
@@ -863,8 +855,6 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
-
-        return False
 
     def _make_new_request_data(
         self,

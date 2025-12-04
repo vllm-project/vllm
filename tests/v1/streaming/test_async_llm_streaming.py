@@ -13,7 +13,7 @@ from vllm.v1.engine.output_processor import RequestOutputCollector
 
 
 @pytest.fixture
-def mock_streaming_llm():
+def mock_async_llm():
     """Create a mock AsyncLLM with mocked dependencies."""
     # Create a minimal mock without initializing the full engine
     llm = MagicMock(spec=AsyncLLM)
@@ -39,7 +39,7 @@ def mock_streaming_llm():
 
 
 @pytest.mark.asyncio
-async def test_generate_normal_flow(mock_streaming_llm):
+async def test_generate_normal_flow(mock_async_llm):
     """Test normal generation flow with streaming requests."""
     request_id = "test_request"
     prompt = "Tell me about Paris"
@@ -76,11 +76,11 @@ async def test_generate_normal_flow(mock_streaming_llm):
     async def mock_add_request(*args, **kwargs):
         return queue
 
-    mock_streaming_llm.add_request = mock_add_request
+    mock_async_llm.add_request = mock_add_request
 
     # Collect outputs from generate
     outputs = []
-    async for output in mock_streaming_llm.generate(
+    async for output in mock_async_llm.generate(
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
@@ -94,7 +94,7 @@ async def test_generate_normal_flow(mock_streaming_llm):
 
 
 @pytest.mark.asyncio
-async def test_generate_multiple_streaming_requests(mock_streaming_llm):
+async def test_generate_multiple_streaming_requests(mock_async_llm):
     """Test session continuation across multiple streaming requests."""
     request_id = "session"
     prompt1 = "Tell me about Paris"
@@ -117,11 +117,11 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
     async def mock_add_request1(*args, **kwargs):
         return queue1
 
-    mock_streaming_llm.add_request = mock_add_request1
+    mock_async_llm.add_request = mock_add_request1
 
     # Generate first request
     outputs1 = []
-    async for output in mock_streaming_llm.generate(
+    async for output in mock_async_llm.generate(
         prompt=prompt1,
         sampling_params=sampling_params,
         request_id=request_id,
@@ -148,11 +148,11 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
     async def mock_add_request2(*args, **kwargs):
         return queue2
 
-    mock_streaming_llm.add_request = mock_add_request2
+    mock_async_llm.add_request = mock_add_request2
 
     # Generate second request
     outputs2 = []
-    async for output in mock_streaming_llm.generate(
+    async for output in mock_async_llm.generate(
         prompt=prompt2,
         sampling_params=sampling_params,
         request_id=request_id,
@@ -165,7 +165,7 @@ async def test_generate_multiple_streaming_requests(mock_streaming_llm):
 
 
 @pytest.mark.asyncio
-async def test_generate_generator_exit(mock_streaming_llm):
+async def test_generate_generator_exit(mock_async_llm):
     """Test that GeneratorExit is handled gracefully for streaming sessions."""
     request_id = "test_request"
     prompt = "Test prompt"
@@ -187,10 +187,10 @@ async def test_generate_generator_exit(mock_streaming_llm):
     async def mock_add_request(*args, **kwargs):
         return queue
 
-    mock_streaming_llm.add_request = mock_add_request
+    mock_async_llm.add_request = mock_add_request
 
     # Create generator and close it early (simulates GeneratorExit)
-    gen = mock_streaming_llm.generate(
+    gen = mock_async_llm.generate(
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,

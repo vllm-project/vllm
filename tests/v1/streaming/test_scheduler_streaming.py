@@ -34,11 +34,14 @@ class DummyRequest(Request):
         continue_session=True,
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
+        max_tokens: int | None = 16,
     ):
         super().__init__(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [],
-            sampling_params=SamplingParams(stop_token_ids=[STOP_TOKEN]),
+            sampling_params=SamplingParams(
+                stop_token_ids=[STOP_TOKEN], max_tokens=max_tokens
+            ),
             pooling_params=None,
             eos_token_id=None,
             mm_features=mm_features,
@@ -195,7 +198,7 @@ class TestStreamingScheduler(unittest.TestCase):
         # 2 + len([1, 2, 3])
         assert session.mm_features[1].mm_position.offset == 5
 
-    def test_process_streaming_requests_with_session_close(self):
+    def test_process_streaming_requests_with_finish_session(self):
         scheduler = create_scheduler()
 
         session = DummyRequest(
@@ -205,18 +208,32 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        session.num_computed_tokens = len(session.prompt_token_ids)
 
         close_request = DummyRequest(
             request_id="session",
+            prompt_token_ids=[0],
             continue_session=False,
+            max_tokens=1,
         )
         scheduler.add_request(close_request)
         assert close_request.status == RequestStatus.WAITING
         assert len(session.streaming_queue) == 1
 
-        _ = scheduler.schedule()
-
-        assert session.status == RequestStatus.FINISHED_STOPPED
+        sout = scheduler.schedule()
+        mro = ModelRunnerOutput(
+            req_ids=[session.request_id],
+            req_id_to_index={session.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={session.request_id: None},
+            pooler_output=None,
+        )
+        out = scheduler.update_from_output(sout, mro)
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert len(out) == 1
+        assert out[0].outputs[0].request_id == session.request_id
+        assert out[0].outputs[0].continue_session is False
 
     def test_streaming_request_session_update(self):
         scheduler = create_scheduler()

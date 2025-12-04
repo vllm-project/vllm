@@ -47,7 +47,7 @@ def mock_model_runner_with_input_batch():
 
 
 def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_batch):
-    """Test that streaming session requests are updated correctly.
+    """Test that streaming session are updated correctly.
 
     This test validates that when a streaming session is updated with new prompt tokens:
     1. The request is removed from InputBatch before updating (avoids duplication)
@@ -118,8 +118,7 @@ def test_e2e_streaming_request_update_basic_flow(mock_model_runner_with_input_ba
 
 
 def test_e2e_streaming_with_multimodal_features(mock_model_runner_with_input_batch):
-    """Test that streaming session requests with multimodal features are updated
-    correctly.
+    """Test that streaming session with multimodal features are updated correctly.
 
     This test validates that when a streaming session with mm features is updated:
     1. The request is removed from InputBatch before updating (avoids duplication)
