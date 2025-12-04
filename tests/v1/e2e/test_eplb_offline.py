@@ -33,8 +33,9 @@ def test_eplb_model(
     )
 
     # Save EPLB statistics to disk
-    eplb_config_save = EPLBConfig(window_size=8,
-        step_interval=10, save_load_window=True, save_dir="/tmp")
+    eplb_config_save = EPLBConfig(
+        window_size=8, step_interval=10, save_load_window=True, save_dir="/tmp"
+    )
     llm = LLM(eplb_config=eplb_config_save, **llm_args)
     llm.generate(test_prompt)
     del llm
