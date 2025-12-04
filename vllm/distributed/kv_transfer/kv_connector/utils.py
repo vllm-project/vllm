@@ -4,10 +4,13 @@
 KV cache helper for store.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
@@ -181,3 +184,124 @@ def copy_kv_blocks(
         src_tensor = src_kv_caches[layer_name]
         dst_tensor = dst_kv_caches[layer_name]
         copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
+
+
+@dataclass
+class TpKVTopology:
+    """
+    Helper class for tensor parallel and KV topology information for
+    mapping between local and remote TP workers.
+    """
+
+    tp_rank: int
+    remote_tp_size: dict[str, int]
+    is_mla: bool
+    total_num_kv_heads: int
+    attn_backend: type[AttentionBackend]
+    engine_id: str
+    remote_block_size: dict[str, int]
+
+    def __post_init__(self):
+        # Figure out whether the first dimension of the cache is K/V
+        # or num_blocks. This is used to register the memory regions correctly.
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+        )
+        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+        # we just mock num_blocks to 1 for the dimension check below.
+        self._is_kv_layout_blocks_first = (
+            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        )
+
+        attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
+        self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
+
+    @property
+    def is_kv_layout_blocks_first(self) -> bool:
+        return self._is_kv_layout_blocks_first
+
+    @property
+    def split_k_and_v(self) -> bool:
+        # Whether to register regions for K and V separately (when present).
+        return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+
+    @property
+    def tp_size(self) -> int:
+        return self.remote_tp_size[self.engine_id]
+
+    @property
+    def block_size(self) -> int:
+        return self.remote_block_size[self.engine_id]
+
+    def tp_ratio(
+        self,
+        remote_tp_size: int,
+    ) -> int:
+        """
+        Calculate the tensor parallel ratio between local and remote TP.
+        We can think of it as the number of local TP workers-per-remote TP
+        workers. Local workers will read from the same remote TP worker in
+        groups of size `tp_ratio`.
+        """
+        assert self.tp_size % remote_tp_size == 0, (
+            f"Local tensor parallel size {self.tp_size} is not divisible "
+            f"by remote tensor parallel size {remote_tp_size}."
+        )
+        return self.tp_size // remote_tp_size
+
+    def block_size_ratio(
+        self,
+        remote_block_size: int,
+    ) -> float:
+        """
+        Calculate the block size ratio between local and remote TP.
+        """
+        assert self.block_size % remote_block_size == 0, (
+            f"Local block size {self.block_size} is not divisible "
+            f"by remote block size {remote_block_size} or vice versa."
+        )
+        return self.block_size // remote_block_size
+
+    def tp_ratio_from_engine_id(
+        self,
+        remote_engine_id: str,
+    ) -> int:
+        remote_tp_size = self.remote_tp_size[remote_engine_id]
+        return self.tp_ratio(remote_tp_size)
+
+    def block_size_ratio_from_engine_id(
+        self,
+        remote_engine_id: str,
+    ) -> float:
+        remote_block_size = self.remote_block_size[remote_engine_id]
+        return self.block_size_ratio(remote_block_size)
+
+    def is_kv_replicated(self, engine_id: str) -> bool:
+        """
+        Whether the KV cache is replicated across TP workers due to the
+        number of TP workers being greater than the number of KV heads.
+        """
+        tp_size = self.remote_tp_size[engine_id]
+        return tp_size // self.total_num_kv_heads >= 1
+
+    def replicates_kv_cache(self, remote_engine_id: str) -> bool:
+        # MLA is always replicated as the hidden dim can't be split.
+        return self.is_mla or self.is_kv_replicated(remote_engine_id)
+
+    def get_target_remote_rank(
+        self,
+        remote_tp_size: int,
+    ) -> int:
+        """
+        Get the remote TP rank (on P) that the current local TP rank
+        (on D) will read from.
+        """
+        tp_ratio = self.tp_ratio(remote_tp_size)
+        return self.tp_rank // tp_ratio
+
+    def get_target_remote_rank_from_engine_id(
+        self,
+        remote_engine_id: str,
+    ) -> int:
+        remote_tp_size = self.remote_tp_size[remote_engine_id]
+        return self.get_target_remote_rank(remote_tp_size)
