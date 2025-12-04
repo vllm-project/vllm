@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers.minimax_tool_parser import MinimaxToolParser
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 

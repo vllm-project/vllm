@@ -27,7 +27,8 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
@@ -92,7 +93,6 @@ ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
 class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
-    embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

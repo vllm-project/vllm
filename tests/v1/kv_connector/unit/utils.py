@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from itertools import chain, count
 from typing import Any
 
-import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -93,17 +92,18 @@ def create_vllm_config(
     enable_permute_local_kv: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=max_num_seqs,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_model_len,
-        enable_chunked_prefill=enable_chunked_prefill,
-    )
     model_config = ModelConfig(
         model=model,
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_model_len=max_model_len,
+        enable_chunked_prefill=enable_chunked_prefill,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -229,7 +229,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
-    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
+    sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     kv_connector_output = (
         None

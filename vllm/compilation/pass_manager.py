@@ -92,22 +92,23 @@ class PostGradPassManager(CustomGraphPass):
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
-            if self.pass_config.enable_noop:
+            if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sequence_parallelism:
+            if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.enable_async_tp:
+                if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
-            if self.pass_config.enable_fi_allreduce_fusion:
+            if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
-            if self.pass_config.enable_fusion:
+            if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
+            if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
 
-            if self.pass_config.enable_attn_fusion:
+            if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:

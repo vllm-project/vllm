@@ -22,10 +22,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
-from vllm.transformers_utils.tokenizer import (
+from vllm.tokenizers import (
     MistralTokenizer,
+    TokenizerLike,
     cached_tokenizer_from_config,
-    encode_tokens,
 )
 
 from ....multimodal.utils import random_audio, random_image, random_video
@@ -154,7 +154,7 @@ def get_text_token_prompts(
     mm_data: MultiModalDataDict,
 ):
     dummy_inputs = processor.dummy_inputs
-    tokenizer = processor.info.get_tokenizer()
+    tokenizer: TokenizerLike = processor.info.get_tokenizer()
     model_config = processor.info.ctx.model_config
 
     model_type = model_config.hf_config.model_type
@@ -191,10 +191,9 @@ def get_text_token_prompts(
         assert isinstance(inputs.prompt, str)
 
         text_prompt = inputs.prompt
-        token_prompt = encode_tokens(
-            tokenizer,
+        token_prompt = tokenizer.encode(
             text_prompt,
-            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type),
+            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
         )
 
     return text_prompt, token_prompt
@@ -233,7 +232,7 @@ def _test_processing_correctness(
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    factories = model_cls._processor_factory
     ctx = InputProcessingContext(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),

@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
-from typing import Any
+from typing import Any, Literal
 
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
+
+PoolingTypeStr = Literal["LAST", "ALL", "CLS", "STEP", "MEAN"]
 
 
 @config
@@ -17,7 +19,7 @@ logger = init_logger(__name__)
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 
-    pooling_type: str | None = None
+    pooling_type: PoolingTypeStr | None = None
     """
     The pooling method of the pooling model. This should be a key in
     [`vllm.model_executor.layers.pooler.PoolingType`][].
@@ -102,7 +104,7 @@ class PoolerConfig:
         # no factors to consider.
         # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
 

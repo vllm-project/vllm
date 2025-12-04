@@ -188,11 +188,11 @@ number: "1" | "2"
 
 
 @pytest.fixture(scope="session")
-def zephyr_lora_files():
-    """Download zephyr LoRA files once per test session."""
+def qwen3_lora_files():
+    """Download Qwen3 LoRA files once per test session."""
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return snapshot_download(repo_id="charent/self_cognition_Alice")
 
 
 @pytest.fixture(scope="session")

@@ -47,7 +47,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
@@ -1005,7 +1005,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Key-value pairs (e.g, --header x-additional-info=0.3.3) "
         "for headers to be passed with each request. These headers override "
         "per backend constants and values set via environment variable, and "
-        "will be overriden by other arguments (such as request ids).",
+        "will be overridden by other arguments (such as request ids).",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -1138,7 +1138,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--percentile-metrics",
         type=str,
         default=None,
-        help="Comma-separated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
         'If not specified, defaults to "ttft,tpot,itl" for generative models '

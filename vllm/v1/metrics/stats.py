@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -151,6 +152,15 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class KVCacheEvictionEvent:
+    """Single KV cache block eviction sample."""
+
+    lifetime_seconds: float
+    idle_seconds: float
+    reuse_gaps_seconds: tuple[float, ...]
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -166,11 +176,15 @@ class SchedulerStats:
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
+    kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
+
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 @dataclass
