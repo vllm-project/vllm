@@ -2106,7 +2106,6 @@ class GPUModelRunner(
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            merge_by_field_config=model.merge_by_field_config,
             multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             curr_group_outputs: list[torch.Tensor] = []
@@ -2133,7 +2132,6 @@ class GPUModelRunner(
                             [video_mm_kwargs_item],
                             device=self.device,
                             pin_memory=self.pin_memory,
-                            merge_by_field_config=model.merge_by_field_config,
                             multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
@@ -3849,7 +3847,6 @@ class GPUModelRunner(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                merge_by_field_config=model.merge_by_field_config,
                 multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
