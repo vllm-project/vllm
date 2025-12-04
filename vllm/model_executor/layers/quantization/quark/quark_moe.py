@@ -510,6 +510,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         # instead we adjust half of INT4 w13_weight_scale1 numbers
         shard_size = layer.intermediate_size_per_partition
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
+        assert torch.all(max_w13_scales != 0), "fp8 weight scale cannot be zero."
         for expert_id in range(layer.local_num_experts):
             start = 0
             max_w13_scale_fp8 = max_w13_scales[expert_id]
