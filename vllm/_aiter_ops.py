@@ -262,6 +262,28 @@ def _rocm_aiter_grouped_topk_fake(
     pass
 
 
+# Cache whether aiter supports FP8 MLA parameters
+_AITER_MLA_SUPPORTS_FP8: bool | None = None
+
+
+def _check_aiter_mla_fp8_support() -> bool:
+    """Check if aiter.mla.mla_decode_fwd supports q_scale and kv_scale parameters."""
+    global _AITER_MLA_SUPPORTS_FP8
+    if _AITER_MLA_SUPPORTS_FP8 is None:
+        try:
+            import inspect
+
+            from aiter.mla import mla_decode_fwd
+
+            sig = inspect.signature(mla_decode_fwd)
+            _AITER_MLA_SUPPORTS_FP8 = (
+                "q_scale" in sig.parameters and "kv_scale" in sig.parameters
+            )
+        except Exception:
+            _AITER_MLA_SUPPORTS_FP8 = False
+    return _AITER_MLA_SUPPORTS_FP8
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -273,8 +295,20 @@ def _rocm_aiter_mla_decode_fwd_impl(
     kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
 ) -> None:
     from aiter.mla import mla_decode_fwd
+
+    kwargs = {
+        "sm_scale": sm_scale,
+        "logit_cap": logit_cap,
+    }
+
+    # Only pass q_scale and kv_scale if the aiter library supports them
+    if _check_aiter_mla_fp8_support():
+        kwargs["q_scale"] = q_scale
+        kwargs["kv_scale"] = kv_scale
 
     mla_decode_fwd(
         q,
@@ -285,8 +319,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
         kv_indices,
         kv_last_page_lens,
         max_seqlen_qo,
-        sm_scale=sm_scale,
-        logit_cap=logit_cap,
+        **kwargs,
     )
 
 
@@ -301,6 +334,8 @@ def _rocm_aiter_mla_decode_fwd_fake(
     kv_last_page_lens: torch.Tensor | None = None,
     sm_scale: float = 1.0,
     logit_cap: float = 0.0,
+    q_scale: torch.Tensor | None = None,
+    kv_scale: torch.Tensor | None = None,
 ) -> None:
     pass
 
@@ -1015,6 +1050,8 @@ class rocm_aiter_ops:
         kv_indices: torch.Tensor | None = None,
         kv_last_page_lens: torch.Tensor | None = None,
         logit_cap: float = 0.0,
+        q_scale: torch.Tensor | None = None,
+        kv_scale: torch.Tensor | None = None,
     ):
         torch.ops.vllm.rocm_aiter_mla_decode_fwd(
             q,
@@ -1027,6 +1064,8 @@ class rocm_aiter_ops:
             kv_last_page_lens,
             sm_scale=sm_scale,
             logit_cap=logit_cap,
+            q_scale=q_scale,
+            kv_scale=kv_scale,
         )
 
     @staticmethod
@@ -1155,6 +1194,31 @@ class rocm_aiter_ops:
             (7168, 256),
             (8192, 1024),
             (8192, 32768),
+        ]
+
+    @staticmethod
+    def is_triton_gemm_afp4wfp4_presh_ws_tuned(n: int, k: int) -> bool:
+        return (n, k) in [
+            (8192, 4096),
+            (1280, 8192),
+            (16384, 53248),
+            (106496, 16384),
+            (57344, 8192),
+            (8192, 2048),
+            (2560, 8192),
+            (10240, 8192),
+            (16384, 16384),
+            (8192, 28672),
+            (28672, 8192),
+            (18432, 16384),
+            (8192, 1024),
+            (7168, 8192),
+            (5120, 8192),
+            (8192, 8192),
+            (8192, 7168),
+            (14336, 8192),
+            (8192, 14336),
+            (8192, 3584),
         ]
 
     @staticmethod
