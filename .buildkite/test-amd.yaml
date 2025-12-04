@@ -1429,16 +1429,7 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 ##### E2E Eval Tests #####
-- label: ROCM LM Eval Large Models
-  mirror_hardwares: [amdproduction]
-  agent_pool: mi325_8
-  num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
-
-- label: LM Eval Small Models # 15min
+- label: LM Eval Small Models (1 Card) # 15min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
@@ -1448,36 +1439,6 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
-
-- label: LM Eval Large Models # optional
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: a100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
-
-- label: LM Eval Large Models (H100) # optional
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
-    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 - label: Blackwell LM Eval Small Models
   timeout_in_minutes: 120
@@ -1501,6 +1462,45 @@ steps:
   - vllm/v1/core/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  
+- label: LM Eval Large Models (4 Card)
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  # grade: Blocking
+  gpu: a100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+  - label: LM Eval Large Models (H100) # optional
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  # grade: Blocking
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+
+- label: ROCm LM Eval Large Models (8 Card)
+  mirror_hardwares: [amdproduction]
+  agent_pool: mi325_8
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
