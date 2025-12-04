@@ -766,13 +766,6 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         request.num_preemptions += 1
 
-        # The hidden_states_cache is used in requests that
-        # use all pooling + chunked prefill.
-        # If the request is preempted, the hidden_states_cache
-        # needs to be cleared and recalculated.
-        if request.pooling_params is not None:
-            request.pooling_params.reset_pooling_states()
-
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 

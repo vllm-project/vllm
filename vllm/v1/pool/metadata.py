@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.utils.platform_utils import is_pin_memory_available
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_input_batch import PoolingStates
+else:
+    PoolingStates = Any
 
 pin_memory = is_pin_memory_available()
 
@@ -43,6 +49,7 @@ class PoolingMetadata:
     prompt_lens: torch.Tensor  # CPU Tensor
     prompt_token_ids: torch.Tensor | None
     pooling_params: list[PoolingParams]
+    pooling_states: list[PoolingStates]
     pooling_cursor: PoolingCursor | None = None
 
     def __getitem__(self, indices: slice):
@@ -52,6 +59,7 @@ class PoolingMetadata:
             if self.prompt_token_ids is None
             else self.prompt_token_ids[indices],
             pooling_params=self.pooling_params[indices],
+            pooling_states=self.pooling_states[indices],
             pooling_cursor=None
             if self.pooling_cursor is None
             else self.pooling_cursor[indices],

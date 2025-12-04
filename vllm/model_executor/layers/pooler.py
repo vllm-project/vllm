@@ -228,9 +228,7 @@ class AllPool(PoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooling_cursor = pooling_metadata.pooling_cursor
-        pooling_params = get_pooling_params(pooling_metadata)
         is_finished = pooling_cursor.is_finished()
-
         hidden_states_lst = list(
             hidden_states.split(pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
@@ -239,21 +237,23 @@ class AllPool(PoolingMethod):
         if not self.enable_chunked_prefill:
             return hidden_states_lst
 
+        pooling_states = pooling_metadata.pooling_states
+
         # If chunked_prefill is enabled
-        # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
-        for pooling_param, hs_chunk in zip(pooling_params, hidden_states_lst):
-            pooling_param.pooling_states.hidden_states_cache.append(hs_chunk)
+        # 1. first store the chunked hidden_states in pooling_states.hidden_states_cache
+        for p, hs_chunk in zip(pooling_states, hidden_states_lst):
+            p.hidden_states_cache.append(hs_chunk)
 
         # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
         output_list: PoolerOutput = []
-        for pooling_param, finished in zip(pooling_params, is_finished):
+        for p, finished in zip(pooling_states, is_finished):
             if finished:
-                hidden_states_cache = pooling_param.pooling_states.hidden_states_cache
+                hidden_states_cache = p.hidden_states_cache
                 if len(hidden_states_cache) == 1:
                     output_list.append(hidden_states_cache[0])
                 else:
                     output_list.append(torch.concat(hidden_states_cache, dim=0))
-                pooling_param.clean_pooling_states()
+                p.clean()
             else:
                 output_list.append(None)
 
