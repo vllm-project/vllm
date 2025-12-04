@@ -811,14 +811,14 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser()
     parser.add_argument(
-        "--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1"
+        "--model", type=str, default="deepseek-ai/DeepSeek-R1"
     )
     parser.add_argument(
-        "--tp-size", "-tp", "--tensor-parallel-size", type=int, default=2
+        "--tp-size", "-tp", "--tensor-parallel-size", type=int, default=8
     )
     parser.add_argument("--enable-expert-parallel", "-enable-ep", action="store_true")
     parser.add_argument(
-        "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="auto"
+        "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="fp8_w8a8"
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument(
