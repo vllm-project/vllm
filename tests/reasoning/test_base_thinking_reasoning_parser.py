@@ -129,7 +129,7 @@ class TestBaseThinkingReasoningParserMethods:
             parser.is_reasoning_end(
                 [1, start_token_id, 2, end_token_id, 2, 2, start_token_id]
             )
-            is True
+            is False
         )
 
     def test_extract_content_ids(self, test_tokenizer):
