@@ -1087,9 +1087,19 @@ class GPUModelRunner(
         # Build set of new request IDs for fast lookup
         new_req_ids = {req.req_id for req in new_reqs}
 
-        # Case 1: First run, no previous state
+        # Case 1: First run, no previous state - full initialization
         if prev_req_id_to_index is None:
-            self._ngram_gpu_full_init()
+            for idx in curr_req_id_to_index.values():
+                num_tokens = self.input_batch.num_tokens_no_spec[idx]
+                if num_tokens > 0:
+                    self.token_ids_gpu_tensor[idx, :num_tokens].copy_(
+                        self.input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                        non_blocking=True,
+                    )
+                    self.num_tokens_no_spec_gpu[idx : idx + 1].copy_(
+                        self.input_batch.num_tokens_no_spec_cpu_tensor[idx : idx + 1],
+                        non_blocking=True,
+                    )
             return
 
         # Case 2: Detect index changes, collect requests needing reorder
@@ -1136,25 +1146,6 @@ class GPUModelRunner(
                     self.input_batch.num_tokens_no_spec_cpu_tensor[
                         new_req_idx : new_req_idx + 1
                     ],
-                    non_blocking=True,
-                )
-
-    def _ngram_gpu_full_init(self) -> None:
-        """Initialize all GPU tensors for ngram proposer from scratch.
-
-        Called on first run when there's no previous batch state.
-        Uses data already stored in input_batch.
-        """
-        for idx in self.input_batch.req_id_to_index.values():
-            num_tokens = self.input_batch.num_tokens_no_spec[idx]
-            if num_tokens > 0:
-                # Copy from input_batch.token_ids_cpu to GPU
-                self.token_ids_gpu_tensor[idx, :num_tokens].copy_(
-                    self.input_batch.token_ids_cpu_tensor[idx, :num_tokens],
-                    non_blocking=True,
-                )
-                self.num_tokens_no_spec_gpu[idx : idx + 1].copy_(
-                    self.input_batch.num_tokens_no_spec_cpu_tensor[idx : idx + 1],
                     non_blocking=True,
                 )
 
