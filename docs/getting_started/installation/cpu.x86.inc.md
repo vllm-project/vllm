@@ -17,6 +17,8 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
+Currently, there are no pre-built x86 CPU wheels.
+
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 

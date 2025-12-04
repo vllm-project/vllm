@@ -39,9 +39,9 @@ steps:
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -50,9 +50,9 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test # 10min
   timeout_in_minutes: 15
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/multimodal
@@ -63,9 +63,9 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -115,9 +115,9 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
 - label: Entrypoints Unit Tests # 5min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -214,6 +214,7 @@ steps:
   # test with internal dp
   - python3 ../examples/offline_inference/data_parallel.py --enforce-eager
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
@@ -252,9 +253,9 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: EPLB Algorithm Test # 5min
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -341,9 +342,9 @@ steps:
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -391,6 +392,20 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: Batch Invariance Tests (H100) # 10min
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  timeout_in_minutes: 25
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+
 - label: V1 Test attention (B200) # 10min
   timeout_in_minutes: 30
   gpu: b200
@@ -401,9 +416,9 @@ steps:
     - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
 
 - label: V1 Test others (CPU) # 5 mins
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  # grade: Blocking
+  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -495,7 +510,7 @@ steps:
 
 - label: PyTorch Compilation Unit Tests # 15min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -512,7 +527,7 @@ steps:
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -568,7 +583,7 @@ steps:
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   # grade: Blocking
   source_file_dependencies:
@@ -595,7 +610,7 @@ steps:
 
 - label: Kernels MoE Test %N # 40min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   # grade: Blocking
   source_file_dependencies:
@@ -621,6 +636,26 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   commands:
     - pytest -v -s kernels/mamba
+
+- label: Kernels DeepGEMM Test (H100) # Nvidia-centric
+# Not replicating for CUTLAS & CuTe
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  commands:
+    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/moe/test_deepgemm.py
+    - pytest -v -s kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
@@ -680,6 +715,7 @@ steps:
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
   - uv pip install --system torchao==0.13.0
+  - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: LM Eval Small Models # 15min
@@ -899,6 +935,18 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  no_gpu: true
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+
 - label: Multi-Modal Processor Test # 44min
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
@@ -939,7 +987,8 @@ steps:
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
-- label: Multi-Modal Models Test (Extended) 1
+- label: Multi-Modal Models Test (Extended) 1 # 60min
+  timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -963,7 +1012,8 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-- label: Multi-Modal Models Test (Extended) 3
+- label: Multi-Modal Models Test (Extended) 3 # 75min
+  timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -1055,6 +1105,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
 
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
@@ -1064,11 +1115,19 @@ steps:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/worker/
+  - vllm/v1/cudagraph_dispatcher.py
   - vllm/compilation/
   # can affect pattern matching
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - vllm/model_executor/layers/fused_moe/layer.py
+  - tests/compile/test_fusion_attn.py
+  - tests/compile/test_silu_mul_quant_fusion.py
+  - tests/compile/distributed/test_fusion_all_reduce.py
+  - tests/compile/distributed/test_fusions_e2e.py
+  - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
     - pytest -v -s tests/compile/test_fusion_attn.py
@@ -1079,7 +1138,7 @@ steps:
     # Wrap with quotes to escape yaml
     - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and not +quant_fp8 and not +rms_norm'"
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
-    - pytest -v -s tests/compile/distributed/test_full_graph.py::test_fp8_kv_scale_compile
+    - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Blackwell Fusion E2E Tests # 30 min
   timeout_in_minutes: 40
@@ -1101,7 +1160,7 @@ steps:
   commands:
     - nvidia-smi
     # Run all e2e fusion tests
-    - pytest -v -s tests/compile/test_fusions_e2e.py
+    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
 
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
@@ -1216,6 +1275,7 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s v1/entrypoints/openai/test_multi_api_servers.py
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
@@ -1251,7 +1311,7 @@ steps:
 
 - label: Plugin Tests (2 GPUs) # 40min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -1327,7 +1387,7 @@ steps:
 
 - label: Weight Loading Multiple GPU Test  # 33min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -1427,14 +1487,14 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
     #- pytest -v -s tests/compile/distributed/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
-    - pytest -v -s tests/compile/distributed/test_sequence_parallel.py
+    - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - HIP_VISIBLE_DEVICES=0,1 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 ##### B200 test #####
@@ -1464,7 +1524,7 @@ steps:
     - bash .buildkite/scripts/run-prime-rl-test.sh
 
 - label: DeepSeek V2-Lite Accuracy
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 60
@@ -1475,8 +1535,8 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy
-  mirror_hardwares: [amdexperimental]
+- label: Qwen3-30B-A3B-FP8-block Accuracy (H100)
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 60
@@ -1486,3 +1546,12 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1

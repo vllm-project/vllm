@@ -834,7 +834,6 @@ class LLM:
             conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
-                tokenizer,
                 content_format=resolved_content_format,
             )
 
@@ -1492,8 +1491,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> None:
-        self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+        return self.llm_engine.reset_prefix_cache(reset_running_requests)
 
     def sleep(self, level: int = 1):
         """

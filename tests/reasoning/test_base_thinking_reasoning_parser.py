@@ -112,7 +112,7 @@ class TestBaseThinkingReasoningParserMethods:
         """Test the is_reasoning_end method."""
         parser = TestThinkingReasoningParser(test_tokenizer)
         end_token_id = parser.end_token_id
-
+        start_token_id = parser.start_token_id
         # Test with end token present
         assert parser.is_reasoning_end([1, 2, end_token_id, 4]) is True
 
@@ -121,6 +121,16 @@ class TestBaseThinkingReasoningParserMethods:
 
         # Test with empty list
         assert parser.is_reasoning_end([]) is False
+
+        # Test with interleaved thinking
+        assert parser.is_reasoning_end([1, start_token_id, 2, end_token_id]) is True
+        assert parser.is_reasoning_end([1, start_token_id, 2, 3]) is False
+        assert (
+            parser.is_reasoning_end(
+                [1, start_token_id, 2, end_token_id, 2, 2, start_token_id]
+            )
+            is False
+        )
 
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""
