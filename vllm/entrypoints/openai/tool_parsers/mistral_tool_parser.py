@@ -229,7 +229,51 @@ class MistralToolParser(ToolParser):
         if self.bot_token_id not in current_token_ids:
             return DeltaMessage(content=delta_text)
 
+        # Check if this is the first chunk containing [TOOL_CALLS]
+        # If so, we may have content tokens before it in this delta
+        if self.bot_token_id not in previous_token_ids:
+            return self._stream_tool_calls_with_content(delta_token_ids)
+
         return self._stream_tool_calls(delta_token_ids)
+
+    def _stream_tool_calls_with_content(
+        self, delta_token_ids: Sequence[int]
+    ) -> DeltaMessage | None:
+        """
+        Handle the first chunk containing [TOOL_CALLS].
+
+        Content tokens before [TOOL_CALLS] are emitted as content,
+        then tool call parsing begins.
+        """
+        from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+
+        # Find where [TOOL_CALLS] appears in this delta
+        try:
+            bot_idx = list(delta_token_ids).index(self.bot_token_id)
+        except ValueError:
+            # Shouldn't happen, but handle gracefully
+            return self._stream_tool_calls(delta_token_ids)
+
+        # Decode content tokens before [TOOL_CALLS]
+        content_tokens = delta_token_ids[:bot_idx]
+        content = ""
+        if content_tokens:
+            content = self._mistral_base_tokenizer.decode(
+                list(content_tokens),
+                special_token_policy=SpecialTokenPolicy.IGNORE,
+            )
+
+        # Process tool call tokens (including [TOOL_CALLS] itself)
+        tool_tokens = delta_token_ids[bot_idx:]
+        tool_result = self._stream_tool_calls(tool_tokens)
+
+        # Combine content and tool calls in response
+        if content and tool_result and tool_result.tool_calls:
+            return DeltaMessage(content=content, tool_calls=tool_result.tool_calls)
+        elif content:
+            return DeltaMessage(content=content)
+        else:
+            return tool_result
 
     def _stream_tool_calls(
         self, delta_token_ids: Sequence[int]

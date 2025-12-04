@@ -610,6 +610,12 @@ class TestStreamingOneChunk:
             )
             assert actual["id"] is not None and len(actual["id"]) == 9
 
+        # Verify content before tool calls is preserved
+        actual_content = delta_message.content or ""
+        assert actual_content == expected_content, (
+            f"Expected content '{expected_content}', got '{actual_content}'"
+        )
+
 
 # =============================================================================
 # Edge case tests
