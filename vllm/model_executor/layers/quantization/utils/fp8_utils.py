@@ -822,6 +822,7 @@ def _w8a8_triton_block_scaled_mm(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    needs_masking: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and
@@ -847,20 +848,24 @@ def _w8a8_triton_block_scaled_mm(
     As_ptrs = As + offs_am * stride_As_m
     offs_bsn = offs_bn // group_n
     Bs_ptrs = Bs + offs_bsn * stride_Bs_n
+    scale_step_k = BLOCK_SIZE_K // group_k
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-
-        k_start = k * BLOCK_SIZE_K
-        offs_ks = k_start // group_k
-        a_s = tl.load(As_ptrs + offs_ks * stride_As_k)
-        b_s = tl.load(Bs_ptrs + offs_ks * stride_Bs_k)
+        if needs_masking:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        else:
+            a = tl.load(a_ptrs)
+            b = tl.load(b_ptrs)
+        a_s = tl.load(As_ptrs)
+        b_s = tl.load(Bs_ptrs)
 
         accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+        As_ptrs += scale_step_k * stride_As_k
+        Bs_ptrs += scale_step_k * stride_Bs_k
 
     if C.dtype.element_ty == tl.bfloat16:
         c = accumulator.to(tl.bfloat16)
@@ -971,6 +976,8 @@ def w8a8_triton_block_scaled_mm(
             "num_stages": 2,
         }
 
+    needs_masking = bool(K % config["BLOCK_SIZE_K"] != 0)
+
     def grid(META):
         return (
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -998,6 +1005,7 @@ def w8a8_triton_block_scaled_mm(
         Bs.stride(1),
         Bs.stride(0),
         **config,
+        needs_masking=needs_masking,
     )
 
     return C
