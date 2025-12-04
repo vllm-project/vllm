@@ -3,6 +3,8 @@
 import threading
 from weakref import WeakValueDictionary
 
+from typing import Any
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -68,7 +70,11 @@ class All2AllManagerBase:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ):
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> Any:
+        # Subclasses should either:
+        # - implement handling for extra_tensors, or
+        # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):

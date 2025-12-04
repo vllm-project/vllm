@@ -64,7 +64,12 @@ class NaiveAll2AllManager(All2AllManagerBase):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if extra_tensors is not None:
+            raise NotImplementedError(
+                "extra_tensors is not supported for NaiveAll2AllManager"
+            )
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
@@ -216,6 +221,7 @@ class PPLXAll2AllManager(All2AllManagerBase):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
@@ -263,6 +269,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
