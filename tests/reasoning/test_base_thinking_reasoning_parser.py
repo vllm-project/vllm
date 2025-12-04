@@ -132,6 +132,20 @@ class TestBaseThinkingReasoningParserMethods:
             is False
         )
 
+    def test_is_reasoning_end_on_decode_step(self, test_tokenizer):
+        """Test the is_reasoning_end_on_decode_step method."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        end_token_id = parser.end_token_id
+
+        assert parser.is_reasoning_end_on_decode_step([]) is False
+        assert parser.is_reasoning_end_on_decode_step([1, 2, 3, 4]) is False
+        assert parser.is_reasoning_end_on_decode_step([1, 2, 3, end_token_id]) is True
+        # Even if the end token is present, the function can return False if it is not
+        # the current decode step that is ending the reasoning content.
+        assert (
+            parser.is_reasoning_end_on_decode_step([1, 2, 3, end_token_id, 4]) is False
+        )
+
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""
         parser = TestThinkingReasoningParser(test_tokenizer)

@@ -100,6 +100,9 @@ class Step3ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.think_end_token_id in input_ids
 
+    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
+        return len(input_ids) > 0 and self.think_end_token_id == input_ids[-1]
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self.think_end_token_id not in input_ids[:-1]:
             return []

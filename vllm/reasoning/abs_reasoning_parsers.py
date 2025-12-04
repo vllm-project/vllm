@@ -64,6 +64,32 @@ class ReasoningParser:
         """
 
     @abstractmethod
+    def is_reasoning_end_on_decode_step(self, input_ids: list[int]) -> bool:
+        """
+        Check if the reasoning content ends in the input_ids on a
+        decode step.
+
+        It is used in structured engines like `xgrammar` to check if the
+        reasoning content ends in the model output before applying the
+        structured output.
+
+        Notes:
+            - The first time the reasoning content ends during a decode step, this
+            method returns True. StructuredOutputManager then caches the result.
+            - Subsequent decode steps for the same reasoning segment can return
+            False or True.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output at the current decode step.
+
+        Returns:
+        bool
+            True if the reasoning content ends in the input_ids on a
+            decode step.
+        """
+
+    @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract content token ids from the input_ids.
