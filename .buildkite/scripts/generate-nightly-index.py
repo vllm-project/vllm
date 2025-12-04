@@ -7,15 +7,16 @@
 
 import argparse
 import json
-import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-if not sys.version_info >= (3, 10):
-    raise RuntimeError("This script requires Python 3.10 or higher.")
+import regex as re
+
+if not sys.version_info >= (3, 12):
+    raise RuntimeError("This script requires Python 3.12 or higher.")
 
 INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
 <html>

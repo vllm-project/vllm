@@ -17,9 +17,8 @@ from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
 from vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
-from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 
