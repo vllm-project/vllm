@@ -102,7 +102,7 @@ if current_platform.is_cuda():
         ),
         ModelBackendTestCase(
             model_name="Qwen/Qwen3-30B-A3B",
-            model_kwargs=dict(max_model_len=1024, load_format="dummy"),
+            model_kwargs=dict(max_model_len=1024),
             backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=0,
