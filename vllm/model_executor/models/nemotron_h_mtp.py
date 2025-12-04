@@ -290,7 +290,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = vllm_config.quant_config
@@ -304,10 +303,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
             self.num_redundant_experts = (
                 vllm_config.parallel_config.eplb_config.num_redundant_experts
             )
-
-        assert not cache_config.enable_prefix_caching, (
-            "NemotronHMTP currently does not support prefix caching"
-        )
 
         # MTP predictor
         self.model = NemotronHMultiTokenPredictor(
