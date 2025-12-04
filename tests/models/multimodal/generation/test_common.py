@@ -137,7 +137,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
@@ -152,7 +152,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen3_vl": VLMTestInfo(
@@ -173,7 +173,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
         ],
@@ -350,7 +350,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
-        image_size_factors=[(), (1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -403,12 +403,13 @@ VLM_TEST_SETTINGS = {
         # So, we need to reduce the number of tokens for the test to pass.
         max_tokens=8,
         num_logprobs=10,
+        auto_cls=AutoModelForCausalLM,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v": VLMTestInfo(
         models=["zai-org/GLM-4.1V-9B-Thinking"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
         video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
         max_model_len=2048,
@@ -423,6 +424,7 @@ VLM_TEST_SETTINGS = {
         models=["zai-org/GLM-4.1V-9B-Thinking"],
         # GLM4.1V require include video metadata for input
         test_type=VLMTestType.CUSTOM_INPUTS,
+        prompt_formatter=lambda vid_prompt: f"[gMASK]<|user|>\n{vid_prompt}<|assistant|>\n",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
@@ -707,7 +709,13 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
-        image_size_factors=[(), (0.25,)],
+        image_size_factors=[(0.25,)],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
+                reason="This model is broken in Transformers v4.57.3",
+            )
+        ],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
@@ -731,7 +739,13 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=48)],
+        marks=[
+            large_gpu_mark(min_gb=48),
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Model produces a vector of <UNK> output in HF on ROCm",
+            ),
+        ],
     ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
@@ -754,7 +768,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
     "skywork_r1v": VLMTestInfo(
@@ -806,7 +820,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests

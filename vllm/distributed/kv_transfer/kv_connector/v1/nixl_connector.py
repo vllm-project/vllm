@@ -4,7 +4,6 @@ import contextlib
 import copy
 import logging
 import math
-import os
 import queue
 import threading
 import time
@@ -21,10 +20,10 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention import AttentionBackend
-from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
@@ -52,7 +51,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -290,7 +288,7 @@ class NixlConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return NixlPromMetrics(
             vllm_config, metric_types, labelnames, per_engine_labelvalues
@@ -309,7 +307,7 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """NixlConnector does not save explicitly."""
@@ -670,128 +668,6 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    @dataclass
-    class TpKVTopology:
-        """
-        Helper class for tensor parallel and KV topology information for
-        mapping between local and remote TP workers.
-        """
-
-        tp_rank: int
-        remote_tp_size: dict[EngineId, int]
-        is_mla: bool
-        total_num_kv_heads: int
-        attn_backend: type[AttentionBackend]
-        engine_id: EngineId
-        remote_block_size: dict[EngineId, int]
-
-        def __post_init__(self):
-            # Figure out whether the first dimension of the cache is K/V
-            # or num_blocks. This is used to register the memory regions correctly.
-            kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-            )
-            # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
-            # we just mock num_blocks to 1 for the dimension check below.
-            self._is_kv_layout_blocks_first = (
-                len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-            )
-
-            attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
-            self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
-
-        @property
-        def is_kv_layout_blocks_first(self) -> bool:
-            return self._is_kv_layout_blocks_first
-
-        @property
-        def split_k_and_v(self) -> bool:
-            # Whether to register regions for K and V separately (when present).
-            return not (
-                self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first
-            )
-
-        @property
-        def tp_size(self) -> int:
-            return self.remote_tp_size[self.engine_id]
-
-        @property
-        def block_size(self) -> int:
-            return self.remote_block_size[self.engine_id]
-
-        def tp_ratio(
-            self,
-            remote_tp_size: int,
-        ) -> int:
-            """
-            Calculate the tensor parallel ratio between local and remote TP.
-            We can think of it as the number of local TP workers-per-remote TP
-            workers. Local workers will read from the same remote TP worker in
-            groups of size `tp_ratio`.
-            """
-            assert self.tp_size % remote_tp_size == 0, (
-                f"Local tensor parallel size {self.tp_size} is not divisible "
-                f"by remote tensor parallel size {remote_tp_size}."
-            )
-            return self.tp_size // remote_tp_size
-
-        def block_size_ratio(
-            self,
-            remote_block_size: int,
-        ) -> float:
-            """
-            Calculate the block size ratio between local and remote TP.
-            """
-            assert self.block_size % remote_block_size == 0, (
-                f"Local block size {self.block_size} is not divisible "
-                f"by remote block size {remote_block_size} or vice versa."
-            )
-            return self.block_size // remote_block_size
-
-        def tp_ratio_from_engine_id(
-            self,
-            remote_engine_id: EngineId,
-        ) -> int:
-            remote_tp_size = self.remote_tp_size[remote_engine_id]
-            return self.tp_ratio(remote_tp_size)
-
-        def block_size_ratio_from_engine_id(
-            self,
-            remote_engine_id: EngineId,
-        ) -> float:
-            remote_block_size = self.remote_block_size[remote_engine_id]
-            return self.block_size_ratio(remote_block_size)
-
-        def is_kv_replicated(self, engine_id: EngineId) -> bool:
-            """
-            Whether the KV cache is replicated across TP workers due to the
-            number of TP workers being greater than the number of KV heads.
-            """
-            tp_size = self.remote_tp_size[engine_id]
-            return tp_size // self.total_num_kv_heads >= 1
-
-        def replicates_kv_cache(self, remote_engine_id: EngineId) -> bool:
-            # MLA is always replicated as the hidden dim can't be split.
-            return self.is_mla or self.is_kv_replicated(remote_engine_id)
-
-        def get_target_remote_rank(
-            self,
-            remote_tp_size: int,
-        ) -> int:
-            """
-            Get the remote TP rank (on P) that the current local TP rank
-            (on D) will read from.
-            """
-            tp_ratio = self.tp_ratio(remote_tp_size)
-            return self.tp_rank // tp_ratio
-
-        def get_target_remote_rank_from_engine_id(
-            self,
-            remote_engine_id: EngineId,
-        ) -> int:
-            remote_tp_size = self.remote_tp_size[remote_engine_id]
-            return self.get_target_remote_rank(remote_tp_size)
-
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
@@ -810,9 +686,6 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        # TODO temporary, once nixl allows for telemetry flag in config
-        # (next release), we can remove this env var.
-        os.environ["NIXL_TELEMETRY_ENABLE"] = "1"
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -828,10 +701,11 @@ class NixlConnectorWorker:
         if nixl_agent_config is None:
             config = None
         else:
+            # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends)
+                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
                 if len(non_ucx_backends) > 0
-                else nixl_agent_config(num_threads=num_threads)
+                else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
@@ -962,7 +836,7 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        self.kv_topo = self.TpKVTopology(
+        self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
             remote_tp_size=self._tp_size,  # shared state
@@ -1042,10 +916,12 @@ class NixlConnectorWorker:
         NOT directly supported by NIXL (e.g., tpu)
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
+        inv_order = [0, 1, 3, 2, 4]
         try:
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
+                permute_shape = False
                 if (
                     self.kv_cache_layout == "NHD"
                     and self.vllm_config.kv_transfer_config is not None
@@ -1059,10 +935,20 @@ class NixlConnectorWorker:
                     # Since NHD will not support Decode/Prefill TP_ratio > 1,
                     # we can leverage host_buffer for permute
                     self.host_buffer_kv_cache_layout = "HND"
-                    kv_shape = tuple(kv_shape[i] for i in [0, 1, 3, 2, 4])
+                    kv_shape = (
+                        tuple(kv_shape[i] for i in inv_order)
+                        if not self.use_mla
+                        else kv_shape
+                    )
+                    permute_shape = not self.use_mla
+
                 xfer_buffers[layer_name] = torch.empty(
                     kv_shape, dtype=kv_dtype, device="cpu"
                 )
+                if permute_shape:
+                    xfer_buffers[layer_name] = xfer_buffers[layer_name].permute(
+                        inv_order
+                    )
         except MemoryError as e:
             logger.error("NIXLConnectorWorker gets %s.", e)
             raise
@@ -1823,34 +1709,54 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
-                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
-                if xfer_state == "DONE":
-                    # Get telemetry from NIXL
-                    res = self.nixl_wrapper.get_xfer_telemetry(handle)
-                    self.xfer_stats.record_transfer(res)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                elif xfer_state == "PROC":
-                    in_progress = True
-                    continue
-                else:
-                    # transfer failed - mark blocks as invalid
-                    logger.error(
-                        "NIXL transfer failed for request %s with state %s. "
+            for handle, xfer_start_time in handles:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    if xfer_state == "DONE":
+                        # Get telemetry from NIXL
+                        res = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.xfer_stats.record_transfer(res)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    elif xfer_state == "PROC":
+                        in_progress = True
+                        continue
+                    else:
+                        logger.error(
+                            "NIXL transfer failed for request %s with state "
+                            "%s. Marking blocks as invalid.",
+                            req_id,
+                            xfer_state,
+                        )
+                        self._handle_failed_transfer(req_id, handle)
+                        in_progress = False
+                except Exception:
+                    logger.exception(
+                        "NIXL transfer exception for request %s. "
                         "Marking blocks as invalid.",
                         req_id,
-                        xfer_state,
                     )
-                    # mark all (logical)blocks for this request as invalid
-                    if meta := self._recving_metadata.pop(req_id, None):
-                        self._invalid_block_ids.update(meta.local_block_ids)
-                    self._recving_metadata.pop(req_id, None)
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                    self.xfer_stats.record_failed_transfer()
+                    self._handle_failed_transfer(req_id, handle)
+                    in_progress = False
+
             if not in_progress:
                 done_req_ids.add(req_id)
                 del transfers[req_id]
         return done_req_ids
+
+    def _handle_failed_transfer(self, req_id: str, handle: int):
+        """
+        Handle a failed transfer by marking all (logical) blocks as invalid and
+        recording the failure.
+
+        Args:
+            req_id: The request ID.
+            handle: The transfer handle.
+        """
+        if meta := self._recving_metadata.pop(req_id, None):
+            self._invalid_block_ids.update(meta.local_block_ids)
+        self._recving_metadata.pop(req_id, None)
+        self.nixl_wrapper.release_xfer_handle(handle)
+        self.xfer_stats.record_failed_transfer()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """
@@ -2317,9 +2223,9 @@ class NixlKVConnectorStats(KVConnectorStats):
         return {
             "Num successful transfers": n,
             "Avg xfer time (ms)": round(xfer_time.mean() * 1e3, 3),
-            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90) * 1e3, 3),
+            "P90 xfer time (ms)": round(np.percentile(xfer_time, 90).item() * 1e3, 3),
             "Avg post time (ms)": round(post_time.mean() * 1e3, 3),
-            "P90 post time (ms)": round(np.percentile(post_time, 90) * 1e3, 3),
+            "P90 post time (ms)": round(np.percentile(post_time, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(avg_mb, 3),
             "Throughput (MB/s)": round(throughput_mb_s, 3),
             "Avg number of descriptors": round(descs.mean(), 1),
@@ -2336,7 +2242,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
 
