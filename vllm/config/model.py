@@ -84,7 +84,7 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -141,6 +141,7 @@ class ModelConfig:
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
+    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
