@@ -1161,6 +1161,11 @@ class VllmConfig:
                     and max_token_num < max_num_batched_tokens
                 ):
                     computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below allreduce-rms fusion threshold, "
+                        "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
 
         if compilation_config.compile_ranges_split_points is not None:
             for x in compilation_config.compile_ranges_split_points:

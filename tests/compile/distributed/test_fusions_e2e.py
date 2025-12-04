@@ -102,7 +102,7 @@ if current_platform.is_cuda():
         ),
         ModelBackendTestCase(
             model_name="Qwen/Qwen3-30B-A3B",
-            model_kwargs=dict(max_model_len=1024),
+            model_kwargs=dict(max_model_len=1024, load_format="dummy"),
             backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=0,
@@ -300,9 +300,10 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     )
     # 2 for each compile range
     # (global compile range can be split due to fuse_allreduce_rmsnorm)
-    assert len(log_matches) == 2 * len(compilation_config.get_compile_ranges()), (
-        log_holder.text
-    )
+    num_compile_ranges = len(compilation_config.get_compile_ranges())
+    assert num_compile_ranges in [1, 2]
+
+    assert len(log_matches) == 2 * num_compile_ranges, log_holder.text
 
     assert all(int(log_match) == matches.attention_fusion for log_match in log_matches)
 
@@ -319,7 +320,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
         r"pass_manager.py:\d+] Skipping .*AllReduceFusionPass.* with compile range",
         log_holder.text,
     )
-    assert len(log_matches) == 2, log_holder.text
+    assert len(log_matches) == 2 * (num_compile_ranges - 1), log_holder.text
 
 
 @multi_gpu_test(num_gpus=2)
