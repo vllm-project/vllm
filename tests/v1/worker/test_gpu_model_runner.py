@@ -854,16 +854,16 @@ def test_hybrid_attention_mamba_tensor_shapes():
             )
         # suppress var not used error
         assert fwd_context is not None
-    vllm_ctx = vllm_config.compilation_config.static_forward_context
+        vllm_ctx = vllm_config.compilation_config.static_forward_context
 
-    runner = GPUModelRunner(vllm_config, DEVICE)
-    kv_cache_spec = runner.get_kv_cache_spec()
+        runner = GPUModelRunner(vllm_config, DEVICE)
+        kv_cache_spec = runner.get_kv_cache_spec()
 
-    available_memory = 5 * GiB_bytes
-    kv_cache_config = get_kv_cache_configs(
-        vllm_config, [kv_cache_spec], [available_memory]
-    )[0]
-    runner.initialize_kv_cache(kv_cache_config)
+        available_memory = 5 * GiB_bytes
+        kv_cache_config = get_kv_cache_configs(
+            vllm_config, [kv_cache_spec], [available_memory]
+        )[0]
+        runner.initialize_kv_cache(kv_cache_config)
 
     # random partition of blocks
     # blocks0 will be assigned to attention layers
