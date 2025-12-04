@@ -1041,7 +1041,6 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
-        is_empty_draft_tokens = model_runner_output.is_empty_draft_tokens
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1084,9 +1083,6 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
-            req_is_empty_draft_tokens = (
-                is_empty_draft_tokens[req_index] if is_empty_draft_tokens else False
-            )
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
@@ -1116,13 +1112,6 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             kv_transfer_params = None
             status_before_stop = request.status
-
-            # Check for stop and update request status.
-            # logger.info(f"In Scheduler::_update_request_with_output inside loop")
-            # from fpdb import ForkedPdb; ForkedPdb().set_trace()
-
-            if req_is_empty_draft_tokens:
-                request.spec_token_ids = []
 
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(

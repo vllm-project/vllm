@@ -187,9 +187,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         logprobs_tensors: LogprobsTensors | None,
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
-        async_draft_copy_stream: torch.cuda.Stream | None,
         vocab_size: int,
-        is_empty_draft_tokens: torch.Tensor | None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -202,12 +200,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
-        self._is_empty_draft_tokens = is_empty_draft_tokens
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
 
-        # Stream 1: Copy sampled_token_ids and logprobs
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
@@ -219,22 +215,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 else None
             )
             self.async_copy_ready_event.record()
-
-        # Stream 2: Copy is_empty_draft_tokens in parallel
-        self.async_draft_copy_ready_event: torch.Event | None = None
-        if (
-            self._is_empty_draft_tokens is not None
-            and async_draft_copy_stream is not None
-        ):
-            self.async_draft_copy_ready_event = torch.Event()
-            with torch.cuda.stream(async_draft_copy_stream):
-                async_draft_copy_stream.wait_stream(default_stream)
-                self._is_empty_draft_tokens_cpu = self._is_empty_draft_tokens.to(
-                    "cpu", non_blocking=True
-                )
-                self.async_draft_copy_ready_event.record()
-        else:
-            self._is_empty_draft_tokens_cpu = None
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -265,11 +245,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids = valid_sampled_token_ids
         if self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
-        if self.async_draft_copy_ready_event is not None:
-            self.async_draft_copy_ready_event.synchronize()
-            del self._is_empty_draft_tokens
-            output.is_empty_draft_tokens = self._is_empty_draft_tokens_cpu.tolist()
-            del self._is_empty_draft_tokens_cpu
         return output
 
 
@@ -493,15 +468,11 @@ class GPUModelRunner(
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: torch.cuda.Stream | None = None
-        # Separate cuda stream for overlapping transfer of draft tokens info
-        # from GPU to CPU, runs in parallel with async_output_copy_stream.
-        self.async_draft_copy_stream: torch.cuda.Stream | None = None
         # cuda event to synchronize use of reused CPU tensors between steps
         # when async scheduling is enabled.
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.async_draft_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -1029,10 +1000,17 @@ class GPUModelRunner(
                 req_id, []
             )
             num_spec_tokens = len(spec_token_ids)
+
+            is_empty_draft_tokens = (
+                self._is_empty_draft_tokens is not None
+                and req_index is not None
+                and self._is_empty_draft_tokens[req_index].item()
+            )
+
             # For async scheduling, token_ids_cpu assigned from
             # spec_token_ids are placeholders and will be overwritten in
             # _prepare_input_ids.
-            if num_spec_tokens:
+            if num_spec_tokens and not is_empty_draft_tokens:
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
                 self.input_batch.token_ids_cpu[
@@ -1057,7 +1035,11 @@ class GPUModelRunner(
             # num_output_placeholders in update_from_output().
             if self.use_async_scheduling:
                 req_state.prev_num_draft_len = num_spec_tokens
-                if num_spec_tokens and self._draft_token_ids is None:
+                if (
+                    num_spec_tokens
+                    and self._draft_token_ids is None
+                    or is_empty_draft_tokens
+                ):
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
                     scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
@@ -3018,6 +3000,12 @@ class GPUModelRunner(
             self.use_async_scheduling
             and self.num_spec_tokens
             and self._draft_token_ids is None
+            or (
+                self.speculative_config is not None
+                and self.speculative_config.method == "ngram_gpu"
+                and self._is_empty_draft_tokens is not None
+                and self._is_empty_draft_tokens.any()
+            )
         ):
             scheduler_output = deepcopy(scheduler_output)
 
@@ -3431,9 +3419,7 @@ class GPUModelRunner(
                 logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
-                async_draft_copy_stream=self.async_draft_copy_stream,
                 vocab_size=self.input_batch.vocab_size,
-                is_empty_draft_tokens=self._is_empty_draft_tokens,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -3568,22 +3554,15 @@ class GPUModelRunner(
             valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
 
             if self.input_batch.spec_decode_unsupported_reqs:
-                unsupported_ids = torch.tensor(
-                    list(self.input_batch.spec_decode_unsupported_reqs),
-                    dtype=torch.long,
-                    device=self.device,
-                )
-
-                batch_req_ids = torch.tensor(
-                    self.input_batch.req_ids[:batch_size],
-                    dtype=torch.long,
-                    device=self.device,
-                )
-
-                is_unsupported = (
-                    batch_req_ids.unsqueeze(1) == unsupported_ids.unsqueeze(0)
-                ).any(dim=1)
-                valid_mask = valid_mask & ~is_unsupported
+                # Get indices of unsupported requests that are in current batch
+                unsupported_indices = [
+                    self.input_batch.req_id_to_index[req_id]
+                    for req_id in self.input_batch.spec_decode_unsupported_reqs
+                    if req_id in self.input_batch.req_id_to_index
+                    and self.input_batch.req_id_to_index[req_id] < batch_size
+                ]
+                if unsupported_indices:
+                    valid_mask[unsupported_indices] = False
 
             draft_token_ids, is_empty_draft_tokens = self.drafter.propose(
                 self.num_tokens_no_spec_gpu[:batch_size],

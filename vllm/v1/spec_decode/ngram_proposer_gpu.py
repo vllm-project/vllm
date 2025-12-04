@@ -84,6 +84,9 @@ class NgramGPUKernel(nn.Module):
         Process all pattern lengths in parallel, selecting the longest match.
         Completely free of data-dependent control flow, suitable for
         torch.compile optimization.
+
+        This function allows partial results when there are fewer than result_len
+        tokens available after the match. The remaining positions are filled with 0.
         """
         batch_size = data.shape[0]
         device = data.device
@@ -117,33 +120,41 @@ class NgramGPUKernel(nn.Module):
             matches = (current_windows == patterns.unsqueeze(1)).all(dim=-1)
 
             # Validity check: ensure enough space for result extraction
-            max_valid_pattern_start = seq_lengths - pattern_len - result_len
+            max_valid_pattern_start = seq_lengths - pattern_len - 1
             pattern_start_positions = window_starts + offset
             valid_mask = pattern_start_positions <= max_valid_pattern_start.unsqueeze(1)
             final_matches = matches & valid_mask
 
             # Handle prefix positions that fall before the available windows
-            prefix_positions = torch.arange(offset, device=device)
-            gather_indices = prefix_positions.view(1, -1, 1) + torch.arange(
-                pattern_len, device=device
-            ).view(1, 1, -1)
-            gather_indices = gather_indices.clamp(min=0, max=max_seq_len - 1)
-            expanded_indices = gather_indices.expand(batch_size, -1, -1)
-            prefix_tokens = torch.gather(
-                data.unsqueeze(1).expand(-1, offset, -1),
-                2,
-                expanded_indices,
-            )
-            prefix_matches = (
-                prefix_tokens == patterns.unsqueeze(1).expand(-1, offset, -1)
-            ).all(dim=-1)
-            prefix_valid_mask = prefix_positions <= max_valid_pattern_start.unsqueeze(1)
-            prefix_final_matches = prefix_matches & prefix_valid_mask
+            if offset > 0:
+                prefix_positions = torch.arange(offset, device=device)
+                gather_indices = prefix_positions.view(1, -1, 1) + torch.arange(
+                    pattern_len, device=device
+                ).view(1, 1, -1)
+                gather_indices = gather_indices.clamp(min=0, max=max_seq_len - 1)
+                expanded_indices = gather_indices.expand(batch_size, -1, -1)
+                prefix_tokens = torch.gather(
+                    data.unsqueeze(1).expand(-1, offset, -1),
+                    2,
+                    expanded_indices,
+                )
+                prefix_matches = (
+                    prefix_tokens == patterns.unsqueeze(1).expand(-1, offset, -1)
+                ).all(dim=-1)
+                prefix_valid_mask = (
+                    prefix_positions <= max_valid_pattern_start.unsqueeze(1)
+                )
+                prefix_final_matches = prefix_matches & prefix_valid_mask
 
-            combined_matches = torch.cat([prefix_final_matches, final_matches], dim=1)
-            start_positions = torch.cat(
-                [prefix_positions, pattern_start_positions], dim=0
-            )
+                combined_matches = torch.cat(
+                    [prefix_final_matches, final_matches], dim=1
+                )
+                start_positions = torch.cat(
+                    [prefix_positions, pattern_start_positions], dim=0
+                )
+            else:
+                combined_matches = final_matches
+                start_positions = pattern_start_positions
 
             # Find first match
             # (if no match, argmax returns 0, but we verify with has_match)
@@ -175,6 +186,7 @@ class NgramGPUKernel(nn.Module):
             best_match_pos + best_pattern_lengths,
             torch.zeros_like(best_match_pos),
         )
+        available_tokens = seq_lengths - result_starts
 
         # Create gather indices
         result_indices = result_starts.unsqueeze(1) + torch.arange(
@@ -186,11 +198,20 @@ class NgramGPUKernel(nn.Module):
         # Always execute gather (even for invalid data)
         extracted_sequences = torch.gather(data, 1, result_indices)
 
-        # Use where to zero out invalid results
+        position_indices = torch.arange(result_len, device=device).unsqueeze(0)
+        valid_positions = position_indices < available_tokens.unsqueeze(1)
+
+        # Zero out positions beyond the sequence length
+        extracted_sequences = torch.where(
+            valid_positions,
+            extracted_sequences,
+            torch.zeros_like(extracted_sequences),
+        )
+
         results = torch.where(
             has_any_match.unsqueeze(1),
             extracted_sequences,
-            torch.full_like(extracted_sequences, 0),
+            torch.zeros_like(extracted_sequences),
         )
 
         return results
