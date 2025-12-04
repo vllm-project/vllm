@@ -17,7 +17,7 @@ class PCPManager:
     Manager for Prefill Context Parallelism (PCP) metadata and buffers.
 
     This manager encapsulates all PCP-related buffers and logic so that the
-    ModelRunner can access them via `self.pcp_manager`..
+    ModelRunner can access them via `self.pcp_manager`.
     """
 
     def __init__(
@@ -28,11 +28,9 @@ class PCPManager:
         max_num_reqs: int,
         device: torch.device,
         pin_memory: bool = False,
-        arange_np: np.ndarray | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
-        self.arange_np = arange_np
 
         self.pcp_allgather_restore_idx = CpuGpuBuffer(
             max_buffer_num_tokens,
