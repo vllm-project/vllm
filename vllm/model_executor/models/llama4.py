@@ -24,6 +24,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
@@ -70,6 +71,8 @@ class Llama4MoE(nn.Module):
         topk: int,
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if rocm_aiter_ops.is_enabled():
+            return torch.ops.vllm.rocm_aiter_topk_sigmoid(gating_output, topk)
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
         # pseudo-standard is that the router scores are floats
         router_scores = torch.sigmoid(router_scores.float())
