@@ -554,24 +554,6 @@ class GPUModelRunner(
                 device=self.device,
             )
 
-        self.expert_usage_histogram: torch.Tensor | None = None
-
-        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
-            self.expert_histogram_iter = 0
-
-            logger.warning_once(
-                "Collecting expert routing histogram per layer, "
-                "this can affect performance negatively"
-            )
-
-            self.expert_usage_histogram = torch.zeros(
-                model_config.get_total_num_moe_layers(),
-                model_config.get_num_experts()
-                + self.parallel_config.eplb_config.num_redundant_experts,
-                dtype=torch.int32,
-                device=self.device,
-            )
-
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -2413,6 +2395,7 @@ class GPUModelRunner(
         hist_shape = self.expert_usage_histogram.shape
 
         from vllm.distributed.parallel_state import get_ep_group
+
         self.expert_usage_histogram = self.expert_usage_histogram.reshape(
             [hist_shape[0], get_ep_group().world_size, -1]
         )

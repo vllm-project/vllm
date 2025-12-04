@@ -10,8 +10,8 @@ from typing import TypeAlias
 import numpy as np
 from prometheus_client import Counter, Gauge, Histogram
 
-from vllm.compilation.cuda_graph import CUDAGraphLogging
 import vllm.envs as envs
+from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,

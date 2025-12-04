@@ -1224,7 +1224,6 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                
                 spec_decoding_stats,
                 kv_connector_stats,
                 cudagraph_stats,
