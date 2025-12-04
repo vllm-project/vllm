@@ -9,6 +9,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.distributed.parallel_state import get_pcp_group
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -197,7 +198,7 @@ class PCPManager:
 
     def update_tokens_for_pcp(
         self,
-        tokens: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
         arange_np: np.ndarray,
         num_reqs: int,
         reorder_batch_threshold: int | None = None,
@@ -225,8 +226,8 @@ class PCPManager:
               ordering after per-rank allgather and interleaving.
 
         Args:
-            tokens: 1D numpy array of length num_reqs containing the number of new
-                    tokens scheduled for each request (before PCP splitting).
+            num_scheduled_tokens: 1D numpy array of length num_reqs containing
+                                  the number of new tokens scheduled per request.
             arange_np: 1D numpy array of length max_buffer_num_tokens used for
                        efficient batched arange operations.
             num_reqs: Total number of requests in the batch.
@@ -256,23 +257,25 @@ class PCPManager:
         assert reorder_batch_threshold is not None, (
             "PCP depends on reorder batch to split decode and prefill requests."
         )
-        num_decode_reqs = sum(tokens <= reorder_batch_threshold)
-        num_decode_tokens = sum(tokens[:num_decode_reqs])
+        num_decode_reqs = sum(num_scheduled_tokens <= reorder_batch_threshold)
+        num_decode_tokens = sum(num_scheduled_tokens[:num_decode_reqs])
 
         # DualChunkSwap requires alignment to a multiple of (2 * pcp_world_size).
         # We first pad each request's token count up to that multiple.
         num_padded_scheduled_tokens = np.ceil(
-            tokens / (2 * self.pcp_world_size)
+            num_scheduled_tokens / (2 * self.pcp_world_size)
         ).astype(np.int32) * (2 * self.pcp_world_size)
 
         # PCP does not split decode requests. For decode requests, we instead
         # duplicate the scheduled tokens across the pcp_world_size ranks.
         num_padded_scheduled_tokens[:num_decode_reqs] = (
-            tokens[:num_decode_reqs] * self.pcp_world_size
+            num_scheduled_tokens[:num_decode_reqs] * self.pcp_world_size
         )
 
         # Record how many pads were added per request (padded - original).
-        self.num_pcp_pads_cpu[:num_reqs] = num_padded_scheduled_tokens - tokens
+        self.num_pcp_pads_cpu[:num_reqs] = (
+            num_padded_scheduled_tokens - num_scheduled_tokens
+        )
 
         # cu_padded_tokens: cumulative sum of padded token counts,
         # pcp_padded_arange: per-request arange flattened for padded tokens.
@@ -282,7 +285,8 @@ class PCPManager:
         # Build the mask that marks which positions in the padded allgather buffer
         # correspond to real (unpadded) tokens.
         self.pcp_unpad_mask_cpu[: pcp_padded_arange.shape[0]] = (
-            pcp_padded_arange < np.repeat(tokens, num_padded_scheduled_tokens)
+            pcp_padded_arange
+            < np.repeat(num_scheduled_tokens, num_padded_scheduled_tokens)
         )
 
         pcp_tokens = num_padded_scheduled_tokens // self.pcp_world_size
@@ -340,7 +344,7 @@ class PCPManager:
         # same without prefill context parallel.
         if num_decode_reqs > 0:
             positions[:num_decode_tokens] = self._get_cumsum_and_arange(
-                tokens[:num_decode_reqs], arange_np
+                num_scheduled_tokens[:num_decode_reqs], arange_np
             )[1]
 
         # Build the restore index used after allgather.
@@ -359,6 +363,55 @@ class PCPManager:
         return (
             pcp_tokens[:num_reqs],
             positions,
+        )
+
+    def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
+        return (
+            torch.from_numpy(cu_num_tokens) * self.pcp_world_size
+            - self.num_pcp_pads_cpu_tensor[:num_reqs]
+            - 1
+        )
+
+    def get_discard_request_mask(
+        self,
+        num_computed_tokens_cpu: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        num_reqs: int,
+        num_tokens_np: np.ndarray,
+    ):
+        return (
+            num_computed_tokens_cpu[:num_reqs]
+            + num_scheduled_tokens * self.pcp_world_size
+            - self.num_pcp_pads_cpu[:num_reqs]
+        ) < num_tokens_np
+
+    def get_padded_slot_mapping(self, num_tokens: int, slot_mapping: torch.Tensor):
+        # After pcp allgather and restore, there are padded tokens in kv,
+        # so we need pad slotmapping for alignment.
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[
+            : num_tokens * self.pcp_world_size
+        ]
+        cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[
+            : num_tokens * self.pcp_world_size
+        ]
+        pcp_padded_slot_mapping.fill_(-1)
+        pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
+        return pcp_padded_slot_mapping
+
+    def get_restore_hidden_states(
+        self, hidden_states: torch.Tensor, num_tokens_unpadded: int
+    ):
+        # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
+        # ignores the padding from CUDA Graph.
+        hidden_states = get_pcp_group().all_gather(
+            hidden_states[:num_tokens_unpadded],
+            0,
+        )
+        restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
+        return torch.index_select(
+            hidden_states,
+            0,
+            restore_idx,
         )
 
 
