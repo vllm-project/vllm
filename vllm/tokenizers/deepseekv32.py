@@ -43,7 +43,8 @@ class DeepseekV32Tokenizer(HfTokenizer):
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
-        messages = messages.copy()
+        conversation = kwargs.get("conversation", messages)
+        messages = conversation.copy()
         drop_thinking = True
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
