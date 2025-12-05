@@ -42,9 +42,37 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
-def create_ubatch_slices(
-    num_scheduled_tokens: np.ndarray, split_point: int
+# This just pads the second ubatch slice out to the total number of tokens
+# (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
+def _pad_out_ubatch_slices(
+    ubatch_slices: UBatchSlices, num_total_tokens: int, num_reqs_padded: int
 ) -> UBatchSlices:
+    # TODO(lucas): handle empty second ubatch
+    padded_second_request_slice = slice(
+        ubatch_slices[1].request_slice.start, num_reqs_padded
+    )
+    padded_second_token_slice = slice(
+        ubatch_slices[1].token_slice.start, num_total_tokens
+    )
+    return [
+        ubatch_slices[0],
+        UBatchSlice(padded_second_request_slice, padded_second_token_slice),
+    ]
+
+
+def maybe_create_ubatch_slices(
+    should_ubatch: bool,
+    num_scheduled_tokens: np.ndarray,
+    num_tokens_padded: int,
+    num_reqs_padded: int,
+    split_point: int | None = None,
+) -> tuple[UBatchSlices | None, UBatchSlices | None]:
+    if not should_ubatch:
+        return None, None
+
+    if split_point is None:
+        split_point = int(num_tokens_padded) // 2
+
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
     cu_num_tokens = np.zeros(len(num_scheduled_tokens) + 1, dtype=np.int32)
@@ -67,7 +95,15 @@ def create_ubatch_slices(
     )
     second_ubatch_req_slice = slice(second_ubatch_req_start, len(cu_num_tokens) - 1)
 
-    return [
+    ubatch_slices = [
         UBatchSlice(first_ubatch_req_slice, first_ubatch_token_slice),
         UBatchSlice(second_ubatch_req_slice, second_ubatch_token_slice),
     ]
+
+    ubatch_slices_padded = _pad_out_ubatch_slices(
+        ubatch_slices, num_tokens_padded, num_reqs_padded
+    )
+
+    assert sum(s.num_tokens for s in ubatch_slices_padded) == num_tokens_padded
+
+    return ubatch_slices, ubatch_slices_padded

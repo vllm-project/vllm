@@ -28,10 +28,12 @@ def llama4_flash_attn_wrapper(
     max_seqlen_q: int,
     max_seqlen_k: int,
     softmax_scale: float,
-    causal: bool = False,
-    dropout_p: float = 0.0,
+    is_rocm_aiter: bool,
 ) -> torch.Tensor:
-    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    if is_rocm_aiter:
+        from aiter import flash_attn_varlen_func
+    else:
+        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
     return flash_attn_varlen_func(
         q,
@@ -42,8 +44,6 @@ def llama4_flash_attn_wrapper(
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
-        causal=causal,
-        dropout_p=dropout_p,
     )
 
 
@@ -56,11 +56,10 @@ def llama4_flash_attn_wrapper_fake(
     max_seqlen_q: int,
     max_seqlen_k: int,
     softmax_scale: float,
-    causal: bool = False,
-    dropout_p: float = 0.0,
+    is_rocm_aiter: bool,
 ) -> torch.Tensor:
     bs, h, d = q.shape
-    return torch.empty((bs, h, d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -79,8 +78,7 @@ def llama4_flash_attn_wrapper_call(
     max_seqlen_q: torch.Tensor,
     max_seqlen_k: torch.Tensor,
     softmax_scale: float,
-    causal: bool = False,
-    dropout_p: float = 0.0,
+    is_rocm_aiter: bool = False,
 ) -> torch.Tensor:
     return torch.ops.vllm.llama4_flash_attn_wrapper(
         q,
@@ -91,8 +89,7 @@ def llama4_flash_attn_wrapper_call(
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,
-        causal=causal,
-        dropout_p=dropout_p,
+        is_rocm_aiter=is_rocm_aiter,
     )
 
 

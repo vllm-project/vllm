@@ -88,12 +88,7 @@ def maybe_get_vit_flash_attn_backend(
         if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
-            from vllm.attention.ops.vit_attn_wrappers import (
-                llama4_flash_attn_wrapper_call,
-            )
-
-            flash_attn_varlen_func = llama4_flash_attn_wrapper_call
-            # from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -308,7 +303,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input()
+            and self.impl.supports_quant_query_input
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -343,7 +338,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input():
+            if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
@@ -502,6 +497,18 @@ class MultiHeadAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
+        should_override_fa = (
+            multimodal_config is not None
+            and multimodal_config.mm_encoder_wrap_fa_in_custom_op
+        )
+        if self.is_flash_attn_backend and should_override_fa:
+            from vllm.attention.ops.vit_attn_wrappers import (
+                llama4_flash_attn_wrapper_call,
+            )
+
+            self._flash_attn_varlen_func = llama4_flash_attn_wrapper_call
+            assert self._flash_attn_varlen_func is not None
+
         logger.info_once(
             f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
@@ -546,6 +553,7 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
+                is_rocm_aiter=self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))

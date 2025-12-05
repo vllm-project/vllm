@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
-import sys
 from typing import Any
 
 import pytest
@@ -10,7 +9,6 @@ from tests.utils import create_new_process_for_each_test
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
-    DUMMY_LOGITPROC_MODULE,
     MAX_TOKENS,
     MODEL_NAME,
     POOLING_MODEL_NAME,
@@ -18,7 +16,6 @@ from tests.v1.logits_processors.utils import (
     CustomLogitprocSource,
     DummyLogitsProcessor,
     WrappedPerReqLogitsProcessor,
-    dummy_module,
     prompts,
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
@@ -162,8 +159,6 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
     kwargs: dict[str, list[str | type[LogitsProcessor]]] = {}
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
         # Scenario: load logitproc based on fully-qualified class name (FQCN)
-        # Inject dummy module which defines logitproc
-        sys.modules[DUMMY_LOGITPROC_MODULE] = dummy_module
         kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
     elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_CLASS:
         # Scenario: load logitproc from provided class object
