@@ -444,23 +444,27 @@ __device__ inline T apply_sigmoid(T val) {
   return cuda_cast<T, float>(sigmoid_accurate(f));
 }
 
-template <typename T>
+template <ScoringFunc SF, typename T>
+__device__ inline T apply_scoring(T val) {
+  if constexpr (SF == SCORING_SIGMOID) {
+    return apply_sigmoid(val);
+  } else {
+    return val;
+  }
+}
+
+template <typename T, ScoringFunc SF>
 __device__ void topk_with_k2(T* output, T const* input, T const* bias,
                              cg::thread_block_tile<32> const& tile,
                              int32_t const lane_id,
-                             int const num_experts_per_group,
-                             int const scoring_func) {
+                             int const num_experts_per_group) {
   // Get the top2 per thread
   T largest = neg_inf<T>();
   T second_largest = neg_inf<T>();
 
   if (num_experts_per_group > WARP_SIZE) {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = input[i];
-      // Apply scoring function if needed
-      if (scoring_func == SCORING_SIGMOID) {
-        value = apply_sigmoid(value);
-      }
+      T value = apply_scoring<SF>(input[i]);
       value = value + bias[i];
 
       if (value > largest) {
@@ -472,11 +476,7 @@ __device__ void topk_with_k2(T* output, T const* input, T const* bias,
     }
   } else {
     for (int i = lane_id; i < num_experts_per_group; i += WARP_SIZE) {
-      T value = input[i];
-      // Apply scoring function if needed
-      if (scoring_func == SCORING_SIGMOID) {
-        value = apply_sigmoid(value);
-      }
+      T value = apply_scoring<SF>(input[i]);
       value = value + bias[i];
       largest = value;
     }
@@ -501,13 +501,12 @@ __device__ void topk_with_k2(T* output, T const* input, T const* bias,
   }
 }
 
-template <typename T>
+template <typename T, ScoringFunc SF>
 __global__ void topk_with_k2_kernel(T* output, T* input, T const* bias,
                                     int64_t const num_tokens,
                                     int64_t const num_cases,
                                     int64_t const n_group,
-                                    int64_t const num_experts_per_group,
-                                    int const scoring_func) {
+                                    int64_t const num_experts_per_group) {
   int32_t warp_id = threadIdx.x / WARP_SIZE;
   int32_t lane_id = threadIdx.x % WARP_SIZE;
 
@@ -525,21 +524,20 @@ __global__ void topk_with_k2_kernel(T* output, T* input, T const* bias,
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     asm volatile("griddepcontrol.wait;");
 #endif
-    topk_with_k2(output, input, group_bias, tile, lane_id,
-                 num_experts_per_group, scoring_func);
+    topk_with_k2<T, SF>(output, input, group_bias, tile, lane_id,
+                        num_experts_per_group);
   }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.launch_dependents;");
 #endif
 }
 
-template <typename T, typename IdxT>
+template <typename T, typename IdxT, ScoringFunc SF, bool Renorm>
 __global__ void group_idx_and_topk_idx_kernel(
     T* scores, T const* group_scores, float* topk_values, IdxT* topk_indices,
     T const* bias, int64_t const num_tokens, int64_t const n_group,
     int64_t const topk_group, int64_t const topk, int64_t const num_experts,
-    int64_t const num_experts_per_group, bool renormalize,
-    double routed_scaling_factor, int scoring_func) {
+    int64_t const num_experts_per_group, double routed_scaling_factor) {
   int32_t warp_id = threadIdx.x / WARP_SIZE;
   int32_t lane_id = threadIdx.x % WARP_SIZE;
   int32_t case_id =
@@ -616,8 +614,7 @@ __global__ void group_idx_and_topk_idx_kernel(
             // Apply scoring function (if any) and add bias
             T input = scores[offset + i];
             if (is_finite(input)) {
-              T score = (scoring_func == SCORING_SIGMOID) ? apply_sigmoid(input)
-                                                          : input;
+              T score = apply_scoring<SF>(input);
               candidates = score + bias[offset + i];
             }
           }
@@ -646,8 +643,7 @@ __global__ void group_idx_and_topk_idx_kernel(
       if (i < topk) {
         // Load the score value (without bias) for normalization
         T input = scores[s_topk_idx[i]];
-        value =
-            (scoring_func == SCORING_SIGMOID) ? apply_sigmoid(input) : input;
+        value = apply_scoring<SF>(input);
         s_topk_value[i] = value;
       }
       topk_sum +=
@@ -661,7 +657,7 @@ __global__ void group_idx_and_topk_idx_kernel(
     if (if_proceed_next_topk) {
       for (int i = lane_id; i < topk; i += WARP_SIZE) {
         float value;
-        if (renormalize) {
+        if constexpr (Renorm) {
           value = cuda_cast<float, T>(s_topk_value[i]) / topk_sum *
                   routed_scaling_factor;
         } else {
@@ -694,7 +690,6 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
                    cudaStream_t const stream = 0) {
   int64_t num_cases = num_tokens * n_group;
   int64_t topk_with_k2_num_blocks = (num_cases - 1) / NUM_WARPS_PER_BLOCK + 1;
-  auto* kernel_instance1 = &topk_with_k2_kernel<T>;
   cudaLaunchConfig_t config;
   config.gridDim = topk_with_k2_num_blocks;
   config.blockDim = BLOCK_SIZE;
@@ -705,16 +700,30 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
   attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
   config.numAttrs = 1;
   config.attrs = attrs;
-  cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
-                     num_tokens, num_cases, n_group, num_experts / n_group,
-                     scoring_func);
+  auto const sf = static_cast<ScoringFunc>(scoring_func);
+  switch (sf) {
+    case SCORING_NONE: {
+      auto* kernel_instance1 = &topk_with_k2_kernel<T, SCORING_NONE>;
+      cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
+                         num_tokens, num_cases, n_group, num_experts / n_group);
+      break;
+    }
+    case SCORING_SIGMOID: {
+      auto* kernel_instance1 = &topk_with_k2_kernel<T, SCORING_SIGMOID>;
+      cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
+                         num_tokens, num_cases, n_group, num_experts / n_group);
+      break;
+    }
+    default:
+      // should be guarded by higher level checks.
+      TORCH_CHECK(false, "Unsupported scoring_func in invokeNoAuxTc");
+  }
 
   int64_t topk_with_k_group_num_blocks =
       (num_tokens - 1) / NUM_WARPS_PER_BLOCK + 1;
   size_t dynamic_smem_in_bytes =
       warp_topk::calc_smem_size_for_block_wide<T, int32_t>(NUM_WARPS_PER_BLOCK,
                                                            topk);
-  auto* kernel_instance2 = &group_idx_and_topk_idx_kernel<T, IdxT>;
   config.gridDim = topk_with_k_group_num_blocks;
   config.blockDim = BLOCK_SIZE;
   config.dynamicSmemBytes = dynamic_smem_in_bytes;
@@ -723,10 +732,46 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
   attrs[0].val.programmaticStreamSerializationAllowed = enable_pdl;
   config.numAttrs = 1;
   config.attrs = attrs;
-  cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                     topk_values, topk_indices, bias, num_tokens, n_group,
-                     topk_group, topk, num_experts, num_experts / n_group,
-                     renormalize, routed_scaling_factor, scoring_func);
+  switch (sf) {
+    case SCORING_NONE: {
+      if (renormalize) {
+        auto* kernel_instance2 =
+            &group_idx_and_topk_idx_kernel<T, IdxT, SCORING_NONE, true>;
+        cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
+                           topk_values, topk_indices, bias, num_tokens, n_group,
+                           topk_group, topk, num_experts, num_experts / n_group,
+                           routed_scaling_factor);
+      } else {
+        auto* kernel_instance2 =
+            &group_idx_and_topk_idx_kernel<T, IdxT, SCORING_NONE, false>;
+        cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
+                           topk_values, topk_indices, bias, num_tokens, n_group,
+                           topk_group, topk, num_experts, num_experts / n_group,
+                           routed_scaling_factor);
+      }
+      break;
+    }
+    case SCORING_SIGMOID: {
+      if (renormalize) {
+        auto* kernel_instance2 =
+            &group_idx_and_topk_idx_kernel<T, IdxT, SCORING_SIGMOID, true>;
+        cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
+                           topk_values, topk_indices, bias, num_tokens, n_group,
+                           topk_group, topk, num_experts, num_experts / n_group,
+                           routed_scaling_factor);
+      } else {
+        auto* kernel_instance2 =
+            &group_idx_and_topk_idx_kernel<T, IdxT, SCORING_SIGMOID, false>;
+        cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
+                           topk_values, topk_indices, bias, num_tokens, n_group,
+                           topk_group, topk, num_experts, num_experts / n_group,
+                           routed_scaling_factor);
+      }
+      break;
+    }
+    default:
+      TORCH_CHECK(false, "Unsupported scoring_func in invokeNoAuxTc");
+  }
 }
 
 #define INSTANTIATE_NOAUX_TC(T, IdxT)                                       \
