@@ -718,6 +718,18 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
+- label: LM Eval Small Models # 53min
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  # grade: Blocking
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+
 - label: OpenAI API correctness # 10min
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -962,6 +974,19 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+
+- label: Multi-Modal Accuracy Eval (Small Models) # 50min
+  timeout_in_minutes: 70
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  # grade: Blocking
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
@@ -1397,6 +1422,39 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
+
+- label: LM Eval Large Models # optional
+  gpu: a100
+  optional: true
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+##### H100 test #####
+- label: LM Eval Large Models (H100) # optional
+  gpu: h100
+  optional: true
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+
+
 ##### H200 test #####
 - label: Distributed Tests (H200) # optional
   mirror_hardwares: [amdexperimental]
@@ -1564,3 +1622,27 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
+
+- label: DeepSeek V2-Lite Async EPLB Accuracy
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
+
+- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
