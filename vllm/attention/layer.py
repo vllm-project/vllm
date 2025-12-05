@@ -303,7 +303,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input()
+            and self.impl.supports_quant_query_input
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -338,7 +338,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input():
+            if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:

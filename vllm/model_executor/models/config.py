@@ -4,7 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -331,6 +331,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
+        attention_config = vllm_config.attention_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -347,7 +348,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         #   * CUTLASS_MLA backend: kernel_block_size 128 alignment
         #   * Other MLA backends: kernel_block_size 64 alignment
         if model_config.use_mla:
-            use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
+            use_cutlass_mla = (
+                attention_config.backend == AttentionBackendEnum.CUTLASS_MLA
+            )
             kernel_block_alignment_size = 128 if use_cutlass_mla else 64
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
@@ -361,8 +364,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 current_platform.is_device_capability(100)
                 and model_config.get_head_size() == 256
                 and (
-                    envs.VLLM_ATTENTION_BACKEND is None
-                    or envs.VLLM_ATTENTION_BACKEND == "FLASHINFER"
+                    attention_config.backend is None
+                    or attention_config.backend == AttentionBackendEnum.FLASHINFER
                 )
             ):
                 # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
