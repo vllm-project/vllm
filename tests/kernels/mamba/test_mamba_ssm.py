@@ -973,7 +973,7 @@ def test_selective_state_update_with_num_accepted_tokens(
 @pytest.mark.parametrize("dstate", [16, 64])
 @pytest.mark.parametrize("dim", [2048, 4096])
 @pytest.mark.parametrize("max_seq_len", [2, 4])
-def test_selective_state_update_varlen_with_num_accepted_and_inplace(
+def test_selective_state_update_varlen_with_num_accepted(
     dim, dstate, has_z, itype, max_seq_len
 ):
     device = "cuda"
