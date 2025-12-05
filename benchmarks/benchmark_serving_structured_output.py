@@ -19,11 +19,9 @@ On the client side, run:
         --endpoint /generate_stream
     to the end of the command above.
 
-    when using tensorrt-llm backend (OpenAI-compatible server), use
+    when using an OpenAI-compatible server, use
         --endpoint /v1/chat/completions   # or /v1/completions
     and optionally:
-        --api-key <token>                 # if the server requires auth
-        --debug                           # verbose request/response logging
         --validate-schema                 # validate JSON outputs (requires jsonschema)
 """
 
@@ -455,13 +453,11 @@ async def benchmark(
     def prepare_extra_body(request) -> dict:
         """Build backend-specific structured output config for a request.
 
-        For `tensorrt-llm` backend, map the internal structure type to the
+        For OpenAI-compatible backends, map the internal structure type to the
         OpenAI-compatible `response_format` field (e.g., JSON schema, regex, or
-        EBNF grammar). For other backends, fall back to the vLLM-native
-        `structured_outputs` shape to preserve existing behavior.
+        EBNF grammar). For the vLLM backend, use the native `structured_outputs`
+        shape to preserve existing behavior.
         """
-        # For tensorrt-llm backend, the server follows OpenAI-style APIs and
-        # expects structured decoding settings in `response_format`.
         if backend == "tensorrt-llm":
             structure_type = request.structure_type
             schema = request.schema
@@ -526,8 +522,6 @@ async def benchmark(
         output_len=test_request.expected_output_len,
         ignore_eos=ignore_eos,
         extra_body=test_req_extra_body,
-        api_key=args.api_key,
-        debug=args.debug,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -548,8 +542,6 @@ async def benchmark(
             output_len=test_request.expected_output_len,
             ignore_eos=ignore_eos,
             extra_body=test_req_extra_body,
-            api_key=args.api_key,
-            debug=args.debug,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -584,8 +576,6 @@ async def benchmark(
             output_len=request.expected_output_len,
             ignore_eos=ignore_eos,
             extra_body=extra_body,
-            api_key=args.api_key,
-            debug=args.debug,
         )
         expected.append(request.completion)
         tasks.append(
@@ -780,14 +770,16 @@ def evaluate(ret, args, input_requests=None):
     scores = []
     for idx, res in enumerate(ret):
         expected = res["expected"]
-        # For JSON dataset, expected may be None in ret; fallback to request schema
+        # JSON datasets omit reference completions; reuse request schema so the
+        # JSON validator can still run.
         is_json = getattr(args, "structure_type", "") == "json"
-        has_requests = input_requests is not None
-        if expected is None and is_json and has_requests:
-            try:
-                expected = input_requests[idx].schema
-            except Exception:
-                expected = None
+        if (
+            expected is None
+            and is_json
+            and input_requests is not None
+            and idx < len(input_requests)
+        ):
+            expected = input_requests[idx].schema
         score = _eval_correctness(expected, res["generated"])
         res["correctness"] = score
         scores.append(score)
@@ -1119,17 +1111,6 @@ def create_argument_parser():
         help="Ratio of Structured Outputs requests",
     )
 
-    parser.add_argument(
-        "--api-key",
-        type=str,
-        default=None,
-        help="Optional API key for Authorization header (Bearer).",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable verbose request/response debugging for backend calls.",
-    )
     parser.add_argument(
         "--validate-schema",
         action="store_true",
