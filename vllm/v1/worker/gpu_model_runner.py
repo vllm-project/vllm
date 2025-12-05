@@ -3467,7 +3467,7 @@ class GPUModelRunner(
             )
             combined_msg = f"{msg} (original error: {e})"
             logger.error("init_failed msg=%s", combined_msg)
-            raise RuntimeError(combined_msg) from e
+            raise e
         logger.info_once(
             "Model loading took %.4f GiB memory and %.6f seconds",
             self.model_memory_usage / GiB_bytes,
