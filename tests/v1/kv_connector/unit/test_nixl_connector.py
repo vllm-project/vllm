@@ -470,6 +470,7 @@ class TestNixlHandshake:
                             num_xfers + 6,
                         ],
                         "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                        "remote_request_id": f"prefill-{request_id}",
                         "remote_host": "localhost",
                         "remote_port": 1234,
                         "remote_tp_size": 1,
@@ -536,6 +537,7 @@ class TestNixlHandshake:
             kv_transfer_params={
                 "remote_block_ids": [4, 5, 6],
                 "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                "remote_request_id": "prefill-id",
                 "remote_host": "localhost",
                 "remote_port": 1234,
                 "remote_tp_size": prefill_tp_size,
@@ -591,6 +593,7 @@ class TestNixlHandshake:
                 kv_transfer_params={
                     "remote_block_ids": [4, 5, 6],
                     "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                    "remote_request_id": f"prefill-id-{i}",
                     "remote_host": "localhost",
                     "remote_port": 1234,
                     "remote_tp_size": 1,
@@ -754,6 +757,7 @@ def test_kv_connector_stats(dist_init):
         kv_transfer_params={
             "remote_block_ids": [4, 5, 6],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
@@ -1470,6 +1474,7 @@ def test_handshake_failure_returns_finished(dist_init):
         kv_transfer_params={
             "remote_block_ids": [4, 5, 6],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
@@ -1519,6 +1524,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
         kv_transfer_params={
             "remote_block_ids": [10, 11, 12],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
