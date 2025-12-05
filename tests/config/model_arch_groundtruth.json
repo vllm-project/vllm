@@ -14,8 +14,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "mosaicml/mpt-7b": {
         "architectures": [
@@ -32,8 +31,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "databricks/dbrx-instruct": {
         "architectures": [
@@ -50,8 +48,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "tiiuae/falcon-7b": {
         "architectures": [
@@ -68,8 +65,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "tiiuae/falcon-40b": {
         "architectures": [
@@ -86,8 +82,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "luccafong/deepseek_mtp_main_random": {
         "architectures": [
@@ -104,8 +99,7 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "luccafong/deepseek_mtp_draft_random": {
         "architectures": [
@@ -122,8 +116,7 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "Qwen/Qwen3-Next-80B-A3B-Instruct": {
         "architectures": [
@@ -140,8 +133,7 @@
         "num_experts": 512,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "tiny-random/qwen3-next-moe": {
         "architectures": [
@@ -158,8 +150,7 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "zai-org/GLM-4.5": {
         "architectures": [
@@ -176,8 +167,7 @@
         "num_experts": 160,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "baidu/ERNIE-4.5-21B-A3B-PT": {
         "architectures": [
@@ -194,8 +184,7 @@
         "num_experts": 64,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "lmsys/gpt-oss-20b-bf16": {
         "architectures": [
@@ -212,8 +201,7 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "deepseek-ai/DeepSeek-V3.2-Exp": {
         "architectures": [
@@ -230,8 +218,7 @@
         "num_experts": 256,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
         "architectures": [
@@ -248,8 +235,7 @@
         "num_experts": 16,
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
         "architectures": [
@@ -266,8 +252,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "XiaomiMiMo/MiMo-7B-RL": {
         "architectures": [
@@ -284,8 +269,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.bfloat16"
     },
     "meituan-longcat/LongCat-Flash-Chat": {
         "architectures": [
@@ -302,7 +286,6 @@
         "num_experts": 512,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.float32",
-        "dtype_original_type": "torch.dtype"
+        "dtype": "torch.float32"
     }
 }

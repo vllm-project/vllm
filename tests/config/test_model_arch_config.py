@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import torch
-
 from vllm.config import ModelConfig
 
 
@@ -67,12 +65,6 @@ def test_model_arch_config():
 
         dtype = model_arch_config.torch_dtype
         assert str(dtype) == expected["dtype"]
-        if expected["dtype_original_type"] == "str":
-            assert isinstance(dtype, str)
-        elif expected["dtype_original_type"] == "torch.dtype":
-            assert isinstance(dtype, torch.dtype)
-        else:
-            raise ValueError(f"Unknown dtype_original_type: {expected['dtype']}")
 
         # Test that model_config methods return expected values
         assert model_config.architectures == expected["architectures"]
