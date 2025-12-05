@@ -803,11 +803,6 @@ class VllmConfig:
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
-        assert (
-            self.parallel_config.cp_kv_cache_interleave_size == 1
-            or self.speculative_config is None
-        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
-
         # Do this after all the updates to compilation_config.mode
         self.compilation_config.set_splitting_ops_for_v1()
 

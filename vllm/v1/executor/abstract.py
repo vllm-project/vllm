@@ -109,9 +109,11 @@ class Executor(ABC):
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
         """
-        Initialize the KV caches and begin the model execution loop of the
+        Check attention backend for ContextParallelism compatibility,
+        initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
+        self.collective_rpc("_check_attention_cp_compatibility")
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
         self.collective_rpc("compile_or_warm_up_model")
 
