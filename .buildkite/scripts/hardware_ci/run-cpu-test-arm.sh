@@ -36,6 +36,11 @@ function cpu_tests() {
     set -e
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
+  # Run model tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model"
+
   # Run kernel tests
   docker exec cpu-test bash -c "
     set -e

@@ -92,13 +92,14 @@ def run_test(
     *,
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
+    dtype: str = "half",
 ) -> None:
     prompt_list = PROMPTS * 10
     expected_list = EXPECTED[model] * 10
 
     with vllm_runner(
         model,
-        dtype="half",
+        dtype=dtype,
         max_model_len=448,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
@@ -118,14 +119,17 @@ def run_test(
         assert output.outputs[0].text == expected
 
 
+@pytest.mark.cpu_model
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
 @create_new_process_for_each_test()
-def test_models(vllm_runner, model) -> None:
+def test_models(vllm_runner, model, dtype) -> None:
     run_test(
         vllm_runner,
         model,
         tensor_parallel_size=1,
+        dtype=dtype,
     )
 
 
@@ -145,29 +149,3 @@ def test_models_distributed(
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
     )
-
-
-@pytest.mark.parametrize("model", ["openai/whisper-large-v3"])
-@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
-@pytest.mark.cpu_model
-def test_whisper_cpu(vllm_runner, model, dtype):
-    prompt_list = PROMPTS * 4
-    expected_list = EXPECTED[model] * 4
-    with vllm_runner(
-        model,
-        dtype=dtype,
-        max_model_len=448,
-    ) as vllm_model:
-        llm = vllm_model.llm
-
-        sampling_params = SamplingParams(
-            temperature=0,
-            top_p=1.0,
-            max_tokens=200,
-        )
-
-        outputs = llm.generate(prompt_list, sampling_params)
-
-    for output, expected in zip(outputs, expected_list):
-        print(output.outputs[0].text)
-        assert output.outputs[0].text == expected

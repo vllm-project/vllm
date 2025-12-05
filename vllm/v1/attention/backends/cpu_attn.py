@@ -154,10 +154,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        if self.is_cross_attention:
-            causal = False
-        else:
-            causal = common_attn_metadata.causal
+        causal = False if self.is_cross_attention else common_attn_metadata.causal
 
         sdpa_start_loc = query_start_loc
         num_decode_tokens = 0
@@ -177,7 +174,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             query_start_loc = query_start_loc[: num_decodes + 1]
             block_table_tensor = block_table_tensor[:num_decodes]
 
-        sheduler_metadata = None
         sheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
             num_reqs=num_reqs,
             num_heads=self.num_heads,
