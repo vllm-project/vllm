@@ -11,9 +11,9 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
     _normalize_quant_group_shape,
+    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -39,6 +39,7 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
@@ -259,7 +260,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             input.shape, device=input.device, dtype=self.quant_key.dtype
         )
 
-        if self.quant_key.scale.group_shape == GroupShape(1, 128):
+        if self.quant_key.scale.group_shape.is_per_group():
             assert scale is None
             scale = self.make_scale(input, transposed=self.use_col_major_scales)
 
@@ -305,20 +306,17 @@ class MatcherQuantFP8(MatcherCustomOp):
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
+        scale_shape = (
+            input.shape[0] // normalized_group_shape[0],
+            input.shape[1] // normalized_group_shape[1],
+        )
         if transposed:
-            scale_shape = (
-                input.shape[1] // normalized_group_shape[1],
-                input.shape[0] // normalized_group_shape[0],
-            )
+            scale_shape = tuple(reversed(scale_shape))
             return torch.empty(
                 scale_shape, device=input.device, dtype=torch.float32
             ).permute(-1, -2)
-        else:
-            scale_shape = (
-                input.shape[0] // normalized_group_shape[0],
-                input.shape[1] // normalized_group_shape[1],
-            )
-            return torch.empty(scale_shape, device=input.device, dtype=torch.float32)
+
+        return torch.empty(scale_shape, device=input.device, dtype=torch.float32)
 
     def inputs(self) -> list[torch.Tensor]:
         input = self.empty(5, 16)

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -65,6 +66,7 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -102,6 +104,12 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, True
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic64Sym, False
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic64Sym, True
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
 
@@ -487,6 +495,15 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse rms_norm + fp8 group quant
             RMSNormGroupQuantPattern(
                 epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            ).register(self.patterns)
+
+            FusedAddRMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
+            ).register(self.patterns)
+
+            # Fuse rms_norm + fp8 group quant
+            RMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
             ).register(self.patterns)
 
             # Fuse fused_add_rms_norm + static fp8 quant

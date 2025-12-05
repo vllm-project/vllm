@@ -142,30 +142,19 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (residual.has_value()) {
+  VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
           vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        true>
+                                                        has_residual>
               <<<grid, block, 0, stream>>>(
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>());
+                  var_epsilon, hidden_size,
+                  has_residual ? residual->data_ptr<scalar_in_t>() : nullptr);
         });
-
-  } else {
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
-                                                        false>
-              <<<grid, block, 0, stream>>>(
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, nullptr);
-        });
-  }
+  });
 }
 
 void rms_norm_dynamic_per_token_quant(
@@ -198,14 +187,15 @@ void rms_norm_dynamic_per_token_quant(
 }
 
 // Residual add + RMS norm + dynamic per token
-template <typename scalar_in_t, int32_t group_size>
+template <typename scalar_in_t>
 void rms_norm_per_block_quant_dispatch(
     torch::Tensor& out,           // [..., hidden_size]
     torch::Tensor const& input,   // [..., hidden_size]
     torch::Tensor const& weight,  // [hidden_size]
     torch::Tensor& scales,        // [num_tokens, hidden_size / group_size] or
                                   // [hidden_size / group_size, num_tokens]
-    double const var_epsilon,     // Variance epsilon used in norm calculation
+    int32_t group_size,
+    double const var_epsilon,  // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
     std::optional<at::Tensor>& residual, bool is_scale_transposed) {
   int32_t hidden_size = input.size(-1);
@@ -217,65 +207,26 @@ void rms_norm_per_block_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (residual.has_value()) {
-    if (is_scale_transposed) {
-      VLLM_DISPATCH_QUANT_TYPES(
-          out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-            vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, true,
-                                                  true, group_size>
-                <<<grid, block, 0, stream>>>(
-                    out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                    input.data_ptr<scalar_in_t>(),
-                    weight.data_ptr<scalar_in_t>(),
-                    scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                         : nullptr,
-                    var_epsilon, hidden_size,
-                    residual->data_ptr<scalar_in_t>());
-          });
-    } else {
-      VLLM_DISPATCH_QUANT_TYPES(
-          out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-            vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, true,
-                                                  false, group_size>
-                <<<grid, block, 0, stream>>>(
-                    out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                    input.data_ptr<scalar_in_t>(),
-                    weight.data_ptr<scalar_in_t>(),
-                    scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                         : nullptr,
-                    var_epsilon, hidden_size,
-                    residual->data_ptr<scalar_in_t>());
-          });
-    }
-  } else {
-    if (is_scale_transposed) {
-      VLLM_DISPATCH_QUANT_TYPES(
-          out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-            vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, false,
-                                                  true, group_size>
-                <<<grid, block, 0, stream>>>(
-                    out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                    input.data_ptr<scalar_in_t>(),
-                    weight.data_ptr<scalar_in_t>(),
-                    scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                         : nullptr,
-                    var_epsilon, hidden_size, nullptr);
-          });
-    } else {
-      VLLM_DISPATCH_QUANT_TYPES(
-          out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-            vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, false,
-                                                  false, group_size>
-                <<<grid, block, 0, stream>>>(
-                    out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                    input.data_ptr<scalar_in_t>(),
-                    weight.data_ptr<scalar_in_t>(),
-                    scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                         : nullptr,
-                    var_epsilon, hidden_size, nullptr);
-          });
-    }
-  }
+  VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+    VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+      VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
+        VLLM_DISPATCH_QUANT_TYPES(
+            out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
+              vllm::rms_norm_per_block_quant_kernel<
+                  scalar_in_t, scalar_t, has_residual, transpose_scale, gs>
+                  <<<grid, block, 0, stream>>>(
+                      out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+                      input.data_ptr<scalar_in_t>(),
+                      weight.data_ptr<scalar_in_t>(),
+                      scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                           : nullptr,
+                      var_epsilon, hidden_size,
+                      has_residual ? residual->data_ptr<scalar_in_t>()
+                                   : nullptr);
+            });
+      });
+    });
+  });
 }
 
 void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -299,21 +250,13 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
     TORCH_CHECK(residual->scalar_type() == input.scalar_type());
   }
 
-  if (group_size == 128) {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "rms_norm_per_block_quant_dispatch", [&] {
-          rms_norm_per_block_quant_dispatch<scalar_t, 128>(
-              out, input, weight, scales, var_epsilon, scale_ub, residual,
-              is_scale_transposed);
-        });
-  } else if (group_size == 64) {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        input.scalar_type(), "rms_norm_per_block_quant_dispatch", [&] {
-          rms_norm_per_block_quant_dispatch<scalar_t, 64>(
-              out, input, weight, scales, var_epsilon, scale_ub, residual,
-              is_scale_transposed);
-        });
-  } else {
-    TORCH_CHECK(false, "Unsupported group size: ", group_size);
-  }
+  TORCH_CHECK(group_size == 128 || group_size == 64,
+              "Unsupported group size: ", group_size);
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_per_block_quant_dispatch", [&] {
+        rms_norm_per_block_quant_dispatch<scalar_t>(
+            out, input, weight, scales, group_size, var_epsilon, scale_ub,
+            residual, is_scale_transposed);
+      });
 }

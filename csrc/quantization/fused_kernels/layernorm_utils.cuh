@@ -9,6 +9,7 @@
 #include "quant_conversions.cuh"
 
 #include "../../cub_helpers.h"
+#include "../../cuda_compat.h"
 
 namespace vllm {
 
@@ -43,10 +44,14 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-// TODO replace 32 with WARP_SIZE
 __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
                                           int64_t thread_in_warp,
                                           int64_t reduced_elems) {
+  static_assert(WARP_SIZE == 32 || WARP_SIZE == 64);
+  if constexpr (WARP_SIZE == 64) {
+    if (thread_in_warp + 64 < reduced_elems)
+      val[tid] = fmaxf(val[tid], val[tid + 64]);
+  }
   if (thread_in_warp + 32 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 32]);
   if (thread_in_warp + 16 < reduced_elems)
@@ -94,7 +99,7 @@ __device__ void compute_dynamic_per_token_scales(
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
     __syncthreads();
 
-    int64_t const warp_size = 32;
+    int64_t const warp_size = WARP_SIZE;
     int64_t const num_warps = blockDim.x / warp_size;
     int64_t const warp_id = threadIdx.x / warp_size;
     int64_t const thread_in_warp = threadIdx.x % warp_size;
@@ -343,7 +348,7 @@ __device__ void compute_dynamic_per_token_scales(
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
     __syncthreads();
 
-    int64_t const warp_size = 32;
+    int64_t const warp_size = WARP_SIZE;
     int64_t const num_warps = blockDim.x / warp_size;
     int64_t const warp_id = threadIdx.x / warp_size;
     int64_t const thread_in_warp = threadIdx.x % warp_size;

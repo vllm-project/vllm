@@ -118,6 +118,9 @@ kNvfp4Quant = QuantKey(FP4_DTYPE, scale=kNvfp4GroupScale, scale2=kStaticTensorSc
 kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
 kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 
+kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
+kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
+
 
 # Normalize the group_shape to the full extent for any dims that are -1
 def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):

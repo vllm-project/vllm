@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
@@ -56,10 +57,11 @@ class TestModel(torch.nn.Module):
         super().__init__(*args, **kwargs)
         self.cuda_force_torch = cuda_force_torch
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
-        if group_shape == GroupShape(1, 128):
+        if group_shape.is_per_group():
             self.wscale = [
                 torch.rand(
-                    (hidden_size // 128, hidden_size // 128), dtype=torch.float32
+                    (hidden_size // group_shape[1], hidden_size // group_shape[1]),
+                    dtype=torch.float32,
                 )
                 for _ in range(3)
             ]
@@ -75,29 +77,26 @@ class TestModel(torch.nn.Module):
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE) for _ in range(3)
         ]
-        if group_shape != GroupShape(1, 128):
+        if not group_shape.is_per_group():
             self.w = [self.w[0].t() for _ in range(3)]
 
-        if group_shape == GroupShape(1, 128):
+        if group_shape.is_per_group():
             self.fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(128, 128),
+                weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
                 act_quant_group_shape=group_shape,
                 cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
                 use_aiter_and_is_supported=False,
             )
+            self.enable_quant_fp8_custom_op = self.fp8_linear.input_quant_op.enabled()
         else:
             with override_cutlass_fp8_supported(not cuda_force_torch):
                 self.fp8_linear = Fp8LinearOp(
                     act_quant_static=static,
                     act_quant_group_shape=group_shape,
                 )
+                self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
 
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
-        self.enable_quant_fp8_custom_op = (
-            self.fp8_linear.quant_fp8.enabled()
-            if group_shape != GroupShape(1, 128)
-            else True
-        )
         self.group_shape = group_shape
 
     def forward(self, x):
@@ -145,7 +144,12 @@ class TestModel(torch.nn.Module):
         )
 
 
-GROUP_SHAPES = [GroupShape.PER_TOKEN, GroupShape.PER_TENSOR, GroupShape(1, 128)]
+GROUP_SHAPES = [
+    GroupShape.PER_TOKEN,
+    GroupShape.PER_TENSOR,
+    GroupShape(1, 128),
+    GroupShape(1, 64),
+]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -178,8 +182,14 @@ def test_fusion_rmsnorm_quant(
     torch.manual_seed(1)
     maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
-    if not enable_quant_fp8_custom_op and group_shape == GroupShape(1, 128):
+    if not enable_quant_fp8_custom_op and group_shape.is_per_group():
         pytest.skip("Unsupported unwrapped quant fp8 op for blockwise quantization")
+
+    # Skip test for 64-bit group shape when running with cutlass or deepgemm
+    if group_shape == GroupShape(1, 64) and (
+        cutlass_block_fp8_supported() or is_deep_gemm_supported()
+    ):
+        pytest.skip("Unsupported group shape 64 for CUTLASS/DeepGemm")
 
     custom_ops = []
     if enable_rms_norm_custom_op:
