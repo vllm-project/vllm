@@ -1175,9 +1175,6 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
     }
 
     # Store tensor info for validation
-    expected_tensor_size = shared_tensor[0].element_size() * shared_tensor[0].numel()
-    if attn_backend == "TRITON_ATTN":
-        expected_tensor_size *= 2
 
     test_shape = backend_cls.get_kv_cache_shape(
         num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
