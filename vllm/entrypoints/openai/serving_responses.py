@@ -52,6 +52,7 @@ from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
+from vllm.config.structured_outputs import StructuredOutputsConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -69,6 +70,7 @@ from vllm.entrypoints.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
+    get_tool_names_from_messages,
     get_user_message,
     has_custom_tools,
     parse_output_message,
@@ -164,7 +166,6 @@ class OpenAIServingResponses(OpenAIServing):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         return_tokens_as_token_ids: bool = False,
-        reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
         tool_server: ToolServer | None = None,
@@ -172,6 +173,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         log_error_stack: bool = False,
+        structured_outputs_config: StructuredOutputsConfig | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -186,8 +188,11 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_log_outputs = enable_log_outputs
 
         self.reasoning_parser = self._get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
+            ""
+            if not structured_outputs_config
+            else structured_outputs_config.reasoning_parser
         )
+        self.structured_outputs_config = structured_outputs_config
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -427,7 +432,14 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = SimpleContext()
 
-                if self.reasoning_parser is not None:
+                # Enable in reasoning must be true since structural tags are
+                # currently used to guide the harmony chat format
+                # which is technically in the reasoning, not the content
+                if (
+                    self.reasoning_parser is not None
+                    and self.structured_outputs_config
+                    and self.structured_outputs_config.enable_in_reasoning
+                ):
                     reasoning_parser = self.reasoning_parser(tokenizer)
                     if sampling_params.structured_outputs is None:
                         sampling_params.structured_outputs = StructuredOutputsParams()
@@ -436,7 +448,7 @@ class OpenAIServingResponses(OpenAIServing):
                         sampling_params.structured_outputs.structural_tag = (
                             reasoning_parser.prepare_structured_tag(
                                 sampling_params.structured_outputs.structural_tag,
-                                self.tool_server,
+                                get_tool_names_from_messages(messages),
                             )
                         )
                 generator = self._generate_with_builtin_tools(

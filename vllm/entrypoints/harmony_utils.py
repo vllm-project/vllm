@@ -520,6 +520,35 @@ def get_stop_tokens_for_assistant_actions() -> list[int]:
     return get_encoding().stop_tokens_for_assistant_actions()
 
 
+def get_tool_names_from_messages(messages: list[Message]) -> set[str]:
+    """
+    Returns a set of tool names for the purpose of guided decoding
+    """
+    tool_names: set[str] = set()
+    for message in messages:
+        if message.author.role == Role.SYSTEM or message.author.role == Role.DEVELOPER:
+            assert len(message.content) == 1, (
+                f"SYSTEM/DEVELOPER messages should have exactly 1 content item, "
+                f"got {len(message.content)}"
+            )
+            message_content = message.content[0]
+            assert isinstance(message_content, (SystemContent, DeveloperContent)), (
+                f"SYSTEM/DEVELOPER message content should be SystemContent or "
+                f"DeveloperContent, got {type(message_content).__name__}"
+            )
+            tool_namespace_configs = (
+                message_content.tools.values() if message_content.tools else []
+            )
+            for tool_namespace_config in tool_namespace_configs:
+                # gpt-oss special case for python tool not needing a namespace
+                if tool_namespace_config.name == "python":
+                    tool_names.add("python")
+                    continue
+                for tool in tool_namespace_config.tools:
+                    tool_names.add(f"{tool_namespace_config.name}.{tool.name}")
+    return tool_names
+
+
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
 

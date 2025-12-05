@@ -1130,11 +1130,11 @@ async def init_app_state(
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,
             tool_server=tool_server,
-            reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             log_error_stack=args.log_error_stack,
+            structured_outputs_config=args.structured_outputs_config,
         )
         if "generate" in supported_tasks
         else None
