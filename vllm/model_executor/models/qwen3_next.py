@@ -750,7 +750,6 @@ class Qwen3NextAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=config.partial_rotary_factor,
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 
