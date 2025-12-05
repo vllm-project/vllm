@@ -278,7 +278,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=64)],
     ),
     "aya_vision": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
@@ -294,7 +294,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
     ),
     "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
