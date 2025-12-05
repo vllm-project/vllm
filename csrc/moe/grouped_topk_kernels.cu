@@ -532,13 +532,13 @@ __global__ void topk_with_k2_kernel(T* output, T* input, T const* bias,
 #endif
 }
 
-template <typename T, typename IdxT, ScoringFunc SF, bool Renorm,
-          int NGroup = -1>
+template <typename T, typename IdxT, ScoringFunc SF, int NGroup = -1>
 __global__ void group_idx_and_topk_idx_kernel(
     T* scores, T const* group_scores, float* topk_values, IdxT* topk_indices,
     T const* bias, int64_t const num_tokens, int64_t const n_group,
     int64_t const topk_group, int64_t const topk, int64_t const num_experts,
-    int64_t const num_experts_per_group, double routed_scaling_factor) {
+    int64_t const num_experts_per_group, bool renormalize,
+    double routed_scaling_factor) {
   int32_t warp_id = threadIdx.x / WARP_SIZE;
   int32_t lane_id = threadIdx.x % WARP_SIZE;
   int32_t case_id =
@@ -664,7 +664,7 @@ __global__ void group_idx_and_topk_idx_kernel(
         value = apply_scoring<SF>(input);
         s_topk_value[i] = value;
       }
-      if constexpr (Renorm) {
+      if (renormalize) {
         topk_sum +=
             cg::reduce(tile, cuda_cast<float, T>(value), cg::plus<float>());
       }
@@ -676,13 +676,9 @@ __global__ void group_idx_and_topk_idx_kernel(
   if (case_id < num_tokens) {
     if (if_proceed_next_topk) {
       for (int i = lane_id; i < topk; i += WARP_SIZE) {
-        float value;
-        if constexpr (Renorm) {
-          value = cuda_cast<float, T>(s_topk_value[i]) / topk_sum *
-                  routed_scaling_factor;
-        } else {
-          value = cuda_cast<float, T>(s_topk_value[i]) * routed_scaling_factor;
-        }
+        float base = cuda_cast<float, T>(s_topk_value[i]);
+        float value = renormalize ? (base / topk_sum * routed_scaling_factor)
+                                  : (base * routed_scaling_factor);
         topk_indices[i] = s_topk_idx[i];
         topk_values[i] = value;
       }
@@ -700,39 +696,40 @@ __global__ void group_idx_and_topk_idx_kernel(
 #endif
 }
 
-template <typename T, typename IdxT, ScoringFunc SF, bool Renorm>
+template <typename T, typename IdxT, ScoringFunc SF>
 inline void launch_group_idx_and_topk_kernel(
     cudaLaunchConfig_t const& config, T* scores, T* group_scores,
     float* topk_values, IdxT* topk_indices, T const* bias,
     int64_t const num_tokens, int64_t const n_group, int64_t const topk_group,
     int64_t const topk, int64_t const num_experts,
-    int64_t const num_experts_per_group, double const routed_scaling_factor) {
+    int64_t const num_experts_per_group, bool const renormalize,
+    double const routed_scaling_factor) {
   auto launch = [&](auto* kernel_instance2) {
     cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
                        topk_values, topk_indices, bias, num_tokens, n_group,
                        topk_group, topk, num_experts, num_experts_per_group,
-                       routed_scaling_factor);
+                       renormalize, routed_scaling_factor);
   };
 
   switch (n_group) {
     case 4: {
-      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 4>);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 4>);
       break;
     }
     case 8: {
-      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 8>);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 8>);
       break;
     }
     case 16: {
-      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 16>);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 16>);
       break;
     }
     case 32: {
-      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 32>);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, 32>);
       break;
     }
     default: {
-      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm>);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF>);
       break;
     }
   }
@@ -795,31 +792,17 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
   config.attrs = attrs;
   switch (sf) {
     case SCORING_NONE: {
-      if (renormalize) {
-        launch_group_idx_and_topk_kernel<T, IdxT, SCORING_NONE, true>(
-            config, scores, group_scores, topk_values, topk_indices, bias,
-            num_tokens, n_group, topk_group, topk, num_experts,
-            num_experts_per_group, routed_scaling_factor);
-      } else {
-        launch_group_idx_and_topk_kernel<T, IdxT, SCORING_NONE, false>(
-            config, scores, group_scores, topk_values, topk_indices, bias,
-            num_tokens, n_group, topk_group, topk, num_experts,
-            num_experts_per_group, routed_scaling_factor);
-      }
+      launch_group_idx_and_topk_kernel<T, IdxT, SCORING_NONE>(
+          config, scores, group_scores, topk_values, topk_indices, bias,
+          num_tokens, n_group, topk_group, topk, num_experts,
+          num_experts_per_group, renormalize, routed_scaling_factor);
       break;
     }
     case SCORING_SIGMOID: {
-      if (renormalize) {
-        launch_group_idx_and_topk_kernel<T, IdxT, SCORING_SIGMOID, true>(
-            config, scores, group_scores, topk_values, topk_indices, bias,
-            num_tokens, n_group, topk_group, topk, num_experts,
-            num_experts_per_group, routed_scaling_factor);
-      } else {
-        launch_group_idx_and_topk_kernel<T, IdxT, SCORING_SIGMOID, false>(
-            config, scores, group_scores, topk_values, topk_indices, bias,
-            num_tokens, n_group, topk_group, topk, num_experts,
-            num_experts_per_group, routed_scaling_factor);
-      }
+      launch_group_idx_and_topk_kernel<T, IdxT, SCORING_SIGMOID>(
+          config, scores, group_scores, topk_values, topk_indices, bias,
+          num_tokens, n_group, topk_group, topk, num_experts,
+          num_experts_per_group, renormalize, routed_scaling_factor);
       break;
     }
     default:
