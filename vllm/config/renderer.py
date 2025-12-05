@@ -64,7 +64,7 @@ class RendererConfig:
     def __post_init__(self) -> None:
         # The tokenizer is consistent with the model by default.
         if not self.tokenizer:
-            self.tokenizer = self.model_config.model
+            self.tokenizer = self.model_config.original_model
         if not self.tokenizer_revision:
             self.tokenizer_revision = self.model_config.revision
 
@@ -87,7 +87,7 @@ class RendererConfig:
 
         object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
         object_storage_tokenizer.pull_files(
-            self.model_config.original_model,
+            tokenizer,
             ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
         )
         self.tokenizer = object_storage_tokenizer.dir
