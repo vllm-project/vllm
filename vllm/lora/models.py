@@ -367,10 +367,11 @@ class LoRAModelManager:
         if self.supports_mm:
             model_config: ModelConfig = vllm_config.model_config
             self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
-            self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
-            self.supports_mm_lora = self.supports_mm and hasattr(
-                self.info, "get_num_mm_encoder_tokens"
-            )
+            if self.lora_config.enable_mm_lora:
+                self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
+                self.supports_mm_lora = self.supports_mm and hasattr(
+                    self.info, "get_num_mm_encoder_tokens"
+                )
 
         if not self.supports_mm_lora:
             return
@@ -380,7 +381,6 @@ class LoRAModelManager:
             vllm_config.scheduler_config,
             MULTIMODAL_REGISTRY,
         )
-        self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
         limit_per_prompt: int = max(self.info.get_allowed_mm_limits().values())
 
         # For vision tower
