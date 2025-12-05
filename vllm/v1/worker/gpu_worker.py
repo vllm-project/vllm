@@ -51,7 +51,6 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -59,6 +58,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 class Worker(WorkerBase):
@@ -259,7 +259,11 @@ class Worker(WorkerBase):
                 self.vllm_config, self.device
             )
         else:
-            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
+            from vllm.v1.worker.gpu_model_runner import (
+                GPUModelRunner as GPUModelRunnerV1,
+            )
+
+            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -556,7 +560,7 @@ class Worker(WorkerBase):
             and forward_pass
         ):
             # currently only supported by V1 GPUModelRunner
-            assert isinstance(self.model_runner, GPUModelRunner)
+            assert not self.use_v2_model_runner
             num_scheduled_tokens_np = np.array(
                 list(scheduler_output.num_scheduled_tokens.values()),
                 dtype=np.int32,
