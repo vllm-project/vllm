@@ -22,7 +22,7 @@ pull_request_rules:
     - -draft
   actions:
     comment:
-      message: |-
+      message: |
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
         ```bash 
