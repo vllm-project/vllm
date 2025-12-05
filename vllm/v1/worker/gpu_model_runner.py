@@ -4110,8 +4110,8 @@ class GPUModelRunner(
                 # NOTE(lucas): this is a hack, need to clean up.
                 use_cudagraphs = (
                     (
-                        cudagraph_runtime_mode.has_mode(CUDAGraphMode.PIECEWISE)
-                        and is_graph_capturing
+                        is_graph_capturing
+                        and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     )
                     or (cudagraph_runtime_mode != CUDAGraphMode.NONE)
                 ) and not self.speculative_config.enforce_eager
