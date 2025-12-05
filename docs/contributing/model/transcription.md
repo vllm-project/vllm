@@ -183,7 +183,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
             cls,
             audio_duration_s: float,
             stt_config: SpeechToTextConfig,
-            renderer_config: renderer_config,
+            renderer_config: RendererConfig,
         ) -> int | None:
             # Return None if unknown; otherwise return an estimate.
             return int(audio_duration_s * stt_config.sample_rate // 320)  # example
