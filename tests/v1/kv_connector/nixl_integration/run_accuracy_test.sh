@@ -27,18 +27,37 @@ if [[ -n "$ATTENTION_BACKEND" ]]; then
   echo "Using attention backend: $ATTENTION_BACKEND"
 fi
 
+PREFILL_KV_LAYOUT=${PREFILL_KV_LAYOUT:-"HND"}
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
-if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
-  KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
+AGREED_BLOCK_SIZE=${AGREED_BLOCK_SIZE:-""}
+PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
+DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+if [[ -n "$AGREED_BLOCK_SIZE" && "$AGREED_BLOCK_SIZE" != "$PREFILL_BLOCK_SIZE" ]]; then
+  PREFILL_HETERO_BLOCK_SIZE=1
 else
-  KV_CONFIG_HETERO_LAYOUT=''
+  PREFILL_HETERO_BLOCK_SIZE=0
+fi
+if [[ "$PREFILL_KV_LAYOUT" == "NHD" || $PREFILL_HETERO_BLOCK_SIZE -eq 1 ]]; then
+  PREFILL_KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
+else
+  PREFILL_KV_CONFIG_HETERO_LAYOUT=''
+fi
+if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
+  DECODE_KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
+else
+  DECODE_KV_CONFIG_HETERO_LAYOUT=''
+fi
+if [[ "$AGREED_BLOCK_SIZE" != "" ]]; then
+  EXTRA_KV_CONFIG='"agreed_block_size":'"$AGREED_BLOCK_SIZE"
 fi
 
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  PREFILL_KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${PREFILL_KV_CONFIG_HETERO_LAYOUT}',"kv_connector_extra_config":{'${EXTRA_KV_CONFIG}'}}'
+  DECODE_KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${DECODE_KV_CONFIG_HETERO_LAYOUT}',"kv_connector_extra_config":{'${EXTRA_KV_CONFIG}'}}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
+  PREFILL_KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${PREFILL_KV_CONFIG_HETERO_LAYOUT}",\"kv_connector_extra_config\":{"${EXTRA_KV_CONFIG}"}}"
+  DECODE_KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${DECODE_KV_CONFIG_HETERO_LAYOUT}",\"kv_connector_extra_config\":{"${EXTRA_KV_CONFIG}"}}"
 fi
 
 # Models to run
@@ -57,8 +76,7 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
-PREFILL_BLOCK_SIZE=${PREFILL_BLOCK_SIZE:-128}
-DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
+DISABLE_PREFIX_CACHE=${DISABLE_PREFIX_CACHE:-false}
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -91,6 +109,10 @@ get_model_args() {
 
   if [[ "$model_name" == "deepseek-ai/deepseek-vl2-tiny" ]]; then
     extra_args="--hf_overrides '{\"architectures\": [\"DeepseekVLV2ForCausalLM\"]}' --trust-remote-code"
+  fi
+
+  if [[ "$DISABLE_PREFIX_CACHE" == "true" ]]; then
+    extra_args="${extra_args} --no-enable-prefix-caching"
   fi
 
   echo "$extra_args"
@@ -145,7 +167,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT=$PREFILL_KV_LAYOUT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
@@ -154,7 +176,7 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$PREFILL_KV_CONFIG'"
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
@@ -200,7 +222,7 @@ run_tests_for_model() {
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$DECODE_KV_CONFIG'"
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
