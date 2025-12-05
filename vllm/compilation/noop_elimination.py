@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 import torch.fx
 from torch import SymInt
+from torch.fx.experimental.symbolic_shapes import statically_known_true
 
 from vllm.logger import init_logger
 
@@ -116,12 +117,7 @@ class NoOpEliminationPass(VllmInductorPass):
         2. The dimensions both correspond to the same SymInt
         """
         # Case 1
-        if isinstance(i_dim, int) and isinstance(dim, int):
-            return dim == i_dim
-        # Case 2
-        if isinstance(i_dim, SymInt) and isinstance(dim, SymInt):
-            return dim == i_dim
-        return False
+        return statically_known_true(dim == i_dim)
 
     def all_dims_equivalent(
         self, dims: Iterable[int | SymInt], i_dims: Iterable[int | SymInt]
