@@ -5182,6 +5182,7 @@ class GPUModelRunner(
 
         # Initialize eagle's cudagraph dispatcher if using eagle spec decode.
         if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
     def calculate_reorder_batch_threshold(self) -> None:
