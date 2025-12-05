@@ -1380,7 +1380,9 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
-    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         """Reset the KV prefix cache.
 
         If reset_running_requests is True, all the running requests will be
@@ -1418,7 +1420,25 @@ class Scheduler(SchedulerInterface):
                 "the presence of running requests waiting for remote KV transfer, "
                 "which is not supported yet."
             )
+
+        if reset_connector:
+            reset_successful = self.reset_connector_cache() and reset_successful
+
         return reset_successful
+
+    def reset_connector_cache(self) -> bool:
+        if self.connector is None:
+            logger.warning("reset_connector called but no KV connector is configured.")
+            return False
+
+        if self.connector.reset_cache() is False:
+            return False
+
+        if self.log_stats:
+            assert self.connector_prefix_cache_stats is not None
+            self.connector_prefix_cache_stats.reset = True
+
+        return True
 
     def make_stats(
         self,
