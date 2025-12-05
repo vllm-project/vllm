@@ -4104,9 +4104,8 @@ class GPUModelRunner(
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
-                # since eagle currently only supports PIECEWISE cudagraphs if we are
-                # capturing cudagraphs only capture for PIECEWISE cudagraphs use
-                # PIECEWISE cudagraphs if the main model used cudagraphs.
+                # Eagle currently only supports PIECEWISE cudagraphs.
+                # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
                 use_cudagraphs = (
                     (
