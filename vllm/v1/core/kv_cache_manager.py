@@ -207,10 +207,10 @@ class KVCacheManager:
         self,
         request: Request,
         num_new_tokens: int,
-        num_lookahead_tokens: int = 0,
         num_new_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
         new_computed_blocks: KVCacheBlocks | None = None,
+        num_lookahead_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
     ) -> KVCacheBlocks | None:
@@ -221,13 +221,13 @@ class KVCacheManager:
             num_new_tokens: The number of tokens to be computed.
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
-            num_external_computed_tokens: The number of tokens that their
-                KV caches are not cached by vLLM but cached by the connector.
+            new_computed_blocks: The cached blocks for the above new computed
+                tokens, groups as a tuple by kv cache groups.
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
-            new_computed_blocks: The cached blocks for the above new computed
-                tokens, groups as a tuple by kv cache groups.
+            num_external_computed_tokens: The number of tokens that their
+                KV caches are not cached by vLLM but cached by the connector.
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
@@ -349,12 +349,23 @@ class KVCacheManager:
             return None
 
         # Touch the computed blocks to make sure they won't be evicted.
+        touched_block_ids: set[int] = set()
         if self.enable_caching:
             self.block_pool.touch(blocks_to_touch)
+            touched_block_ids = {
+                id(block) for blocks in blocks_to_touch for block in blocks
+            }
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when prefix caching is disabled"
             )
+
+        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+            for blocks in new_computed_block_list:
+                for block in blocks:
+                    if block.is_null or id(block) in touched_block_ids:
+                        continue
+                    block.ref_cnt += 1
 
         if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
             # Append the new computed blocks to the request blocks until now to
