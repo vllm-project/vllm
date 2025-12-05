@@ -57,10 +57,12 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 if current_platform.is_rocm():
-    pytest.skip("These tests require gptq_marlin_repack,"
-            "marlin_int4_fp8_preprocess, gptq_marlin_24_gemm,"
-            "or gptq_marlin_gemm which are not supported on ROCm.",
-            allow_module_level = True)
+    pytest.skip(
+        "These tests require gptq_marlin_repack,"
+        "marlin_int4_fp8_preprocess, gptq_marlin_24_gemm,"
+        "or gptq_marlin_gemm which are not supported on ROCm.",
+        allow_module_level=True,
+    )
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
@@ -627,6 +629,7 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size, mnk_facto
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
+
 
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
