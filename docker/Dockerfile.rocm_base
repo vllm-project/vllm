@@ -45,10 +45,10 @@ RUN apt-get update -y \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
-    && update-alternatives --install /usr/bin/pip pip /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pip 1 \
-    && update-alternatives --install /usr/bin/pip3 pip3 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pip 1 \
-    && update-alternatives --set pip /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pip \
-    && update-alternatives --set pip3 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pip \
+    && update-alternatives --install /usr/bin/pip pip /usr/local/bin/pip${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/pip3 pip3 /usr/local/bin/pip${PYTHON_VERSION} 1 \
+    && update-alternatives --set pip /usr/local/bin/pip${PYTHON_VERSION} \
+    && update-alternatives --set pip3 /usr/local/bin/pip${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
