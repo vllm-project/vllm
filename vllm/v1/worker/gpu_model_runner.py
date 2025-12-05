@@ -153,6 +153,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
+    maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
@@ -2743,7 +2744,7 @@ class GPUModelRunner(
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
-        UBatchSlices | None,
+        bool,
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
@@ -2779,7 +2780,7 @@ class GPUModelRunner(
 
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
-        ubatch_slices, num_tokens_across_dp = None, None
+        should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             # Disable DP padding when running eager to avoid excessive padding when
             # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
@@ -2789,8 +2790,8 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-                num_tokens_unpadded=num_tokens_padded,
+            should_ubatch, num_tokens_across_dp = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
                 parallel_config=self.parallel_config,
                 allow_microbatching=allow_microbatching,
                 allow_dp_padding=allow_dp_padding,
@@ -2822,7 +2823,7 @@ class GPUModelRunner(
         return (
             cudagraph_mode,
             batch_descriptor,
-            ubatch_slices,
+            should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
         )
@@ -2921,7 +2922,7 @@ class GPUModelRunner(
                 (
                     cudagraph_mode,
                     batch_desc,
-                    ubatch_slices,
+                    should_ubatch,
                     num_tokens_across_dp,
                     cudagraph_stats,
                 ) = self._determine_batch_execution_and_padding(
@@ -2934,10 +2935,10 @@ class GPUModelRunner(
 
                 logger.debug(
                     "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                    "ubatch_slices: %s, num_tokens_across_dp: %s",
+                    "should_ubatch: %s, num_tokens_across_dp: %s",
                     cudagraph_mode,
                     batch_desc,
-                    ubatch_slices,
+                    should_ubatch,
                     num_tokens_across_dp,
                 )
 
@@ -2945,9 +2946,17 @@ class GPUModelRunner(
                 num_reqs_padded = (
                     batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
                 )
+                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+                    should_ubatch,
+                    num_scheduled_tokens_np,
+                    num_tokens_padded,
+                    num_reqs_padded,
+                )
+
+                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
                 (attn_metadata, spec_decode_common_attn_metadata) = (
                     self._build_attention_metadata(
@@ -2956,7 +2965,7 @@ class GPUModelRunner(
                         num_reqs=num_reqs,
                         num_reqs_padded=num_reqs_padded if pad_attn else None,
                         max_query_len=max_num_scheduled_tokens,
-                        ubatch_slices=ubatch_slices,
+                        ubatch_slices=ubatch_slices_attn,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
                         num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
@@ -2993,7 +3002,7 @@ class GPUModelRunner(
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
-                ubatch_slices=ubatch_slices,
+                ubatch_slices=ubatch_slices_padded,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
@@ -3945,7 +3954,7 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, ubatch_slices, num_tokens_across_dp, _ = (
+        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -3979,6 +3988,9 @@ class GPUModelRunner(
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded
+        )
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
@@ -4000,11 +4012,12 @@ class GPUModelRunner(
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
+            pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
-                ubatch_slices=ubatch_slices,
+                ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
             )
 
@@ -4056,11 +4069,11 @@ class GPUModelRunner(
                     num_tokens_padded, None, False
                 )
 
-            if ubatch_slices is not None:
+            if ubatch_slices_padded is not None:
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
                 #  the padding refactor.
-                num_tokens_padded = ubatch_slices[0].num_tokens
+                num_tokens_padded = ubatch_slices_padded[0].num_tokens
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
@@ -4073,7 +4086,7 @@ class GPUModelRunner(
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    ubatch_slices=ubatch_slices,
+                    ubatch_slices=ubatch_slices_padded,
                 ),
             ):
                 outputs = self.model(
