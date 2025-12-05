@@ -56,6 +56,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
+if current_platform.is_rocm():
+    pytest.skip("These tests require gptq_marlin_repack,"
+            "marlin_int4_fp8_preprocess, gptq_marlin_24_gemm,"
+            "or gptq_marlin_gemm which are not supported on ROCm.",
+            allow_module_level = True)
+
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 USE_ATOMIC_ADD_OPTS = [False, True]
@@ -622,8 +628,6 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size, mnk_facto
 
     assert max_diff < 0.04
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason="This test requires gptq_marlin_repack is not defined for ROCm")
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
