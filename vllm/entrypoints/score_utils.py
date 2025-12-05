@@ -89,12 +89,10 @@ def parse_score_data(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
     model_config: ModelConfig,
-    tokenizer: TokenizerLike,
 ) -> tuple[str, str, MultiModalDataDict | None]:
-    mm_tracker = MultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
-
     content_2 = _parse_score_content(data_2, mm_tracker)
 
     def ensure_str(content: _ContentPart | None) -> str:
@@ -188,7 +186,6 @@ def get_score_prompt(
         data_1,
         data_2,
         model_config,
-        tokenizer,
     )
     from vllm.model_executor.model_loader import get_model_cls
 

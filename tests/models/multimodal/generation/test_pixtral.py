@@ -15,6 +15,7 @@ from transformers import AutoProcessor
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.multimodal import MultiModalDataBuiltins
+from vllm.platforms import current_platform
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -165,6 +166,15 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
 def test_chat(
     vllm_runner, max_model_len: int, model: str, dtype: str, local_asset_server
 ) -> None:
+    if (
+        model == MISTRAL_SMALL_3_1_ID
+        and max_model_len == 65536
+        and current_platform.is_rocm()
+    ):
+        pytest.skip(
+            "OOM on ROCm: 24B model with 65536 context length exceeds GPU memory"
+        )
+
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
         model,

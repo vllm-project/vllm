@@ -36,6 +36,13 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.skip_global_cleanup
+def test_config(llm: LLM):
+    vllm_config = llm.llm_engine.vllm_config
+    assert vllm_config.cache_config.enable_prefix_caching
+    assert vllm_config.scheduler_config.enable_chunked_prefill
+
+
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
         outputs = llm.reward(
