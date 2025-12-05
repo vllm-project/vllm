@@ -1064,7 +1064,6 @@ def test_selective_state_update_with_inplace_final_state(
         state_batch_indices=state_batch_indices,
         dst_state_batch_indices=dst_state_batch_indices,
         pad_slot_id=PAD_SLOT_ID,
-        inplace_final_state=True,
     )
 
     for seq_idx in range(batch_size):
@@ -1192,7 +1191,6 @@ def test_selective_state_update_varlen_with_num_accepted_and_inplace(
         dst_state_batch_indices=dst_state_batch_indices,
         num_accepted_tokens=num_accepted_tokens,
         pad_slot_id=PAD_SLOT_ID,
-        inplace_final_state=True,
     )
 
     for seq_idx in range(batch_size):
