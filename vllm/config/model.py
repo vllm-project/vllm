@@ -398,7 +398,8 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
-        self.model = maybe_model_redirect(self.model)
+        self.original_model = self.model
+        self.model = maybe_model_redirect(self.original_model)
 
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)

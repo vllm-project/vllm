@@ -68,7 +68,8 @@ class RendererConfig:
         if not self.tokenizer_revision:
             self.tokenizer_revision = self.model_config.revision
 
-        self.tokenizer = maybe_model_redirect(self.tokenizer)
+        self.original_tokenizer = self.tokenizer
+        self.tokenizer = maybe_model_redirect(self.original_tokenizer)
         self.maybe_pull_tokenizer_for_runai(self.tokenizer)
 
         # Multimodal GGUF models must use original repo for mm processing
@@ -86,7 +87,7 @@ class RendererConfig:
 
         object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
         object_storage_tokenizer.pull_files(
-            self.model_config.model,
+            self.model_config.original_model,
             ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
         )
         self.tokenizer = object_storage_tokenizer.dir
