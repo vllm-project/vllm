@@ -161,9 +161,9 @@ class RayDistributedExecutor(Executor):
         self.workers: list[RayWorkerWrapper] = []
 
         # Used in ray compiled DAG: indexed first by PP rank,
-        # and then TP rank. In other words, the inner list is
-        # the TP group of workers for a PP rank.
-        self.pp_tp_workers: list[list[RayWorkerWrapper]] = []
+        # and then PCP and TP rank. In other words, the inner list is
+        # the PCP_TP group of workers for a PP rank.
+        self.pp_pcp_tp_workers: list[list[RayWorkerWrapper]] = []
 
         if self.parallel_config.ray_workers_use_nsight:
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
@@ -368,14 +368,14 @@ class RayDistributedExecutor(Executor):
         self.collective_rpc("load_model")
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
-            self.pp_tp_workers.append([])
-            for tp_rank in range(self.parallel_config.tensor_parallel_size):
-                # PP=2, TP=4
-                # pp_tp_workers = [[0, 1, 2, 3], [4, 5, 6, 7]]
-                rank = (pp_rank * self.parallel_config.tensor_parallel_size) + tp_rank
-                assert len(self.pp_tp_workers[pp_rank]) == tp_rank
-                assert pp_rank < len(self.pp_tp_workers)
-                self.pp_tp_workers[pp_rank].append(self.workers[rank])
+            self.pp_pcp_tp_workers.append([])
+            for pcp_tp_rank in range(self.parallel_config.prefill_context_parallel_size * self.parallel_config.tensor_parallel_size):
+                # PP=2, PCP=2, TP=4
+                # pp_pcp_tp_workers = [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15]]
+                rank = (pp_rank * self.parallel_config.prefill_context_parallel_size * self.parallel_config.tensor_parallel_size) + pcp_tp_rank
+                assert len(self.pp_pcp_tp_workers[pp_rank]) == pcp_tp_rank
+                assert pp_rank < len(self.pp_pcp_tp_workers)
+                self.pp_pcp_tp_workers[pp_rank].append(self.workers[rank])
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
@@ -553,25 +553,29 @@ class RayDistributedExecutor(Executor):
             )
 
         with InputNode() as input_data:
-            # Example DAG: PP=2, TP=4
+            # Example DAG: PP=2, PCP=2, TP=4
             #
-            # SchedulerOutput -> 0 -> (SchedulerOutput, IntermediateTensors) -> 4 -> ModelRunnerOutput   # noqa: E501
-            # SchedulerOutput -> 1 -> (SchedulerOutput, IntermediateTensors) -> 5 -> ModelRunnerOutput   # noqa: E501
-            # SchedulerOutput -> 2 -> (SchedulerOutput, IntermediateTensors) -> 6 -> ModelRunnerOutput   # noqa: E501
-            # SchedulerOutput -> 3 -> (SchedulerOutput, IntermediateTensors) -> 7 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 0 -> (SchedulerOutput, IntermediateTensors) -> 8 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 1 -> (SchedulerOutput, IntermediateTensors) -> 9 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 2 -> (SchedulerOutput, IntermediateTensors) -> 10 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 3 -> (SchedulerOutput, IntermediateTensors) -> 11 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 4 -> (SchedulerOutput, IntermediateTensors) -> 12 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 5 -> (SchedulerOutput, IntermediateTensors) -> 13 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 6 -> (SchedulerOutput, IntermediateTensors) -> 14 -> ModelRunnerOutput   # noqa: E501
+            # SchedulerOutput -> 7 -> (SchedulerOutput, IntermediateTensors) -> 15 -> ModelRunnerOutput   # noqa: E501
 
-            # All workers in the first TP group will take in the
+            # All workers in the first PCP_TP group will take in the
             # ExecuteModelRequest as input.
-            outputs = [input_data for _ in self.pp_tp_workers[0]]
-            for pp_rank, tp_group in enumerate(self.pp_tp_workers):
+            outputs = [input_data for _ in self.pp_pcp_tp_workers[0]]
+            for pp_rank, tp_group in enumerate(self.pp_pcp_tp_workers):
                 # Each PP worker takes in the output of the previous PP worker,
-                # and the TP group executes in SPMD fashion.
+                # and the PCP_TP group executes in SPMD fashion.
                 outputs = [
                     worker.execute_model_ray.bind(outputs[i])  # type: ignore[attr-defined]
                     for i, worker in enumerate(tp_group)
                 ]
 
-                last_pp_rank = len(self.pp_tp_workers) - 1
+                last_pp_rank = len(self.pp_pcp_tp_workers) - 1
                 if (
                     pp_rank < last_pp_rank
                     and envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE != "shm"
