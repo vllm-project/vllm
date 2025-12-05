@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
-from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -24,8 +23,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 class KVCacheCoordinator(ABC):
@@ -92,9 +89,9 @@ class KVCacheCoordinator(ABC):
             total_computed_tokens: Include both local and external tokens.
 
         Returns:
-            1. The number of new blocks to allocate for each kv cache group.
-            2. The number of evictable blocks to touch for each kv cache group.
-            3. The blocks to touch for each kv cache group.
+            The number of new blocks to allocate for each kv cache group.
+            The number of evictable blocks to touch for each kv cache group.
+            The blocks to touch for each kv cache group.
         """
         num_new_blocks_to_allocate = []
         num_evictable_blocks_to_allocate = []
@@ -141,6 +138,8 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
+            total_computed_tokens: The total number of computed tokens, including
+                both local and external tokens.
         """
         for i, manager in enumerate(self.single_type_managers):
             manager.save_new_computed_blocks(
@@ -156,13 +155,14 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
-        token slots. If `num_blocks_to_allocate` is smaller than the number of
-        blocks needed (in the case of sliding window attention), the leading
-        blocks will be padded with null blocks.
+        token slots. If `num_blocks_to_allocate_per_group[i]` is smaller than
+        the number of blocks needed (in the case of sliding window attention),
+        the leading blocks will be padded with null blocks.
 
         Args:
             request_id: The request ID.
-            num_blocks_to_allocate: The number of blocks to allocate.
+            num_blocks_to_allocate_per_group: The number of blocks to allocate
+                for each kv cache group.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating

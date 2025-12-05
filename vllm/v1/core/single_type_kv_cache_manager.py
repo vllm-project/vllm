@@ -91,16 +91,9 @@ class SingleTypeKVCacheManager(ABC):
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-
-        # How many *tokens* are outside the attention window for this manager.
-        # For attention types that do not skip tokens (e.g. full attention),
-        # this will always be 0.
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
 
-        # Fast-path: nothing is skipped. This should match the original
-        # behavior before total_computed_tokens was introduced so that
-        # existing tests (and non-sliding-window attention types) behave
-        # identically.
+        # Fast-path: nothing is skipped.
         if num_skipped_tokens <= 0:
             num_new_blocks = (
                 num_required_blocks
@@ -112,9 +105,6 @@ class SingleTypeKVCacheManager(ABC):
                 for blk in new_computed_blocks
                 if blk.ref_cnt == 0 and not blk.is_null
             ]
-            # Scheduler relies on evictable blocks being counted in the free
-            # capacity check, but allocate_new_blocks will clamp to actual new
-            # blocks to avoid double allocation.
             return num_new_blocks, evictable_computed_blocks
 
         # General case: some prefix tokens are skipped by the attention window.
@@ -168,25 +158,24 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
         """
-
-        # How many *tokens* are outside the attention window for this manager.
-        # For attention types that do not skip tokens (e.g. full attention),
-        # this will always be 0.
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
 
+        # Fast-path: nothing is skipped.
         if num_skipped_tokens <= 0:
             if request_id not in self.num_cached_block:
                 # A new request.
                 req_blocks = self.req_to_blocks[request_id]
                 assert len(req_blocks) == 0
                 req_blocks.extend(new_computed_blocks)
-                ## YIFAN: why len(new_computed_blocks) rather than len(req_blocks)?
+                # REMOVE BEFORE MERGE (YIFAN): why len(new_computed_blocks)
+                # rather than len(req_blocks)?
                 self.num_cached_block[request_id] = len(new_computed_blocks)
             else:
                 # A running request. Should not have new computed blocks.
                 assert len(new_computed_blocks) == 0
             return
 
+        # General case: some prefix tokens are skipped by the attention window.
         num_skipped_blocks = num_skipped_tokens // self.block_size
         req_blocks = self.req_to_blocks[request_id]
         num_local_computed_blocks = len(new_computed_blocks) + len(req_blocks)
@@ -218,6 +207,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
+            num_blocks_to_allocate: The number of new blocks to allocate.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
 
