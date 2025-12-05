@@ -71,8 +71,9 @@ ReqId = str
 #
 # Version History:
 #   1: Initial version with compatibility checking
+#   2: Add remote_request_id to kv_transfer_params
 #
-NIXL_CONNECTOR_VERSION: int = 1
+NIXL_CONNECTOR_VERSION: int = 2
 
 GET_META_MSG = b"get_meta_msg"
 
