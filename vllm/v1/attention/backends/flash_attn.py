@@ -766,9 +766,9 @@ class FlashAttentionImpl(AttentionImpl):
             fa_version=self.vllm_flash_attn_version,
             prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
             suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
+            q_descale=layer._q_scale,
+            k_descale=layer._k_scale,
+            v_descale=layer._v_scale,
             s_aux=self.sinks,
         )
         return output
