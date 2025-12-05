@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
@@ -149,6 +148,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -171,7 +172,7 @@ class CudaPlatformBase(Platform):
             and cache_config.block_size is not None
         ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
-            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # If `--attention-config.backend` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
@@ -179,23 +180,25 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
-            if envs.VLLM_ATTENTION_BACKEND is None:
+            if vllm_config.attention_config.backend is None:
                 # Default case
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
-                    # TODO: This does not work, because the
-                    # global_force_attn_backend_context_manager is not set.
-                    # See vllm/attention/selector.py:_cached_get_attn_backend
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.CUTLASS_MLA
+                    )
                 else:
                     # Not Blackwell
                     use_flashmla = True
             else:
                 # Forced case
-                use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
-                use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
-                use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
+                backend = vllm_config.attention_config.backend
+                use_flashmla = backend == AttentionBackendEnum.FLASHMLA
+                use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
+                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 

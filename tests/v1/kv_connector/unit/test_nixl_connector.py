@@ -1151,13 +1151,29 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
     }
 
     # Store tensor info for validation
-    expected_tensor_size = shared_tensor[0].element_size() * shared_tensor[0].numel()
-    expected_base_addrs = [
-        shared_tensor[0].data_ptr(),
-        shared_tensor[1].data_ptr(),
-        unique_tensor[0].data_ptr(),
-        unique_tensor[1].data_ptr(),
-    ]
+    test_shape = backend_cls.get_kv_cache_shape(
+        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+    )
+    is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
+
+    if is_blocks_first:
+        expected_tensor_size = shared_tensor.element_size() * shared_tensor.numel()
+        expected_base_addrs = [
+            shared_tensor.data_ptr(),
+            unique_tensor.data_ptr(),
+        ]
+        expected_num_entries = 2
+    else:
+        expected_tensor_size = (
+            shared_tensor[0].element_size() * shared_tensor[0].numel()
+        )
+        expected_base_addrs = [
+            shared_tensor[0].data_ptr(),
+            shared_tensor[1].data_ptr(),
+            unique_tensor[0].data_ptr(),
+            unique_tensor[1].data_ptr(),
+        ]
+        expected_num_entries = 4
 
     with (
         patch(
@@ -1192,7 +1208,7 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
         # Verify get_reg_descs was called with caches_data
         assert mock_wrapper_instance.get_reg_descs.called
         caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
-        assert len(caches_data) == 4
+        assert len(caches_data) == expected_num_entries
 
         for i, cache_entry in enumerate(caches_data):
             base_addr, size, _tp_rank, _ = cache_entry
@@ -1214,7 +1230,12 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
 
-        expected_block_len = expected_tensor_size // 2
+        num_blocks = 2
+        if is_blocks_first:
+            expected_block_len = expected_tensor_size // num_blocks // 2
+        else:
+            expected_block_len = expected_tensor_size // num_blocks
+
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
             assert block_len == expected_block_len, (
