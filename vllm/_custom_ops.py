@@ -1601,7 +1601,9 @@ def scaled_fp8_quant(
             scale = torch.empty((1, 1), device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        assert scale.numel() == 1, f"{scale.shape}"
+        assert scale.numel() == 1 or scale.numel() == input.shape[-1], (
+            f"scale must be either shape [1] or [d], where d is hidden_size {input.shape[-1]}, but got {scale.shape}"
+        )
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
 
     return output, scale

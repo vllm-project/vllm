@@ -54,10 +54,15 @@ class QuantFP8(CustomOp):
             assert not static, "Group quantization only supports dynamic mode"
             self.group_size = group_shape.col
         else:
-            assert group_shape in {GroupShape.PER_TOKEN, GroupShape.PER_TENSOR}
-            assert not static or group_shape == GroupShape.PER_TENSOR, (
-                "Only per-tensor scales supported for static quantization."
-            )
+            assert group_shape in {
+                GroupShape.PER_TOKEN,
+                GroupShape.PER_TENSOR,
+                GroupShape.PER_CHANNEL,
+            }
+            assert not static or group_shape in {
+                GroupShape.PER_TENSOR,
+                GroupShape.PER_CHANNEL,
+            }, "Only per-tensor or per-channel scales are supported for static quant."
             self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
 
     def forward_cuda(
