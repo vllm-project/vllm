@@ -11,6 +11,7 @@ import pybase64
 import torch
 
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
 
@@ -135,8 +136,4 @@ class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
         return torch.load(filepath, weights_only=True)
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        buffer = BytesIO()
-        torch.save(media, buffer)
-        buffer.seek(0)
-        binary_data = buffer.read()
-        return pybase64.b64encode(binary_data).decode("utf-8")
+        return tensor2base64(media)
