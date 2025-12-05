@@ -258,7 +258,6 @@ class RMSNormFp8Helion(HelionCustomOp):
         """
         return rms_norm_fp8(input, weight, scale, epsilon)
 
-
     @property
     def helion_kernels(self):
         """Return the list of Helion kernel wrappers for autotuning."""
@@ -274,13 +273,6 @@ class RMSNormFp8Benchmark(KernelBenchmark):
     This class provides test configurations and benchmark utilities
     for the RMSNormFp8Helion custom op.
     """
-
-    benchmark_name = "rms_norm_fp8"
-
-    def __init__(self):
-        """Initialize the benchmark."""
-        self.op = RMSNormFp8Helion()
-        self.epsilon = 1e-5
 
     def get_quick_test_shapes(
         self,
@@ -344,7 +336,7 @@ class RMSNormFp8Benchmark(KernelBenchmark):
 
     def create_inputs(
         self, dtype: torch.dtype, **shape_params
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
         """
         Create input tensors for rms_norm_fp8 kernel.
 
@@ -353,10 +345,11 @@ class RMSNormFp8Benchmark(KernelBenchmark):
             **shape_params: Must contain 'shape' - a tuple specifying input shape
 
         Returns:
-            Tuple of (input_tensor, weight, scale)
+            Tuple of (input_tensor, weight, scale, epsilon)
             - input_tensor has shape (num_tokens, hidden_size)
             - weight has shape (hidden_size,)
             - scale is a scalar tensor
+            - epsilon is the epsilon value for numerical stability
         """
         shape = shape_params["shape"]
         hidden_size = shape[-1]
@@ -364,10 +357,15 @@ class RMSNormFp8Benchmark(KernelBenchmark):
         input_tensor = torch.randn(*shape, dtype=dtype, device="cuda")
         weight = torch.randn(hidden_size, dtype=dtype, device="cuda")
         scale = torch.tensor([0.5], dtype=torch.float32, device="cuda")
-        return input_tensor, weight, scale
+        epsilon = 1e-5
+        return input_tensor, weight, scale, epsilon
 
     def run_baseline(
-        self, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
     ) -> torch.Tensor:
         """
         Run the baseline reference kernel.
@@ -379,26 +377,16 @@ class RMSNormFp8Benchmark(KernelBenchmark):
             input: Input tensor with shape (num_tokens, hidden_size)
             weight: Weight tensor with shape (hidden_size,)
             scale: Scale tensor (scalar)
+            epsilon: Epsilon value for numerical stability
 
         Returns:
             Output tensor from baseline kernel
         """
         out = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-        torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, self.epsilon)
+        torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
         return out
 
-    def run_helion(
-        self, input: torch.Tensor, weight: torch.Tensor, scale: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Run the Helion kernel.
 
-        Args:
-            input: Input tensor with shape (num_tokens, hidden_size)
-            weight: Weight tensor with shape (hidden_size,)
-            scale: Scale tensor (scalar)
-
-        Returns:
-            Output tensor from Helion kernel
-        """
-        return self.op.forward_helion(input, weight, scale, self.epsilon)
+# Register the benchmark class with the CustomOp
+if HELION_AVAILABLE:
+    RMSNormFp8Helion.register_benchmark(RMSNormFp8Benchmark)

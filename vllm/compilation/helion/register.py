@@ -10,7 +10,6 @@ as PyTorch custom operations with automatic fake kernel generation.
 from collections.abc import Callable
 from typing import Optional
 
-import torch
 from torch.library import Library
 
 from vllm.logger import init_logger
@@ -47,6 +46,9 @@ class HelionKernelWrapper:
         # Registered implementations for autotuning methods
         self._autotune_inputs_generator = None
         self._config_picker = None
+
+        # Registered benchmark class for this kernel
+        self._benchmark_class = None
 
         # Copy attributes needed for PyTorch schema inference
         self.__name__ = getattr(helion_kernel_func, "__name__", op_name)
@@ -203,6 +205,33 @@ class HelionKernelWrapper:
             )
         return self._config_picker(model_config, available_configs)
 
+    def register_benchmark(self, benchmark_class):
+        """
+        Register a benchmark class for this kernel.
+
+        Args:
+            benchmark_class: KernelBenchmark subclass for benchmarking this kernel
+
+        Returns:
+            The registered benchmark class (for decorator usage)
+
+        Example:
+            @silu_mul_fp8.register_benchmark
+            class SiluMulFp8Benchmark(KernelBenchmark):
+                ...
+        """
+        self._benchmark_class = benchmark_class
+        return benchmark_class
+
+    def get_benchmark(self):
+        """
+        Get the registered benchmark class for this kernel.
+
+        Returns:
+            KernelBenchmark subclass, or None if no benchmark is registered
+        """
+        return self._benchmark_class
+
     def run_autotune(
         self, autotune_inputs: dict[str, tuple], tuner_kwargs: dict | None = None
     ) -> dict[str, "helion.Config"]:
@@ -224,9 +253,7 @@ class HelionKernelWrapper:
         # Get the Helion kernel function
         kernel_fn = self.helion_kernel_func
         if kernel_fn is None:
-            raise RuntimeError(
-                f"No Helion kernel available for {self.op_name}"
-            )
+            raise RuntimeError(f"No Helion kernel available for {self.op_name}")
 
         # Set reasonable defaults for tuner
         tuner_kwargs = tuner_kwargs or {}
@@ -240,9 +267,7 @@ class HelionKernelWrapper:
         results = {}
 
         for config_key, inputs in autotune_inputs.items():
-            logger.info(
-                f"Autotuning {self.op_name} for config: {config_key}"
-            )
+            logger.info(f"Autotuning {self.op_name} for config: {config_key}")
 
             try:
                 # Use Helion's built-in autotune method
@@ -282,9 +307,7 @@ class HelionKernelWrapper:
         )
 
         kernel_name = self.op_name
-        assert kernel_name, (
-            f"{self.op_name}.op_name returned None or empty string"
-        )
+        assert kernel_name, f"{self.op_name}.op_name returned None or empty string"
 
         # Load available configs using ConfigManager
         available_configs = config_manager.load_all_configs(kernel_name)
@@ -406,7 +429,8 @@ def register_kernel(
 
         if not HELION_AVAILABLE:
             logger.warning(
-                "Helion not available, skipping registration of kernel '%s'", final_op_name
+                "Helion not available, skipping registration of kernel '%s'",
+                final_op_name,
             )
             return helion_kernel_func
 
@@ -420,7 +444,9 @@ def register_kernel(
 
         # Create the HelionKernelWrapper that will be registered as PyTorch custom op
         namespace = "vllm_helion"  # Fixed namespace for all Helion kernels
-        kernel_wrapper = HelionKernelWrapper(helion_kernel_func, final_op_name, namespace)
+        kernel_wrapper = HelionKernelWrapper(
+            helion_kernel_func, final_op_name, namespace
+        )
 
         # Register the wrapper as PyTorch custom op using vLLM's low-overhead function
         # Convert mutates_args tuple to list of strings for direct_register_custom_op
@@ -466,7 +492,9 @@ def register_kernel(
         )
 
         # Preserve references for advanced use and debugging
-        kernel_wrapper._pytorch_op_wrapper = None  # No longer applicable with direct registration
+        kernel_wrapper._pytorch_op_wrapper = (
+            None  # No longer applicable with direct registration
+        )
         kernel_wrapper._helion_kernel = helion_kernel_func
 
         if final_fake_impl == fake_impl:

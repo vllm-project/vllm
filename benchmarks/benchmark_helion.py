@@ -26,10 +26,12 @@ from pathlib import Path
 
 import torch
 
-# Import helion package to auto-register all kernel benchmarks
+# Import helion package to auto-register all kernel benchmarks and CustomOps
 import vllm.compilation.helion  # noqa: F401
+import vllm.compilation.helion.allreduce_add_rmsnorm  # noqa: F401
+import vllm.compilation.helion.rms_norm_fp8  # noqa: F401
+import vllm.compilation.helion.silu_mul_fp8  # noqa: F401
 from vllm.compilation.helion.benchmark import (
-    KernelBenchmark,
     print_results,
     print_summary_statistics,
     save_results_csv,
@@ -105,20 +107,46 @@ def main():
             "(default: /tmp/helion_benchmark_{benchmark}_{timestamp})"
         ),
     )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=4096,
+        help="Hidden size for model configuration (default: 4096)",
+    )
     args = parser.parse_args()
 
     # List all benchmarks if requested
     if args.list_benchmarks:
-        benchmarks = KernelBenchmark.list_benchmarks()
-        print("Available Helion kernel benchmarks:\n")
-        for bench_name in benchmarks:
-            print(f"  {bench_name}")
+        try:
+            from vllm.compilation.helion.custom_op import get_registered_custom_ops
+
+            custom_ops = get_registered_custom_ops()
+            available_benchmarks = []
+            for op_name, op_class in custom_ops.items():
+                if op_class.get_benchmark() is not None:
+                    available_benchmarks.append(op_name)
+
+            print("Available Helion CustomOp benchmarks:\n")
+            for bench_name in available_benchmarks:
+                print(f"  {bench_name}")
+        except ImportError:
+            print("ERROR: Helion not available")
         return
 
-    # Get the benchmark class
+    # Get the CustomOp by name and its associated benchmark class
     try:
-        benchmark_cls = KernelBenchmark.get_benchmark_class(args.benchmark)
-    except ValueError as e:
+        from vllm.compilation.helion.custom_op import get_registered_custom_ops
+
+        custom_ops = get_registered_custom_ops()
+        if args.benchmark not in custom_ops:
+            raise ValueError(f"Unknown CustomOp '{args.benchmark}'")
+
+        custom_op_class = custom_ops[args.benchmark]
+        benchmark_cls = custom_op_class.get_benchmark()
+        if benchmark_cls is None:
+            raise ValueError(f"No benchmark registered for CustomOp '{args.benchmark}'")
+
+    except (ImportError, ValueError) as e:
         print(f"ERROR: {e}")
         return
 
@@ -134,6 +162,7 @@ def main():
     print(f"PyTorch version: {torch.__version__}")
     print(f"Benchmark: {args.benchmark}")
     print(f"Mode: {args.mode}")
+    print(f"Hidden size: {args.hidden_size}")
     print(f"CUDA graphs: {'DISABLED' if args.no_cudagraph else 'ENABLED'}")
     print(f"Correctness verification: {'DISABLED' if args.no_verify else 'ENABLED'}")
     print(f"Iterations: {args.num_iterations}")
@@ -143,8 +172,34 @@ def main():
     # Set default device
     torch.set_default_device("cuda")
 
-    # Create benchmark instance
-    benchmark = benchmark_cls()
+    # Configure the kernel with the specified hidden size
+    try:
+        from vllm.compilation.helion.config_manager import ConfigManager
+
+        # Create a mock HuggingFace config with the hidden size
+        class MockHFConfig:
+            def __init__(self, hidden_size):
+                self.hidden_size = hidden_size
+
+        # Create a mock vLLM ModelConfig that mimics the real one
+        class MockModelConfig:
+            def __init__(self, hidden_size):
+                self.hf_text_config = MockHFConfig(hidden_size)
+
+            def get_hidden_size(self):
+                return getattr(self.hf_text_config, "hidden_size", 0)
+
+        mock_model_config = MockModelConfig(args.hidden_size)
+
+    except ImportError:
+        print("ERROR: Helion not available")
+        return
+    except Exception as e:
+        print(f"ERROR: Failed to configure kernel: {e}")
+        return
+
+    # Create benchmark instance with model config
+    benchmark = benchmark_cls(model_config=mock_model_config)
 
     # Run benchmark using the standardized API
     results = benchmark.run(

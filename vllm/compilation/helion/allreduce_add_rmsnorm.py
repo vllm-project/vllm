@@ -306,7 +306,7 @@ if HELION_AVAILABLE:
             range_warp_specializes=[],
             reduction_loops=[None],
         ),
-        static_shapes=True,
+        static_shapes=False,
     )
     def allreduce_add_rmsnorm(
         allreduce_buf: torch.Tensor,
@@ -400,9 +400,7 @@ if HELION_AVAILABLE:
                 batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
             )
             rms_gamma = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
-            progress = torch.zeros(
-                splits_per_rank, dtype=torch.uint32, device="cuda"
-            )
+            progress = torch.zeros(splits_per_rank, dtype=torch.uint32, device="cuda")
 
             inputs[str(hidden_size)] = (
                 allreduce_buf,
@@ -613,7 +611,6 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
             input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
         )
 
-
     @property
     def helion_kernels(self):
         """Return the list of Helion kernel wrappers for autotuning."""
@@ -641,15 +638,18 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
     The baseline (FlashInfer) still uses CUDA graphs for fair comparison.
     """
 
-    benchmark_name = "allreduce_add_rmsnorm"
-
-    def __init__(self, num_gpus: int = 2):
+    def __init__(self, num_gpus: int = 2, model_config=None):
         """
         Args:
             num_gpus: Number of GPUs to use for distributed benchmark (default: 2)
+            model_config: vLLM ModelConfig for kernel configuration
         """
-        super().__init__(num_gpus=num_gpus, master_port=12348)
+        super().__init__(
+            num_gpus=num_gpus, master_port=12348, model_config=model_config
+        )
 
+    def __post_init__(self):
+        """Additional initialization after distributed setup."""
         if not FLASHINFER_AVAILABLE:
             raise RuntimeError(
                 "FlashInfer is required for baseline comparison. "
@@ -868,36 +868,6 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
 
         return norm_out_baseline.clone(), residual_out_baseline.clone()
 
-    def run_helion(self, *args, **kwargs) -> Any:
-        """
-        Run Helion kernel.
-
-        Args are unpacked from create_inputs():
-            input_data, residual_data, gamma, eps, splits_per_rank
-
-        Returns:
-            Tuple of (norm_out, residual_out)
-        """
-        input_data, residual_data, gamma, eps, splits_per_rank = args
-
-        M, K = input_data.shape
-
-        # Get or create cached buffers
-        input_helion, residual_helion = self._get_or_create_cached_buffer(
-            M, K, input_data.dtype, "helion_input", input_data, residual_data
-        )
-
-        # Create op with the correct splits_per_rank for this test
-        op = AllReduceAddRMSNormHelion(splits_per_rank=splits_per_rank)
-        norm_out, residual_out = op.forward_helion(
-            input_helion,
-            residual_helion,
-            gamma,
-            eps,
-        )
-
-        return norm_out, residual_out
-
     def get_shape_description(self, **shape_params) -> str:
         """Generate description for shape configuration."""
         M, K = shape_params["shape"]
@@ -923,3 +893,8 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
         """
         self._cleanup_flashinfer_workspace()
         self._buffer_cache.clear()
+
+
+# Register the benchmark class with the CustomOp
+if HELION_AVAILABLE:
+    AllReduceAddRMSNormHelion.register_benchmark(AllReduceAddRMSNormBenchmark)

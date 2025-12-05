@@ -10,7 +10,6 @@ Helion custom ops extend vLLM's CustomOp infrastructure with:
 """
 
 from abc import abstractmethod
-from typing import Optional
 
 import torch
 
@@ -19,6 +18,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 
 logger = init_logger(__name__)
+
+# Registry for CustomOp -> Benchmark class associations
+_custom_op_benchmarks: dict[type["HelionCustomOp"], type] = {}
 
 # Import Helion types conditionally
 try:
@@ -152,9 +154,12 @@ class HelionCustomOp(CustomOp):
             f"{self.__class__.__name__} HelionCustomOp must be enabled"
         )
 
-        assert model_config is not None, (
-            f"{self.__class__.__name__}.configure() requires model_config to be provided"
-        )
+        # Handle case where model_config is None (e.g., during testing/compilation)
+        if model_config is None:
+            raise AssertionError(
+                f"{self.__class__.__name__}.configure() requires model_config to be provided. "
+                "Tests should create a mock ModelConfig with appropriate hidden size."
+            )
 
         # Delegate to all helion kernels' configure methods
         helion_kernels = self.helion_kernels
@@ -164,7 +169,6 @@ class HelionCustomOp(CustomOp):
 
         for kernel in helion_kernels:
             kernel.configure(model_config, self._config_manager)
-
 
     @property
     @abstractmethod
@@ -179,3 +183,56 @@ class HelionCustomOp(CustomOp):
             List[HelionKernelWrapper]: List of Helion kernel wrappers, or empty list if not available
         """
         raise NotImplementedError
+
+    # Benchmark Registration Methods
+
+    @classmethod
+    def register_benchmark(cls, benchmark_class):
+        """
+        Register a benchmark class for this CustomOp.
+
+        Args:
+            benchmark_class: KernelBenchmark subclass to associate with this CustomOp
+
+        Returns:
+            The registered benchmark class (for decorator usage)
+
+        Example:
+            @SiluMulFp8Helion.register_benchmark
+            class SiluMulFp8Benchmark(KernelBenchmark):
+                ...
+        """
+        _custom_op_benchmarks[cls] = benchmark_class
+        return benchmark_class
+
+    @classmethod
+    def get_benchmark(cls):
+        """
+        Get the registered benchmark class for this CustomOp.
+
+        Returns:
+            KernelBenchmark subclass, or None if no benchmark is registered
+        """
+        return _custom_op_benchmarks.get(cls)
+
+
+def get_registered_custom_ops() -> dict[str, type["HelionCustomOp"]]:
+    """
+    Get all registered Helion CustomOps.
+
+    Returns:
+        Dictionary mapping CustomOp names to classes
+    """
+    # Get all registered CustomOps from vLLM's registry
+    from vllm.model_executor.custom_op import CustomOp
+
+    registered_ops = {}
+
+    # Access the CustomOp registries
+    for registry in [CustomOp.op_registry, CustomOp.op_registry_oot]:
+        for op_name, op_class in registry.items():
+            # Check if it's a HelionCustomOp
+            if issubclass(op_class, HelionCustomOp):
+                registered_ops[op_name] = op_class
+
+    return registered_ops
