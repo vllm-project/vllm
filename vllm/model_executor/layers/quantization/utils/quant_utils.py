@@ -34,6 +34,7 @@ class GroupShape(_GroupShape):
     # Aliases for common quantization group shapes
     PER_TENSOR: ClassVar["GroupShape"]
     PER_TOKEN: ClassVar["GroupShape"]
+    PER_CHANNEL: ClassVar["GroupShape"]
 
     def is_per_tensor(self) -> bool:
         return self.row == -1 and self.col == -1
@@ -41,12 +42,16 @@ class GroupShape(_GroupShape):
     def is_per_token(self) -> bool:
         return self.row == 1 and self.col == -1
 
+    def is_per_channel(self) -> bool:
+        return self.row == -1 and self.col == 1
+
     def is_per_group(self) -> bool:
         return self.row == 1 and self.col >= 1
 
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
+GroupShape.PER_CHANNEL = GroupShape(-1, 1)
 
 
 @dataclass(frozen=True)
@@ -63,15 +68,14 @@ class ScaleDesc:
     group_shape: GroupShape
 
     def __str__(self):
-        group_shape = (
-            "per_tensor"
-            if self.group_shape == GroupShape.PER_TENSOR
-            else (
-                "per_token"
-                if self.group_shape == GroupShape.PER_TOKEN
-                else str(self.group_shape)
-            )
-        )
+        if self.group_shape == GroupShape.PER_TENSOR:
+            group_shape = "per_tensor"
+        elif self.group_shape == GroupShape.PER_TOKEN:
+            group_shape = "per_token"
+        elif self.group_shape == GroupShape.PER_CHANNEL:
+            group_shape = "per_channel"
+        else:
+            group_shape = str(self.group_shape)
 
         return (
             f"{fx.graph.dtype_abbrs[self.dtype]},"

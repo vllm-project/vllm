@@ -29,6 +29,24 @@ __global__ void scaled_fp8_quant_kernel_strided(
 }
 
 template <typename scalar_t, typename fp8_type>
+__global__ void scaled_fp8_quant_kernel_strided_per_channel(
+    fp8_type* __restrict__ out, const scalar_t* __restrict__ input,
+    const float* __restrict__ scale, int hidden_size, int64_t in_row_stride,
+    int64_t out_row_stride) {
+  const int64_t token_idx = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  const scalar_t* token_in = input + token_idx * in_row_stride;
+  fp8_type* token_out = out + token_idx * out_row_stride;
+
+  for (int i = tid; i < hidden_size; i += blockDim.x) {
+    const float inv_scale = 1.0f / scale[i];
+    token_out[i] = scaled_fp8_conversion<true, fp8_type>(
+        static_cast<float>(token_in[i]), inv_scale);
+  }
+}
+
+template <typename scalar_t, typename fp8_type>
 __global__ void segmented_max_reduction_strided(
     float* __restrict__ scale, const scalar_t* __restrict__ input,
     int hidden_size, int64_t in_row_stride, int64_t num_tokens) {
@@ -135,33 +153,46 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 
 void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
-                             torch::Tensor const& scale)  // [1]
+                             torch::Tensor const& scale)  // [1] or [d]
 {
   TORCH_CHECK(input.stride(-1) == 1,
               "last dimension of input must be contiguous");
   TORCH_CHECK(out.stride(-1) == 1,
               "last dimension of output must be contiguous");
+  TORCH_CHECK(scale.numel() == 1 || scale.numel() == input.size(-1),
+              "scale must be either shape [1] or [d], where d is hidden_size");
 
   const int hidden_size = input.size(-1);
   const int num_tokens = input.numel() / hidden_size;
   const int block_size = 256;
   dim3 grid(num_tokens);
   dim3 block(block_size);
+  const bool is_per_channel = (scale.numel() == hidden_size);
 
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "scaled_fp8_quant_kernel_fp8_type", [&] {
-              vllm::scaled_fp8_quant_kernel_strided<scalar_t, fp8_t>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                      scale.data_ptr<float>(), hidden_size, in_row_stride,
-                      out_row_stride);
+              if (is_per_channel) {
+                vllm::scaled_fp8_quant_kernel_strided_per_channel<scalar_t,
+                                                                  fp8_t>
+                    <<<grid, block, 0, stream>>>(
+                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                        scale.data_ptr<float>(), hidden_size, in_row_stride,
+                        out_row_stride);
+              } else {
+                vllm::scaled_fp8_quant_kernel_strided<scalar_t, fp8_t>
+                    <<<grid, block, 0, stream>>>(
+                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                        scale.data_ptr<float>(), hidden_size, in_row_stride,
+                        out_row_stride);
+              }
             });
       });
 }
