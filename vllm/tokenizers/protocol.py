@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from transformers import AddedToken, BatchEncoding
+    from transformers import BatchEncoding
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 
@@ -32,10 +32,6 @@ class TokenizerLike(Protocol):
     @property
     def all_special_ids(self) -> list[int]:
         raise NotImplementedError
-
-    @property
-    def added_tokens_decoder(self) -> dict[int, "AddedToken"]:
-        raise NotImplementedError()
 
     @property
     def bos_token_id(self) -> int:
