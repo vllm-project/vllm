@@ -64,6 +64,7 @@ def test_multimodal_interface():
     assumes(PlaceholderRange, "offset")
     assumes(PlaceholderRange, "length")
 
+
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
 )
@@ -157,7 +158,7 @@ def test_request_interface():
     assumes(req, "num_tokens")
     assumes(req, "kv_transfer_params", is_instance_of=(dict, NoneType))
 
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
 
     assumes(MultiModalFeatureSpec, "identifier")
     assumes(MultiModalFeatureSpec, "mm_position")
