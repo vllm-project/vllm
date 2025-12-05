@@ -6,10 +6,13 @@ from functools import lru_cache
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
 )
+
+logger = init_logger(__name__)
 
 
 class QuantMethod(IntEnum):
@@ -36,6 +39,66 @@ class ActivationMethod(IntEnum):
 
 
 aiter_topK_meta_data = None
+
+
+def preprocess_w4a16_weights_for_aiter(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Preprocess vLLM weights to AITER format for w4a16 quantization.
+
+    Args:
+        w1: Gate/up projection weights [E, 2*inter_dim, K] uint8
+        w2: Down projection weights [E, hidden_size, K] uint8
+        w1_scale: Scale for w1 [E, 2*inter_dim, groups] float
+        w2_scale: Scale for w2 [E, hidden_size, groups] float
+        num_experts: Number of experts (E)
+
+    Returns:
+        Tuple of (w1_aiter, w2_aiter, w1_scale_aiter, w2_scale_aiter)
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if w1.dtype != torch.uint8:
+        logger.warning("w1 dtype is %s, converting to uint8", w1.dtype)
+        w1 = w1.view(torch.uint8)
+    if w2.dtype != torch.uint8:
+        logger.warning("w2 dtype is %s, converting to uint8", w2.dtype)
+        w2 = w2.view(torch.uint8)
+
+    # Use rocm_aiter_ops registered functions
+    w1_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w1, NLane=16, gate_up=True)
+    w2_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w2, NLane=16, gate_up=False)
+
+    # Ensure output is uint8 (AITER shuffle might preserve input dtype)
+    if w1_aiter.dtype != torch.uint8:
+        logger.warning(
+            "w1_aiter dtype is %s after shuffle, converting to uint8",
+            w1_aiter.dtype,
+        )
+        w1_aiter = w1_aiter.view(torch.uint8)
+    if w2_aiter.dtype != torch.uint8:
+        logger.warning(
+            "w2_aiter dtype is %s after shuffle, converting to uint8",
+            w2_aiter.dtype,
+        )
+        w2_aiter = w2_aiter.view(torch.uint8)
+
+    w1_scale_2d = w1_scale.view(num_experts * w1_scale.shape[1], -1)
+    w1_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(
+        w1_scale_2d, num_experts, gate_up=True
+    )
+
+    w2_scale_2d = w2_scale.view(num_experts * w2_scale.shape[1], -1)
+    w2_scale_aiter = rocm_aiter_ops.shuffle_scale_a16w4(
+        w2_scale_2d, num_experts, gate_up=False
+    )
+
+    return w1_aiter, w2_aiter, w1_scale_aiter, w2_scale_aiter
 
 
 @lru_cache(maxsize=1)
@@ -221,9 +284,12 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # quark moe for mxfp4 w_dtype
-        if quant_config.use_mxfp4_w4a16:
-            quant_method = QuantMethod.BLOCK_1X32.value
+
+        # w4a16 quantization (int4 or mxfp4):
+        # Use QuantMethod.NO to prevent activation quantization
+        # AITER will detect w1_scale/w2_scale and use a16w4 kernels for weights
+        # (activations stay in bf16/fp16, weights are pre-quantized int4/mxfp4)
+
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
             assert not apply_router_weight_on_input, (
@@ -238,6 +304,10 @@ def rocm_aiter_fused_experts(
         elif quant_config.use_fp8_w8a8:
             # Currently only per tensor quantization method is enabled.
             quant_method = QuantMethod.PER_TENSOR.value
+        elif quant_config.use_int4_w4a16 or quant_config.use_mxfp4_w4a16:
+            quant_method = QuantMethod.BLOCK_1X32.value
+        else:
+            raise ValueError(f"Unsupported quantization method: {quant_config}")
 
         if apply_router_weight_on_input:
             assert topk_weights.dim() == 2, (

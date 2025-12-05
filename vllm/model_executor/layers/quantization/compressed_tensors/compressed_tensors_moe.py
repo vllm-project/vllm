@@ -1877,6 +1877,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             "Only symmetric quantization is supported for MoE"
         )
 
+        # Check if ROCm AITER is available for w4a16
+        self.rocm_aiter_moe_enabled = False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -2005,7 +2008,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Reconfigure packed weights and scales to match moe_wna16 format
+        # Check if we should enable ROCm AITER for w4a16
+        self.rocm_aiter_moe_enabled = (
+            self.num_bits == 4 and rocm_aiter_ops.is_fused_moe_enabled()
+        )
+
         layer.w13_weight_packed = torch.nn.Parameter(
             layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
             requires_grad=False,
@@ -2014,12 +2021,45 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
             requires_grad=False,
         )
+
         layer.w13_weight_scale = torch.nn.Parameter(
             layer.w13_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
+
+        # If using AITER, preprocess weights and scales for w4a16
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                preprocess_w4a16_weights_for_aiter,
+            )
+
+            # Preprocess weights for AITER (shuffle + convert scales)
+            num_experts = layer.w13_weight_packed.shape[0]
+
+            shuffled_w13, shuffled_w2, shuffled_w13_scale, shuffled_w2_scale = (
+                preprocess_w4a16_weights_for_aiter(
+                    w1=layer.w13_weight_packed.data,
+                    w2=layer.w2_weight_packed.data,
+                    w1_scale=layer.w13_weight_scale.data,
+                    w2_scale=layer.w2_weight_scale.data,
+                    num_experts=num_experts,
+                )
+            )
+
+            layer.w13_weight_packed = torch.nn.Parameter(
+                shuffled_w13, requires_grad=False
+            )
+            layer.w2_weight_packed = torch.nn.Parameter(
+                shuffled_w2, requires_grad=False
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(
+                shuffled_w13_scale, requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                shuffled_w2_scale, requires_grad=False
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -2069,6 +2109,25 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             router_logits=router_logits,
         )
 
+        # Use ROCm AITER optimized path for w4a16 if enabled
+        if self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+                rocm_aiter_fused_experts,
+            )
+
+            return rocm_aiter_fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight_packed,
+                w2=layer.w2_weight_packed,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+            )
+
+        # Default path: use standard fused_experts
         return fused_experts(
             x,
             layer.w13_weight_packed,
