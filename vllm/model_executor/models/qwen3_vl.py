@@ -200,7 +200,6 @@ class Qwen3_VisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -214,7 +213,6 @@ class Qwen3_VisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
-            attn_backend=attn_backend,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -395,7 +393,6 @@ class Qwen3_VisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
-                    attn_backend=self.attn_backend,
                 )
                 for layer_idx in range(vision_config.depth)
             ]

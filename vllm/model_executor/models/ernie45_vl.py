@@ -200,13 +200,6 @@ class Ernie4_5_VisionAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
-        )
-
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
@@ -215,6 +208,11 @@ class Ernie4_5_VisionAttention(nn.Module):
             raise RuntimeError(
                 f"Ernie45-VL does not support {self.attn_backend} backend now."
             )
+
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
+        )
+
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
