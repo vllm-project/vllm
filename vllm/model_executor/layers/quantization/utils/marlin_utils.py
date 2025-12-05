@@ -179,8 +179,6 @@ def check_marlin_supports_shape(
 
 
 def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    from vllm.platform import current_platform
-
     if current_platform.is_rocm():
         return False
     output_size_per_partition = (
@@ -199,8 +197,6 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    from vllm.platform import current_platform
-
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
