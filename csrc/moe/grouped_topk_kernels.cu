@@ -707,50 +707,32 @@ inline void launch_group_idx_and_topk_kernel(
     int64_t const num_tokens, int64_t const n_group, int64_t const topk_group,
     int64_t const topk, int64_t const num_experts,
     int64_t const num_experts_per_group, double const routed_scaling_factor) {
+  auto launch = [&](auto* kernel_instance2) {
+    cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
+                       topk_values, topk_indices, bias, num_tokens, n_group,
+                       topk_group, topk, num_experts, num_experts_per_group,
+                       routed_scaling_factor);
+  };
+
   switch (n_group) {
     case 4: {
-      auto* kernel_instance2 =
-          &group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 4>;
-      cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                         topk_values, topk_indices, bias, num_tokens, n_group,
-                         topk_group, topk, num_experts, num_experts_per_group,
-                         routed_scaling_factor);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 4>);
       break;
     }
     case 8: {
-      auto* kernel_instance2 =
-          &group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 8>;
-      cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                         topk_values, topk_indices, bias, num_tokens, n_group,
-                         topk_group, topk, num_experts, num_experts_per_group,
-                         routed_scaling_factor);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 8>);
       break;
     }
     case 16: {
-      auto* kernel_instance2 =
-          &group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 16>;
-      cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                         topk_values, topk_indices, bias, num_tokens, n_group,
-                         topk_group, topk, num_experts, num_experts_per_group,
-                         routed_scaling_factor);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 16>);
       break;
     }
     case 32: {
-      auto* kernel_instance2 =
-          &group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 32>;
-      cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                         topk_values, topk_indices, bias, num_tokens, n_group,
-                         topk_group, topk, num_experts, num_experts_per_group,
-                         routed_scaling_factor);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm, 32>);
       break;
     }
     default: {
-      auto* kernel_instance2 =
-          &group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm>;
-      cudaLaunchKernelEx(&config, kernel_instance2, scores, group_scores,
-                         topk_values, topk_indices, bias, num_tokens, n_group,
-                         topk_group, topk, num_experts, num_experts_per_group,
-                         routed_scaling_factor);
+      launch(&group_idx_and_topk_idx_kernel<T, IdxT, SF, Renorm>);
       break;
     }
   }
@@ -778,17 +760,19 @@ void invokeNoAuxTc(T* scores, T* group_scores, float* topk_values,
   config.attrs = attrs;
   auto const sf = static_cast<ScoringFunc>(scoring_func);
   int64_t const num_experts_per_group = num_experts / n_group;
+  auto launch_topk_with_k2 = [&](auto* kernel_instance1) {
+    cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
+                       num_tokens, num_cases, n_group, num_experts_per_group);
+  };
   switch (sf) {
     case SCORING_NONE: {
       auto* kernel_instance1 = &topk_with_k2_kernel<T, SCORING_NONE>;
-      cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
-                         num_tokens, num_cases, n_group, num_experts_per_group);
+      launch_topk_with_k2(kernel_instance1);
       break;
     }
     case SCORING_SIGMOID: {
       auto* kernel_instance1 = &topk_with_k2_kernel<T, SCORING_SIGMOID>;
-      cudaLaunchKernelEx(&config, kernel_instance1, group_scores, scores, bias,
-                         num_tokens, num_cases, n_group, num_experts_per_group);
+      launch_topk_with_k2(kernel_instance1);
       break;
     }
     default:
