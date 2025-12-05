@@ -331,14 +331,19 @@ def test_get_num_blocks_to_allocate():
         KVCacheBlock(i + 1) for i in range(5)
     ]
 
-    assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
-        == 20
+    num_blocks, evictable = manager.get_num_blocks_to_allocate(
+        "1", 20 * block_size, cached_blocks_1, 0
     )
-    assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
-        == 15
+    assert num_blocks == 10
+    assert evictable == cached_blocks_1
+    assert num_blocks + len(evictable) == 20
+
+    num_blocks, evictable = manager.get_num_blocks_to_allocate(
+        "2", 20 * block_size, cached_blocks_2, 0
     )
+    assert num_blocks == 10
+    assert evictable == cached_blocks_2[5:]
+    assert num_blocks + len(evictable) == 20
 
 
 def test_evictable_cached_blocks_not_double_allocated():
@@ -359,17 +364,21 @@ def test_evictable_cached_blocks_not_double_allocated():
     request_id = "req"
     evictable_block = block_pool.blocks[1]  # ref_cnt == 0, eviction candidate
 
-    num_blocks = manager.get_num_blocks_to_allocate(
+    num_blocks, evictable_blocks = manager.get_num_blocks_to_allocate(
         request_id=request_id,
         num_tokens=4,  # requires 2 blocks
         new_computed_blocks=[evictable_block],  # one cached block hit
         total_computed_tokens=0,
     )
-    # Free capacity check should count evictable cached blocks (so return 2),
-    # but allocation should only allocate the truly new block.
-    assert num_blocks == 2
+    # Free capacity check should count evictable cached blocks, but allocation
+    # should only allocate the truly new block.
+    assert num_blocks == 1
+    assert evictable_blocks == [evictable_block]
+    assert num_blocks + len(evictable_blocks) == 2
 
-    manager.save_new_computed_blocks(request_id, [evictable_block])
+    manager.save_new_computed_blocks(
+        request_id, [evictable_block], total_computed_tokens=block_size
+    )
     new_blocks = manager.allocate_new_blocks(request_id, num_blocks, num_tokens=4)
     assert len(new_blocks) == 1
     assert len(manager.req_to_blocks[request_id]) == 2
@@ -394,11 +403,16 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
         KVCacheBlock(i + 1) for i in range(5)
     ]
 
-    assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
-        == 20
+    num_blocks, evictable = manager.get_num_blocks_to_allocate(
+        "1", 20 * block_size, cached_blocks_1, 0
     )
-    assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
-        == 15
+    assert num_blocks == 10
+    assert evictable == cached_blocks_1
+    assert num_blocks + len(evictable) == 20
+
+    num_blocks, evictable = manager.get_num_blocks_to_allocate(
+        "2", 20 * block_size, cached_blocks_2, 0
     )
+    assert num_blocks == 10
+    assert evictable == cached_blocks_2[5:]
+    assert num_blocks + len(evictable) == 15
