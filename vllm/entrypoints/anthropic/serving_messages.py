@@ -267,11 +267,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Received messages.count_tokens request %s",
-                request.model_dump_json(),
-            )
 
         validation_error = self._validate_anthropic_request(
             messages=request.messages,
@@ -336,10 +331,6 @@ class AnthropicServingMessages(OpenAIServingChat):
             ),
         )
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "messages.count_tokens response %s", response.model_dump_json()
-            )
         return response
 
     async def create_messages(
