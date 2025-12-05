@@ -279,13 +279,13 @@ class ParsableContext(ConversationContext):
         """Return true if the last message is a MCP tool call"""
         last_message = self.parser.response_messages[-1]
         # TODO: figure out which tools are MCP tools
-        if (  # noqa: SIM103
-            last_message.type == "function_call"
-            and last_message.name
-            in ("code_interpreter", "python", "web_search_preview")
-            or last_message.name.startswith("container")
-        ):
-            return True
+        if last_message.type == "function_call":  # noqa: SIM102
+            if last_message.name in (
+                "code_interpreter",
+                "python",
+                "web_search_preview",
+            ) or last_message.name.startswith("container"):
+                return True
 
         return False
 
