@@ -8,6 +8,7 @@ from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ....conftest import AudioTestAssets, HfRunner, PromptAudioInput, VllmRunner
 from ...registry import HF_EXAMPLE_MODELS
@@ -32,6 +33,12 @@ MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
 # currently still needs to be passed directly to vLLM.
 audio_lora_path = MODEL_NAME
 models = [MODEL_NAME]
+
+
+@pytest.fixture(autouse=True)
+def set_attention_backend_for_rocm(monkeypatch):
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
 
 
 def run_test(
@@ -111,8 +118,12 @@ def run_test(
 
 
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_model_len", [2048])
+@pytest.mark.parametrize(
+    "dtype", ["float16"] if current_platform.is_rocm() else ["bfloat16"]
+)
+@pytest.mark.parametrize(
+    "max_model_len", [512] if current_platform.is_rocm() else [2048]
+)
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_models(

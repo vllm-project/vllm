@@ -11,6 +11,7 @@ import pprint
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from functools import partial
 from typing import Any
 
@@ -401,6 +402,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.extra_traceback = False
 
     def run(self, *args):
+        # maybe instead just assert inputs are fake?
         fake_args = [
             self.fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in args
@@ -415,11 +417,13 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         kwargs: dict[str, Any],
     ) -> Any:
         assert isinstance(target, str)
+
         output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)
             submod = self.fetch_attr(target)
+
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
@@ -429,7 +433,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 self.vllm_backend.compiler_manager.compile(
                     submod,
                     args,
-                    self.compilation_config.inductor_compile_config,
+                    self.vllm_backend.inductor_config,
                     self.compilation_config,
                     graph_index=index,
                     num_graphs=len(self.compile_submod_names),
@@ -531,6 +535,9 @@ class VllmBackend:
     sym_tensor_indices: list[int]
     input_buffers: list[torch.Tensor]
     compiler_manager: CompilerManager
+    # Copy of CompilationConfig.inductor_compile_config +
+    # an entry for PostGradPassManager
+    inductor_config: dict[str, Any]
 
     def __init__(
         self,
@@ -561,25 +568,30 @@ class VllmBackend:
             self.compilation_config
         )
 
+        # Deepcopy the inductor config to detach the post-grad custom pass
+        # from CompilationConfig.
+        # We want to avoid PostGradPassManager in CompilationConfig because
+        # in future we need PostGradPassManager.uuid() to be executed
+        # only at compile time.
+        self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
     def configure_post_pass(self):
-        config = self.compilation_config
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
         # hook. If a pass for that hook exists, add it to the pass manager.
-        inductor_config = config.inductor_compile_config
-        if self.pass_key in inductor_config:
-            if isinstance(inductor_config[self.pass_key], PostGradPassManager):
-                # PassManager already added to config, make sure it's correct
-                assert inductor_config[self.pass_key].uuid() == self.pass_manager.uuid()
+        if self.pass_key in self.inductor_config:
+            if isinstance(self.inductor_config[self.pass_key], PostGradPassManager):
+                raise ValueError(
+                    "PostGradPassManager can not be kept in CompilationConfig."
+                )
             else:
                 # Config should automatically wrap all inductor passes
-                assert isinstance(inductor_config[self.pass_key], InductorPass)
-                self.pass_manager.add(inductor_config[self.pass_key])
-        inductor_config[self.pass_key] = self.pass_manager
+                assert isinstance(self.inductor_config[self.pass_key], InductorPass)
+                self.pass_manager.add(self.inductor_config[self.pass_key])
+        self.inductor_config[self.pass_key] = self.pass_manager
 
     def __call__(
         self, graph: fx.GraphModule, example_inputs
@@ -638,9 +650,7 @@ class VllmBackend:
         self.compilation_config.local_cache_dir = local_cache_dir
 
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
-        disable_cache = not is_compile_cache_enabled(
-            self.compilation_config.inductor_compile_config
-        )
+        disable_cache = not is_compile_cache_enabled(self.inductor_config)
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
@@ -739,11 +749,21 @@ class VllmBackend:
             if not item.is_splitting_graph
         ]
 
+        # Extract fake values from the graph to use them when needed.
+        all_fake_values = []
+        for i in graph.graph.find_nodes(op="placeholder"):
+            all_fake_values.append(i.meta["example_value"])
+
+        fake_args = [
+            all_fake_values[i] if isinstance(t, torch.Tensor) else t
+            for i, t in enumerate(example_inputs)
+        ]
+
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(
             self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*example_inputs)
+        ).run(*fake_args)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
@@ -773,14 +793,7 @@ class VllmBackend:
             )
 
         # if we need to copy input buffers for cudagraph
-        from torch._guards import detect_fake_mode
-
-        fake_mode = detect_fake_mode()
-        fake_args = [
-            fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
-            for t in example_inputs
-        ]
-
+        #
         # index of tensors that have symbolic shapes (batch size)
         # for weights and static buffers, they will have concrete shapes.
         # symbolic shape only happens for input tensors.
