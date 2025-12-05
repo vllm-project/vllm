@@ -43,7 +43,7 @@ else:
 @triton.heuristics(
     {"BLOCK_SIZE_DSTATE": lambda args: triton.next_power_of_2(args["dstate"])}
 )
-@triton.jit(do_not_specialize=["N", "T"])
+@triton.jit(do_not_specialize=["N"])
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
@@ -63,7 +63,6 @@ def _selective_scan_update_kernel(
     cu_seqlens_ptr,
     # Matrix dimensions
     N,
-    T,
     nheads,
     dim,
     dstate,
@@ -110,7 +109,6 @@ def _selective_scan_update_kernel(
     HAS_D: tl.constexpr,
     HAS_Z: tl.constexpr,
     HAS_STATE_BATCH_INDICES: tl.constexpr,
-    INPLACE_FINAL_STATE: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
@@ -127,9 +125,8 @@ def _selective_scan_update_kernel(
         if seq_len == 0:
             return
     else:
-        bos = pid_b * T
-        eos = bos + T
-        seq_len = T
+        bos = pid_b
+        seq_len = 1
 
     state_ptr_base = state_ptr
 
@@ -144,7 +141,7 @@ def _selective_scan_update_kernel(
             init_token_idx = 0
 
         dst_state_batch_indices_ptr += pid_b * stride_dst_state_indices_batch
-        if not INPLACE_FINAL_STATE:
+        if not IS_SPEC_DECODING:
             dst_state_batch_idx = tl.load(
                 dst_state_batch_indices_ptr
                 + init_token_idx * stride_dst_state_indices_T
@@ -180,7 +177,7 @@ def _selective_scan_update_kernel(
     state_ptrs = state_ptr + (
         offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
     )
-    if not INPLACE_FINAL_STATE:
+    if not IS_SPEC_DECODING:
         dst_state_ptrs = dst_state_ptr + (
             offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
         )
@@ -238,7 +235,7 @@ def _selective_scan_update_kernel(
         dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
         state = state * dA + dB * x[:, None]
 
-        if INPLACE_FINAL_STATE:
+        if IS_SPEC_DECODING:
             dst_idx_ptr = dst_state_batch_indices_ptr + i_t * stride_dst_state_indices_T
             token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
             if token_dst_idx != pad_slot_id:
@@ -268,7 +265,7 @@ def _selective_scan_update_kernel(
         if HAS_Z:
             z_ptr += stride_z_batch
 
-    if not INPLACE_FINAL_STATE:
+    if not IS_SPEC_DECODING:
         tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
 
 
@@ -287,7 +284,6 @@ def selective_state_update(
     dst_state_batch_indices=None,
     pad_slot_id=PAD_SLOT_ID,
     out=None,
-    inplace_final_state=False,
     num_accepted_tokens=None,
     cu_seqlens=None,
 ):
@@ -310,6 +306,11 @@ def selective_state_update(
             indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
+        num_accepted_tokens: (batch,)
+            number of accepted tokens from previous verification step,
+            tells the kernel which initial state to use
+        cu_seqlens: (batch,)
+            length per sequence, for variable length in speculative decoding cases
     """
     if state.dim() == 3:
         state = state.unsqueeze(1)
@@ -331,6 +332,9 @@ def selective_state_update(
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
+    if num_accepted_tokens is not None:
+        assert state_batch_indices is not None and state_batch_indices.dim() == 2
+        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
     if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
@@ -422,7 +426,6 @@ def selective_state_update(
             num_accepted_tokens,
             cu_seqlens,
             N,
-            max_seqlen,
             nheads,
             dim,
             dstate,
@@ -461,7 +464,6 @@ def selective_state_update(
             dt_softplus,
             tie_hdim,
             BLOCK_SIZE_M,
-            INPLACE_FINAL_STATE=inplace_final_state,
             num_warps=num_warps,
         )
 
