@@ -156,6 +156,8 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+    num_of_microbatches: int = 2
+    """Number of microbatches. Requires --enable-dbo to be enabled."""
 
     dbo_decode_token_threshold: int = 32
     """The threshold for dual batch overlap for batches only containing decodes.

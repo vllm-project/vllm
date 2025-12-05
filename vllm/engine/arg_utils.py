@@ -408,6 +408,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
+    num_of_microbatches: int = ParallelConfig.num_of_microbatches
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
     disable_nccl_for_dp_synchronization: bool = (
@@ -841,6 +842,10 @@ class EngineArgs:
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
+        parallel_group.add_argument(
+            "--num-of-microbatches",
+            **parallel_kwargs["num_of_microbatches"],
+        )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
             **parallel_kwargs["dbo_decode_token_threshold"],
@@ -1557,6 +1562,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
+            num_of_microbatches=self.num_of_microbatches,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,

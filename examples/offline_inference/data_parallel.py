@@ -94,6 +94,12 @@ def parse_args():
         help=("Enable microbatched execution"),
     )
     parser.add_argument(
+        "--num-of-microbatches",
+        type=int,
+        default=2,
+        help=("Number of microbatches. Requires --enable-dbo to be enabled."),
+    )
+    parser.add_argument(
         "--compilation-config",
         type=int,
         help=("Compilation optimization (O) mode 0-3."),
