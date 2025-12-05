@@ -81,7 +81,10 @@ else
     alias_arg=""
 fi
 
-$PYTHON pip install regex && .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
+# HACK: we do not need regex module here, but it is required by pre-commit hook
+# To avoid any external dependency, we simply replace it back to the stdlib re module
+sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
