@@ -455,11 +455,13 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in tools on commentary channel are treated as reasoning for now
-        elif recipient is not None and (
-            recipient.startswith("python")
-            or recipient.startswith("browser")
-            or recipient.startswith("container")
+        elif (
+            recipient is None  # Preambles: explanatory text before tool calls
+            or recipient.startswith(("python", "browser", "container"))
         ):
+            # Per Harmony format, commentary channel can contain preambles to calling
+            # multiple functions - explanatory text with no recipient. Built-in tool
+            # recipients (python/browser/container) also generate reasoning output.
             output_items.extend(_parse_reasoning_content(message))
         else:
             raise ValueError(f"Unknown recipient: {recipient}")
