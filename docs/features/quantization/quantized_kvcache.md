@@ -49,7 +49,6 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
 
-
 ---
 
 ## Examples
@@ -96,9 +95,9 @@ print(out)
 
 ### 3. **[Recommended] Calibration Using a Dataset (with `llm-compressor`)**
 
-For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization. 
+For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization.
 
-#### Install the required package:
+#### Install the required package
 
 ```bash
 pip install llmcompressor
