@@ -1307,7 +1307,7 @@ def test_shutdown_cleans_up_resources(dist_init):
         patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
         patch.object(nixl_wrapper, "deregister_memory") as mock_dereg,
     ):
-        worker._recving_transfers = {"req1": [(123, time.perf_counter())]}
+        worker._recving_transfers = {"req1": [123]}
         worker.src_xfer_side_handle = 456
         worker.dst_xfer_side_handles = {"engine1": 789}
         worker._remote_agents = {"engine1": {0: "agent1"}}
