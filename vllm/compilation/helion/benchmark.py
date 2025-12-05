@@ -49,9 +49,6 @@ def verify_correctness(
             output = output.to(dtype=compare_dtype)
             reference = reference.to(dtype=compare_dtype)
 
-        print(f"ycao_debug: refernce {reference}")
-        print(f"ycao_debug: output {output}")
-
         torch.testing.assert_close(
             output,
             reference,
@@ -342,6 +339,40 @@ class KernelBenchmark(ABC):
         """
         return "_".join(f"{k}={v}" for k, v in sorted(shape_params.items()))
 
+    # FIXME(gmagogsfm): This is a hack until Helion doesn't incorrectly
+    # specialize 0/1 tensor dimensions during inputs binding.
+    # https://github.com/pytorch/helion/issues/934
+    def _reorder_shapes_avoid_dimension_one_first(self, shapes: list[tuple]) -> list[tuple]:
+        """
+        Reorder shapes to avoid dimensions of 1 appearing first.
+
+        This is a hack to prevent Helion from specializing on shapes with dimensions
+        of 1 when they appear early in the benchmark sequence. Shapes with dimensions
+        of 1 are moved to the end while preserving the relative order of other shapes.
+
+        Args:
+            shapes: List of shape tuples to reorder
+
+        Returns:
+            Reordered list where shapes without dimension 1 come first
+        """
+        shapes_without_one = []
+        shapes_with_one = []
+
+        for shape in shapes:
+            if 1 in shape:
+                shapes_with_one.append(shape)
+            else:
+                shapes_without_one.append(shape)
+
+        # Return non-1 shapes first, then shapes with 1
+        reordered = shapes_without_one + shapes_with_one
+
+        if shapes_with_one:
+            print(f"Benchmark reordering: moved {len(shapes_with_one)} shapes with dimension 1 to end")
+
+        return reordered
+
     def run_benchmark(self, config: BenchmarkConfig) -> BenchmarkResult | None:
         """
         Run a single benchmark configuration.
@@ -369,8 +400,6 @@ class KernelBenchmark(ABC):
             )
             baseline_output = self.run_baseline(*inputs)
             helion_output = self.run_helion(*inputs)
-
-            print(f"ycao_debug inputs: {inputs}")
 
             passed = verify_correctness(
                 helion_output,
@@ -464,7 +493,9 @@ class KernelBenchmark(ABC):
         # Run benchmarks for all configurations
         results = []
         for shapes, dtype, extra_params in test_configs:
-            for shape in shapes:
+            # Reorder shapes to avoid dimensions of 1 appearing first
+            reordered_shapes = self._reorder_shapes_avoid_dimension_one_first(shapes)
+            for shape in reordered_shapes:
                 config = BenchmarkConfig(
                     shape_params={"shape": shape},
                     dtype=dtype,
@@ -578,7 +609,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
         # Build configuration list from test shapes
         configs = []
         for shapes, dtype, extra_params in test_configs:
-            for shape in shapes:
+            # Reorder shapes to avoid dimensions of 1 appearing first
+            reordered_shapes = self._reorder_shapes_avoid_dimension_one_first(shapes)
+            for shape in reordered_shapes:
                 # If there are extra parameters, create all combinations
                 if extra_params:
                     # Generate all combinations of extra parameters
