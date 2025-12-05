@@ -59,9 +59,14 @@ class ZeroExpertFusedMoE(FusedMoE):
         # We handle zero experts ourselves in forward().
         super().__init__(**kwargs)
         # Store the actual zero_expert_num and zero_expert_type for our own use
-        self._actual_zero_expert_num = 0
-        self._actual_zero_expert_type = None
+        self._actual_zero_expert_num = zero_expert_num
+        self._actual_zero_expert_type = zero_expert_type
         self._router = router  # Full router (includes zero experts)
+
+        # Expose zero_expert_num and zero_expert_type as attributes for
+        # compatibility with quantization methods that check these attributes
+        self.zero_expert_num = 0
+        self.zero_expert_type = None
 
         # Memoization state for routing results
         self._memoized_topk_weights: torch.Tensor | None = None
