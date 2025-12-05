@@ -950,7 +950,8 @@ class VllmConfig:
                 "or Mamba attention. If you are a developer of kv connector"
                 ", please consider supporting hybrid kv cache manager for "
                 "your connector by making sure your connector is a subclass"
-                " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                " of `SupportsHMA` defined in kv_connector/v1/base.py and"
+                " use --no-disable-hybrid-kv-cache-manager to start vLLM."
             )
             self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
