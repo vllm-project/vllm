@@ -74,7 +74,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
         total_computed_tokens: int,
-    ) -> tuple[list[int], list[int], tuple[Sequence[KVCacheBlock], ...]]:
+    ) -> tuple[list[int], list[int]]:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -91,25 +91,23 @@ class KVCacheCoordinator(ABC):
         Returns:
             The number of new blocks to allocate for each kv cache group.
             The number of evictable blocks to touch for each kv cache group.
-            The blocks to touch for each kv cache group.
         """
         num_new_blocks_to_allocate = []
         num_evictable_blocks_to_allocate = []
-        evictable_blocks_to_touch: list[Sequence[KVCacheBlock]] = []
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 (
                     num_new_blocks_to_allocate_single_group,
-                    blocks_to_touch_single_group,
+                    num_evictable_blocks_to_allocate_single_group,
                 ) = manager.get_num_blocks_to_allocate(
                     request_id, num_encoder_tokens, [], 0
                 )
             else:
                 (
                     num_new_blocks_to_allocate_single_group,
-                    blocks_to_touch_single_group,
+                    num_evictable_blocks_to_allocate_single_group,
                 ) = manager.get_num_blocks_to_allocate(
                     request_id,
                     num_tokens,
@@ -117,13 +115,10 @@ class KVCacheCoordinator(ABC):
                     total_computed_tokens,
                 )
             num_new_blocks_to_allocate.append(num_new_blocks_to_allocate_single_group)
-            num_evictable_blocks_to_allocate.append(len(blocks_to_touch_single_group))
-            evictable_blocks_to_touch.append(blocks_to_touch_single_group)
-        return (
-            num_new_blocks_to_allocate,
-            num_evictable_blocks_to_allocate,
-            tuple(evictable_blocks_to_touch),
-        )
+            num_evictable_blocks_to_allocate.append(
+                num_evictable_blocks_to_allocate_single_group
+            )
+        return num_new_blocks_to_allocate, num_evictable_blocks_to_allocate
 
     def save_new_computed_blocks(
         self,

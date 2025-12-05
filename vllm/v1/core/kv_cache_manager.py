@@ -331,7 +331,6 @@ class KVCacheManager:
         (
             num_new_blocks_to_allocate,
             num_evictable_blocks_to_allocate,
-            blocks_to_touch,
         ) = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
@@ -348,24 +347,12 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        # Touch the computed blocks to make sure they won't be evicted.
-        touched_block_ids: set[int] = set()
         if self.enable_caching:
-            self.block_pool.touch(blocks_to_touch)
-            touched_block_ids = {
-                id(block) for blocks in blocks_to_touch for block in blocks
-            }
+            self.block_pool.touch(new_computed_block_list)
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when prefix caching is disabled"
             )
-
-        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
-            for blocks in new_computed_block_list:
-                for block in blocks:
-                    if block.is_null or id(block) in touched_block_ids:
-                        continue
-                    block.ref_cnt += 1
 
         if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
             # Append the new computed blocks to the request blocks until now to
