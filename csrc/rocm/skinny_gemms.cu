@@ -1301,14 +1301,16 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                                        biasf4, c, __wvPrGrp, CuCount);     \
   }
 
-#define WVSPLIT_TILE(_YT, __N) \
-  {                            \
-    if (_YT <= 2)              \
-      WVSPLITK(2, 2, __N)      \
-    else if (_YT <= 3)         \
-      WVSPLITK(3, 1, __N)      \
-    else                       \
-      WVSPLITK(4, 1, __N)      \
+#define WVSPLIT_TILE(_sYT, __N) \
+  {                             \
+    if (_sYT <= 2)              \
+      WVSPLITK(1, 4, __N)       \
+    else if (_sYT <= 4 * 2)     \
+      WVSPLITK(2, 2, __N)       \
+    else if (_sYT <= 4 * 3)     \
+      WVSPLITK(3, 2, __N)       \
+    else                        \
+      WVSPLITK(4, 2, __N)       \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
@@ -1321,22 +1323,22 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
 
-    // first shoot for biggest tile-size that keeps machine busy,
+    // first shoot for biggest tile-size that keeps all simd busy,
     // then cut the active waves to balance their distribution...
-    int YT = (M_in + CuCount * 16 - 1) / (CuCount * 16);
+    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);
 
     switch (N_in) {
       case 1:
-        WVSPLIT_TILE(YT, 1)
+        WVSPLIT_TILE(sYT, 1)
         break;
       case 2:
-        WVSPLIT_TILE(YT, 2)
+        WVSPLIT_TILE(sYT, 2)
         break;
       case 3:
-        WVSPLIT_TILE(YT, 3)
+        WVSPLIT_TILE(sYT, 3)
         break;
       case 4:
-        WVSPLIT_TILE(YT, 4)
+        WVSPLIT_TILE(sYT, 4)
         break;
       default:
         throw std::runtime_error(
