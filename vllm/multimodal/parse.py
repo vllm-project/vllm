@@ -484,7 +484,7 @@ class MultiModalDataParser:
             return ImageEmbeddingItems(data)
 
         if (
-            isinstance(data, PILImage.Image)
+            isinstance(data, (PILImage.Image, MediaWithBytes))
             or isinstance(data, (np.ndarray, torch.Tensor))
             and data.ndim == 3
         ):
