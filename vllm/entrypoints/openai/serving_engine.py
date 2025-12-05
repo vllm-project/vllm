@@ -81,6 +81,7 @@ from vllm.entrypoints.openai.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranslationRequest,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
@@ -344,8 +345,10 @@ class OpenAIServing:
         input_processor = self.input_processor
         tokenizer = input_processor.tokenizer
         if tokenizer is None:
-            raise ValueError(
-                "You cannot use beam search when `skip_tokenizer_init=True`"
+            raise VLLMValidationError(
+                "You cannot use beam search when `skip_tokenizer_init=True`",
+                parameter="skip_tokenizer_init",
+                value=True,
             )
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
@@ -704,8 +707,9 @@ class OpenAIServing:
 
             return None
 
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e), param=e.parameter)
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
     async def _collect_batch(
@@ -736,6 +740,8 @@ class OpenAIServing:
 
             return None
 
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e), param=e.parameter)
         except Exception as e:
             return self.create_error_response(str(e))
 
@@ -744,6 +750,7 @@ class OpenAIServing:
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
     ) -> ErrorResponse:
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
@@ -752,7 +759,12 @@ class OpenAIServing:
             else:
                 traceback.print_stack()
         return ErrorResponse(
-            error=ErrorInfo(message=message, type=err_type, code=status_code.value)
+            error=ErrorInfo(
+                message=message,
+                type=err_type,
+                code=status_code.value,
+                param=param,
+            )
         )
 
     def create_streaming_error_response(
@@ -760,10 +772,14 @@ class OpenAIServing:
         message: str,
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
     ) -> str:
         json_str = json.dumps(
             self.create_error_response(
-                message=message, err_type=err_type, status_code=status_code
+                message=message,
+                err_type=err_type,
+                status_code=status_code,
+                param=param,
             ).model_dump()
         )
         return json_str
@@ -795,6 +811,7 @@ class OpenAIServing:
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
+            param="model",
         )
 
     def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
@@ -961,11 +978,13 @@ class OpenAIServing:
                     ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
-                raise ValueError(
+                raise VLLMValidationError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
-                    f"Please reduce the length of the input."
+                    f"Please reduce the length of the input.",
+                    parameter="input_tokens",
+                    value=token_num,
                 )
             return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
@@ -987,20 +1006,24 @@ class OpenAIServing:
         # Note: input length can be up to model context length - 1 for
         # completion-like requests.
         if token_num >= self.max_model_len:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, your request has "
                 f"{token_num} input tokens. Please reduce the length of "
-                "the input messages."
+                "the input messages.",
+                parameter="input_tokens",
+                value=token_num,
             )
 
         if max_tokens is not None and token_num + max_tokens > self.max_model_len:
-            raise ValueError(
+            raise VLLMValidationError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
                 f"{self.max_model_len} tokens and your request has "
                 f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
-                f" - {token_num})."
+                f" - {token_num}).",
+                parameter="max_tokens",
+                value=max_tokens,
             )
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
