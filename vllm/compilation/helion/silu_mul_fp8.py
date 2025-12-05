@@ -69,6 +69,7 @@ if HELION_AVAILABLE:
             range_unroll_factors=[0],
             range_warp_specializes=[],
         ),
+        static_shapes=False,
     )
     def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
@@ -229,7 +230,6 @@ class SiluMulFp8Helion(HelionCustomOp):
         # Use the registered HelionKernelWrapper which handles config internally
         return silu_mul_fp8(input, scale)
 
-
     @property
     def helion_kernels(self):
         """Return the list of Helion kernel wrappers for autotuning."""
@@ -245,13 +245,6 @@ class SiluMulFp8Benchmark(KernelBenchmark):
     This class provides test configurations and benchmark utilities
     for the SiluMulFp8Helion custom op.
     """
-
-    benchmark_name = "silu_mul_fp8"
-
-    def __init__(self):
-        """Initialize the benchmark."""
-        super().__init__()
-        self.op = SiluMulFp8Helion()
 
     def get_quick_test_shapes(
         self,
@@ -355,15 +348,7 @@ class SiluMulFp8Benchmark(KernelBenchmark):
         torch.ops._C.silu_and_mul_quant(out, input, scale)
         return out
 
-    def run_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        """
-        Run the Helion kernel.
 
-        Args:
-            input: Input tensor with shape (batch, 2 * hidden_dim)
-            scale: Scale tensor (scalar)
-
-        Returns:
-            Output tensor from Helion kernel with shape (batch, hidden_dim)
-        """
-        return self.op.forward_helion(input, scale)
+# Register the benchmark class with the CustomOp
+if HELION_AVAILABLE:
+    SiluMulFp8Helion.register_benchmark(SiluMulFp8Benchmark)
