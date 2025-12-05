@@ -153,7 +153,7 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Pass full router_logits (including zero experts) so that zero experts
         # can be properly identified in topk_ids
         with self._temporarily_set_attrs(**temp_attrs):
-            topk_weights, topk_ids, _ = self.select_experts(
+            topk_weights, topk_ids = self.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,  # Full logits (includes zero experts)
             )
