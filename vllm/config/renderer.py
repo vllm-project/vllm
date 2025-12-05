@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, SkipValidation
 from pydantic.dataclasses import dataclass
 
 from vllm.config.model import ModelConfig
@@ -19,7 +19,7 @@ TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 class RendererConfig:
     """Configuration for the renderer."""
 
-    model_config: ModelConfig = Field(default_factory=ModelConfig)
+    model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """Provides model context to the renderer."""
 
     tokenizer: str = ""
