@@ -208,6 +208,9 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # list of itl's
+    inter_token_latencies: list[float] = field(default_factory=list)
+
 
 @dataclass
 class FinishedRequestStats:
@@ -297,6 +300,7 @@ class IterationStats:
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
             self.inter_token_latencies_iter.append(itl)
+            req_stats.inter_token_latencies.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
 
