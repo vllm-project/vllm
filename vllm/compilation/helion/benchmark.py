@@ -20,9 +20,6 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-# Registry for KernelBenchmark classes
-_benchmark_registry: dict[str, type["KernelBenchmark"]] = {}
-
 # Global container for distributed benchmark result collection
 _distributed_results_container = [None]
 
@@ -51,6 +48,9 @@ def verify_correctness(
         if compare_dtype is not None:
             output = output.to(dtype=compare_dtype)
             reference = reference.to(dtype=compare_dtype)
+
+        print(f"ycao_debug: refernce {reference}")
+        print(f"ycao_debug: output {output}")
 
         torch.testing.assert_close(
             output,
@@ -111,54 +111,59 @@ class KernelBenchmark(ABC):
     Subclasses should implement kernel-specific logic for creating inputs,
     running reference and Helion kernels, and providing test configurations.
 
-    Subclasses are automatically registered using their benchmark_name attribute.
-
-    Example:
-        class SiluMulFp8Benchmark(KernelBenchmark):
-            benchmark_name = "silu_mul_fp8"
-            ...
+    Each subclass is responsible for:
+    1. Creating its HelionCustomOp instance
+    2. Configuring it with the provided model config
+    3. Running benchmarks and reporting results
     """
 
-    benchmark_name: str = ""
-
-    def __init_subclass__(cls, **kwargs):
-        """Automatically register subclasses with non-empty benchmark_name."""
-        super().__init_subclass__(**kwargs)
-        # Only register classes that set a benchmark_name
-        # This allows abstract base classes to have empty names
-        if cls.benchmark_name != "":
-            _benchmark_registry[cls.benchmark_name] = cls
-
-    @staticmethod
-    def get_benchmark_class(name: str) -> type["KernelBenchmark"]:
+    def __init__(self, model_config=None):
         """
-        Get a registered benchmark class by name.
+        Initialize benchmark with optional model configuration.
 
         Args:
-            name: Registered name of the benchmark
-
-        Returns:
-            The benchmark class
-
-        Raises:
-            ValueError: If benchmark is not found
+            model_config: vLLM ModelConfig for kernel configuration
         """
-        if name not in _benchmark_registry:
+        super().__init__()
+        self.model_config = model_config
+        self._custom_op = None
+
+        # Setup and configure the custom op during initialization
+        self.setup_custom_op()
+
+    def setup_custom_op(self):
+        """
+        Setup and configure the custom op.
+
+        This method:
+        1. Gets the associated CustomOp class from the registration
+        2. Ensures it's enabled for benchmarking
+        3. Creates instance and configures it with the model config
+        """
+        # Find the CustomOp class that registered this benchmark
+        from vllm.compilation.helion.custom_op import _custom_op_benchmarks
+
+        custom_op_class = None
+        for op_class, benchmark_class in _custom_op_benchmarks.items():
+            if benchmark_class is self.__class__:
+                custom_op_class = op_class
+                break
+
+        if custom_op_class is None:
             raise ValueError(
-                f"Unknown benchmark '{name}'. "
-                f"Available: {', '.join(_benchmark_registry.keys())}"
+                f"No CustomOp registered for benchmark {self.__class__.__name__}"
             )
-        return _benchmark_registry[name]
 
-    @staticmethod
-    def list_benchmarks() -> list[str]:
-        """
-        List all registered benchmarks.
+        # Override enabled() method to return True for benchmarking
+        original_enabled = custom_op_class.enabled
+        custom_op_class.enabled = classmethod(lambda cls: True)
 
-        Returns:
-            List of registered benchmark names
-        """
-        return list(_benchmark_registry.keys())
+        # Create instance and force re-dispatch
+        self._custom_op = custom_op_class()
+        self._custom_op._forward_method = self._custom_op.dispatch_forward()
+
+        # Configure the custom op if we have a model config
+        self._custom_op.configure(self.model_config)
 
     @staticmethod
     def time_kernel(
@@ -308,19 +313,21 @@ class KernelBenchmark(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def run_helion(self, *args, **kwargs) -> Any:
         """
-        Run the Helion kernel.
+        Run the Helion CustomOp.
+
+        This method automatically passes all arguments from create_inputs()
+        to the configured CustomOp instance.
 
         Args:
-            *args: Positional arguments for the kernel
-            **kwargs: Keyword arguments for the kernel
+            *args: Positional arguments for the CustomOp
+            **kwargs: Keyword arguments for the CustomOp
 
         Returns:
-            Output from Helion kernel (could be tensor, tuple, None, etc.)
+            Output from Helion CustomOp (could be tensor, tuple, None, etc.)
         """
-        raise NotImplementedError
+        return self._custom_op(*args, **kwargs)
 
     def get_shape_description(self, **shape_params) -> str:
         """
@@ -362,6 +369,8 @@ class KernelBenchmark(ABC):
             )
             baseline_output = self.run_baseline(*inputs)
             helion_output = self.run_helion(*inputs)
+
+            print(f"ycao_debug inputs: {inputs}")
 
             passed = verify_correctness(
                 helion_output,
@@ -486,7 +495,6 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
     Example:
         class MyDistributedBenchmark(DistributedKernelBenchmark):
-            benchmark_name = "my_distributed_kernel"
 
             def __init__(self, num_gpus: int = 2):
                 super().__init__(num_gpus=num_gpus, master_port=12348)
@@ -509,14 +517,12 @@ class DistributedKernelBenchmark(KernelBenchmark):
                 return helion_kernel(input_tensor)
     """
 
-    # Don't register this base class
-    benchmark_name = ""
-
     def __init__(
         self,
         num_gpus: int = 2,
         master_port: int = 12348,
         init_fn: Callable[[int, int], None] | None = None,
+        model_config=None,
     ):
         """
         Args:
@@ -524,7 +530,11 @@ class DistributedKernelBenchmark(KernelBenchmark):
             master_port: Port for distributed initialization
             init_fn: Optional custom initialization function(local_rank, world_size)
                     If None, uses default vLLM distributed initialization
+            model_config: vLLM ModelConfig for kernel configuration
         """
+        # Initialize the base KernelBenchmark first
+        super().__init__(model_config=model_config)
+
         self.num_gpus = num_gpus
         self.master_port = master_port
         self.init_fn = init_fn
@@ -616,7 +626,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
         manager = mp.Manager()
         results_dict = manager.dict()
-        results_dict['data'] = None
+        results_dict["data"] = None
 
         torch.multiprocessing.spawn(
             _distributed_worker_wrapper,
@@ -625,7 +635,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
         )
 
         # Collect and return results
-        results = results_dict.get('data')
+        results = results_dict.get("data")
 
         if results is None:
             raise RuntimeError(
@@ -667,13 +677,15 @@ class DistributedKernelBenchmark(KernelBenchmark):
             device = torch.device(f"cuda:{local_rank}")
             torch.cuda.set_device(device)
 
-            update_environment_variables({
-                "RANK": str(local_rank),
-                "LOCAL_RANK": str(local_rank),
-                "WORLD_SIZE": str(world_size),
-                "MASTER_ADDR": "localhost",
-                "MASTER_PORT": str(self.master_port),
-            })
+            update_environment_variables(
+                {
+                    "RANK": str(local_rank),
+                    "LOCAL_RANK": str(local_rank),
+                    "WORLD_SIZE": str(world_size),
+                    "MASTER_ADDR": "localhost",
+                    "MASTER_PORT": str(self.master_port),
+                }
+            )
 
             init_distributed_environment()
             initialize_model_parallel(tensor_model_parallel_size=world_size)
@@ -787,13 +799,19 @@ class DistributedKernelBenchmark(KernelBenchmark):
                     verification_passed = True
                     if local_rank == 0:
                         # Handle tuple outputs - compare all elements
-                        if isinstance(baseline_output, tuple) and isinstance(helion_output, tuple):
+                        if isinstance(baseline_output, tuple) and isinstance(
+                            helion_output, tuple
+                        ):
                             if len(baseline_output) != len(helion_output):
-                                print(f"✗ FAILED: Output tuple length mismatch: baseline={len(baseline_output)}, helion={len(helion_output)}")
+                                print(
+                                    f"✗ FAILED: Output tuple length mismatch: baseline={len(baseline_output)}, helion={len(helion_output)}"
+                                )
                                 verification_passed = False
                             else:
                                 try:
-                                    for i, (base_elem, helion_elem) in enumerate(zip(baseline_output, helion_output)):
+                                    for i, (base_elem, helion_elem) in enumerate(
+                                        zip(baseline_output, helion_output)
+                                    ):
                                         torch.testing.assert_close(
                                             helion_elem,
                                             base_elem,
@@ -802,7 +820,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
                                         )
                                     print("✓ PASSED")
                                 except AssertionError as e:
-                                    print(f"✗ FAILED at output element {i}: {str(e)[:200]}")
+                                    print(
+                                        f"✗ FAILED at output element {i}: {str(e)[:200]}"
+                                    )
                                     verification_passed = False
                         else:
                             # Single output or convert tuples to single elements
@@ -828,7 +848,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
                         verification_tensor = torch.tensor(
                             [1 if verification_passed else 0],
                             dtype=torch.int,
-                            device="cuda"
+                            device="cuda",
                         )
                         dist.broadcast(verification_tensor, src=0)
                         verification_passed = bool(verification_tensor.item())
@@ -847,7 +867,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
                 # Benchmark baseline
                 if local_rank == 0:
-                    print(f"  Benchmarking baseline... ", flush=True)
+                    print("  Benchmarking baseline... ", flush=True)
 
                 def baseline_fn():
                     return self.run_baseline(*inputs_perf)
@@ -866,17 +886,25 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
                 # Benchmark Helion
                 if local_rank == 0:
-                    print(f"  Benchmarking Helion... ", flush=True)
+                    print("  Benchmarking Helion... ", flush=True)
 
                 def helion_fn():
                     return self.run_helion(*inputs_perf)
 
                 # Check if Helion supports CUDA graphs
-                use_cudagraph_helion = config.use_cudagraph and self.supports_cudagraph()
+                use_cudagraph_helion = (
+                    config.use_cudagraph and self.supports_cudagraph()
+                )
 
                 # Warn if CUDA graphs are disabled for Helion
-                if config.use_cudagraph and not use_cudagraph_helion and local_rank == 0:
-                    print(f"    (CUDA graphs disabled for Helion: cross-stream synchronization)")
+                if (
+                    config.use_cudagraph
+                    and not use_cudagraph_helion
+                    and local_rank == 0
+                ):
+                    print(
+                        "    (CUDA graphs disabled for Helion: cross-stream synchronization)"
+                    )
 
                 helion_time = self._time_kernel_distributed(
                     helion_fn,
@@ -983,11 +1011,14 @@ def _distributed_worker_wrapper(
 
         # Rank 0 stores results in shared dictionary
         if local_rank == 0:
-            results_dict['data'] = worker_results
-            print(f"\n[Rank {local_rank}] Stored {len(worker_results)} results in container")
+            results_dict["data"] = worker_results
+            print(
+                f"\n[Rank {local_rank}] Stored {len(worker_results)} results in container"
+            )
     except Exception as e:
         print(f"\n[Rank {local_rank}] ERROR in worker: {e}")
         import traceback
+
         traceback.print_exc()
         raise
 

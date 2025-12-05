@@ -24,6 +24,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -243,13 +244,50 @@ def test_fusion_silu_and_mul_quant(
     # Enable Helion op if requested
     if use_helion:
         custom_ops.append("+silu_mul_fp8_helion")
-    config = VllmConfig(
-        compilation_config=CompilationConfig(
+
+    # Create VllmConfig, adding mock ModelConfig only when using Helion
+    # This is needed because the ActivationQuantFusionPass calls configure() with vllm_config.model_config
+    config_kwargs = {
+        "compilation_config": CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
             pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
         ),
-    )
+    }
+
+    if use_helion:
+        # Create a proper ModelConfig instance for Helion kernel configuration
+        # The input has shape [num_tokens, hidden_size * 2], so the model's hidden size is hidden_size * 2
+        model_hidden_size = hidden_size * 2
+
+        try:
+            # Try to create a minimal ModelConfig instance
+            # Use a simple model name that should work for testing
+            mock_model_config = ModelConfig(model="gpt2")
+
+            # Override the get_hidden_size method to return our desired size
+            # We need to patch this because gpt2 has a different hidden size
+            original_get_hidden_size = mock_model_config.get_hidden_size
+
+            def patched_get_hidden_size():
+                return model_hidden_size
+
+            mock_model_config.get_hidden_size = patched_get_hidden_size
+
+        except Exception:
+            # Fallback: create a minimal mock object
+            class MockModelConfig:
+                def __init__(self, hidden_size):
+                    self._hidden_size = hidden_size
+
+                def get_hidden_size(self):
+                    return self._hidden_size
+
+            mock_model_config = MockModelConfig(model_hidden_size)
+
+        config_kwargs["model_config"] = mock_model_config
+
+    config = VllmConfig(**config_kwargs)
 
     with set_current_vllm_config(config):
         fusion_passes = [ActivationQuantFusionPass(config)]
