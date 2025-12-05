@@ -408,7 +408,10 @@ class MooncakeConnectorWorker:
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", "rdma", "")
+        protocol = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "mooncake_protocol", "rdma"
+        )
+        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -434,6 +437,7 @@ class MooncakeConnectorWorker:
         self.num_workers = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
+
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
