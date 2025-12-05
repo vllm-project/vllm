@@ -18,6 +18,16 @@ from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.context import (
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
+)
+from vllm.entrypoints.openai.protocol import (
+    FunctionCall,
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -39,6 +49,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -72,11 +83,7 @@ from vllm.entrypoints.openai.protocol import (
     DetokenizeRequest,
     ErrorInfo,
     ErrorResponse,
-    FunctionCall,
     FunctionDefinition,
-    GenerateRequest,
-    GenerateResponse,
-    ResponsesRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
@@ -87,6 +94,10 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.responses_utils import (
+    construct_input_messages,
+)
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -106,7 +117,7 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import DeepseekV32Tokenizer, MistralTokenizer, TokenizerLike
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -1089,11 +1100,6 @@ class OpenAIServing:
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
     ]:
-        if tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
-
         model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
@@ -1106,7 +1112,6 @@ class OpenAIServing:
         conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
             messages,
             model_config,
-            tokenizer,
             content_format=resolved_content_format,
         )
 
@@ -1127,6 +1132,13 @@ class OpenAIServing:
             request_prompt = await self._apply_mistral_chat_template_async(
                 tokenizer,
                 messages=messages,
+                **_chat_template_kwargs,
+            )
+        elif isinstance(tokenizer, DeepseekV32Tokenizer):
+            request_prompt = tokenizer.apply_chat_template(
+                conversation=conversation,
+                messages=messages,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
         else:
@@ -1224,6 +1236,31 @@ class OpenAIServing:
         )
         return engine_request, tokenization_kwargs
 
+    async def _render_next_turn(
+        self,
+        request: ResponsesRequest,
+        tokenizer: AnyTokenizer,
+        messages: list[ResponseInputOutputItem],
+        tool_dicts: list[dict[str, Any]] | None,
+        tool_parser,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ):
+        new_messages = construct_input_messages(
+            request_input=messages,
+        )
+
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            new_messages,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+        )
+        return request_prompts, engine_prompts
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -1286,11 +1323,27 @@ class OpenAIServing:
 
             # Create inputs for the next turn.
             # Render the next prompt token ids.
-            prompt_token_ids = context.render_for_completion()
-            engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
-            request_prompt = prompt_token_ids
+            if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
+                prompt_token_ids = context.render_for_completion()
+                engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+                request_prompt = prompt_token_ids
+            elif isinstance(context, ParsableContext):
+                request_prompts, engine_prompts = await self._render_next_turn(
+                    context.request,
+                    context.tokenizer,
+                    context.parser.response_messages,
+                    context.tool_dicts,
+                    context.tool_parser_cls,
+                    context.chat_template,
+                    context.chat_template_content_format,
+                )
+                engine_prompt = engine_prompts[0]
+                request_prompt = request_prompts[0]
+
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
+            sampling_params.max_tokens = self.max_model_len - len(
+                engine_prompt["prompt_token_ids"]
+            )
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
