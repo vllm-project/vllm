@@ -239,7 +239,7 @@ class Scheduler(SchedulerInterface):
         
         # Peak Split-related
         if self.peak_split_enabled:
-            if self.peak_split_factor * (len(self.running) + len(self.waiting)) < self.max_num_running_reqs:
+            if len(self.running) < self.peak_split_factor * self.max_num_running_reqs:
                 self.chunked_prefill_enabled = False
                 logger.debug(
                     f"peak_split_enabled is {self.peak_split_enabled} and chunked_prefill_enabled is {self.chunked_prefill_enabled}")
