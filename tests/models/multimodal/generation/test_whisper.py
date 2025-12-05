@@ -119,12 +119,25 @@ def run_test(
         assert output.outputs[0].text == expected
 
 
-@pytest.mark.cpu_model
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("dtype", ["half"])
 @create_new_process_for_each_test()
 def test_models(vllm_runner, model, dtype) -> None:
+    run_test(
+        vllm_runner,
+        model,
+        tensor_parallel_size=1,
+        dtype=dtype,
+    )
+
+
+@pytest.mark.cpu_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_cpu(vllm_runner, model, dtype) -> None:
+    # @create_new_process_for_each_test() does not work for some runners
+    # TODO: to fix cpu privilege issues in run-cpu-test-arm.sh
     run_test(
         vllm_runner,
         model,
