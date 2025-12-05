@@ -988,11 +988,7 @@ class CompilationConfig:
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
-            if self.use_inductor_graph_partition:
-                if self.splitting_ops is None:
-                    added_default_splitting_ops = True
-                self.set_splitting_ops_for_inductor_graph_partition()
-            elif self.splitting_ops is None:
+            if self.splitting_ops is None:
                 # NOTE: When using full cudagraph, instead of setting an empty
                 # list and capture the full cudagraph inside the flattened fx
                 # graph, we keep the piecewise fx graph structure but capture
@@ -1044,7 +1040,7 @@ class CompilationConfig:
             )
         )
 
-        if need_moe_splitting and self.splitting_ops is not None:
+        if need_moe_splitting and self.cudagraph_mode != CUDAGraphMode.NONE:
             # if we just initialized default splitting_ops for this config,
             # automatically append the MoE ops
             if added_default_splitting_ops:
@@ -1054,17 +1050,16 @@ class CompilationConfig:
 
             # make sure MoE ops are split out
             if not any(op in self.splitting_ops for op in moe_ops):
-                raise ValueError(
+                self.cudagraph_mode = CUDAGraphMode.NONE
+                logger.warning_once(
                     "DeepEP high throughput backend with data_parallel_size > 1 "
                     "requires splitting MoE ops from cudagraphs. Please ensure "
                     "'vllm::moe_forward' or 'vllm::moe_forward_shared' are "
                     "present in CompilationConfig.splitting_ops."
                 )
-
-    def set_splitting_ops_for_inductor_graph_partition(self):
-        assert self.use_inductor_graph_partition
-        if self.splitting_ops is None:
-            self.splitting_ops = list(self._attention_ops)
+            elif self.cudagraph_mode.has_full_cudagraphs():
+                # fall back to piecewise when MoE splitting is required.
+                self.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
