@@ -362,11 +362,15 @@ class LoRAModelManager:
             and hasattr(self.model, "get_mm_mapping")
         )
 
-        model_config: ModelConfig = vllm_config.model_config
-        self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
-        self.supports_mm_lora = self.supports_mm and hasattr(
-            self.info, "get_num_mm_encoder_tokens"
-        )
+        self.supports_mm_lora = False
+
+        if self.supports_mm:
+            model_config: ModelConfig = vllm_config.model_config
+            self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
+            self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
+            self.supports_mm_lora = self.supports_mm and hasattr(
+                self.info, "get_num_mm_encoder_tokens"
+            )
 
         if not self.supports_mm_lora:
             return
@@ -591,10 +595,12 @@ class LoRAModelManager:
             if not self._match_target_modules(module_name):
                 continue
 
-            if (
-                self.supports_mm_lora
-                and self._get_mm_punica_wrapper(module_name) is None
-            ):
+            if self._filter_unsupported_mm_module(module_name):
+                logger.warning(
+                    "Module %s does not support adding LoRA for "
+                    "now and has been ignored.",
+                    module_name,
+                )
                 continue
 
             parts = module_name.split(".")[-1]
