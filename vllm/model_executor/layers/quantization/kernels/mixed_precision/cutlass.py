@@ -6,7 +6,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    convert_bf16_scales_to_fp8,
+)
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -83,10 +86,18 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
             x.data = ops.cutlass_pack_scale_fp8(x.data)
             return x
 
+        w_s = getattr(layer, self.w_s_name)
+        fp8_scales, chan_scales = convert_bf16_scales_to_fp8(self.quant_fp8, w_s.data)
+        w_s.data = fp8_scales
+
+        # register per-channel scales
+        layer.register_parameter(
+            "weight_chan_scale", torch.nn.Parameter(chan_scales, requires_grad=False)
+        )
+
         # Encode/reorder weights and pack scales
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
-        self._transform_param(layer, "weight_chan_scale", lambda x: x)
 
     def apply_weights(
         self,

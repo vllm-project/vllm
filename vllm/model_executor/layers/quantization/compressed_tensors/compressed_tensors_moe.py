@@ -80,7 +80,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    convert_bf16_scales_to_fp8,
+    swizzle_blockscale,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
     normalize_e4m3fn_to_e4m3fnuz,
@@ -2461,6 +2464,13 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.disable_expert_map = False
         self.layer_name = layer_name
 
+        from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            GroupShape,
+        )
+
+        self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -2509,13 +2519,16 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight_packed)
         set_weight_attrs(w2_weight_packed, extra_weight_attrs)
 
+        # SCALES
         # weight_scale refers to the group-wise scales
+        # they are initially loaded as bf16, we will convert to fp8
+        # after loading
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // self.group_size,
-                dtype=torch.float8_e4m3fn,
+                dtype=layer.orig_dtype,
             ),
             requires_grad=False,
         )
@@ -2526,7 +2539,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // self.group_size,
-                dtype=torch.float8_e4m3fn,
+                dtype=layer.orig_dtype,
             ),
             requires_grad=False,
         )
@@ -2538,29 +2551,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
-        # CHANNEL_SCALES
-        w13_weight_chan_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                1,
-                dtype=torch.float32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight_chan_scale", w13_weight_chan_scale)
-        w2_weight_chan_scale = torch.nn.Parameter(
-            torch.ones(num_experts, hidden_size, 1, dtype=torch.float32),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight_chan_scale", w2_weight_chan_scale)
-        # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
-        )
-        set_weight_attrs(w13_weight_chan_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_chan_scale, extra_weight_attrs)
-
         # weight shapes
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
@@ -2570,7 +2560,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         w13_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False
         )
-
         layer.register_parameter("w13_weight_shape", w13_weight_shape)
         set_weight_attrs(w13_weight_shape, extra_weight_attrs)
 
@@ -2614,20 +2603,6 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         self.s_strides2[:, 0] = layer.hidden_size
 
-        # pack group-wise scales
-        # The weights are stored as (E, N, K // 128) but the kernel expects
-        # (E, K // 128, N) in row-major, so we need to permute the last 2 dims
-        # and make it contiguous
-        w13_weight_scale_packed = ops.cutlass_pack_scale_fp8(
-            layer.w13_weight_scale.permute(0, 2, 1).contiguous()
-        )
-        replace_parameter(layer, "w13_weight_scale", w13_weight_scale_packed)
-        w2_weight_scale_packed = ops.cutlass_pack_scale_fp8(
-            layer.w2_weight_scale.permute(0, 2, 1).contiguous()
-        )
-
-        replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
-
         # encode and reorder weight tensors, and get the layout to pass to
         # the grouped gemm kernel. `b_strides1/2` specifies the entire layout
         w13_weight_shuffled, self.b_strides1 = (
@@ -2638,6 +2613,36 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w2_weight_packed)
         )
         replace_parameter(layer, "w2_weight_packed", w2_weight_shuffled)
+
+        # convert bf16 scales to (fp8_scales, channel_scales)
+        w13_weight_scale, w13_weight_chan_scale = convert_bf16_scales_to_fp8(
+            self.quant_fp8, layer.w13_weight_scale
+        )
+        w2_weight_scale, w2_weight_chan_scale = convert_bf16_scales_to_fp8(
+            self.quant_fp8, layer.w2_weight_scale
+        )
+
+        # register channel scales
+        layer.register_parameter(
+            "w13_weight_chan_scale",
+            torch.nn.Parameter(w13_weight_chan_scale, requires_grad=False),
+        )
+        layer.register_parameter(
+            "w2_weight_chan_scale",
+            torch.nn.Parameter(w2_weight_chan_scale, requires_grad=False),
+        )
+
+        # The scales are stored as (E, N, K // 128) but the kernel expects
+        # (E, K // 128, N) in row-major format, so we need to permute the last 2 dims
+        # and make it contiguous
+        w13_weight_scale_packed = ops.cutlass_pack_scale_fp8(
+            w13_weight_scale.permute(0, 2, 1).contiguous()
+        )
+        replace_parameter(layer, "w13_weight_scale", w13_weight_scale_packed)
+        w2_weight_scale_packed = ops.cutlass_pack_scale_fp8(
+            w2_weight_scale.permute(0, 2, 1).contiguous()
+        )
+        replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
 
     def maybe_make_prepare_finalize(
         self,
