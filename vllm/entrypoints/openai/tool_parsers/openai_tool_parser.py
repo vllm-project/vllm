@@ -43,6 +43,7 @@ class OpenAIToolParser(ToolParser):
         parser = parse_output_into_messages(token_ids)
         tool_calls = []
         final_content = None
+        commentary_content = None
 
         if len(parser.messages) > 0:
             for msg in parser.messages:
@@ -75,11 +76,15 @@ class OpenAIToolParser(ToolParser):
                     )
                 elif msg.channel == "final":
                     final_content = msg_text
+                elif msg.channel == "commentary" and not msg.recipient:
+                    commentary_content = msg_text
 
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
-            content=final_content,
+            # prefer final content over commentary content if both are present
+            # commentary content is tool call preambles meant to be shown to the user
+            content=final_content or commentary_content,
         )
 
     def extract_tool_calls_streaming(

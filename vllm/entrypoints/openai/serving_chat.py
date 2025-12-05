@@ -26,8 +26,8 @@ from vllm.entrypoints.harmony_utils import (
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     get_system_message,
+    parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
-    parse_input_to_harmony_message,
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -816,6 +816,9 @@ class OpenAIServingChat(OpenAIServing):
 
                             if delta_message is not None:
                                 harmony_tools_streamed[i] = True
+                        elif cur_channel == "commentary":
+                            # Tool call preambles meant to be shown to the user
+                            delta_message = DeltaMessage(content=delta_text)
                         else:
                             delta_message = None
                     # handle streaming deltas for tools with named tool_choice
@@ -1755,6 +1758,11 @@ class OpenAIServingChat(OpenAIServing):
     ):
         messages: list[OpenAIMessage] = []
 
+        # because of issues with pydantic we need to potentially
+        # re-serialize the tool_calls field of the request
+        # for more info: see comment in `maybe_serialize_tool_calls`
+        maybe_serialize_tool_calls(request)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
@@ -1773,8 +1781,7 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(dev_msg)
 
         # Add user message.
-        for chat_msg in request.messages:
-            messages.extend(parse_input_to_harmony_message(chat_msg))
+        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
