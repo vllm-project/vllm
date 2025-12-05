@@ -456,7 +456,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Valid options mirror torch.set_float32_matmul_precision
     "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
         "VLLM_FLOAT32_MATMUL_PRECISION",
-        "high",
+        "highest",
         ["highest", "high", "medium"],
         case_sensitive=False,
     ),
