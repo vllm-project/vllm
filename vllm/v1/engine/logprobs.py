@@ -182,9 +182,7 @@ class LogprobsProcessor:
         return plp
 
     def _correct_decoded_token(self, idx: int, tokens: list[int]) -> str:
-        if self.tokenizer is None:
-            # Double check state of self.tokenizer and help linter
-            raise RuntimeError("self.tokenizer should not be None")
+        assert self.tokenizer is not None, "self.tokenizer should not be None"
 
         # try with prev token id in same list
         if idx > 0:
