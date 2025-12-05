@@ -1237,8 +1237,7 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
         # Verify get_reg_descs was called with caches_data
         assert mock_wrapper_instance.get_reg_descs.called
         caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
-        expected_caches_data_len = 2 if attn_backend == "TRITON_ATTN" else 4
-        assert len(caches_data) == expected_caches_data_len
+        assert len(caches_data) == expected_num_entries
 
         for i, cache_entry in enumerate(caches_data):
             base_addr, size, _tp_rank, _ = cache_entry
