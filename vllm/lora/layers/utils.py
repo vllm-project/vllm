@@ -33,6 +33,15 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # HQQ marlin
     elif hasattr(base_layer, "W_q"):
         return base_layer.W_q.device
+    # MoE layer
+    elif hasattr(base_layer, "w2_weight"):
+        return base_layer.w2_weight.device
+    # MoE Compressed Tensor
+    elif hasattr(base_layer, "w2_weight_packed"):
+        return base_layer.w2_weight_packed.device
+    # MoE GPTQ/AWQ/GGUF
+    elif hasattr(base_layer, "w2_qweight"):
+        return base_layer.w2_qweight.device
     else:
         raise ValueError(f"Unsupported base layer: {base_layer}")
 
@@ -45,8 +54,7 @@ def _not_fully_sharded_can_replace(can_replace):
 
     def dec(*args, **kwargs):
         decorate = kwargs.pop("decorate") if "decorate" in kwargs else True
-        condition = (not kwargs["lora_config"].fully_sharded_loras
-                     if decorate else True)
+        condition = not kwargs["lora_config"].fully_sharded_loras if decorate else True
         return can_replace(*args, **kwargs) and condition
 
     return dec
@@ -59,7 +67,8 @@ def _fully_sharded_can_replace(can_replace):
     """
 
     def dec(*args, **kwargs):
-        return (can_replace(*args, **kwargs)
-                and kwargs["lora_config"].fully_sharded_loras)
+        return (
+            can_replace(*args, **kwargs) and kwargs["lora_config"].fully_sharded_loras
+        )
 
     return dec

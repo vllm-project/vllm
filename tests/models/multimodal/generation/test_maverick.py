@@ -18,13 +18,11 @@ from typing import Any
 import pytest
 import torch
 from safetensors.torch import save_file
-from transformers import (AutoConfig, AutoProcessor, AutoTokenizer,
-                          GenerationConfig)
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
-                                        FullAttentionSpec)
+from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
 
 from ....utils import multi_gpu_test
 
@@ -93,8 +91,7 @@ def get_rope_layers_config(model_path: str) -> list[int]:
 
 
 def create_reduced_maverick_model(
-    original_model_name:
-    str = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+    original_model_name: str = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     output_dir: str = "/tmp/reduced_maverick",
     text_layers: int = 4,
     num_experts: int = 4,
@@ -118,7 +115,8 @@ def create_reduced_maverick_model(
 
     print(
         f"Creating reduced Maverick model with {text_layers} text layers and "
-        f"{vision_layers} vision layers...")
+        f"{vision_layers} vision layers..."
+    )
 
     # Create output directory
     output_path = Path(output_dir)
@@ -126,19 +124,23 @@ def create_reduced_maverick_model(
         if force_recreate:
             shutil.rmtree(output_path)
         else:
-            print(f"Output directory {output_dir} already exists. "
-                  "Use --force-recreate to overwrite.")
+            print(
+                f"Output directory {output_dir} already exists. "
+                "Use --force-recreate to overwrite."
+            )
             return str(output_path)
 
     output_path.mkdir(parents=True, exist_ok=True)
 
     try:
         print("Loading original model configuration...")
-        original_config = AutoConfig.from_pretrained(original_model_name,
-                                                     trust_remote_code=True)
+        original_config = AutoConfig.from_pretrained(
+            original_model_name, trust_remote_code=True
+        )
         print("Creating reduced configuration...")
-        reduced_config = create_reduced_config(original_config, text_layers,
-                                               num_experts, vision_layers)
+        reduced_config = create_reduced_config(
+            original_config, text_layers, num_experts, vision_layers
+        )
 
         config_path = output_path / "config.json"
         with open(config_path, "w") as f:
@@ -149,8 +151,7 @@ def create_reduced_maverick_model(
         copy_tokenizer_files(original_model_name, output_path)
 
         print("Creating reduced safetensors files...")
-        create_reduced_safetensors(original_config, reduced_config,
-                                   output_path)
+        create_reduced_safetensors(original_config, reduced_config, output_path)
 
         print("Creating preprocessor config...")
         create_preprocessor_config(original_config, output_path)
@@ -173,9 +174,9 @@ def create_reduced_maverick_model(
         raise
 
 
-def create_reduced_config(original_config: Any, text_layers: int,
-                          num_experts: int,
-                          vision_layers: int) -> dict[str, Any]:
+def create_reduced_config(
+    original_config: Any, text_layers: int, num_experts: int, vision_layers: int
+) -> dict[str, Any]:
     """Create a reduced configuration based on the original."""
 
     # Convert config to dictionary
@@ -185,23 +186,20 @@ def create_reduced_config(original_config: Any, text_layers: int,
     if "text_config" in config_dict:
         original_text_layers = config_dict["text_config"]["num_hidden_layers"]
         config_dict["text_config"]["num_hidden_layers"] = text_layers
-        print(
-            f"Reduced text layers from {original_text_layers} to {text_layers}"
-        )
+        original_layer_types = config_dict["text_config"]["layer_types"]
+        config_dict["text_config"]["layer_types"] = original_layer_types[:text_layers]
+        print(f"Reduced text layers from {original_text_layers} to {text_layers}")
 
         original_num_experts = config_dict["text_config"]["num_local_experts"]
         config_dict["text_config"]["num_local_experts"] = num_experts
-        print(
-            f"Reduced num experts from {original_num_experts} to {num_experts}"
-        )
+        print(f"Reduced num experts from {original_num_experts} to {num_experts}")
 
         hidden_dim_divisor = 4
 
         original_hidden_size = config_dict["text_config"]["hidden_size"]
         new_hidden_size = original_hidden_size // hidden_dim_divisor
         config_dict["text_config"]["hidden_size"] = new_hidden_size
-        print(f"Reduced hidden size from {original_hidden_size} to "
-              f"{new_hidden_size}")
+        print(f"Reduced hidden size from {original_hidden_size} to {new_hidden_size}")
 
         original_head_dim = config_dict["text_config"]["head_dim"]
         new_head_dim = original_head_dim // hidden_dim_divisor
@@ -210,15 +208,12 @@ def create_reduced_config(original_config: Any, text_layers: int,
 
     # Reduce vision layers
     if "vision_config" in config_dict:
-        original_vision_layers = config_dict["vision_config"][
-            "num_hidden_layers"]
+        original_vision_layers = config_dict["vision_config"]["num_hidden_layers"]
         config_dict["vision_config"]["num_hidden_layers"] = vision_layers
-        print(f"Reduced vision layers from {original_vision_layers} "
-              f"to {vision_layers}")
+        print(f"Reduced vision layers from {original_vision_layers} to {vision_layers}")
 
     # Update model name to indicate it's a reduced version
-    config_dict["_name_or_path"] = (
-        f"reduced_maverick_{text_layers}t_{vision_layers}v")
+    config_dict["_name_or_path"] = f"reduced_maverick_{text_layers}t_{vision_layers}v"
 
     return config_dict
 
@@ -227,16 +222,16 @@ def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(original_model_name,
-                                                  trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            original_model_name, trust_remote_code=True
+        )
         tokenizer.save_pretrained(output_path)
         print("Tokenizer files copied successfully")
     except Exception as e:
         print(f"Warning: Could not copy tokenizer files: {e}")
 
 
-def create_preprocessor_config(original_config: Any,
-                               output_path: Path) -> None:
+def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
 
     # Try to load the original preprocessor config
@@ -254,9 +249,9 @@ def create_preprocessor_config(original_config: Any,
         raise
 
 
-def create_reduced_safetensors(original_config: Any, reduced_config: dict[str,
-                                                                          Any],
-                               output_path: Path) -> None:
+def create_reduced_safetensors(
+    original_config: Any, reduced_config: dict[str, Any], output_path: Path
+) -> None:
     """Create safetensors files with weights for the reduced model."""
 
     print("Generating synthetic weights for reduced model...")
@@ -279,8 +274,7 @@ def create_reduced_safetensors(original_config: Any, reduced_config: dict[str,
     save_weights_to_safetensors(weights, output_path)
 
 
-def create_text_model_weights(
-        text_config: dict[str, Any]) -> dict[str, torch.Tensor]:
+def create_text_model_weights(text_config: dict[str, Any]) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the text model with MoE structure."""
 
     weights = {}
@@ -291,19 +285,18 @@ def create_text_model_weights(
     intermediate_size_mlp = text_config["intermediate_size_mlp"]
     num_layers = text_config["num_hidden_layers"]
     num_attention_heads = text_config["num_attention_heads"]
-    num_key_value_heads = text_config.get("num_key_value_heads",
-                                          num_attention_heads)
+    num_key_value_heads = text_config.get("num_key_value_heads", num_attention_heads)
 
     # MoE specific parameters
     num_experts = text_config.get("num_local_experts")
-    assert (num_experts
-            is not None), "num_local_experts must be specified for MoE"
+    assert num_experts is not None, "num_local_experts must be specified for MoE"
 
     head_dim = hidden_size // num_attention_heads
 
     # Embedding layers
     weights["language_model.model.embed_tokens.weight"] = torch.randn(
-        vocab_size, hidden_size, dtype=torch.float16)
+        vocab_size, hidden_size, dtype=torch.float16
+    )
 
     # Transformer layers
     for layer_idx in range(num_layers):
@@ -312,95 +305,105 @@ def create_text_model_weights(
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
+            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16)
+            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
+            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
+        )
         print("Self-attention weights created.")
 
         # Feed-forward weights - MoE pattern based on interleave_moe_layer_step
         # For interleave_moe_layer_step=2: layers 1,3,5,... are MoE, layers
         # 0,2,4,... are dense
         interleave_step = text_config.get("interleave_moe_layer_step", 1)
-        is_moe_layer = (interleave_step > 0
-                        and (layer_idx + 1) % interleave_step == 0)
+        is_moe_layer = interleave_step > 0 and (layer_idx + 1) % interleave_step == 0
 
         if is_moe_layer:
             # MoE layer structure
             # 1. Router weights
-            weights[
-                f"{layer_prefix}.feed_forward.router.weight"] = torch.randn(
-                    num_experts, hidden_size, dtype=torch.float16)
+            weights[f"{layer_prefix}.feed_forward.router.weight"] = torch.randn(
+                num_experts, hidden_size, dtype=torch.float16
+            )
 
             # 2. Individual expert weights (not fused)
             for expert_idx in range(num_experts):
-                expert_prefix = (
-                    f"{layer_prefix}.feed_forward.experts.{expert_idx}")
+                expert_prefix = f"{layer_prefix}.feed_forward.experts.{expert_idx}"
 
                 weights[f"{expert_prefix}.gate_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.bfloat16)
+                    intermediate_size, hidden_size, dtype=torch.bfloat16
+                )
                 weights[f"{expert_prefix}.up_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.bfloat16)
+                    intermediate_size, hidden_size, dtype=torch.bfloat16
+                )
                 weights[f"{expert_prefix}.down_proj.weight"] = torch.randn(
-                    hidden_size, intermediate_size, dtype=torch.bfloat16)
+                    hidden_size, intermediate_size, dtype=torch.bfloat16
+                )
 
                 # Expert weight scales (FP8 quantization)
-                weights[
-                    f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(
-                        intermediate_size, 1, dtype=torch.bfloat16)
+                weights[f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(
+                    intermediate_size, 1, dtype=torch.bfloat16
+                )
                 weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(
-                    intermediate_size, 1, dtype=torch.bfloat16)
-                weights[
-                    f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(
-                        hidden_size, 1, dtype=torch.bfloat16)
+                    intermediate_size, 1, dtype=torch.bfloat16
+                )
+                weights[f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(
+                    hidden_size, 1, dtype=torch.bfloat16
+                )
 
             # 3. Shared expert weights
             shared_expert_prefix = f"{layer_prefix}.feed_forward.shared_expert"
             weights[f"{shared_expert_prefix}.gate_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.bfloat16)
+                intermediate_size, hidden_size, dtype=torch.bfloat16
+            )
             weights[f"{shared_expert_prefix}.up_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.bfloat16)
+                intermediate_size, hidden_size, dtype=torch.bfloat16
+            )
             weights[f"{shared_expert_prefix}.down_proj.weight"] = torch.randn(
-                hidden_size, intermediate_size, dtype=torch.bfloat16)
+                hidden_size, intermediate_size, dtype=torch.bfloat16
+            )
             print(f"MoE feed-forward weights created for layer {layer_idx}.")
         else:
             # Dense layer structure
-            weights[f"{layer_prefix}.feed_forward.gate_proj.weight"] = (
-                torch.randn(intermediate_size_mlp,
-                            hidden_size,
-                            dtype=torch.bfloat16))
-            weights[f"{layer_prefix}.feed_forward.up_proj.weight"] = (
-                torch.randn(intermediate_size_mlp,
-                            hidden_size,
-                            dtype=torch.bfloat16))
-            weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = (
-                torch.randn(hidden_size,
-                            intermediate_size_mlp,
-                            dtype=torch.bfloat16))
+            weights[f"{layer_prefix}.feed_forward.gate_proj.weight"] = torch.randn(
+                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
+            )
+            weights[f"{layer_prefix}.feed_forward.up_proj.weight"] = torch.randn(
+                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
+            )
+            weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = torch.randn(
+                hidden_size, intermediate_size_mlp, dtype=torch.bfloat16
+            )
             print(f"Dense feed-forward weights created for layer {layer_idx}.")
 
         # Layer norms
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16)
-        weights[
-            f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-                hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
+        weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
+            hidden_size, dtype=torch.bfloat16
+        )
         print("Layer norms created.")
 
     # Final layer norm and output projection
     weights["language_model.model.norm.weight"] = torch.ones(
-        hidden_size, dtype=torch.bfloat16)
+        hidden_size, dtype=torch.bfloat16
+    )
     weights["language_model.lm_head.weight"] = torch.randn(
-        vocab_size, hidden_size, dtype=torch.bfloat16)
+        vocab_size, hidden_size, dtype=torch.bfloat16
+    )
 
     return weights
 
 
 def create_vision_model_weights(
-        vision_config: dict[str, Any]) -> dict[str, torch.Tensor]:
+    vision_config: dict[str, Any],
+) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the vision model."""
 
     weights = {}
@@ -414,47 +417,62 @@ def create_vision_model_weights(
         layer_prefix = f"vision_model.model.layers.{layer_idx}"
 
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16)
+            hidden_size, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.q_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16)
+            hidden_size, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.k_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16)
+            hidden_size, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.v_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16)
+            hidden_size, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.self_attn.o_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
 
         weights[f"{layer_prefix}.mlp.fc1.weight"] = torch.randn(
-            intermediate_size, hidden_size, dtype=torch.bfloat16)
+            intermediate_size, hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.mlp.fc1.bias"] = torch.zeros(
-            intermediate_size, dtype=torch.bfloat16)
+            intermediate_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.mlp.fc2.weight"] = torch.randn(
-            hidden_size, intermediate_size, dtype=torch.bfloat16)
+            hidden_size, intermediate_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.mlp.fc2.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
 
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.input_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
-        weights[
-            f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-                hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
+        weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
+            hidden_size, dtype=torch.bfloat16
+        )
         weights[f"{layer_prefix}.post_attention_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16)
+            hidden_size, dtype=torch.bfloat16
+        )
 
     return weights
 
 
 def create_shared_weights(
-        text_config: dict[str, Any],
-        vision_config: dict[str, Any]) -> dict[str, torch.Tensor]:
+    text_config: dict[str, Any], vision_config: dict[str, Any]
+) -> dict[str, torch.Tensor]:
     """Create weights for shared components (vision-language connector)"""
 
     weights = {}
@@ -464,13 +482,15 @@ def create_shared_weights(
 
     # Vision-language connector (projects vision features to text space)
     weights["multi_modal_projector.linear_1.weight"] = torch.randn(
-        text_hidden_size, projector_input_dim, dtype=torch.bfloat16)
+        text_hidden_size, projector_input_dim, dtype=torch.bfloat16
+    )
 
     return weights
 
 
-def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
-                                output_path: Path) -> None:
+def save_weights_to_safetensors(
+    weights: dict[str, torch.Tensor], output_path: Path
+) -> None:
     """Save weights to safetensors files and create index."""
 
     # Determine how to shard the weights
@@ -507,18 +527,18 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
     else:
         # Multiple shards
         for i, shard in enumerate(shards):
-            filename = f"model-{i+1:05d}-of-{len(shards):05d}.safetensors"
+            filename = f"model-{i + 1:05d}-of-{len(shards):05d}.safetensors"
             save_file(shard, output_path / filename)
             for name in shard:
                 weight_map[name] = filename
-            print(f"Saved shard {i+1}/{len(shards)}: {filename}")
+            print(f"Saved shard {i + 1}/{len(shards)}: {filename}")
 
     # Create index file
     index_data = {
         "metadata": {
-            "total_size":
-            sum(tensor.numel() * tensor.element_size()
-                for tensor in weights.values())
+            "total_size": sum(
+                tensor.numel() * tensor.element_size() for tensor in weights.values()
+            )
         },
         "weight_map": weight_map,
     }
@@ -528,8 +548,9 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
         json.dump(index_data, f, indent=2)
 
     print(f"Created index file: {index_path}")
-    print(f"Total model size: "
-          f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
+    print(
+        f"Total model size: {index_data['metadata']['total_size'] / (1024**3):.2f} GB"
+    )
 
 
 def check_attention_spec_interleaved_rope(
@@ -540,8 +561,7 @@ def check_attention_spec_interleaved_rope(
 ):
     """Check that the attention spec is correct."""
     assert isinstance(llm.llm_engine.model_executor, Executor)
-    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs(
-    )
+    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs()
     for rank in range(num_ranks):
         kv_cache_specs = kv_cache_specs_per_rank[rank]
         assert len(kv_cache_specs.keys()) == num_attention_layers
@@ -551,16 +571,14 @@ def check_attention_spec_interleaved_rope(
             else:
                 expected_spec = ChunkedLocalAttentionSpec
             assert isinstance(
-                kv_cache_specs[
-                    f"language_model.model.layers.{i}.self_attn.attn"],
-                expected_spec)
+                kv_cache_specs[f"language_model.model.layers.{i}.self_attn.attn"],
+                expected_spec,
+            )
 
 
 def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
     """Test the created reduced model with vLLM."""
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     max_tokens=50)
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=50)
 
     if should_profile:
         llm.start_profile()
@@ -571,15 +589,15 @@ def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
     print("Test generation successful!")
     for output in outputs:
         print(f"Prompt: {output.prompt}")
-        print(f"Output: "
-              f"{output.outputs[0].text}")
+        print(f"Output: {output.outputs[0].text}")
         print("-" * 40)
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "original_model_name,text_layers,num_experts,vision_layers,",
-    [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)])
+    [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)],
+)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("tp,ep", [(2, True)])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -597,7 +615,6 @@ def test_dummy_maverick(
     profile: bool = False,
 ) -> None:
     # Disable multiprocessing allows us to access model executor from LLM engine
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     model_path = create_reduced_maverick_model(
@@ -640,7 +657,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Create a reduced-layer Maverick model")
+        description="Create a reduced-layer Maverick model"
+    )
     parser.add_argument(
         "--output-dir",
         default="/tmp/reduced_maverick",
@@ -652,10 +670,7 @@ def main():
         default=4,
         help="Number of text transformer layers",
     )
-    parser.add_argument("--num-experts",
-                        type=int,
-                        default=4,
-                        help="Number of experts")
+    parser.add_argument("--num-experts", type=int, default=4, help="Number of experts")
     parser.add_argument(
         "--vision-layers",
         type=int,
@@ -667,12 +682,12 @@ def main():
         action="store_true",
         help="Force recreation if output directory exists",
     )
-    parser.add_argument("--test",
-                        action="store_true",
-                        help="Test the created model with vLLM")
-    parser.add_argument("--profile",
-                        action="store_true",
-                        help="Profile the created model with vLLM")
+    parser.add_argument(
+        "--test", action="store_true", help="Test the created model with vLLM"
+    )
+    parser.add_argument(
+        "--profile", action="store_true", help="Profile the created model with vLLM"
+    )
     parser.add_argument(
         "--test-original",
         action="store_true",
@@ -687,16 +702,18 @@ def main():
     args = parser.parse_args()
 
     if args.test:
-        test_dummy_maverick(original_model_name=args.original_model,
-                            output_dir=args.output_dir,
-                            text_layers=args.text_layers,
-                            num_experts=args.num_experts,
-                            vision_layers=args.vision_layers,
-                            force_recreate=args.force_recreate,
-                            tp=2,
-                            ep=True,
-                            enforce_eager=True,
-                            profile=args.profile)
+        test_dummy_maverick(
+            original_model_name=args.original_model,
+            output_dir=args.output_dir,
+            text_layers=args.text_layers,
+            num_experts=args.num_experts,
+            vision_layers=args.vision_layers,
+            force_recreate=args.force_recreate,
+            tp=2,
+            ep=True,
+            enforce_eager=True,
+            profile=args.profile,
+        )
 
     if args.test_original:
         run_maverick_serving(args.original_model)

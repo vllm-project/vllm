@@ -10,7 +10,7 @@ on HuggingFace model repository.
 
 import os
 from dataclasses import asdict
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -18,7 +18,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.lora.request import LoRARequest
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
@@ -30,11 +30,11 @@ question_per_audio_count = {
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
-    prompt: Optional[str] = None
-    prompt_token_ids: Optional[dict[str, list[int]]] = None
-    multi_modal_data: Optional[dict[str, Any]] = None
-    stop_token_ids: Optional[list[int]] = None
-    lora_requests: Optional[list[LoRARequest]] = None
+    prompt: str | None = None
+    prompt_token_ids: dict[str, list[int]] | None = None
+    multi_modal_data: dict[str, Any] | None = None
+    stop_token_ids: list[int] | None = None
+    lora_requests: list[LoRARequest] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -43,12 +43,15 @@ class ModelRequestData(NamedTuple):
 
 
 # Voxtral
+# Make sure to install mistral-common[audio].
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.messages import (
+    from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
         RawAudio,
         TextChunk,
+    )
+    from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -422,6 +425,13 @@ def parse_args():
         default=None,
         help="Set the seed when initializing `vllm.LLM`.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
 
     return parser.parse_args()
 
@@ -430,6 +440,12 @@ def main(args):
     model = args.model_type
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
+
+    if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {args.tensor_parallel_size}"
+        )
 
     audio_count = args.num_audios
     req_data = model_example_map[model](
@@ -443,6 +459,8 @@ def main(args):
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    if args.tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)
 
     # We set temperature to 0.2 so that outputs can be different

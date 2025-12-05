@@ -1,7 +1,7 @@
 # Summary
 
 !!! important
-    Many decoder language models can now be automatically loaded using the [Transformers backend][transformers-backend] without having to implement them in vLLM. See if `vllm serve <model>` works first!
+    Many decoder language models can now be automatically loaded using the [Transformers modeling backend](../../models/supported_models.md#transformers) without having to implement them in vLLM. See if `vllm serve <model>` works first!
 
 vLLM models are specialized [PyTorch](https://pytorch.org/) models that take advantage of various [features](../../features/README.md#compatibility-matrix) to optimize their performance.
 

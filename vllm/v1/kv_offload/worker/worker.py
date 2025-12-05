@@ -74,12 +74,14 @@ class OffloadingWorker:
 
     def __init__(self):
         self.handlers: set[OffloadingHandler] = set()
-        self.transfer_type_to_handler: dict[TransferType,
-                                            OffloadingHandler] = {}
+        self.transfer_type_to_handler: dict[TransferType, OffloadingHandler] = {}
 
-    def register_handler(self, src_cls: type[LoadStoreSpec],
-                         dst_cls: type[LoadStoreSpec],
-                         handler: OffloadingHandler) -> None:
+    def register_handler(
+        self,
+        src_cls: type[LoadStoreSpec],
+        dst_cls: type[LoadStoreSpec],
+        handler: OffloadingHandler,
+    ) -> None:
         """
         Registers a new handler.
 
@@ -113,19 +115,19 @@ class OffloadingWorker:
         try:
             success = handler.transfer_async(job_id, spec)
         except Exception as e:
-            logger.warning("Exception in %r transfer %d: %r",
-                           transfer_type,
-                           job_id,
-                           e,
-                           exc_info=True)
+            logger.warning(
+                "Exception in %r transfer %d: %r",
+                transfer_type,
+                job_id,
+                e,
+                exc_info=True,
+            )
             return False
 
         if not success:
-            logger.warning("Failed to submit %r transfer %d", transfer_type,
-                           job_id)
+            logger.warning("Failed to submit %r transfer %d", transfer_type, job_id)
         else:
-            logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id,
-                         spec)
+            logger.debug("Submitted %r transfer %d: %r", transfer_type, job_id, spec)
 
         return success
 

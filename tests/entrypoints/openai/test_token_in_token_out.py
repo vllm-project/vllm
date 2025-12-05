@@ -6,9 +6,8 @@ import tempfile
 
 import pytest
 
-from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf)
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
@@ -23,7 +22,8 @@ def server():
         MODEL_NAME,
         allow_patterns=["*"],
         cache_dir=MODEL_PATH,
-        ignore_patterns=["tokenizer*", "vocab*", "*.safetensors"])
+        ignore_patterns=["tokenizer*", "vocab*", "*.safetensors"],
+    )
     args = [
         "--max-model-len",
         "2048",
@@ -61,13 +61,14 @@ async def test_token_in_token_out_and_logprobs(server):
         )
 
         # Verify all fields are present
-        assert (completion.choices[0].token_ids is not None
-                and 0 < len(completion.choices[0].token_ids) <= 20)
+        assert (
+            completion.choices[0].token_ids is not None
+            and 0 < len(completion.choices[0].token_ids) <= 20
+        )
         assert completion.choices[0].prompt_token_ids is not None
 
         # Decode prompt tokens
         if completion.choices[0].prompt_token_ids:
-            prompt_text = tokenizer.decode(
-                completion.choices[0].prompt_token_ids)
+            prompt_text = tokenizer.decode(completion.choices[0].prompt_token_ids)
             # The decoded prompt should match or close to original prompt
             assert prompt_text == text

@@ -55,9 +55,7 @@ benchmark() {
   output_len=$2
 
 
-  CUDA_VISIBLE_DEVICES=0 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=0 vllm serve $model \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
@@ -65,9 +63,7 @@ benchmark() {
     '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
 
 
-  CUDA_VISIBLE_DEVICES=1 python3 \
-    -m vllm.entrypoints.openai.api_server \
-    --model $model \
+  CUDA_VISIBLE_DEVICES=1 vllm serve $model \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \

@@ -4,8 +4,11 @@
 import traceback
 import unittest
 
+import numpy as np
+
 from vllm.distributed.device_communicators.shm_object_storage import (
-    SingleWriterShmRingBuffer)
+    SingleWriterShmRingBuffer,
+)
 
 
 class TestSingleWriterShmRingBuffer(unittest.TestCase):
@@ -25,18 +28,21 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         """Test opening an existing buffer"""
         # First create a buffer
         self.ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=self.buffer_size, create=True)
+            data_buffer_size=self.buffer_size, create=True
+        )
 
         # Then open it with another instance
         reader_buffer = SingleWriterShmRingBuffer(*self.ring_buffer.handle())
         self.assertFalse(reader_buffer.is_writer)
-        self.assertEqual(reader_buffer.shared_memory.name,
-                         self.ring_buffer.shared_memory.name)
+        self.assertEqual(
+            reader_buffer.shared_memory.name, self.ring_buffer.shared_memory.name
+        )
 
     def test_buffer_access(self):
         """Test accessing allocated buffers"""
         self.ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=self.buffer_size, create=True)
+            data_buffer_size=self.buffer_size, create=True
+        )
 
         size = 100
         address, monotonic_id = self.ring_buffer.allocate_buf(size)
@@ -44,11 +50,11 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         # Write some test data
         test_data = b"Hello, World!" * 7  # 91 bytes
         with self.ring_buffer.access_buf(address) as (data_buf, metadata):
-            data_buf[0:len(test_data)] = test_data
+            data_buf[0 : len(test_data)] = test_data
 
         # Read it back
         with self.ring_buffer.access_buf(address) as (data_buf2, metadata2):
-            read_data = bytes(data_buf2[0:len(test_data)])
+            read_data = bytes(data_buf2[0 : len(test_data)])
             read_id = metadata2[0]
 
         self.assertEqual(read_data, test_data)
@@ -58,7 +64,8 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         """Test that MemoryError is raised when buffer is full"""
         small_buffer_size = 200
         self.ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=small_buffer_size, create=True)
+            data_buffer_size=small_buffer_size, create=True
+        )
 
         # Fill up the buffer
         self.ring_buffer.allocate_buf(100)
@@ -72,7 +79,8 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         """Test allocation and freeing of buffers"""
         small_buffer_size = 200
         self.ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=small_buffer_size, create=True)
+            data_buffer_size=small_buffer_size, create=True
+        )
 
         size = 80
         # Write some data
@@ -81,7 +89,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
             address, monotonic_id = self.ring_buffer.allocate_buf(size)
             with self.ring_buffer.access_buf(address) as (data_buf, metadata):
                 data_buf[0:4] = (0).to_bytes(4, "little")  # 0 for not in-use
-                data_buf[4:len(test_data) + 4] = test_data
+                data_buf[4 : len(test_data) + 4] = test_data
             print(self.ring_buffer.metadata)
             freed_ids = self.ring_buffer.free_buf(lambda *args: True)
             print(f"  Freed IDs: {freed_ids}")
@@ -90,7 +98,8 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
     def test_clear_buffer(self):
         """Test clearing the buffer"""
         self.ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=self.buffer_size, create=True)
+            data_buffer_size=self.buffer_size, create=True
+        )
 
         # Allocate some buffers
         for _ in range(3):
@@ -105,6 +114,69 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
         self.assertEqual(self.ring_buffer.monotonic_id_end, 0)
         self.assertEqual(self.ring_buffer.data_buffer_start, 0)
         self.assertEqual(self.ring_buffer.data_buffer_end, 0)
+
+    def test_allocation_cycles(self):
+        buffer_size = 100
+        ring = SingleWriterShmRingBuffer(data_buffer_size=buffer_size, create=True)
+
+        # tracking allocations for assertions
+        allocated_bitmap = np.zeros(
+            (buffer_size,), dtype=np.bool_
+        )  # addr -> is_allocated
+        allocation_map = dict()  # monotonic_id -> (addr, size)
+
+        def count_allocated(bitmap) -> int:
+            return np.sum(bitmap).item()
+
+        def is_free_fn(a, b) -> bool:
+            return True
+
+        def mark_allocated_with_assertion(id, addr, size):
+            addr = addr % buffer_size
+            self.assertEqual(count_allocated(allocated_bitmap[addr : addr + size]), 0)
+
+            allocated_bitmap[addr : addr + size] = True
+            allocation_map[id] = (addr, size)
+
+        def mark_freed_with_assertion(id):
+            self.assertTrue(id in allocation_map)
+
+            addr, size = allocation_map.pop(id)
+            addr = addr % buffer_size
+            self.assertEqual(
+                count_allocated(allocated_bitmap[addr : addr + size]), size
+            )
+
+            allocated_bitmap[addr : addr + size] = False
+
+        def ring_free(free_size=None):
+            freed_ids = ring.free_buf(is_free_fn, free_size)
+            for freed_id in freed_ids:
+                mark_freed_with_assertion(freed_id)
+
+        def ring_allocate(allocate_size):
+            allocate_size_with_md = allocate_size + ring.MD_SIZE
+            try:
+                addr, monotonic_id = ring.allocate_buf(allocate_size)
+                mark_allocated_with_assertion(monotonic_id, addr, allocate_size_with_md)
+            except MemoryError:
+                # free 2x size for enough space if wrapping happened
+                ring_free(allocate_size_with_md * 2)
+
+                # retry allocating
+                addr, monotonic_id = ring.allocate_buf(allocate_size)
+                mark_allocated_with_assertion(monotonic_id, addr, allocate_size_with_md)
+
+        # 1. allocation & free cycles
+        for _ in range(33):
+            # will consume 2 + 8 = 10 bytes per allocation
+            ring_allocate(2)
+
+        # 2. free all allocations
+        ring_free()
+
+        # 3. try allocate the largest possible buffer
+        ring_allocate(buffer_size - ring.MD_SIZE)
 
 
 def main():
@@ -121,8 +193,7 @@ def main():
     # Manual demonstration
     try:
         print("Creating ring buffer...")
-        writer_buffer = SingleWriterShmRingBuffer(data_buffer_size=2048,
-                                                  create=True)
+        writer_buffer = SingleWriterShmRingBuffer(data_buffer_size=2048, create=True)
         reader_buffer = SingleWriterShmRingBuffer(*writer_buffer.handle())
 
         print(f"Buffer created with name: {writer_buffer.shared_memory.name}")
@@ -140,7 +211,7 @@ def main():
                 # Write some test data
                 with writer_buffer.access_buf(address) as (data_buf, metadata):
                     test_message = f"Test message {i}".encode()
-                    data_buf[0:len(test_message)] = test_message
+                    data_buf[0 : len(test_message)] = test_message
 
             except MemoryError as e:
                 print(f"  Failed to allocate {size} bytes: {e}")
