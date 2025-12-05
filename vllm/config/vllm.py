@@ -1122,10 +1122,10 @@ class VllmConfig:
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
 
-    def recalculate_max_model_len(self, max_model_len: int):
+    def recalculate_max_model_len(self, original_max_model_len: int | None) -> None:
         # Can only be called during try_verify_and_update_config
         self.model_config.recalculate_max_model_len(
-            max_model_len,
+            original_max_model_len,
             tokenizer=self.renderer_config.tokenizer,
             tokenizer_revision=self.renderer_config.tokenizer_revision,
         )

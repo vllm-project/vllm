@@ -1640,7 +1640,7 @@ class ModelConfig:
 
     def recalculate_max_model_len(
         self,
-        max_model_len: int,
+        original_max_model_len: int | None,
         *,
         tokenizer: str | None = None,
         tokenizer_revision: str | None = None,
@@ -1663,7 +1663,7 @@ class ModelConfig:
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
-            max_model_len=max_model_len,
+            max_model_len=original_max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
