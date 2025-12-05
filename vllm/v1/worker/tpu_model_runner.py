@@ -2040,7 +2040,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.renderer_config,
+            renderer_config=self.renderer_config,
             seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
