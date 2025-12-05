@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     TritonExperts,
+    modular_triton_fused_moe,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
@@ -130,9 +131,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-        m_fused_moe_fn = (
-            modular_triton_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
+        m_fused_moe_fn = modular_triton_fused_moe(
+            quant_config, shared_experts=self.base_layer.shared_experts
+        )
         prepare_finalize = MoEPrepareAndFinalizeNoEP()
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
