@@ -409,7 +409,9 @@ def _support_torch_compile(
                     open(aot_compilation_path, "rb") as f,
                 ):
                     start_monitoring_torch_compile(self.vllm_config)
-                    loaded_fn = torch.compiler.load_compiled_function(f)
+                    loaded_fn = torch.compiler.load_compiled_function(
+                        f, f_globals=self.forward.__globals__
+                    )
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
                 loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
