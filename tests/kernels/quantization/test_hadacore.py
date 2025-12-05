@@ -9,6 +9,12 @@ from compressed_tensors.transform import deterministic_hadamard_matrix
 
 from vllm import _custom_ops as ops
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "These tests require hadacore_transform, not supported on ROCm.",
+        allow_module_level=True,
+    )
+
 
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("hidden_dim", [2**n for n in range(10)])
