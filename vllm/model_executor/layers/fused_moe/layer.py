@@ -592,7 +592,7 @@ class FusedMoE(CustomOp):
             if quant_method is None or isinstance(quant_method, LinearMethodBase):
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             assert isinstance(quant_method, FusedMoEMethodBase)
-            
+
             return quant_method
 
         # Note: get_quant_method will look at the layer's local_num_experts
