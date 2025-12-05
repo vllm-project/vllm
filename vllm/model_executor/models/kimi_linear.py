@@ -255,7 +255,6 @@ class KimiMLAAttention(nn.Module):
             q_b_proj=None,
             q_proj=self.q_proj,
             indexer=None,
-            indexer_rotary_emb=None,
             is_sparse=False,
             topk_indices_buffer=None,
         )
