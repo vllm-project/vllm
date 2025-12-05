@@ -176,9 +176,6 @@ struct W4A8GroupedGemmKernel {
       const torch::Tensor& problem_sizes_torch, const torch::Tensor& a_strides,
       const torch::Tensor& b_strides, const torch::Tensor& c_strides,
       const torch::Tensor& group_scale_strides) {
-    // validation?
-
-    // TODO: cuda stream/guard
     auto device = a_tensors.device();
     auto device_id = device.index();
     const at::cuda::OptionalCUDAGuard device_guard(device);
@@ -380,6 +377,7 @@ void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
                 b_group_scales, b_group_size, expert_offsets, problem_sizes,
                 a_strides, b_strides, c_strides, group_scale_strides,
                 *maybe_schedule);
+    return;
   }
 
   // use heuristic

@@ -1112,13 +1112,15 @@ def run_cutlass_moe_w4a8_fp8(
     if expert_map is not None:
         assert expert_num_tokens is None
     assert not use_batched_format, "batched format not supported yet"
-    assert group_size == 128, "Only group size 128 supported"
+    assert group_size == 128, f"Only group size 128 supported but got {group_size=}"
 
     assert global_num_experts != -1
-    assert w1.size(2) * 8 == K, "w1 hidden size mismatch"
+    assert w1.size(2) * 8 == K, (
+        f"w1 hidden size mismatch: got {w1.size(2) * 8}, expected {K=}"
+    )
 
+    # Translate info from expert_map to topk_ids
     if expert_map is not None:
-        "Translate info from expert_map to topk_ids"
         local_topk_ids = torch.where(
             expert_map[topk_ids] != -1, expert_map[topk_ids], -1
         )
