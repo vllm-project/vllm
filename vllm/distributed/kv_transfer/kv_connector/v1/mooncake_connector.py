@@ -408,7 +408,7 @@ class MooncakeConnectorWorker:
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
-        protocol = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+        protocol = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
         ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
