@@ -212,13 +212,9 @@ class SiluMulFp8Helion(HelionCustomOp):
         output: (num_tokens, hidden_size) with dtype float8_e4m3fn
     """
 
-    def __init__(self):
-        """Initialize the SiluMulFp8Helion operation."""
-        super().__init__()
-
     def forward_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
-        Helion kernel implementation using the registered wrapper.
+        Helion kernel implementation.
 
         Args:
             input: Input tensor with shape (num_tokens, 2 * hidden_size)
@@ -227,7 +223,6 @@ class SiluMulFp8Helion(HelionCustomOp):
         Returns:
             Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
         """
-        # Use the registered HelionKernelWrapper which handles config internally
         return silu_mul_fp8(input, scale)
 
     @property
