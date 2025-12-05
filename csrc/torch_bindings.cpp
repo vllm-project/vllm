@@ -6,6 +6,14 @@
 #include <torch/library.h>
 #include <torch/version.h>
 
+#if !defined(USE_ROCM) &&                                     \
+    (((defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)) || \
+     ((defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)))
+  #define VLLM_USE_NVFP4 1
+#else
+  #define VLLM_USE_NVFP4 0
+#endif
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -75,7 +83,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor suffix_output,"
       "    Tensor suffix_lse) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
-#ifndef USE_ROCM
+#if VLLM_USE_NVFP4
   ops.def(
       "convert_vertical_slash_indexes("
       "   Tensor! block_count, Tensor! block_offset, "
@@ -379,9 +387,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
-#ifndef USE_ROCM
-  #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
-      (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+#if VLLM_USE_NVFP4
   // CUTLASS nvfp4 block scaled GEMM
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
@@ -401,8 +407,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
-    // conditionally compiled so impl registration is in source file
-  #endif
+  // conditionally compiled so impl registration is in source file
+#endif
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -525,8 +531,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> int");
   // conditionally compiled so impl in source file
 
-  #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
-      (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+#if VLLM_USE_NVFP4
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
@@ -544,7 +549,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp4", &cutlass_scaled_mm_supports_fp4);
-  #endif
+#endif
 #endif
 
   // Quantized GEMM for GPTQ.
