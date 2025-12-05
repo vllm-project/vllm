@@ -584,15 +584,12 @@ class FusedMoE(CustomOp):
             Helper method to ensure self.quant_method is never None and
             of the proper type.
             """
-            from vllm.model_executor.layers.linear import LinearMethodBase
-
             quant_method = None
             if self.quant_config is not None:
                 quant_method = self.quant_config.get_quant_method(self, prefix)
-            if quant_method is None or isinstance(quant_method, LinearMethodBase):
+            if quant_method is None:
                 quant_method = UnquantizedFusedMoEMethod(self.moe_config)
             assert isinstance(quant_method, FusedMoEMethodBase)
-
             return quant_method
 
         # Note: get_quant_method will look at the layer's local_num_experts
@@ -866,7 +863,8 @@ class FusedMoE(CustomOp):
         use_chunked_impl: bool,
     ) -> tuple[bool, torch.Tensor | None]:
         use_shared_experts_stream = (
-            has_separate_shared_experts
+            current_platform.is_cuda()
+            and has_separate_shared_experts
             and not use_chunked_impl
             and self.shared_experts_stream is not None
             and (
