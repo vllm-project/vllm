@@ -18,7 +18,7 @@ from typing import (
 
 import numpy as np
 import torch
-from typing_extensions import runtime_checkable
+from typing_extensions import deprecated, runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
@@ -95,27 +95,33 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
     @property
-    def seq_lens_cpu(self) -> torch.Tensor:
-        """Lazy CPU copy of seq_lens. Accessing this may cause a sync.
-
-        .. deprecated::
-            Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    @deprecated(
         """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    If a CPU copy is needed, use `seq_lens.cpu()` instead.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def seq_lens_cpu(self) -> torch.Tensor:
         if self._seq_lens_cpu is None:
             self._seq_lens_cpu = self.seq_lens.to("cpu")
         return self._seq_lens_cpu
 
     @property
-    def num_computed_tokens_cpu(self) -> torch.Tensor:
-        """Lazy CPU tensor for num computed tokens. Accessing may cause a sync.
-
-        .. deprecated::
-            Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    @deprecated(
         """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
+    async scheduling. If a CPU copy is needed, it can be derived from 
+    query_start_loc_cpu and seq_lens.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def num_computed_tokens_cpu(self) -> torch.Tensor:
         if self._num_computed_tokens_cpu is None:
             query_seq_lens = (
                 self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
