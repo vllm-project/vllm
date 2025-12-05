@@ -90,13 +90,18 @@ def create_vllm_config(
     max_model_len: int = 10000,
     enable_chunked_prefill: bool = True,
     enable_permute_local_kv: bool = False,
+    kv_connector_extra_config: dict[str, Any] | None = None,
+    dtype: str = "float16",
+    cache_dtype: str = "auto",
+    hf_overrides: dict[str, Any] | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
         model=model,
         trust_remote_code=True,
-        dtype="float16",
+        dtype=dtype,
         seed=42,
+        hf_overrides=hf_overrides or {},
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -110,13 +115,14 @@ def create_vllm_config(
         block_size=block_size,
         gpu_memory_utilization=0.9,
         swap_space=0,
-        cache_dtype="auto",
+        cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
         enable_permute_local_kv=enable_permute_local_kv,
+        kv_connector_extra_config=kv_connector_extra_config or {},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
