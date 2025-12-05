@@ -87,12 +87,15 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                     # Check for invalid file type in tokenize endpoint
                     if op.method.lower() == "post" and op.path == "/tokenize":
                         content = message.get("content", [])
-                        if isinstance(content, list) and len(content) > 0:
-                            if any(
+                        if (
+                            isinstance(content, list)
+                            and content
+                            and any(
                                 isinstance(item, dict) and item.get("type") == "file"
                                 for item in content
-                            ):
-                                return False
+                            )
+                        ):
+                            return False
 
                     # Check for invalid tool_calls with non-function types
                     tool_calls = message.get("tool_calls", [])
