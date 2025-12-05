@@ -210,9 +210,6 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
-    def supports_quant_query_input(self) -> bool:
-        return current_platform.is_cuda()
-
     def __init__(
         self,
         num_heads: int,
@@ -261,6 +258,8 @@ class TritonAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}."
             )
+
+        self.supports_quant_query_input = current_platform.is_cuda()
 
     def forward(
         self,
