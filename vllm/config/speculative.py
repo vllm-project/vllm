@@ -337,6 +337,7 @@ class SpeculativeConfig:
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
+                    config_format=self.target_model_config.config_format,
                 )
 
                 # Automatically detect the method
