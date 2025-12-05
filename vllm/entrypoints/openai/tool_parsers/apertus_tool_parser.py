@@ -23,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import (
     find_common_prefix,
@@ -38,7 +37,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("apertus")
 class ApertusToolParser(ToolParser):
     """
     Tool call parser for Apertus models.
