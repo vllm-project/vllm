@@ -328,8 +328,12 @@ class LLMEngine:
         self.input_processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
-        return self.engine_core.reset_prefix_cache(reset_running_requests)
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
@@ -409,8 +413,6 @@ class LLMEngine:
         return self.collective_rpc("apply_model", args=(func,))
 
     def __del__(self):
-        if (
-            dp_group := getattr(self, "dp_group", None)
-            and not self.external_launcher_dp
-        ):
+        dp_group = getattr(self, "dp_group", None)
+        if dp_group is not None and not self.external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
