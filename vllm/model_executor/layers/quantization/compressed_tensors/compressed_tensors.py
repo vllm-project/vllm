@@ -1002,6 +1002,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         Initialize placeholder scales and zero points to enable loading of
         quantized params from compressed-tensors checkpoints.
         """
+        assert hasattr(self.quant_config, "kv_cache_scheme"), (
+            "This is to satisfy mypy. We will be able to remove it with the next"
+            " release of compressed-tensors."
+        )
         strategy = self.quant_config.kv_cache_scheme.get("strategy")
 
         shape_kv: tuple[int, ...]
