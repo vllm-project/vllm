@@ -566,7 +566,7 @@ class ParallelConfig:
                     f"World size ({self.world_size}) is larger than the number of "
                     f"available GPUs ({gpu_count}) in this node. If this is "
                     "intentional and you are using:\n"
-                    "- ray, set '--distributed-executor-backend ray'."
+                    "- ray, set '--distributed-executor-backend ray'.\n"
                     "- multiprocessing, set '--nnodes' appropriately."
                 )
             elif self.data_parallel_backend == "ray":
