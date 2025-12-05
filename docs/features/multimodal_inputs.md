@@ -365,6 +365,8 @@ You must enable this feature via `enable_mm_embeds=True`.
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+#### Image Embeddings
+
 ??? code
 
     ```python
@@ -441,6 +443,38 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
         print(generated_text)
     ```
 
+For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
+
+#### Audio Embeddings
+
+You can pass pre-computed audio embeddings similar to image embeddings:
+
+??? code
+
+    ```python
+    from vllm import LLM
+    import torch
+
+    # Enable audio embeddings support
+    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+
+    # Load pre-computed audio embeddings
+    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    audio_embeds = torch.load(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"audio": audio_embeds},
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts multi-modal data via the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Media inputs also support optional UUIDs users can provide to uniquely identify each media, which is used to cache the media results across requests.
@@ -483,7 +517,7 @@ Then, you can use the OpenAI client as follows:
     )
 
     # Single-image input inference
-    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -763,14 +797,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    from vllm.utils.serial_utils import tensor2base64
+
     image_embedding = torch.load(...)
     grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
 
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = tensor2base64(image_embedding)
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")

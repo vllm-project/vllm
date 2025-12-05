@@ -15,6 +15,8 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -22,11 +24,9 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
 else:
-    AttentionBackendEnum = None
     VllmConfig = None
     CacheDType = None
 
@@ -48,8 +48,6 @@ def _get_backend_priorities(
     device_capability: DeviceCapability,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.attention.backends.registry import AttentionBackendEnum
-
     if use_mla:
         if device_capability.major == 10:
             return [
@@ -235,6 +233,23 @@ class CudaPlatformBase(Platform):
         from vllm.config import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # decode context parallel does not support full cudagraphs
+            if parallel_config.decode_context_parallel_size > 1:
+                logger.warning_once(
+                    "Decode context parallel (DCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            # prefill context parallel do not support full cudagraphs
+            elif parallel_config.prefill_context_parallel_size > 1:
+                logger.warning_once(
+                    "Prefill context parallel (PCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
         if (
             parallel_config.all2all_backend == "deepep_high_throughput"
             and parallel_config.data_parallel_size > 1
@@ -265,27 +280,18 @@ class CudaPlatformBase(Platform):
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
     ) -> "AttentionBackendEnum":
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        # Try FlashAttention first
+        if (cc := cls.get_device_capability()) and cc.major >= 8:
+            try:
+                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
+                if backend_class.supports_head_size(
+                    head_size
+                ) and backend_class.supports_dtype(dtype):
+                    return AttentionBackendEnum.FLASH_ATTN
+            except ImportError:
+                pass
 
-        # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
-        if cls.has_device_capability(100):
-            return AttentionBackendEnum.TORCH_SDPA
-
-        if dtype not in (torch.float16, torch.bfloat16):
-            return AttentionBackendEnum.XFORMERS
-
-        if cls.has_device_capability(80):
-            backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-            if backend_class.supports_head_size(
-                head_size
-            ) and backend_class.supports_dtype(dtype):
-                return AttentionBackendEnum.FLASH_ATTN
-            else:
-                return AttentionBackendEnum.XFORMERS
-        else:
-            # Fallback for Volta/Turing GPUs or FA not supported
-            return AttentionBackendEnum.XFORMERS
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(
@@ -343,8 +349,6 @@ class CudaPlatformBase(Platform):
         use_sparse: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention import AttentionType
-
         if attn_type is None:
             attn_type = AttentionType.DECODER
 
@@ -415,9 +419,6 @@ class CudaPlatformBase(Platform):
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        logger.info(
-            "Valid backends: %s", [b[0].name for b in valid_backends_priorities]
-        )
         sorted_indices = sorted(
             range(len(valid_backends_priorities)),
             key=lambda i: valid_backends_priorities[i][1],
@@ -425,8 +426,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         logger.info(
-            "Using %s backend.",
+            "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
+            [b[0].name for b in valid_backends_priorities],
         )
 
         return selected_backend.get_path()

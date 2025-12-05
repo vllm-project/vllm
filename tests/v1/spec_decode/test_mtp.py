@@ -51,7 +51,10 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
     )
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
@@ -67,6 +70,10 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
     mock_get_model.return_value = mock_model
+    # MTP does not have its own embed_tokens or lm_head
+    # so it should share them with the target model
+    mock_model.has_own_embed_tokens = False
+    mock_model.has_own_lm_head = False
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}

@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 from transformers import AutoProcessor
 
+from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
 from ...utils import RemoteOpenAIServer
@@ -17,10 +18,10 @@ MAXIMUM_IMAGES = 2
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_ASSETS = [
-    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
 ]
 
 EXPECTED_MM_BEAM_SEARCH_RES = [
@@ -111,7 +112,11 @@ def get_hf_prompt_tokens(model_name, content, image_url):
             "content": f"{placeholder}{content}",
         }
     ]
-    images = [fetch_image(image_url)]
+    image = fetch_image(image_url)
+    # Unwrap MediaWithBytes if present
+    if isinstance(image, MediaWithBytes):
+        image = image.media
+    images = [image]
 
     prompt = processor.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True

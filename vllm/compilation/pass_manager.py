@@ -19,6 +19,7 @@ if current_platform.is_cuda_alike():
     from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
     from .qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_rocm():
     from .rocm_aiter_rmsnorm_fusion import (
@@ -31,7 +32,6 @@ if current_platform.is_cuda():
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
-from .sequence_parallelism import SequenceParallelismPass
 
 logger = init_logger(__name__)
 
@@ -98,24 +98,25 @@ class PostGradPassManager(CustomGraphPass):
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
-            if self.pass_config.enable_noop:
+            if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sequence_parallelism:
+            if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.enable_async_tp:
+                if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
-            if self.pass_config.enable_fi_allreduce_fusion:
+            if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
-            if self.pass_config.enable_fusion:
+            if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
+            if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_rmsnorm_enabled():
                     self.passes += [RMSNormAiterQuantFusionPass(config)]
 
-            if self.pass_config.enable_attn_fusion:
+            if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
@@ -135,7 +136,7 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.uuid(), "passes": []}
+        state = {"pass_config": self.pass_config.compute_hash(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
