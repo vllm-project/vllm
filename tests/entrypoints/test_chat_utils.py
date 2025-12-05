@@ -11,7 +11,7 @@ from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, RendererConfig
 from vllm.entrypoints.chat_utils import (
     _try_extract_ast,
     apply_mistral_chat_template,
@@ -232,7 +232,7 @@ def test_parse_chat_messages_single_image(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -264,7 +264,7 @@ def test_parse_chat_messages_single_image_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -294,7 +294,7 @@ def test_parse_chat_messages_single_empty_image_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -327,7 +327,7 @@ def test_parse_chat_messages_single_image_with_bad_uuid_format(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -368,7 +368,7 @@ def test_parse_chat_messages_multiple_images_with_uuids(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -408,7 +408,7 @@ def test_parse_chat_messages_multiple_empty_images_with_uuids(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -450,7 +450,7 @@ def test_parse_chat_messages_mixed_empty_images_with_uuids(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -484,7 +484,7 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -515,7 +515,7 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -553,7 +553,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -594,7 +594,7 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -633,7 +633,7 @@ async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -659,7 +659,7 @@ def test_parse_chat_messages_empty_system(
                 "content": [{"type": "text", "text": "Who are you?"}],
             },
         ],
-        mistral_model_config,
+        RendererConfig(model_config=mistral_model_config),
         content_format="string",
     )
     assert conversation == [
@@ -676,7 +676,7 @@ def test_parse_chat_messages_empty_system(
                 "content": [{"type": "text", "text": "Who are you?"}],
             },
         ],
-        mistral_model_config,
+        RendererConfig(model_config=mistral_model_config),
         content_format="openai",
     )
     assert conversation == [
@@ -700,7 +700,7 @@ async def test_parse_chat_messages_single_image_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -729,7 +729,7 @@ def test_parse_chat_messages_multiple_images(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -757,7 +757,7 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -785,7 +785,7 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
                 ],
             }
         ],
-        phi3v_model_config_image_embeds,
+        RendererConfig(model_config=phi3v_model_config_image_embeds),
         content_format="string",
     )
 
@@ -817,7 +817,7 @@ def test_parse_chat_messages_empty_audio_embeds_with_uuid(
                 ],
             }
         ],
-        audio_embeds_model_config,
+        RendererConfig(model_config=audio_embeds_model_config),
         content_format="string",
     )
 
@@ -857,7 +857,7 @@ def test_parse_chat_messages_audio_embeds_with_string(
                 ],
             }
         ],
-        audio_embeds_model_config,
+        RendererConfig(model_config=audio_embeds_model_config),
         content_format="string",
     )
 
@@ -899,7 +899,7 @@ async def test_parse_chat_messages_audio_embeds_async(
                 ],
             }
         ],
-        audio_embeds_model_config,
+        RendererConfig(model_config=audio_embeds_model_config),
         content_format="string",
     )
 
@@ -930,7 +930,7 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
                 ],
             }
         ],
-        phi3v_model_config_image_embeds,
+        RendererConfig(model_config=phi3v_model_config_image_embeds),
         content_format="string",
     )
 
@@ -966,7 +966,7 @@ async def test_parse_chat_messages_multiple_images_async(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -998,7 +998,7 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
     assert conversation == [
@@ -1030,7 +1030,7 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -1067,7 +1067,7 @@ def test_parse_chat_messages_multiple_images_across_messages(
                 ],
             },
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -1111,7 +1111,7 @@ def test_parse_chat_messages_multiple_images_with_uuids_across_messages(
                 ],
             },
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -1136,7 +1136,7 @@ def test_parse_chat_messages_context_text_format(
             {"role": "assistant", "content": "Some stuff."},
             {"role": "user", "content": "What about this one?"},
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="openai",
     )
 
@@ -1189,7 +1189,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
                         ],
                     }
                 ],
-                phi3v_model_config,
+                RendererConfig(model_config=phi3v_model_config),
                 content_format="string",
             )
 
@@ -1232,7 +1232,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
                         ],
                     },
                 ],
-                phi3v_model_config,
+                RendererConfig(model_config=phi3v_model_config),
                 content_format="string",
             )
 
@@ -1252,7 +1252,7 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
                 ],
             }
         ],
-        phi3v_model_config,
+        RendererConfig(model_config=phi3v_model_config),
         content_format="string",
     )
 
@@ -1286,7 +1286,7 @@ def test_parse_chat_messages_multiple_images_interleave(
                 ],
             }
         ],
-        phi3v_model_config_mm_interleaved,
+        RendererConfig(model_config=phi3v_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1322,7 +1322,7 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
                 ],
             }
         ],
-        phi3v_model_config_mm_interleaved,
+        RendererConfig(model_config=phi3v_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1367,7 +1367,7 @@ async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
                 ],
             }
         ],
-        phi3v_model_config_mm_interleaved,
+        RendererConfig(model_config=phi3v_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1405,7 +1405,7 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
                 ],
             },
         ],
-        phi3v_model_config_mm_interleaved,
+        RendererConfig(model_config=phi3v_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1453,7 +1453,7 @@ def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interl
                 ],
             },
         ],
-        phi3v_model_config_mm_interleaved,
+        RendererConfig(model_config=phi3v_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1497,7 +1497,7 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
                 ],
             },
         ],
-        qwen25omni_model_config_mm_interleaved,
+        RendererConfig(model_config=qwen25omni_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1565,7 +1565,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interl
                 ],
             },
         ],
-        qwen25omni_model_config_mm_interleaved,
+        RendererConfig(model_config=qwen25omni_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1635,7 +1635,7 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
                 ],
             },
         ],
-        qwen25omni_model_config_mm_interleaved,
+        RendererConfig(model_config=qwen25omni_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1701,7 +1701,7 @@ def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_message
                 ],
             },
         ],
-        qwen25omni_model_config_mm_interleaved,
+        RendererConfig(model_config=qwen25omni_model_config_mm_interleaved),
         content_format="string",
     )
 
@@ -1749,7 +1749,7 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
                     ],
                 }
             ],
-            phi3v_model_config_mm_interleaved,
+            RendererConfig(model_config=phi3v_model_config_mm_interleaved),
             content_format="string",
         )
 
@@ -1767,24 +1767,11 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    model_config = ModelConfig(
-        model,
-        tokenizer=model_info.tokenizer or model,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.require_embed_inputs,
-        enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
-        enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype,
-    )
+    renderer_config = model_info.build_renderer_config()
 
-    # Build the tokenizer
     tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
+        renderer_config.tokenizer,
+        trust_remote_code=renderer_config.trust_remote_code,
     )
 
     tools = (
@@ -1807,7 +1794,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         tokenizer,
         chat_template=None,
         tools=tools,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
     assert isinstance(chat_template, str)
 
@@ -1869,24 +1856,11 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "enable_thinking": True,
     }
 
-    model_config = ModelConfig(
-        model,
-        tokenizer=model_info.tokenizer or model,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.require_embed_inputs,
-        enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
-        enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype,
-    )
+    renderer_config = model_info.build_renderer_config()
 
-    # Build the tokenizer
     tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
+        renderer_config.tokenizer,
+        trust_remote_code=renderer_config.trust_remote_code,
     )
 
     # Test detecting the tokenizer's chat_template
@@ -1894,7 +1868,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tokenizer,
         chat_template=None,
         tools=tools,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
@@ -1965,23 +1939,11 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    model_config = ModelConfig(
-        model,
-        tokenizer=model_info.tokenizer or model,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.require_embed_inputs,
-        enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
-        enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype,
-    )
+    renderer_config = model_info.build_renderer_config()
 
     tokenizer = get_tokenizer(
-        model,
-        trust_remote_code=model_config.trust_remote_code,
+        renderer_config.tokenizer,
+        trust_remote_code=renderer_config.trust_remote_code,
     )
 
     # Test detecting the tokenizer's chat_template
@@ -1989,7 +1951,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         tokenizer,
         chat_template=None,
         tools=None,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
     assert isinstance(chat_template, str)
 
@@ -2003,7 +1965,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         None,
         "auto",
         tokenizer,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
 
     assert resolved_format == expected_format
@@ -2025,23 +1987,11 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    model_config = ModelConfig(
-        model,
-        tokenizer=model_info.tokenizer or model,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.require_embed_inputs,
-        enable_prompt_embeds=model_info.require_embed_inputs,
-        enable_mm_embeds=model_info.require_embed_inputs,
-        enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype,
-    )
+    renderer_config = model_info.build_renderer_config()
 
     tokenizer = get_tokenizer(
-        model_config.tokenizer,
-        trust_remote_code=model_config.trust_remote_code,
+        renderer_config.tokenizer,
+        trust_remote_code=renderer_config.trust_remote_code,
     )
 
     # Test detecting the tokenizer's chat_template
@@ -2049,7 +1999,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         tokenizer,
         chat_template=None,
         tools=None,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
     assert isinstance(chat_template, str)
 
@@ -2063,7 +2013,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         None,
         "auto",
         tokenizer,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
 
     assert resolved_format == expected_format
@@ -2094,15 +2044,13 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     ],
 )
 def test_resolve_content_format_examples(template_path, expected_format):
-    model_config = ModelConfig(
-        PHI3V_MODEL_ID,  # Dummy
-        tokenizer=PHI3V_MODEL_ID,  # Dummy
-        trust_remote_code=True,
-    )
+    model = PHI3V_MODEL_ID  # Dummy
+    model_config = ModelConfig(model, trust_remote_code=True)
+    renderer_config = RendererConfig(model_config=model_config, tokenizer=model)
 
     dummy_tokenizer = get_tokenizer(
-        PHI3V_MODEL_ID,  # Dummy
-        trust_remote_code=model_config.trust_remote_code,
+        renderer_config.tokenizer,
+        trust_remote_code=renderer_config.trust_remote_code,
     )
     dummy_tokenizer.chat_template = None
 
@@ -2119,7 +2067,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
         None,
         "auto",
         dummy_tokenizer,
-        model_config=model_config,
+        renderer_config=renderer_config,
     )
 
     assert resolved_format == expected_format
@@ -2154,7 +2102,7 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
 
     conversation_with_thinking, _, _ = parse_chat_messages(
         messages,
-        mistral_model_config,
+        RendererConfig(model_config=mistral_model_config),
         content_format="openai",
     )
 
@@ -2254,7 +2202,7 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
                 ],
             }
         ],
-        qwen2_audio_model_config,
+        RendererConfig(model_config=qwen2_audio_model_config),
         content_format="string",
     )
 
@@ -2288,7 +2236,7 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
                 ],
             }
         ],
-        qwen2_audio_model_config,
+        RendererConfig(model_config=qwen2_audio_model_config),
         content_format="string",
     )
 

@@ -71,6 +71,7 @@ class OpenAIServingModels:
 
         self.input_processor = self.engine_client.input_processor
         self.io_processor = self.engine_client.io_processor
+        self.renderer_config = self.engine_client.renderer_config
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
 

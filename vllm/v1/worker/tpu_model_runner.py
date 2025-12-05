@@ -353,7 +353,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.mm_budget = (
             MultiModalBudget(
-                self.model_config,
+                vllm_config.renderer_config,
                 self.scheduler_config,
                 self.mm_registry,
             )

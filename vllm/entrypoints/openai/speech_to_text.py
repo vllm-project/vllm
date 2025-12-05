@@ -101,8 +101,8 @@ class OpenAISpeechToText(OpenAIServing):
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
                 get_tokenizer(
-                    tokenizer_name=self.model_config.tokenizer,
-                    tokenizer_mode=self.model_config.tokenizer_mode,
+                    tokenizer_name=self.renderer_config.tokenizer,
+                    tokenizer_mode=self.renderer_config.tokenizer_mode,
                 ),
             )
 

@@ -118,7 +118,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
         image = image.media
     images = [image]
 
-    prompt = processor.tokenizer.apply_chat_template(
+    prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = processor(prompt, images, return_tensors="pt")

@@ -7,7 +7,7 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import RendererConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -23,13 +23,14 @@ class MultiModalBudget:
 
     def __init__(
         self,
-        model_config: ModelConfig,
+        renderer_config: RendererConfig,
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
         super().__init__()
 
-        self.model_config = model_config
+        self.renderer_config = renderer_config
+        self.model_config = model_config = renderer_config.model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
         self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
@@ -40,7 +41,7 @@ class MultiModalBudget:
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            model_config,
+            renderer_config,
             cache=cache,
             profiler_limits=self.mm_limits,
         )
