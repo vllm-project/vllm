@@ -109,7 +109,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-#ifndef USE_ROCM
+#if !defined(USE_ROCM) &&                                   \
+    ((defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120))
   ops.def(
       "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
       "Tensor input, Tensor input_global_scale) -> ()");
@@ -378,6 +380,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
+  #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+      (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
   // CUTLASS nvfp4 block scaled GEMM
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
@@ -397,7 +401,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
-  // conditionally compiled so impl registration is in source file
+    // conditionally compiled so impl registration is in source file
+  #endif
 
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
@@ -520,6 +525,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> int");
   // conditionally compiled so impl in source file
 
+  #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+      (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
@@ -537,6 +544,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // of the given capability
   ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp4", &cutlass_scaled_mm_supports_fp4);
+  #endif
 #endif
 
   // Quantized GEMM for GPTQ.
