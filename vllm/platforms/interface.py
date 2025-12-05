@@ -32,7 +32,7 @@ logger = init_logger(__name__)
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in (uname_str := " ".join(platform.uname()).lower()) and "wsl2" not in uname_str
+    return "wsl1" in " ".join(platform.uname()).lower()
 
 
 class PlatformEnum(enum.Enum):
