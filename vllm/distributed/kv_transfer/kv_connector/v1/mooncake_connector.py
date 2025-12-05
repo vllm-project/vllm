@@ -438,7 +438,6 @@ class MooncakeConnectorWorker:
             "num_workers", 10
         )
 
-
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: SendReqMeta = SendReqMeta(reqs={}, lock=threading.Lock())
