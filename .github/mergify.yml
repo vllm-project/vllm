@@ -14,6 +14,38 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: comment-pre-commit-failure
+  description: Comment on PR when pre-commit check fails
+  conditions:
+    - status-failure=pre-commit
+    - -closed
+    - -draft
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the pre-commit checks have failed. Please run:
+
+        ```bash 
+        uv pip install pre-commit
+        pre-commit install
+        pre-commit run --all-files
+        ```
+
+        Then, commit the changes and push to your branch.
+
+        For future commits, `pre-commit` will run automatically on changed files before each commit.
+
+- name: comment-dco-failure
+  description: Comment on PR when DCO check fails
+  conditions:
+    - status-failure=dco
+    - -closed
+    - -draft
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the DCO check has failed. Please click on DCO in the Checks section for instructions on how to resolve this.
+
 - name: label-ci-build
   description: Automatically apply ci/build label
   conditions:
