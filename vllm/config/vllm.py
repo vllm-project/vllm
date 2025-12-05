@@ -666,9 +666,9 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
         if (
-            self.compilation_config.cudagraph_mode
-            in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE)
+            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(

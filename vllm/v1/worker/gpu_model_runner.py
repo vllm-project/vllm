@@ -2783,12 +2783,11 @@ class GPUModelRunner(
             if force_uniform_decode is None
             else force_uniform_decode
         )
-        # Encoder-decoder models only support GC for decoder_step > 0 (no enc_output
+        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
-        uniform_decode = uniform_decode and not has_encoder_output
 
         has_lora = (
             len(self.input_batch.lora_id_to_lora_request) > 0
@@ -2808,7 +2807,7 @@ class GPUModelRunner(
         )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-            num_tokens_padded, use_cascade_attn
+            num_tokens_padded, use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
 
@@ -4106,7 +4105,6 @@ class GPUModelRunner(
             assert num_tokens_padded <= self.max_num_tokens
             model_kwargs = self._init_model_kwargs(num_tokens_padded)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
-                # NOT ENC-DEC
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = {
