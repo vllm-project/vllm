@@ -143,7 +143,7 @@ COPY pyproject.toml pyproject.toml
 RUN python3 use_existing_torch.py
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+    uv pip install -v --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
@@ -154,7 +154,7 @@ ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install xformers --python /opt/venv/bin/python3
+    uv pip install -v xformers --python /opt/venv/bin/python3
 
 #################### BASE BUILD IMAGE ####################
 
@@ -179,7 +179,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+    uv pip install -v --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 COPY . .
@@ -451,12 +451,13 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
+RUN python3 use_existing_torch.py
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        uv pip install --system -r requirements/dev.txt \
+        uv pip install -v --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
