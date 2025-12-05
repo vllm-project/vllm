@@ -375,9 +375,15 @@ def run_attention_backend(
         # Run forward pass using the real MLAAttention layer
         # NOTE: The query, key, and value are already shaped correctly
         # in the calling test function.
-        output = impl.forward(
-            mla_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
-        )
+        # Dense backends use forward_impl(), sparse backends use impl.forward()
+        if backend.get_class().is_sparse():
+            output = impl.forward(
+                mla_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+            )
+        else:
+            output = mla_layer.forward_impl(
+                mla_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+            )
 
         return output
 

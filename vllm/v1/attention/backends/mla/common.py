@@ -1412,7 +1412,6 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
-    @abstractmethod
     def forward(
         self,
         layer: AttentionLayer,
@@ -1427,10 +1426,14 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
     ) -> torch.Tensor:
         """Forward method required by abstract base class.
 
-        Sparse backends (ROCMAiterMLASparseImpl, FlashMLASparseImpl) implement this.
-        Dense backends use MLAAttention.forward_impl() instead.
+        Sparse backends (ROCMAiterMLASparseImpl, FlashMLASparseImpl) override this.
+        Dense backends use MLAAttention.forward_impl() instead and should not call this.
         """
-        raise NotImplementedError
+        raise NotImplementedError(
+            "MLACommonImpl.forward() should not be called. "
+            "Dense backends should use MLAAttention.forward_impl() instead. "
+            "Sparse backends should override this method."
+        )
 
     @abstractmethod
     def _forward_decode(
