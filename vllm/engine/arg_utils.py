@@ -521,6 +521,9 @@ class EngineArgs:
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
     cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
+    enable_layerwise_nvtx_tracing: bool = (
+        ObservabilityConfig.enable_layerwise_nvtx_tracing
+    )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
     external_parameters: Optional[dict] = SchedulerConfig.external_parameters
@@ -1028,6 +1031,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--cudagraph-metrics",
             **observability_kwargs["cudagraph_metrics"],
+        )
+        observability_group.add_argument(
+            "--enable-layerwise-nvtx-tracing",
+            **observability_kwargs["enable_layerwise_nvtx_tracing"],
         )
 
         # Scheduler arguments
@@ -1721,6 +1728,7 @@ class EngineArgs:
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
         )
 
         # Compilation config overrides
