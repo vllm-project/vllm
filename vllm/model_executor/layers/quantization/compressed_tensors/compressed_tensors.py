@@ -200,6 +200,16 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+        # We keep only config groups which are not doing Attention quantization
+        # because Attention quantization on its own is not supported by vLLM.
+        # It is coupled with KV-cache quantization, and if scales are present in the
+        # checkpoint, they will be used properly.
+        config["config_groups"] = {
+            k: v
+            for k, v in config["config_groups"].items()
+            if "Attention" not in v["targets"][0]
+        }
+
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
@@ -207,6 +217,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config
         )
         transform_config = config.get("transform_config")
+        kv_cache_scheme = config.get("kv_cache_scheme")
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -216,6 +227,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,
             transform_config=transform_config,
+            kv_cache_scheme=kv_cache_scheme,
         )
 
     @classmethod
@@ -965,12 +977,16 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 f"received num_bits={num_bits}, type={type_}"
             )
 
+        # TODO: delegate validation to compressed-tensors library so that we have a
+        # single source of truth. Right now this is not possible until the next release
+        # of compressed-tensors.
         strategy = kv_cache_scheme.get("strategy")
-        if strategy != "tensor":
+        supported_strategies = ("tensor", "attn_head")
+        if strategy not in supported_strategies:
             raise NotImplementedError(
-                "Only support per-tensor scaling factor "
-                "for compressed-tensors KV cache. "
-                f"Expected strategy: tensor, found strategy: {strategy}"
+                "Invalid strategy for compressed-tensors KV cache. "
+                f"Expected strategies: {supported_strategies}, found strategy:"
+                f" {strategy}"
             )
 
         is_symmetric = kv_cache_scheme.get("symmetric")
@@ -980,3 +996,97 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 "for compressed-tensors KV cache. "
                 f"However found symmetric: {is_symmetric}"
             )
+
+    def create_weights(self, layer: torch.nn.Module):
+        """
+        Initialize placeholder scales and zero points to enable loading of
+        quantized params from compressed-tensors checkpoints.
+        """
+        strategy = self.quant_config.kv_cache_scheme.get("strategy")
+
+        shape_kv: tuple[int, ...]
+        shape_q: tuple[int, ...]
+        if strategy == "tensor":
+            shape_kv = (1,)
+            shape_q = (1,)
+        else:  # strategy == "attn_head"
+            from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+            assert (
+                isinstance(layer.impl, FlashAttentionImpl)
+                and layer.impl.vllm_flash_attn_version >= 3
+            ), (
+                "FP8 KV-cache and attention quantization with attn_head strategy is"
+                " only supported for FlashAttentionImpl v3 and above"
+            )
+            shape_kv = (int(layer.num_kv_heads), 1, 1)
+            shape_q = (int(layer.num_heads), 1, 1)
+
+        layer.k_scale = torch.nn.Parameter(
+            torch.empty(shape_kv, requires_grad=False, dtype=torch.float32)
+        )
+        layer.v_scale = torch.nn.Parameter(
+            torch.empty(shape_kv, requires_grad=False, dtype=torch.float32)
+        )
+        layer.q_scale = torch.nn.Parameter(
+            torch.empty(shape_q, requires_grad=False, dtype=torch.float32)
+        )
+
+        # Zero points are not used in vLLM as currently only symmetric quantization is
+        # supported. We need to create them here to enable loading of llm-compressor
+        # checkpoints which contain them irrespective of the symmetric/asymmetric
+        # scheme used during quantization.
+        layer.k_zero_point = torch.nn.Parameter(
+            torch.empty(shape_kv, requires_grad=False)
+        )
+        layer.v_zero_point = torch.nn.Parameter(
+            torch.empty(shape_kv, requires_grad=False)
+        )
+        layer.q_zero_point = torch.nn.Parameter(
+            torch.empty(shape_q, requires_grad=False)
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """
+        Override the default vLLM placeholder scales with the llm-compressor loaded
+        scales. Scales are flattened to 1D tensors to match the expected format.
+        Zero points are not used as currently only symmetric quantization is supported.
+        """
+        layer._k_scale = layer.k_scale.flatten()
+        layer._v_scale = layer.v_scale.flatten()
+        layer._q_scale = layer.q_scale.flatten()
+        layer._q_scale_for_fa = layer._q_scale
+
+        # q_scale requires special treatment in the case of per-attn-head quantization.
+        # llm-compressor creates one scale per attn head, i.e. [num_heads] scales.
+        if layer._q_scale.numel() > 1:  # per-attn-head quantization
+            # 1) FlashAttention kernel expects [num_kv_heads] instead of [num_heads]
+            # scales for layer._q_scale. Therefore, in the case of per-attn-head quant
+            # we need to reduce q_scale from [num_heads] to [num_kv_heads]. We reduce
+            # by taking the max scale in each attention head group.
+            reduction_factor = layer.num_heads // layer.num_kv_heads
+            layer._q_scale_for_fa = torch.amax(
+                layer._q_scale.view(-1, reduction_factor), dim=1
+            )
+
+            # 2) vLLM's QuantFP8 op expects q_scale to be [output_channels] instead of
+            # [num_heads], so we need to repeat the attn_head scales. First we go back
+            # to the [num_heads] shape from the "FA-contracted shape" from the previous
+            # step. Now we have the same scale for each attention head group.
+            layer._q_scale = torch.repeat_interleave(
+                layer._q_scale_for_fa, reduction_factor
+            )
+            # Then we repeat the scales to match the [output_channels] shape, which is
+            # expected by the per-channel QuantFP8 op.
+            layer._q_scale = layer._q_scale.repeat_interleave(
+                (layer.head_size * layer.num_heads) // layer._q_scale.numel()
+            )
+
+        # Zero points are not used in vLLM as currently only symmetric quant is
+        # supported. We discard all dummy placeholder parameters.
+        del layer.k_scale
+        del layer.v_scale
+        del layer.q_scale
+        del layer.k_zero_point
+        del layer.v_zero_point
+        del layer.q_zero_point

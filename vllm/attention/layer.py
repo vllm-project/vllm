@@ -80,8 +80,6 @@ def _init_kv_cache_quant(
     layer: nn.Module,
     quant_config: QuantizationConfig | None,
     prefix: str,
-    kv_cache_dtype: str,
-    calculate_kv_scales: bool,
 ) -> None:
     """Initializes KV cache scaling factors and quantization method.
 
@@ -94,9 +92,10 @@ def _init_kv_cache_quant(
         layer: The attention layer instance to initialize.
         quant_config: Optional quantization configuration.
         prefix: Layer name prefix for quantization method lookup.
-        kv_cache_dtype: The KV cache data type string.
-        calculate_kv_scales: Whether to calculate KV scales dynamically.
     """
+    quant_method = (
+        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+    )
     # The default k/v_scale is set to 1.0. This is ignored
     # when kv-cache is not fp8, and should be used with
     # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
@@ -133,7 +132,7 @@ def _init_kv_cache_quant(
         assert isinstance(quant_method, BaseKVCacheMethod)
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
-        if kv_cache_dtype == "fp8_e5m2":
+        if layer.kv_cache_dtype == "fp8_e5m2":
             raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
         # If quantization is enabled, we make "k_scale" and "v_scale"
         # parameters so that it can be loaded from the model checkpoint.
@@ -197,9 +196,20 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+
+        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        if getattr(quant_config, "kv_cache_scheme", None) is not None:
+            kv_cache_dtype = "fp8"
+            calculate_kv_scales = False
+            if cache_config is not None:
+                cache_config.cache_dtype = "fp8"
+                cache_config.calculate_kv_scales = False
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
@@ -207,15 +217,6 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.quant_config = quant_config
         self.layer_name = prefix
-
-        # Initialize KV cache quantization attributes
-        _init_kv_cache_quant(
-            self,
-            self.quant_config,
-            self.layer_name,
-            kv_cache_dtype,
-            calculate_kv_scales,
-        )
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -318,18 +319,21 @@ class Attention(nn.Module, AttentionLayerBase):
             for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
 
-        # Initialize q/k/v range constants.
-        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
-        self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
-        self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        # Initialize KV cache quantization attributes
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         # for attn backends supporting query quantization
         self.query_quant = None
-        if (
-            self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input
+        is_per_channel = hasattr(self, "q_scale") and self.q_scale.numel() > 1
+        if self.impl.supports_quant_query_input() and self.kv_cache_dtype.startswith(
+            "fp8"
         ):
-            self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+            self.query_quant = QuantFP8(
+                static=True,
+                group_shape=GroupShape.PER_CHANNEL
+                if is_per_channel
+                else GroupShape.PER_TENSOR,
+            )
 
     def forward(
         self,
@@ -524,13 +528,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         # Initialize KV cache quantization attributes
-        _init_kv_cache_quant(
-            self,
-            self.quant_config,
-            self.layer_name,
-            kv_cache_dtype,
-            calculate_kv_scales,
-        )
+        self.kv_cache_dtype = kv_cache_dtype
+        self.calculate_kv_scales = calculate_kv_scales
+        _init_kv_cache_quant(self, quant_config, prefix)
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
