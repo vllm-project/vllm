@@ -33,7 +33,7 @@ class RenderConfig:
     `0` yields an empty list (and skips embeds).
     `-1` maps to `model_config.max_model_len`."""
 
-    add_special_tokens: bool = True
+    add_special_tokens: bool | None = True
     """Whether to add model-specific special tokens during tokenization."""
 
     cache_salt: str | None = None
@@ -169,17 +169,20 @@ class BaseRenderer(ABC):
             )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
-            tensor = torch.load(
-                io.BytesIO(pybase64.b64decode(embed, validate=True)),
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
-                torch.float32,
-                torch.bfloat16,
-                torch.float16,
-            )
-            tensor = tensor.to_dense()
+            # Enable sparse tensor integrity checks to prevent out-of-bounds
+            # writes from maliciously crafted tensors (CVE-2025-62164)
+            with torch.sparse.check_sparse_tensor_invariants():
+                tensor = torch.load(
+                    io.BytesIO(pybase64.b64decode(embed, validate=True)),
+                    weights_only=True,
+                    map_location=torch.device("cpu"),
+                )
+                assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                    torch.float32,
+                    torch.bfloat16,
+                    torch.float16,
+                )
+                tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
@@ -315,7 +318,7 @@ class CompletionRenderer(BaseRenderer):
         text: str,
         max_length: int | None,
         truncate_prompt_tokens: int | None,
-        add_special_tokens: bool,
+        add_special_tokens: bool | None,
         cache_salt: str | None,
     ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""
