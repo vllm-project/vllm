@@ -162,7 +162,7 @@ class ReasoningParserManager:
 
         registered = ", ".join(cls.list_registered())
         raise KeyError(
-            f"Reasoning parser '{name}' not found.\nAvailable parsers: {registered}"
+            f"Reasoning parser '{name}' not found. Available parsers: {registered}"
         )
 
     @classmethod
