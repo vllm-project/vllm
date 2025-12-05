@@ -703,12 +703,12 @@ class FusedMoEModularKernel(torch.nn.Module):
     # Persistent buffers that are shared across `FusedMoEModularKernel`
     # instances (layers), to save memory and allocattions.
     #
-    # We have two sets of buffers to support dual batch overlap (DBO) where each
-    # microbatch (ubatch) should use its own set of buffers to avoid
-    # cross-ubatch contimination.
-    # NOTE that memory is lazily allocated for these buffers, meaning that if
-    # DBO isn't being used, the second SharedBuffers will be empty.
-    shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
+    # We have separate buffers for each microbatch to support dual batch overlap
+    # (DBO) where each microbatch (ubatch) should use its own set of buffers to
+    # avoid cross-ubatch contimination.
+    # NOTE that memory is lazily allocated for these buffers.
+
+    shared_buffers: list[SharedBuffers] = []
 
     def __init__(
         self,
@@ -800,6 +800,11 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
         ubatch_idx = dbo_current_ubatch_id()
+        
+        # Dynamically expand shared_buffers if needed
+        while len(self.shared_buffers) <= ubatch_idx:
+            self.shared_buffers.append(self.SharedBuffers())
+
         buffers = self.shared_buffers[ubatch_idx]
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
