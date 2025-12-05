@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+import torch
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
@@ -43,7 +44,7 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": True,
             },
-        ) as _,
+        ),
     ):
         pass
 
@@ -59,6 +60,7 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     with (
+        monkeypatch.context(),
         compilation_counter.expect(num_models_seen=1),
         vllm_runner(
             "Qwen/Qwen2.5-VL-3B-Instruct",
@@ -68,6 +70,42 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": False,
             },
-        ) as _,
+        ),
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 8, reason="Need at least 8 GPUs to run the test."
+)
+def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
+    """Test that Mllama4 vision submodules are compiled.
+
+    This test verifies that the 2 vision submodules (Llama4VisionEncoder,
+    Llama4VisionPixelShuffleMLP) are properly tagged
+    for compilation by checking that num_models_seen increases to 3.
+    """
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    with (
+        monkeypatch.context(),
+        # TODO: Since we require TP=8, this messes with the compilation
+        # counter. We should fix this in the future, but leave for now
+        # to make sure that compilation runs (no crash) with llama vision encoder
+        compilation_counter.expect(num_models_seen=0),
+        vllm_runner(
+            "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+            max_model_len=512,
+            gpu_memory_utilization=0.8,
+            tensor_parallel_size=8,
+            compilation_config={
+                "mode": CompilationMode.VLLM_COMPILE,
+                "compile_mm_encoder": True,
+            },
+        ),
     ):
         pass

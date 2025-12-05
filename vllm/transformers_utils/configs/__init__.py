@@ -48,6 +48,7 @@ from vllm.transformers_utils.configs.step3_vl import (
     Step3VisionEncoderConfig,
     Step3VLConfig,
 )
+from vllm.transformers_utils.configs.tarsier2 import Tarsier2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -81,4 +82,5 @@ __all__ = [
     "Step3VisionEncoderConfig",
     "Step3TextConfig",
     "Qwen3NextConfig",
+    "Tarsier2Config",
 ]

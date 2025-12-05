@@ -50,6 +50,7 @@ for BACK in "${BACKENDS[@]}"; do
     --data-parallel-size 2 \
     --enable-expert-parallel \
     --enable-eplb \
+    --eplb-config '{"window_size":200,"step_interval":600}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --port $PORT &

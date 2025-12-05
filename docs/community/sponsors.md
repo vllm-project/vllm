@@ -18,6 +18,7 @@ Compute Resources:
 - Alibaba Cloud
 - AMD
 - Anyscale
+- Arm
 - AWS
 - Crusoe Cloud
 - Databricks

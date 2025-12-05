@@ -34,7 +34,7 @@ from transformers.models.llama4.image_processing_llama4_fast import (
 from vllm.attention.layer import MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -49,6 +49,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -204,7 +205,9 @@ def pixel_shuffle(input_tensor, shuffle_ratio):
     return output_tensor
 
 
-@support_torch_compile(dynamic_arg_dims={"encoded_patches": 0})
+@support_torch_compile(
+    dynamic_arg_dims={"encoded_patches": 0}, enable_if=should_torch_compile_mm_vit
+)
 class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
         self,
@@ -258,8 +261,15 @@ class Llama4VisionAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
+        # Needed for torch.compile compatibility
+        mm_config = MultiModalConfig(
+            mm_encoder_wrap_fa_in_custom_op=True,
+        )
         self.attn = MultiHeadAttention(
-            self.num_local_heads, self.head_dim, self.scaling
+            self.num_local_heads,
+            self.head_dim,
+            self.scaling,
+            multimodal_config=mm_config,
         )
 
         if use_data_parallel:
@@ -386,7 +396,9 @@ class Llama4VisionEncoderLayer(nn.Module):
         return outputs
 
 
-@support_torch_compile(dynamic_arg_dims={"hidden_states": 0})
+@support_torch_compile(
+    dynamic_arg_dims={"hidden_states": 0}, enable_if=should_torch_compile_mm_vit
+)
 class Llama4VisionEncoder(nn.Module):
     def __init__(
         self,
