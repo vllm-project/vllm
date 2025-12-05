@@ -397,7 +397,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
         self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
@@ -573,6 +573,39 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
             maybe_post_process_fp8_weight_block(layer)
+
+            if (
+                current_platform.is_rocm()
+                and envs.VLLM_ROCM_USE_AITER
+                and envs.VLLM_ROCM_USE_AITER_LINEAR
+            ):
+                try:
+                    from aiter.ops.shuffle import shuffle_weight
+
+                    # shuffle_weight will throw assertion error
+                    # if the shape cannot be shuffled by the given layout
+                    weight = shuffle_weight(layer.weight, layout=(16, 16))
+                    layer.weight = Parameter(weight.data, requires_grad=False)
+
+                    # Override the W8A8BlockFp8LinearOp as now we know
+                    # the weight is shuffled
+                    # assertion to ensure the weight block size is not None
+                    # so mypy is happy with the GroupShape constructor
+                    assert self.weight_block_size is not None
+                    self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
+                        weight_group_shape=GroupShape(
+                            self.weight_block_size[0], self.weight_block_size[1]
+                        ),
+                        act_quant_group_shape=self.act_q_group_shape,
+                        cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
+                        use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+                        is_weight_swizzled=True,
+                    )
+                except Exception as e:
+                    logger.info_once(
+                        f"[AITER] Shape {layer.weight.shape} cannot be shuffled. "
+                        f"{e}. Fallback to unshuffled gemm. "
+                    )
 
     def apply(
         self,

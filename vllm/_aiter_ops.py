@@ -46,17 +46,21 @@ def if_aiter_supported(func: Callable) -> Callable:
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
     from aiter import QuantType, dtypes, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-    return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
+    return aiter_per1x128_quant(
+        x.contiguous(), quant_dtype=dtypes.fp8, transpose_scale=transpose_scale
+    )
 
 
 def _rocm_aiter_group_fp8_quant_fake(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import dtypes
 
@@ -417,6 +421,31 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_bpreshuffle_gemm_a8w8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    import aiter as rocm_aiter
+
+    return rocm_aiter.gemm_a8w8_blockscale_bpreshuffle(A, B, As, Bs, dtype=output_dtype)
+
+
+def _rocm_aiter_bpreshuffle_gemm_a8w8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
 def _rocm_aiter_rms_norm_impl(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
@@ -500,7 +529,7 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_linear_fp8_enaled(cls) -> bool:
+    def is_linear_fp8_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
 
@@ -650,6 +679,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_bpreshuffle_gemm_a8w8_blockscale",
+                op_func=_rocm_aiter_bpreshuffle_gemm_a8w8_blockscale_impl,
+                fake_impl=_rocm_aiter_bpreshuffle_gemm_a8w8_blockscale_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rms_norm",
                 op_func=_rocm_aiter_rms_norm_impl,
                 mutates_args=[],
@@ -705,6 +740,19 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            A, B, As, Bs, output_dtype
+        )
+
+    @staticmethod
+    def bpreshuffle_gemm_a8w8_blockscale(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_bpreshuffle_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
         )
 
@@ -967,9 +1015,12 @@ class rocm_aiter_ops:
     def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int = 128,
+        transpose_scale: bool = False,
     ) -> tuple[torch.Tensor, ...]:
         assert group_size == 128, "Group size must be 128"
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
+            input_2d, group_size, transpose_scale
+        )
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
