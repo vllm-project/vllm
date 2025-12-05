@@ -44,6 +44,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         shared_experts: torch.nn.Module | None,
     ) -> "FusedMoEModularMethod":
+        parallel_config = getattr(
+            getattr(moe_layer, "vllm_config", None),
+            "parallel_config",
+            None,
+        )
         return FusedMoEModularMethod(
             old_quant_method,
             FusedMoEModularKernel(
@@ -51,6 +56,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
                 getattr(moe_layer, "shared_experts_stream", None),
+                parallel_config=parallel_config,
             ),
         )
 
