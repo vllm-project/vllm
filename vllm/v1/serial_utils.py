@@ -27,7 +27,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalFlatField,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalSharedField,
@@ -176,9 +175,6 @@ class MsgpackEncoder:
         if isinstance(obj, MultiModalKwargsItems):
             return self._encode_mm_items(obj)
 
-        if isinstance(obj, MultiModalKwargs):
-            return self._encode_mm_kwargs(obj)
-
         if isinstance(obj, UtilityResult):
             result = obj.result
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
@@ -259,11 +255,6 @@ class MsgpackEncoder:
             "field": self._encode_mm_field(elem.field),
         }
 
-    def _encode_mm_kwargs(self, kw: MultiModalKwargs) -> dict[str, Any]:
-        return {
-            modality: self._encode_nested_tensors(data) for modality, data in kw.items()
-        }
-
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
             return self._encode_tensor(nt)
@@ -325,8 +316,6 @@ class MsgpackDecoder:
                 return self._decode_mm_item(obj)
             if issubclass(t, MultiModalKwargsItems):
                 return self._decode_mm_items(obj)
-            if issubclass(t, MultiModalKwargs):
-                return self._decode_mm_kwargs(obj)
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj
@@ -413,14 +402,6 @@ class MsgpackDecoder:
 
         obj["field"] = factory_meth(None, *field_args).field
         return MultiModalFieldElem(**obj)
-
-    def _decode_mm_kwargs(self, obj: dict[str, Any]) -> MultiModalKwargs:
-        return MultiModalKwargs(
-            {
-                modality: self._decode_nested_tensors(data)
-                for modality, data in obj.items()
-            }
-        )
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):

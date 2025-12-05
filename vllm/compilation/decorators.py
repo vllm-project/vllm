@@ -433,7 +433,6 @@ def _support_torch_compile(
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
 
         # This is the path for the first compilation.
-
         # the first compilation needs to have dynamic shapes marked
         _mark_dynamic_inputs(
             self,
