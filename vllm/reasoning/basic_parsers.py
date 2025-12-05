@@ -77,7 +77,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
     def is_reasoning_end_streaming(
         self, input_ids: list[int], delta_ids: list[int]
     ) -> bool:
-        return self.is_reasoning_end(delta_ids)
+        # We only check the end token beause interleaved reasoning and content is not
+        # compatible with the current structured output manager.
+        end_token_id = self.end_token_id
+        return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

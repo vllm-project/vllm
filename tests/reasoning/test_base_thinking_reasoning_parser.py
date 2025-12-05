@@ -155,8 +155,8 @@ class TestBaseThinkingReasoningParserMethods:
         )
         assert (
             parser.is_reasoning_end_streaming(
-                [1, start_token_id, 2, end_token_id, 2, start_token_id],
-                [end_token_id, 2, start_token_id],
+                [1, start_token_id, 2, end_token_id, 2, start_token_id, 2],
+                [2],
             )
             is False
         )
