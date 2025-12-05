@@ -59,6 +59,21 @@ Transfer = tuple[int, float]  # (xfer_handle, start_time)
 EngineId = str
 ReqId = str
 
+#
+# NIXL Connector Version
+#
+# Increment this version whenever there is an incompatible change to:
+#   - NixlAgentMetadata schema
+#   - kv_transfer_params schema or semantics
+#   - NIXL transfer protocol or wire format
+#   - KV cache memory layout or block organization
+#   - Any other change that breaks P/D interoperability
+#
+# Version History:
+#   1: Initial version with compatibility checking
+#
+NIXL_CONNECTOR_VERSION: int = 1
+
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -97,16 +112,93 @@ _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
 @dataclass
-class NixlAgentMetadata(KVConnectorHandshakeMetadata):
+class NixlAgentMetadata:
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     device_id: int
     num_blocks: int
     block_lens: list[int]
-    attn_backend_name: str
     kv_cache_layout: str
     block_size: int
+
+
+@dataclass
+class NixlHandshakePayload(KVConnectorHandshakeMetadata):
+    """
+    Wrapper for NIXL handshake sent over the wire.
+
+    Enables two-phase decoding for graceful compatibility checking:
+    1. Decode NixlHandshakePayload to get compatibility_hash
+    2. Compute local hash and compare
+    3. Only if hashes match, decode agent_metadata_bytes
+
+    This prevents decoder errors when NixlAgentMetadata schema is
+    incompatible, allowing graceful failure with clear error message.
+    """
+
+    compatibility_hash: str
+    agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
+
+
+def compute_nixl_compatibility_hash(
+    vllm_config: VllmConfig, attn_backend_name: str
+) -> str:
+    """
+    Compute compatibility hash for NIXL KV transfer.
+
+    Hash only the factors that affect whether two NIXL instances can
+    successfully transfer KV cache data.
+
+    Factors included:
+    - vLLM version and NIXL connector version
+    - Model architecture (name, dtype, KV heads, layers)
+    - KV cache format (dtype, sliding window)
+    - Attention backend
+
+    Note: Factors like tensor_parallel_size, block_size, and kv_cache_layout
+    are validated at runtime in _validate_remote_agent_handshake and are not
+    included in this hash to support heterogeneous deployments.
+
+    Note - the set of factors are likely to evolve significantly over
+    time to be more or less permissive.
+
+    Returns:
+        SHA-256 hex digest
+    """
+    from vllm import __version__ as vllm_version
+    from vllm.config.utils import hash_factors
+
+    model_config = vllm_config.model_config
+    cache_config = vllm_config.cache_config
+
+    factors = {
+        # Version compatibility
+        "vllm_version": vllm_version,
+        "nixl_connector_version": NIXL_CONNECTOR_VERSION,
+        # Model architecture - affects KV cache shape
+        "model": model_config.model,
+        "dtype": str(model_config.dtype),
+        "num_kv_heads": model_config.get_total_num_kv_heads(),
+        "head_size": model_config.get_head_size(),
+        "num_hidden_layers": model_config.get_total_num_hidden_layers(),
+        # Attention backend and KV cache dtype affect memory layout
+        "attn_backend_name": attn_backend_name,
+        "cache_dtype": str(cache_config.cache_dtype),
+    }
+
+    compat_hash = hash_factors(factors)
+    logger.info(
+        "NIXL compatibility hash: %s (model=%s, dtype=%s, num_kv_heads=%d, "
+        "cache_dtype=%s, attn_backend=%s)",
+        compat_hash,
+        factors["model"],
+        factors["dtype"],
+        factors["num_kv_heads"],
+        factors["cache_dtype"],
+        attn_backend_name,
+    )
+    return compat_hash
 
 
 @dataclass
@@ -396,14 +488,14 @@ class NixlConnectorScheduler:
         encoded_data: dict[int, bytes] = {}
         encoder = msgspec.msgpack.Encoder()
         for tp_rank, rank_metadata in metadata.items():
-            if not isinstance(rank_metadata, NixlAgentMetadata):
+            if not isinstance(rank_metadata, NixlHandshakePayload):
                 raise ValueError(
-                    "NixlConnectorScheduler expects NixlAgentMetadata for "
+                    "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
             encoded_data[tp_rank] = encoder.encode(rank_metadata)
             logger.debug(
-                "Tp rank %d: encoded NixlAgentMetadata size: %s bytes",
+                "Tp rank %d: encoded NixlHandshakePayload size: %s bytes",
                 tp_rank,
                 str(len(encoded_data[tp_rank])),
             )
@@ -794,7 +886,7 @@ class NixlConnectorWorker:
         self._failed_recv_reqs: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
-        self.xfer_handshake_metadata: NixlAgentMetadata | None = None
+        self.xfer_handshake_metadata: NixlHandshakePayload | None = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -828,6 +920,13 @@ class NixlConnectorWorker:
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
+
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config, self.backend_name
+        )
+        self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
+            "enforce_handshake_compat", True
+        )
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
@@ -877,13 +976,57 @@ class NixlConnectorWorker:
             # Set receive timeout to 5 seconds to avoid hanging on dead server
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
             sock.send(msg)
-            metadata_bytes = sock.recv()
-            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
+            handshake_bytes = sock.recv()
+
+            # Decode handshake payload to get compatibility hash
+            handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
+            try:
+                handshake_payload = handshake_decoder.decode(handshake_bytes)
+            except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                raise RuntimeError(
+                    f"Failed to decode NixlHandshakePayload. This likely indicates "
+                    f"an incompatibility between connector version. Error: {e}"
+                ) from e
+
             got_metadata_time = time.perf_counter()
             logger.debug(
                 "NIXL handshake: get metadata took: %s", got_metadata_time - start_time
             )
+
+            # Check compatibility hash BEFORE decoding agent metadata
+            if (
+                self.enforce_compat_hash
+                and handshake_payload.compatibility_hash != self.compat_hash
+            ):
+                raise RuntimeError(
+                    f"NIXL compatibility hash mismatch. "
+                    f"Local: {self.compat_hash}, "
+                    f"Remote: {handshake_payload.compatibility_hash}. "
+                    f"Prefill and decode instances have incompatible configurations. "
+                    f"This may be due to: different vLLM versions, models, dtypes, "
+                    f"KV cache layouts, attention backends, etc. "
+                    f"Both instances must use identical configurations."
+                    f"Disable this check using "
+                    f'--kv-transfer-config \'{{"kv_connector_extra_config": '
+                    f'{{"enforce_handshake_compat": false}}}}\''
+                )
+
+            logger.info(
+                "NIXL compatibility check passed (hash: %s)",
+                handshake_payload.compatibility_hash,
+            )
+
+            # Decode agent metadata
+            metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+            try:
+                metadata = metadata_decoder.decode(
+                    handshake_payload.agent_metadata_bytes
+                )
+            except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                # This should not happen if hash matched
+                raise RuntimeError(
+                    f"Failed to decode NixlAgentMetadata. Error: {e}"
+                ) from e
 
             # Ensure engine id matches.
             if metadata.engine_id != expected_engine_id:
@@ -1175,18 +1318,23 @@ class NixlConnectorWorker:
             assert len(self.block_window_per_layer) == self.num_layers
 
         # After KV Caches registered, listen for new connections.
-        self.xfer_handshake_metadata = NixlAgentMetadata(
+        agent_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             device_id=self.device_id,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
-            attn_backend_name=self.backend_name,
             kv_cache_layout=self.kv_cache_layout
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
+        )
+        # Wrap metadata in payload with hash for defensive decoding
+        encoder = msgspec.msgpack.Encoder()
+        self.xfer_handshake_metadata = NixlHandshakePayload(
+            compatibility_hash=self.compat_hash,
+            agent_metadata_bytes=encoder.encode(agent_metadata),
         )
 
     def register_local_xfer_handler(
@@ -1402,8 +1550,6 @@ class NixlConnectorWorker:
         remote_engine_id = nixl_agent_meta.engine_id
 
         assert self._tp_size[remote_engine_id] == remote_tp_size
-        # TODO We may eventually want to skip enforcing the same attn backend.
-        assert nixl_agent_meta.attn_backend_name == self.backend_name
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
