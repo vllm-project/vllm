@@ -11,9 +11,11 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+is_batch_invariant = vllm_is_batch_invariant()
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -203,11 +205,14 @@ def get_lora_op_configs(
     # default config
     default = {}
     if op_type == "shrink":
+        split_k = 64 if batch < 128 else 8
+        if is_batch_invariant:
+            split_k = 1
         default = {
             "block_m": 32,
             "block_n": 16,
             "block_k": 256 if batch < 128 else 32,
-            "split_k": 64 if batch < 128 else 8,
+            "split_k": split_k,
             "num_warps": 4,
             "num_ctas": 1,
             "group_size_m": 8,
