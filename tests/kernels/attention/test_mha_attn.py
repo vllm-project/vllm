@@ -53,7 +53,7 @@ def test_mha_attn_platform(device: str):
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
+            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
