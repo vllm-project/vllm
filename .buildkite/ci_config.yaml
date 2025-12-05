@@ -1,4 +1,4 @@
-name: ci
+name: vllm_ci
 job_dirs:
   - ".buildkite/test_areas"
   - ".buildkite/image_build"

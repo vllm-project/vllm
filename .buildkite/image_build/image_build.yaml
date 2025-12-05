@@ -4,7 +4,7 @@ steps:
     key: image-build
     depends_on: []
     commands:
-    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $CACHE_FROM $CACHE_TO
     env:
       DOCKER_BUILDKIT: "1"
     retry:
@@ -19,20 +19,6 @@ steps:
     depends_on: []
     commands:
     - .buildkite/image_build/image_build_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 2
-        - exit_status: -10  # Agent was lost
-          limit: 2
-  
-  - label: ":docker: Build CUDA 11.8 image"
-    key: image-build-cu118
-    optional: true
-    commands:
-    - .buildkite/image_build/image_build_cu118.sh $REGISTRY $REPO $BUILDKITE_COMMIT
     env:
       DOCKER_BUILDKIT: "1"
     retry:
