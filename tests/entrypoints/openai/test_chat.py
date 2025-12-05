@@ -271,7 +271,10 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
     choice = chat_completion.choices[0]
 
     if current_platform.is_rocm():
-        assert choice.finish_reason in ["length", "stop"]
+        assert choice.finish_reason in ["length", "stop"], (
+            f"Expected finish_reason to be 'length' or 'stop' on ROCm, "
+            f"got '{choice.finish_reason}'"
+        )
         if choice.finish_reason == "length":
             assert chat_completion.usage == openai.types.CompletionUsage(
                 completion_tokens=10, prompt_tokens=37, total_tokens=47
