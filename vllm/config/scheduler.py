@@ -21,7 +21,11 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority", "sjf"]
-
+""" SJF Scheduling Policy:
+It stands for shortest-job-first — requests are scheduled by total prompt +
+output length (shorter first), with aging to prevent starvation. For more
+information, please check: https://github.com/vllm-project/vllm/issues/29406
+"""
 
 @config
 @dataclass
