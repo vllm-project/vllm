@@ -72,7 +72,7 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-    ) -> tuple[int, Sequence[KVCacheBlock]]:
+    ) -> tuple[int, int]:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -86,8 +86,8 @@ class SingleTypeKVCacheManager(ABC):
                 tokens.
 
         Returns:
-            1. The number of blocks.
-            2. The list of evictable blocks (i.e., ref_cnt == 0) that should be touched.
+            The number of blocks.
+            The number of evictable blocks (i.e., ref_cnt == 0).
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -100,12 +100,10 @@ class SingleTypeKVCacheManager(ABC):
                 - len(new_computed_blocks)
                 - len(self.req_to_blocks[request_id])
             )
-            evictable_computed_blocks = [
-                blk
-                for blk in new_computed_blocks
-                if blk.ref_cnt == 0 and not blk.is_null
-            ]
-            return num_new_blocks, evictable_computed_blocks
+            num_evictable_blocks = sum(
+                blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
+            )
+            return num_new_blocks, num_evictable_blocks
 
         # General case: some prefix tokens are skipped by the attention window.
         num_skipped_blocks = num_skipped_tokens // self.block_size
@@ -120,7 +118,7 @@ class SingleTypeKVCacheManager(ABC):
             num_new_blocks = max(num_required_blocks - num_skipped_blocks, 0)
             # All new computed blocks are skipped. This happens when the entire
             # sliding window hits external KV cache via a KV connector.
-            evictable_computed_blocks = []
+            num_evictable_blocks = 0
         else:
             # Some local-computed blocks remain inside the window.
             num_new_blocks = max(num_required_blocks - num_local_computed_blocks, 0)
@@ -136,13 +134,11 @@ class SingleTypeKVCacheManager(ABC):
             # free queue and ref_cnt == 0), it will be changed from a free block
             # to a computed block when the request is allocated, so we also count
             # it in the free-capacity check.
-            evictable_computed_blocks = [
-                blk
+            num_evictable_blocks = sum(
+                blk.ref_cnt == 0 and not blk.is_null
                 for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
-                if blk.ref_cnt == 0 and not blk.is_null
-            ]
-
-        return num_new_blocks, evictable_computed_blocks
+            )
+        return num_new_blocks, num_evictable_blocks
 
     def save_new_computed_blocks(
         self,
@@ -800,7 +796,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-    ) -> tuple[int, Sequence[KVCacheBlock]]:
+    ) -> tuple[int, int]:
         # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
         if total_computed_tokens > 0:
             logger.warning_once(
@@ -850,7 +846,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         self,
         request_id: str,
         new_computed_blocks: Sequence[KVCacheBlock],
-        local_computed_tokens: int,
+        total_computed_tokens: int,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
