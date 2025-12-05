@@ -646,7 +646,17 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
         patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=80)],
+        marks=[
+            large_gpu_mark(min_gb=80),
+            # TODO: [ROCm] Fix pickle issue with ROCm spawn and tp>1
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason=(
+                    "ROCm: Model too large for single GPU; "
+                    "multi-GPU blocked by HF _LazyConfigMapping pickle issue with spawn"
+                ),
+            ),
+        ],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],

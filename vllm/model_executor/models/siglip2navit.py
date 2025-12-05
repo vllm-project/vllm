@@ -190,7 +190,10 @@ def apply_rotary_pos_emb(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-    if is_flash_attn_backend and not current_platform.is_xpu():
+    if is_flash_attn_backend and not (
+        current_platform.is_xpu() or current_platform.is_rocm()
+    ):
+        # TODO: [ROCm] Use AITER flash attention's rotary embedding
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         apply_rotary_emb_func = apply_rotary_emb

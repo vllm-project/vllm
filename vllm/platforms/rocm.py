@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -240,17 +241,17 @@ class RocmPlatform(Platform):
                 )
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
-                    logger.info_once("Using Triton MLA backend.")
+                    logger.info_once("Using Triton MLA backend on V1 engine.")
                     return AttentionBackendEnum.TRITON_MLA.get_path()
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}."
                 )
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
-                logger.info("Using AITER MLA backend.")
+                logger.info("Using AITER MLA backend on V1 engine.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
             if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
-                logger.info("Using AITER TRITON MLA backend.")
+                logger.info("Using AITER TRITON MLA backend on V1 engine.")
                 return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
 
             raise ValueError(
@@ -259,7 +260,7 @@ class RocmPlatform(Platform):
             )
 
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
-            logger.info("Using FlexAttention backend.")
+            logger.info("Using FlexAttention backend on V1 engine.")
             return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
@@ -311,6 +312,11 @@ class RocmPlatform(Platform):
             ):
                 logger.info("Using Aiter Flash Attention backend on V1 engine.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
+
+            # Priority 5: If model is Encoder-only self-attention type
+            if attn_type is not None and attn_type in (AttentionType.ENCODER_ONLY):
+                logger.info("Using FlexAttention backend  on V1 engine.")
+                return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
             logger.info("Using Triton Attention backend on V1 engine.")
