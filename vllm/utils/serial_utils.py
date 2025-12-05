@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+import io
 import sys
 from dataclasses import dataclass
 from typing import Literal
@@ -50,6 +51,15 @@ ENDIANNESS = ["native", "big", "little"]
 EmbedDType = Literal["float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2"]
 Endianness = Literal["native", "big", "little"]
 EncodingFormat = Literal["float", "base64", "bytes"]
+
+
+def tensor2base64(x: torch.Tensor) -> str:
+    with io.BytesIO() as buf:
+        torch.save(x, buf)
+        buf.seek(0)
+        binary_data = buf.read()
+
+    return base64.b64encode(binary_data).decode("utf-8")
 
 
 def tensor2binary(
