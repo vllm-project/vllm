@@ -278,7 +278,6 @@ class ModelConfig:
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
-    media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
@@ -321,7 +320,6 @@ class ModelConfig:
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
-            "media_io_kwargs",
             "mm_processor_kwargs",
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
@@ -386,7 +384,6 @@ class ModelConfig:
         # Multimodal config init vars
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
-        media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
@@ -634,7 +631,6 @@ class ModelConfig:
             mm_config_kwargs = dict(
                 limit_per_prompt=limit_mm_per_prompt,
                 enable_mm_embeds=enable_mm_embeds,
-                media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,

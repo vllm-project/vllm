@@ -451,9 +451,6 @@ class EngineArgs:
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
-    media_io_kwargs: dict[str, dict[str, Any]] = get_field(
-        MultiModalConfig, "media_io_kwargs"
-    )
     mm_processor_kwargs: dict[str, Any] | None = MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
@@ -475,6 +472,9 @@ class EngineArgs:
     tokenizer_revision: str | None = RendererConfig.tokenizer_revision
     skip_tokenizer_init: bool = RendererConfig.skip_tokenizer_init
     io_processor_plugin: str | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] = get_field(
+        RendererConfig, "media_io_kwargs"
+    )
     allowed_local_media_path: str = RendererConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = RendererConfig.allowed_media_domains
     # LoRA fields
@@ -693,6 +693,9 @@ class EngineArgs:
         )
         renderer_group.add_argument(
             "--skip-tokenizer-init", **renderer_kwargs["skip_tokenizer_init"]
+        )
+        renderer_group.add_argument(
+            "--media-io-kwargs", **renderer_kwargs["media_io_kwargs"]
         )
         renderer_group.add_argument(
             "--allowed-local-media-path", **renderer_kwargs["allowed_local_media_path"]
@@ -940,9 +943,6 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--enable-mm-embeds", **multimodal_kwargs["enable_mm_embeds"]
-        )
-        multimodal_group.add_argument(
-            "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
             "--mm-processor-kwargs", **multimodal_kwargs["mm_processor_kwargs"]
@@ -1259,7 +1259,6 @@ class EngineArgs:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
-            media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -1379,6 +1378,7 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             skip_tokenizer_init=self.skip_tokenizer_init,
             io_processor_plugin=self.io_processor_plugin,
+            media_io_kwargs=self.media_io_kwargs,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
         )

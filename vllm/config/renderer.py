@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass
@@ -45,7 +45,10 @@ class RendererConfig:
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup."""
 
-    # Security-related
+    media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'`"""
     allowed_local_media_path: str = ""
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
