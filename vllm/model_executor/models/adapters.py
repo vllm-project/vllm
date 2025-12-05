@@ -444,7 +444,7 @@ def load_weights_using_from_2_way_softmax(
     )
     loaded_weights = pooling_model_cls.load_weights(model, weights, load_lm_head=True)
 
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,
@@ -498,7 +498,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
     loaded_weights = type(model).__mro__[1].load_weights(model, weights)
 
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,
