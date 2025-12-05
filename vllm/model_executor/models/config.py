@@ -8,7 +8,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
-from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
@@ -78,8 +77,6 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
-            set_default_rope_theta(config, default_theta=config.rotary_emb_base)
-
             config.rotary_kwargs = {
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
@@ -118,8 +115,6 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
-
-        set_default_rope_theta(config, default_theta=config.rotary_emb_base)
 
         config.rotary_kwargs = {
             "head_size": head_dim,
@@ -490,6 +485,26 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config, or to
+        float16 if not specified.
+        """
+        cache_config = vllm_config.cache_config
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            hf_config = vllm_config.model_config.hf_config
+            mamba_ssm_cache_dtype = getattr(
+                hf_config, "mamba_ssm_cache_dtype", "float16"
+            )
+            logger.info(
+                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -507,4 +522,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "NemotronHForCausalLM": NemotronHForCausalLMConfig,
 }
