@@ -508,12 +508,7 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision
         )
-        self.model_arch_config = None
-        convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
-            hf_config.model_type, ModelArchConfigConvertorBase
-        )
-        convertor = convertor_cls(hf_config)
-        self.model_arch_config = convertor.convert(self.model, self.revision)
+        self.model_arch_config = self.get_model_arch_config()
 
         architectures = self.architectures
         registry = self.registry
@@ -716,6 +711,13 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+
+    def get_model_arch_config(self) -> ModelArchitectureConfig:
+        convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
+            self.hf_config.model_type, ModelArchConfigConvertorBase
+        )
+        convertor = convertor_cls(self.hf_config)
+        return convertor.convert(self.model, self.revision)
 
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
