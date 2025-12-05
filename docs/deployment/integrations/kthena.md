@@ -331,4 +331,3 @@ If you’re done with the entire stack:
 helm uninstall kthena -n kthena-system   # or your Kthena release name
 helm uninstall volcano -n volcano-system
 ```
-
