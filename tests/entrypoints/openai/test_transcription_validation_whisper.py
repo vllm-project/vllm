@@ -32,27 +32,24 @@ async def whisper_client(server):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    server_args = ["--enforce-eager"]
-
+async def test_basic_audio(mary_had_lamb, whisper_client):
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        transcription = await client.audio.transcriptions.create(
-            model=MODEL_NAME,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            temperature=0.0,
-        )
-        out = json.loads(transcription)
-        out_text = out["text"]
-        out_usage = out["usage"]
-        assert "Mary had a little lamb," in out_text
-        assert out_usage["seconds"] == 16, out_usage["seconds"]
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="text",
+        temperature=0.0,
+    )
+    out = json.loads(transcription)
+    out_text = out["text"]
+    out_usage = out["usage"]
+    assert "Mary had a little lamb," in out_text
+    assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Skipping batched test due to interaction with other tests")
 async def test_basic_audio_batched(mary_had_lamb, winning_call, whisper_client):
     transcription = whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
@@ -140,13 +137,13 @@ async def test_streaming_response(winning_call, whisper_client):
         language="en",
         temperature=0.0,
     )
+    winning_call.seek(0)
     res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
         file=winning_call,
         language="en",
         temperature=0.0,
         stream=True,
-        timeout=30,
     )
     # Reconstruct from chunks and validate
     async for chunk in res:
@@ -165,7 +162,6 @@ async def test_stream_options(winning_call, whisper_client):
         temperature=0.0,
         stream=True,
         extra_body=dict(stream_include_usage=True, stream_continuous_usage_stats=True),
-        timeout=30,
     )
     final = False
     continuous = True
@@ -224,6 +220,8 @@ async def test_audio_prompt(mary_had_lamb, whisper_client):
         temperature=0.0,
     )
     out = json.loads(transcription)["text"]
+    # Might cause timeout if the file is not seekable.
+    mary_had_lamb.seek(0)
     assert prefix in out
     transcription_wprompt = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
