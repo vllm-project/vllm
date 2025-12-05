@@ -583,7 +583,7 @@ class InputProcessor:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
-                    model_config,
+                    self.renderer_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
