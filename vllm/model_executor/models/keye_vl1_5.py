@@ -333,7 +333,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -350,7 +350,7 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_video_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
