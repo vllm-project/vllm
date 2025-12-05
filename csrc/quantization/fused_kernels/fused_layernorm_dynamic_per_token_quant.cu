@@ -187,7 +187,6 @@ void rms_norm_dynamic_per_token_quant(
 }
 
 // Residual add + RMS norm + dynamic per token
-template <typename scalar_in_t>
 void rms_norm_per_block_quant_dispatch(
     torch::Tensor& out,           // [..., hidden_size]
     torch::Tensor const& input,   // [..., hidden_size]
@@ -207,26 +206,31 @@ void rms_norm_per_block_quant_dispatch(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
-    VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
-      VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
-        VLLM_DISPATCH_QUANT_TYPES(
-            out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-              vllm::rms_norm_per_block_quant_kernel<
-                  scalar_in_t, scalar_t, has_residual, transpose_scale, gs>
-                  <<<grid, block, 0, stream>>>(
-                      out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                      input.data_ptr<scalar_in_t>(),
-                      weight.data_ptr<scalar_in_t>(),
-                      scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                           : nullptr,
-                      var_epsilon, hidden_size,
-                      has_residual ? residual->data_ptr<scalar_in_t>()
-                                   : nullptr);
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "rms_norm_per_block_quant_fp_dispatch", [&] {
+        using scalar_in_t = scalar_t;
+        VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+          VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+            VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
+              VLLM_DISPATCH_QUANT_TYPES(
+                  out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
+                    vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t,
+                                                          has_residual,
+                                                          transpose_scale, gs>
+                        <<<grid, block, 0, stream>>>(
+                            out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
+                            input.data_ptr<scalar_in_t>(),
+                            weight.data_ptr<scalar_in_t>(),
+                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                                 : nullptr,
+                            var_epsilon, hidden_size,
+                            has_residual ? residual->data_ptr<scalar_in_t>()
+                                         : nullptr);
+                  });
             });
+          });
+        });
       });
-    });
-  });
 }
 
 void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -253,10 +257,7 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
 
-  VLLM_DISPATCH_FLOATING_TYPES(
-      input.scalar_type(), "rms_norm_per_block_quant_dispatch", [&] {
-        rms_norm_per_block_quant_dispatch<scalar_t>(
-            out, input, weight, scales, group_size, var_epsilon, scale_ub,
-            residual, is_scale_transposed);
-      });
+  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
+                                    var_epsilon, scale_ub, residual,
+                                    is_scale_transposed);
 }
