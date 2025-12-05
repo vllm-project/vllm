@@ -764,7 +764,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             1,
             (
                 M
-                if not self.fused_experts.supports_chunking()
+                if not self.fused_experts.enable_chunking()
                 else min(M, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
             ),
         )
@@ -811,7 +811,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             is_forward_context_available()
             and get_forward_context().attn_metadata is None
         )
-        if is_profile_run and self.fused_experts.supports_chunking():
+        if is_profile_run and self.fused_experts.enable_chunking():
             parallel_config = get_current_vllm_config().parallel_config
             is_dp_ep = (
                 parallel_config.data_parallel_size > 1
