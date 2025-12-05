@@ -379,7 +379,7 @@ class RTNMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            workspace=workspace,  # ???????
+            workspace=workspace,
         )
 
 
