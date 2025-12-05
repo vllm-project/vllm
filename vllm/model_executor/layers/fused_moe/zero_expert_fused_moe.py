@@ -59,8 +59,8 @@ class ZeroExpertFusedMoE(FusedMoE):
         # We handle zero experts ourselves in forward().
         super().__init__(**kwargs)
         # Store the actual zero_expert_num and zero_expert_type for our own use
-        self._actual_zero_expert_num = zero_expert_num
-        self._actual_zero_expert_type = zero_expert_type
+        self._actual_zero_expert_num = 0
+        self._actual_zero_expert_type = None
         self._router = router  # Full router (includes zero experts)
 
         # Memoization state for routing results
