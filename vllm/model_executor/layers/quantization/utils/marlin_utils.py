@@ -179,8 +179,8 @@ def check_marlin_supports_shape(
 
 
 def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    is_rocm = getattr(torch.version, "hip", None) is not None
-    if is_rocm:
+    from vllm.platform import current_platform
+    if current_platform.is_rocm():
         return False
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
@@ -198,8 +198,8 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 
 
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    is_rocm = getattr(torch.version, "hip", None) is not None
-    if is_rocm:
+    from vllm.platform import current_platform
+    if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
