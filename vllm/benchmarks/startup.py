@@ -55,16 +55,14 @@ def cold_startup():
             os.environ.pop("VLLM_CACHE_ROOT", None)
 
 
-def run_startup_in_subprocess(
-    engine_args_dict, batch_size, input_len, output_len, result_queue
-):
+def run_startup_in_subprocess(engine_args_dict, result_queue):
     """
     Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
     """
     try:
         # Import inside the subprocess to avoid issues with forking
-        from vllm import LLM, SamplingParams
+        from vllm import LLM
         from vllm.engine.arg_utils import EngineArgs
 
         engine_args = EngineArgs(**engine_args_dict)
@@ -73,21 +71,6 @@ def run_startup_in_subprocess(
         start_time = time.perf_counter()
 
         llm = LLM(**dataclasses.asdict(engine_args))
-
-        dummy_prompt_token_ids = np.random.randint(10000, size=(batch_size, input_len))
-        dummy_prompts = [
-            {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
-        ]
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            top_p=1.0,
-            ignore_eos=True,
-            max_tokens=output_len,
-            detokenize=False,
-        )
-
-        # Run generation to trigger compilation and complete startup
-        llm.generate(dummy_prompts, sampling_params=sampling_params, use_tqdm=False)
 
         total_startup_time = time.perf_counter() - start_time
 
@@ -177,24 +160,6 @@ def save_to_pytorch_benchmark_format(
 
 def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
-        "--input-len",
-        type=int,
-        default=32,
-        help="Input length for triggering startup.",
-    )
-    parser.add_argument(
-        "--output-len",
-        type=int,
-        default=128,
-        help="Output length for triggering startup.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="Batch size for triggering startup.",
-    )
-    parser.add_argument(
         "--num-iters-cold",
         type=int,
         default=5,
@@ -244,9 +209,6 @@ def main(args: argparse.Namespace):
             target=run_startup_in_subprocess,
             args=(
                 engine_args_dict,
-                args.batch_size,
-                args.input_len,
-                args.output_len,
                 result_queue,
             ),
         )
