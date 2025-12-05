@@ -701,6 +701,16 @@ class VllmConfig:
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    elif (
+                        self.model_config.hf_config.model_type == "gpt_oss"
+                        and not current_platform.has_device_capability(90)
+                    ):
+                        logger.warning_once(
+                            "gpt_oss models do not support full cudagraphs on "
+                            "Ampere or earlier GPUs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
