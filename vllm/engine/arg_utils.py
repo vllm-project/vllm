@@ -991,7 +991,6 @@ class EngineArgs:
         )
         lora_group.add_argument(
             "--enable-mm-lora",
-            action=argparse.BooleanOptionalAction,
             **lora_kwargs["enable_mm_lora"],
         )
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
