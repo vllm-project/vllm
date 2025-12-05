@@ -190,7 +190,7 @@ def get_score_prompt(
 
     from vllm.model_executor.model_loader import get_model_cls
 
-    model_config = renderer_config.renderer_config
+    model_config = renderer_config.model_config
     model = get_model_cls(model_config)
 
     if supports_score_template(model):
