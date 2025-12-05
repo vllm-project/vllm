@@ -28,7 +28,10 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.torchao import TorchAOConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
@@ -182,6 +185,12 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
+        self.lm_head = ParallelLMHead(
+            self.config.draft_vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
@@ -211,6 +220,6 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
-            skip_prefixes=(["lm_head."]),
+            skip_prefixes=([]),
         )
         loader.load_weights(map(transform, weights))
