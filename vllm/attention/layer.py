@@ -58,42 +58,29 @@ logger = init_logger(__name__)
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: AttentionBackendEnum,
-    attn_backend_override: AttentionBackendEnum | None = None,
-) -> tuple[AttentionBackendEnum, Callable | None]:
-    if current_platform.is_rocm():
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = AttentionBackendEnum.ROCM_AITER_FA
-        elif (
-            attn_backend_override is None
-            and on_gfx9()
-            and attn_backend == AttentionBackendEnum.FLASH_ATTN
-        ):
-            pass
-        else:
-            return AttentionBackendEnum.TORCH_SDPA, None
-    elif current_platform.is_cuda():
-        pass
-    elif current_platform.is_xpu():
-        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
-            "XPU platform only supports FLASH_ATTN as vision attention backend."
-        )
-        pass
-    else:
-        return AttentionBackendEnum.TORCH_SDPA, None
+    attn_backend: AttentionBackendEnum | None,
+) -> Callable | None:
+    # At this point,
+    # we already have the attn_backend,
+    # overriding logic is done in the platform-specific implementation.
+    # so we don't need to override backend here.
+    # Just return the attn_backend and flash_attn_varlen_func.
 
-    if attn_backend in {
-        AttentionBackendEnum.FLASH_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    }:
-        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-        else:
-            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    if (
+        attn_backend == AttentionBackendEnum.FLASH_ATTN
+        and current_platform.is_cuda_alike()
+    ):
+        from flash_attn import flash_attn_varlen_func
+    elif attn_backend == AttentionBackendEnum.FLASH_ATTN and current_platform.is_xpu():
+        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    elif attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
+        from aiter import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
-    return attn_backend, flash_attn_varlen_func
+    # if attn_backend is TORCH_SDPA,
+    # it will reach here and the flash_attn_varlen_func will be None.
+    return flash_attn_varlen_func
 
 
 def _init_kv_cache_quant(
@@ -491,29 +478,15 @@ class MultiHeadAttention(nn.Module):
         attn_backend_override = None
         if multimodal_config is not None:
             attn_backend_override = multimodal_config.mm_encoder_attn_backend
-        backend = get_vit_attn_backend(
+
+        self.backend = get_vit_attn_backend(
             head_size=head_size,
             dtype=dtype,
             attn_backend_override=attn_backend_override,
         )
 
-        self.attn_backend = (
-            backend
-            if backend
-            in {
-                AttentionBackendEnum.TORCH_SDPA,
-                AttentionBackendEnum.PALLAS,
-                AttentionBackendEnum.ROCM_AITER_FA,
-                AttentionBackendEnum.FLASH_ATTN,
-            }
-            else AttentionBackendEnum.TORCH_SDPA
-        )
-
-        self.attn_backend, self._flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
+        self._flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
 
         self.is_flash_attn_backend = self.attn_backend in {

@@ -88,14 +88,20 @@ def get_vit_attn_backend(
     """
     Get the available attention backend for Vision Transformer.
     """
-    if attn_backend_override is not None:
-        return attn_backend_override
+    attn_backend = attn_backend_override
 
-    selected_backend = get_current_vllm_config().attention_config.backend
-    if selected_backend is not None:
-        return selected_backend
+    # Lazy import to avoid circular dependency.
+    from vllm.attention.selector import get_env_variable_attn_backend
 
-    return current_platform.get_vit_attn_backend(head_size, dtype)
+    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
+    if attn_backend is None:
+        attn_backend = selected_backend
+
+    return current_platform.get_vit_attn_backend(
+        head_size,
+        dtype,
+        backend=attn_backend,
+    )
 
 
 def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:

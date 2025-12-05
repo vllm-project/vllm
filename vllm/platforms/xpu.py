@@ -3,7 +3,7 @@
 
 import contextlib
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -78,6 +78,34 @@ class XPUPlatform(Platform):
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        # XPU only supports FLASH_ATTN for vision attention.
+        return [
+            AttentionBackendEnum.FLASH_ATTN,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: "
+                f"{cls.get_supported_vit_attn_backends()}."
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using backend {AttentionBackendEnum.FLASH_ATTN} for vit attention"
+        )
+        return AttentionBackendEnum.FLASH_ATTN
+
+    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -109,12 +137,6 @@ class XPUPlatform(Platform):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
-
-    @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> "AttentionBackendEnum":
-        return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod
     def inference_mode(cls):

@@ -287,6 +287,7 @@ class DotsVisionAttention(nn.Module):
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
+
         # Select attention backend
         self.attn_backend = get_vit_attn_backend(
             self.hidden_size_per_attention_head,
@@ -294,12 +295,6 @@ class DotsVisionAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
-        )
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
@@ -308,6 +303,11 @@ class DotsVisionAttention(nn.Module):
             raise RuntimeError(
                 f"Unsupported vision attention backend: {self.attn_backend}"
             )
+
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
+        )
+
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,

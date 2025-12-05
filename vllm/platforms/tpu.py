@@ -76,6 +76,14 @@ class TpuPlatform(Platform):
         return AttentionBackendEnum.PALLAS.get_path()
 
     @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+            # Currently, PALLAS is only used in LLama4 VL model.
+            AttentionBackendEnum.PALLAS,
+        ]
+
+    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
