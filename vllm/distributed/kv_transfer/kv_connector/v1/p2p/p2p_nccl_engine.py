@@ -607,12 +607,8 @@ class P2pNcclEngine:
 
         abs_max = tensor.abs().max()
         max_value = abs_max.item() if abs_max.numel() > 0 else 0.0
-        if max_value == 0:
-            scale = 1.0
-        else:
-            scale = float(max_value / 127.0)
-            if scale == 0:
-                scale = 1.0
+        # Avoid division by zero: use scale=1.0 for zero tensors
+        scale = float(max_value / 127.0) if max_value > 0 else 1.0
 
         q_tensor = torch.clamp(torch.round(tensor / scale), -128, 127).to(torch.int8)
         quant_meta = {
@@ -628,8 +624,6 @@ class P2pNcclEngine:
             return tensor
 
         scale = float(quant_meta.get("scale", 1.0))
-        if scale == 0.0:
-            scale = 1.0
         orig_dtype = getattr(torch, quant_meta["orig_dtype"])
         dequant = tensor.to(orig_dtype)
         dequant.mul_(scale)
