@@ -622,7 +622,8 @@ def test_gptq_marlin_24_gemm(k_chunk, n_chunk, quant_type, group_size, mnk_facto
 
     assert max_diff < 0.04
 
-
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="This test requires gptq_marlin_repack is not defined for ROCm")
 @pytest.mark.skipif(
     not is_quant_method_supported("gptq_marlin"),
     reason="Marlin is not supported on this GPU type.",
