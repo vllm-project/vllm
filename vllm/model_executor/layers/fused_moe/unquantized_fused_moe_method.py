@@ -25,6 +25,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    convert_moe_weights_to_flashinfer_trtllm_block_layout,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -64,7 +67,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_FP16
             and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
-            and current_platform.get_device_capability()[0] >= 10
+            and current_platform.has_device_capability(100)
         )
 
         # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
@@ -73,7 +76,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             and envs.VLLM_USE_FLASHINFER_MOE_FP16
             and self.moe.moe_parallel_config.use_ep
             and self.moe.moe_parallel_config.dp_size == 1
-            and current_platform.get_device_capability()[0] >= 9
+            and current_platform.has_device_capability(90)
         )
 
         if self.flashinfer_trtllm_moe_enabled:
@@ -239,65 +242,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w2_weight.data = shuffled_w2
 
         if self.flashinfer_trtllm_moe_enabled:
-            from flashinfer.fused_moe.core import (
-                _maybe_get_cached_w3_w1_permute_indices,
-                convert_to_block_layout,
-                get_w2_permute_indices_with_cache,
-            )
-
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
             w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
             layer.w13_weight.data = w13_weight_swapped.contiguous()
-            epilogue_tile_m = 128
-            block_k = 128
-            # Reorder rows of W1 for fused gated activation
-            w13_weights_bf16_shuffled = []
-            w2_weights_bf16_shuffled = []
-            for i in range(layer.local_num_experts):
-                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+            w13_weights_shuffled, w2_weights_shuffled = (
+                convert_moe_weights_to_flashinfer_trtllm_block_layout(
                     self._cache_permute_indices,
-                    layer.w13_weight.data[i].view(torch.uint8),
-                    epilogue_tile_m,
+                    layer.w13_weight.data,
+                    layer.w2_weight.data,
                 )
-                tmp_weights1 = (
-                    layer.w13_weight.data[i]
-                    .clone()
-                    .view(torch.uint8)[permute_indices.to(layer.w13_weight.data.device)]
-                    .contiguous()
-                )
-
-                permute_indices = get_w2_permute_indices_with_cache(
-                    self._cache_permute_indices,
-                    layer.w2_weight.data[i].view(torch.uint8),
-                    epilogue_tile_m,
-                )
-                tmp_weights2 = (
-                    layer.w2_weight.data[i]
-                    .clone()
-                    .view(torch.uint8)[permute_indices.to(layer.w2_weight.data.device)]
-                    .contiguous()
-                )
-
-                tmp_weights1 = convert_to_block_layout(
-                    tmp_weights1.view(torch.uint8), block_k
-                )
-                tmp_weights2 = convert_to_block_layout(
-                    tmp_weights2.view(torch.uint8), block_k
-                )
-
-                w13_weights_bf16_shuffled.append(tmp_weights1.view(torch.bfloat16))
-                w2_weights_bf16_shuffled.append(tmp_weights2.view(torch.bfloat16))
-
-            # Stack weights for all experts
-            w13_weights_bf16_shuffled = (
-                torch.stack(w13_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
             )
-            w2_weights_bf16_shuffled = (
-                torch.stack(w2_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
-            )
-            layer.w13_weight = Parameter(w13_weights_bf16_shuffled, requires_grad=False)
-            layer.w2_weight = Parameter(w2_weights_bf16_shuffled, requires_grad=False)
+            layer.w13_weight = Parameter(w13_weights_shuffled, requires_grad=False)
+            layer.w2_weight = Parameter(w2_weights_shuffled, requires_grad=False)
 
         if self.flashinfer_cutlass_moe_enabled:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
