@@ -423,14 +423,11 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
-    compile_cache_save_format: Literal["binary", "unpacked"] = field(
-        default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
-    )
+    compile_cache_save_format: Literal["binary", "unpacked"] = "binary"
     """Format for saving torch compile cache:\n
-    - "binary": saves as binary file (multiprocess safe)\n
+    - "binary": saves as binary file (multiprocess safe, default)\n
     - "unpacked": saves as directory structure for inspection/debugging
     (NOT multiprocess safe)\n
-    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
     """
     backend: str = ""
     """The backend for compilation. It needs to be a string:
@@ -791,6 +788,10 @@ class CompilationConfig:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        self.compile_cache_save_format = (
+            envs.VLLM_COMPILE_CACHE_SAVE_FORMAT or self.compile_cache_save_format
+        )
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
