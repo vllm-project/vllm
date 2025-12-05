@@ -6,9 +6,9 @@
 #include <torch/library.h>
 #include <torch/version.h>
 
-#if !defined(USE_ROCM) &&                                     \
-    (((defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)) || \
-     ((defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)))
+#if !defined(USE_ROCM) &&                                   \
+    ((defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120))
   #define VLLM_USE_NVFP4 1
 #else
   #define VLLM_USE_NVFP4 0
@@ -117,9 +117,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-#if !defined(USE_ROCM) &&                                   \
-    ((defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
-     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120))
+#if VLLM_USE_NVFP4
   ops.def(
       "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
       "Tensor input, Tensor input_global_scale) -> ()");
