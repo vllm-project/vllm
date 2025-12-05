@@ -27,7 +27,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import should_use_deepgemm_for_fp8_linear_for_nk
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_e8m0_used,
+    should_use_deepgemm_for_fp8_linear_for_nk,
+)
 
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
@@ -122,14 +125,13 @@ class RMSNormQuantPattern:
         self.model_dtype = config.model_config.dtype if config.model_config else None
 
         # groupwise FP8 linear uses col major scales if deepgemm and cutlass
-        use_col_major_scales = (
-            should_use_deepgemm_for_fp8_linear_for_nk(
-                self.model_dtype,
-                config.model_config.hf_config.intermediate_size,
-                config.model_config.hf_config.hidden_size,
-            )
-            or cutlass_block_fp8_supported()
+        using_deepgemm = should_use_deepgemm_for_fp8_linear_for_nk(
+            self.model_dtype,
+            config.model_config.hf_config.intermediate_size,
+            config.model_config.hf_config.hidden_size,
         )
+        use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
+        use_e8m0 = is_deep_gemm_e8m0_used() if using_deepgemm else False
 
         assert key in FUSED_OPS, f"unsupported fused rmsnorm+quant op for {key}"
         self.FUSED_OP = FUSED_OPS[key]
@@ -140,7 +142,7 @@ class RMSNormQuantPattern:
             else MatcherFusedAddRMSNorm(epsilon)
         )
         self.quant_matcher = MatcherQuantFP8(
-            key.quant, use_col_major_scales=use_col_major_scales
+            key.quant, use_col_major_scales=use_col_major_scales, use_e8m0=use_e8m0
         )
 
 

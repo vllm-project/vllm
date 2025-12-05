@@ -235,6 +235,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         quant_key: QuantKey,
         enabled: bool | None = None,
         use_col_major_scales: bool = False,
+        use_e8m0: bool = False,
     ):
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -242,6 +243,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         super().__init__(enabled)
         self.quant_key = quant_key
         self.use_col_major_scales = use_col_major_scales
+        self.use_e8m0 = use_e8m0
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
@@ -277,7 +279,7 @@ class MatcherQuantFP8(MatcherCustomOp):
                 eps=1e-10,
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
-                scale_ue8m0=False,
+                scale_ue8m0=self.use_e8m0,
             )
             return result, scale
 
