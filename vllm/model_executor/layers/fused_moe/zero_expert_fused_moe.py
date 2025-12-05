@@ -55,17 +55,10 @@ class ZeroExpertFusedMoE(FusedMoE):
             if user_bias is None or user_bias.shape[0] == router_bias.shape[0]:
                 kwargs["e_score_correction_bias"] = router_bias[:num_real_experts]
 
-        # Pass zero_expert_num=0 to super().__init__() to prevent
-        # torch.ops.vllm.moe_forward from compiling with zero_expert_num > 0,
-        # which would cause it to always return tuple.
+        # FusedMoE no longer accepts zero_expert_num/zero_expert_type.
         # We handle zero experts ourselves in forward().
-        kwargs["zero_expert_num"] = 0
-        kwargs["zero_expert_type"] = None
-
         super().__init__(**kwargs)
         # Store the actual zero_expert_num and zero_expert_type for our own use
-        # Use a different attribute name to avoid affecting FusedMoE's zero_expert_num
-        # which must remain 0 for torch.ops.vllm.moe_forward to work correctly
         self._actual_zero_expert_num = zero_expert_num
         self._actual_zero_expert_type = zero_expert_type
         self._router = router  # Full router (includes zero experts)
@@ -147,19 +140,25 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Prepare temporary attribute overrides for routing computation
         temp_attrs = {
             "custom_routing_function": None,  # Disable for first routing
-            "zero_expert_num": self._actual_zero_expert_num,
-            "zero_expert_type": self._actual_zero_expert_type,
         }
         if self._router is not None:
             temp_attrs["e_score_correction_bias"] = self._router.e_score_correction_bias
 
         # Compute routing with temporary attributes
-        # This ensures zero experts can be properly identified in topk_ids
+        # Pass full router_logits (including zero experts) so that zero experts
+        # can be properly identified in topk_ids
         with self._temporarily_set_attrs(**temp_attrs):
-            topk_weights, topk_ids, zero_expert_result = self.select_experts(
+            topk_weights, topk_ids, _ = self.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,  # Full logits (includes zero experts)
             )
+
+        # Compute zero expert result if needed
+        zero_expert_result = self._compute_zero_expert_result(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
