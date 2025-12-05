@@ -35,6 +35,17 @@ pull_request_rules:
 
         For future commits, `pre-commit` will run automatically on changed files before each commit.
 
+- name: comment-dco-failure
+  description: Comment on PR when DCO check fails
+  conditions:
+    - status-failure=dco
+    - -closed
+    - -draft
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the DCO check has failed. Please click on DCO in the Checks section for instructions on how to resolve this.
+
 - name: label-ci-build
   description: Automatically apply ci/build label
   conditions:
