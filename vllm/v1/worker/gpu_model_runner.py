@@ -270,6 +270,7 @@ class GPUModelRunner(
         device: torch.device,
     ):
         self.vllm_config = vllm_config
+        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
@@ -557,7 +558,7 @@ class GPUModelRunner(
 
         self.mm_budget = (
             MultiModalBudget(
-                vllm_config.renderer_config,
+                self.renderer_config,
                 self.scheduler_config,
                 self.mm_registry,
             )
@@ -3838,7 +3839,7 @@ class GPUModelRunner(
         assert self.mm_budget is not None
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            model_config=self.model_config,
+            model_config=self.renderer_config,
             seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
