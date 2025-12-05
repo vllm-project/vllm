@@ -335,7 +335,7 @@ class GPUModelRunner(
         self.uses_mrope = model_config.uses_mrope
         self.uses_xdrope_dim = model_config.uses_xdrope_dim
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            model_config
+            self.renderer_config
         )
 
         if self.model_config.is_encoder_decoder:

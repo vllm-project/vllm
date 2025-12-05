@@ -1281,6 +1281,7 @@ class LLM:
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
     ) -> list[ScoringRequestOutput]:
+        renderer_config = self.renderer_config
         model_config = self.model_config
 
         if isinstance(tokenizer, MistralTokenizer):
@@ -1307,7 +1308,7 @@ class LLM:
 
         for q, d in input_pairs:
             _, engine_prompt = get_score_prompt(
-                model_config=model_config,
+                renderer_config=renderer_config,
                 data_1=q,
                 data_2=d,
                 tokenizer=tokenizer,

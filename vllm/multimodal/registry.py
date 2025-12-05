@@ -114,17 +114,18 @@ class MultiModalRegistry:
 
         return mm_options if len(mm_options) > 0 else None
 
-    def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
+    def supports_multimodal_inputs(self, renderer_config: "RendererConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
         Returns True if the model is multimodal with any non-zero supported
         modalities, otherwise returns False, effectively running in
         text-only mode.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_multimodal_model:
             return False
 
-        info = self._create_processing_info(model_config, tokenizer=None)
+        info = self._create_processing_info(renderer_config, tokenizer=None)
         supported_modalities = info.get_supported_mm_limits()
 
         mm_config = model_config.get_multimodal_config()

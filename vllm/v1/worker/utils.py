@@ -30,15 +30,19 @@ class MultiModalBudget:
         super().__init__()
 
         self.renderer_config = renderer_config
-        self.model_config = model_config = renderer_config.model_config
+        self.model_config = renderer_config.model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
+        self.cache = cache = processor_only_cache_from_config(
+            renderer_config, mm_registry
+        )
 
-        self.max_model_len = model_config.max_model_len
+        self.max_model_len = self.model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(
+            renderer_config, cache=cache
+        )
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
             renderer_config,
