@@ -7,6 +7,7 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
 )
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -17,17 +18,24 @@ from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
         assert vllm_config.kv_transfer_config is not None
         use_native = vllm_config.kv_transfer_config.get_from_extra_config(
             "use_native", False
@@ -83,7 +91,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         """
@@ -127,6 +135,21 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Get the set of block IDs that failed to load.
+
+        Returns:
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
+        """
+        method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
+        if callable(method):
+            return method()
+
+        # Fallback for older versions that don't support this method
+        return set()
 
     # ==============================
     # Scheduler-side methods

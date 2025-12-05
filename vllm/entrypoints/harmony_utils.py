@@ -61,15 +61,19 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-BUILTIN_TOOLS = {
+MCP_BUILTIN_TOOLS: set[str] = {
     "web_search_preview",
     "code_interpreter",
     "container",
 }
 
 
-def has_custom_tools(tool_types: list[str]) -> bool:
-    return not set(tool_types).issubset(BUILTIN_TOOLS)
+def has_custom_tools(tool_types: set[str]) -> bool:
+    """
+    Checks if the given tool types are custom tools
+    (i.e. any tool other than MCP buildin tools)
+    """
+    return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
 
 def get_encoding():
@@ -324,6 +328,105 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
+def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
+    """Parse browser tool calls (search, open, find) into web search items."""
+    if len(message.content) != 1:
+        raise ValueError("Invalid number of contents in browser message")
+    content = message.content[0]
+
+    # Parse JSON args (with retry detection)
+    try:
+        browser_call = json.loads(content.text)
+    except json.JSONDecodeError:
+        json_retry_output_message = (
+            f"Invalid JSON args, caught and retried: {content.text}"
+        )
+        browser_call = {
+            "query": json_retry_output_message,
+            "url": json_retry_output_message,
+            "pattern": json_retry_output_message,
+        }
+
+    # Create appropriate action based on recipient
+    if recipient == "browser.search":
+        action = ActionSearch(
+            query=f"cursor:{browser_call.get('query', '')}", type="search"
+        )
+    elif recipient == "browser.open":
+        action = ActionOpenPage(
+            url=f"cursor:{browser_call.get('url', '')}", type="open_page"
+        )
+    elif recipient == "browser.find":
+        action = ActionFind(
+            pattern=browser_call.get("pattern", ""),
+            url=f"cursor:{browser_call.get('url', '')}",
+            type="find",
+        )
+    else:
+        raise ValueError(f"Unknown browser action: {recipient}")
+
+    return ResponseFunctionWebSearch(
+        id=f"ws_{random_uuid()}",
+        action=action,
+        status="completed",
+        type="web_search_call",
+    )
+
+
+def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+    """Parse function calls into function tool call items."""
+    function_name = recipient.split(".")[-1]
+    output_items = []
+    for content in message.content:
+        random_id = random_uuid()
+        response_item = ResponseFunctionToolCall(
+            arguments=content.text,
+            call_id=f"call_{random_id}",
+            type="function_call",
+            name=function_name,
+            id=f"fc_{random_id}",
+        )
+        output_items.append(response_item)
+    return output_items
+
+
+def _parse_reasoning_content(message: Message) -> list[ResponseOutputItem]:
+    """Parse reasoning/analysis content into reasoning items."""
+    output_items = []
+    for content in message.content:
+        reasoning_item = ResponseReasoningItem(
+            id=f"rs_{random_uuid()}",
+            summary=[],
+            type="reasoning",
+            content=[
+                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
+            ],
+            status=None,
+        )
+        output_items.append(reasoning_item)
+    return output_items
+
+
+def _parse_final_message(message: Message) -> ResponseOutputItem:
+    """Parse final channel messages into output message items."""
+    contents = []
+    for content in message.content:
+        output_text = ResponseOutputText(
+            text=content.text,
+            annotations=[],  # TODO
+            type="output_text",
+            logprobs=None,  # TODO
+        )
+        contents.append(output_text)
+    return ResponseOutputMessage(
+        id=f"msg_{random_uuid()}",
+        content=contents,
+        role=message.author.role,
+        status="completed",
+        type="message",
+    )
+
+
 def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     """
     Parse a Harmony message into a list of output response items.
@@ -336,102 +439,40 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     output_items: list[ResponseOutputItem] = []
     recipient = message.recipient
+
+    # Browser tool calls
     if recipient is not None and recipient.startswith("browser."):
-        if len(message.content) != 1:
-            raise ValueError("Invalid number of contents in browser message")
-        content = message.content[0]
-        browser_call = json.loads(content.text)
-        # TODO: translate to url properly!
-        if recipient == "browser.search":
-            action = ActionSearch(
-                query=f"cursor:{browser_call.get('query', '')}", type="search"
-            )
-        elif recipient == "browser.open":
-            action = ActionOpenPage(
-                url=f"cursor:{browser_call.get('url', '')}", type="open_page"
-            )
-        elif recipient == "browser.find":
-            action = ActionFind(
-                pattern=browser_call["pattern"],
-                url=f"cursor:{browser_call.get('url', '')}",
-                type="find",
-            )
-        else:
-            raise ValueError(f"Unknown browser action: {recipient}")
-        web_search_item = ResponseFunctionWebSearch(
-            id=f"ws_{random_uuid()}",
-            action=action,
-            status="completed",
-            type="web_search_call",
-        )
-        output_items.append(web_search_item)
+        output_items.append(_parse_browser_tool_call(message, recipient))
+
+    # Analysis channel (reasoning/chain-of-thought)
     elif message.channel == "analysis":
-        for content in message.content:
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=content.text, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-            output_items.append(reasoning_item)
+        output_items.extend(_parse_reasoning_content(message))
+
+    # Commentary channel
     elif message.channel == "commentary":
+        # Function calls
         if recipient is not None and recipient.startswith("functions."):
-            function_name = recipient.split(".")[-1]
-            for content in message.content:
-                random_id = random_uuid()
-                response_item = ResponseFunctionToolCall(
-                    arguments=content.text,
-                    call_id=f"call_{random_id}",
-                    type="function_call",
-                    name=function_name,
-                    id=f"fc_{random_id}",
-                )
-                output_items.append(response_item)
-        elif recipient is not None and (
-            recipient.startswith("python")
-            or recipient.startswith("browser")
-            or recipient.startswith("container")
+            output_items.extend(_parse_function_call(message, recipient))
+
+        # Built-in tools on commentary channel are treated as reasoning for now
+        elif (
+            recipient is None  # Preambles: explanatory text before tool calls
+            or recipient.startswith(("python", "browser", "container"))
         ):
-            for content in message.content:
-                reasoning_item = ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(
-                            text=content.text, type="reasoning_text"
-                        )
-                    ],
-                    status=None,
-                )
-                output_items.append(reasoning_item)
+            # Per Harmony format, commentary channel can contain preambles to calling
+            # multiple functions - explanatory text with no recipient. Built-in tool
+            # recipients (python/browser/container) also generate reasoning output.
+            output_items.extend(_parse_reasoning_content(message))
         else:
             raise ValueError(f"Unknown recipient: {recipient}")
+
+    # Final output message
     elif message.channel == "final":
-        contents = []
-        for content in message.content:
-            output_text = ResponseOutputText(
-                text=content.text,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=None,  # TODO
-            )
-            contents.append(output_text)
-        text_item = ResponseOutputMessage(
-            id=f"msg_{random_uuid()}",
-            content=contents,
-            role=message.author.role,
-            status="completed",
-            type="message",
-        )
-        output_items.append(text_item)
+        output_items.append(_parse_final_message(message))
+
     else:
         raise ValueError(f"Unknown channel: {message.channel}")
+
     return output_items
 
 
@@ -500,15 +541,15 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
     if len(output_msgs) == 0:
         # The generation has stopped during reasoning.
-        reasoning_content = parser.current_content
+        reasoning = parser.current_content
         final_content = None
     elif len(output_msgs) == 1:
         # The generation has stopped during final message.
-        reasoning_content = output_msgs[0].content[0].text
+        reasoning = output_msgs[0].content[0].text
         final_content = parser.current_content
     else:
         reasoning_msg = output_msgs[:-1]
         final_msg = output_msgs[-1]
-        reasoning_content = "\n".join([msg.content[0].text for msg in reasoning_msg])
+        reasoning = "\n".join([msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
-    return reasoning_content, final_content, is_tool_call
+    return reasoning, final_content, is_tool_call

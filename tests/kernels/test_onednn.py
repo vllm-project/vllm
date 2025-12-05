@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Integration tests for FlexAttention backend vs default backend"""
 
 import pytest
 import torch

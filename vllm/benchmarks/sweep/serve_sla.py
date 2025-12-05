@@ -7,16 +7,22 @@ import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, get_args
+from typing import ClassVar, Literal, get_args
 
-import pandas as pd
 from typing_extensions import assert_never
+
+from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .serve import SweepServeArgs, run_benchmark, run_server
 from .server import ServerProcess
 from .sla_sweep import SLASweep, SLASweepItem
 from .utils import sanitize_filename
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 def _get_sla_base_path(
@@ -399,6 +405,9 @@ class SweepServeSLAArgs(SweepServeArgs):
     sla_params: SLASweep
     sla_variable: SLAVariable
 
+    parser_name: ClassVar[str] = "serve_sla"
+    parser_help: ClassVar[str] = "Tune a variable to meet SLAs under multiple settings."
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # NOTE: Don't use super() as `from_cli_args` calls `cls()`
@@ -419,7 +428,8 @@ class SweepServeSLAArgs(SweepServeArgs):
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser = super().add_cli_args(parser)
 
-        parser.add_argument(
+        sla_group = parser.add_argument_group("sla options")
+        sla_group.add_argument(
             "--sla-params",
             type=str,
             required=True,
@@ -431,7 +441,7 @@ class SweepServeSLAArgs(SweepServeArgs):
             "the maximum `sla_variable` that satisfies the constraints for "
             "each combination of `serve_params`, `bench_params`, and `sla_params`.",
         )
-        parser.add_argument(
+        sla_group.add_argument(
             "--sla-variable",
             type=str,
             choices=get_args(SLAVariable),
@@ -476,9 +486,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Tune a variable to meet SLAs under multiple settings."
-    )
+    parser = argparse.ArgumentParser(description=SweepServeSLAArgs.parser_help)
     SweepServeSLAArgs.add_cli_args(parser)
 
     main(parser.parse_args())
