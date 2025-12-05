@@ -725,6 +725,8 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings. "
             )
+        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
+        self._set_compile_ranges()
 
         if self.model_config and self.model_config.is_encoder_decoder:
             from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -1125,6 +1127,52 @@ class VllmConfig:
 
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
+
+    def _set_compile_ranges(self):
+        """
+        Set the compile ranges for the compilation config.
+        """
+        compilation_config = self.compilation_config
+        computed_compile_ranges_split_points = []
+
+        # The upper bound of the compile ranges is the max_num_batched_tokens
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        if max_num_batched_tokens is not None:
+            computed_compile_ranges_split_points.append(max_num_batched_tokens)
+
+        # Add the compile ranges for flashinfer
+        if compilation_config.pass_config.fuse_allreduce_rms:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+            if max_size is not None:
+                max_token_num = max_size // (
+                    self.model_config.get_hidden_size()
+                    * self.model_config.dtype.itemsize
+                )
+                if (
+                    max_num_batched_tokens is not None
+                    and max_token_num < max_num_batched_tokens
+                ):
+                    computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below allreduce-rms fusion threshold, "
+                        "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
+
+        if compilation_config.compile_ranges_split_points is not None:
+            for x in compilation_config.compile_ranges_split_points:
+                assert isinstance(x, int)
+                assert x > 0, f"Invalid compile range split point: {x}"
+                if (
+                    max_num_batched_tokens is not None
+                    and x < max_num_batched_tokens
+                    and x > 1
+                ):
+                    computed_compile_ranges_split_points.append(x)
+        compilation_config.compile_ranges_split_points = sorted(
+            computed_compile_ranges_split_points
+        )
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config
