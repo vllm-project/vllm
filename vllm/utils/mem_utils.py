@@ -11,7 +11,11 @@ import psutil
 import torch
 import torch.types
 
+from vllm.logger import init_logger
+
 from .mem_constants import GiB_bytes
+
+logger = init_logger(__name__)
 
 
 @cache
@@ -230,3 +234,62 @@ def memory_profiling(
     result.non_kv_cache_memory = (
         non_torch_memory + peak_activation_memory + result.weights_memory
     )  # noqa
+
+
+@contextlib.contextmanager
+def memory_snapshot_profiling(
+    output_dir: str,
+    filename_prefix: str = "memory_snapshot",
+    max_entries: int = 100000,
+) -> Generator[None, None, None]:
+    """Memory snapshot profiling context manager using PyTorch's memory history API.
+
+    This records detailed memory allocation history with callstacks, which is
+    extremely useful for debugging OOM issues during model loading.
+
+    Args:
+        output_dir: Directory to save the memory snapshot file.
+        filename_prefix: Prefix for the snapshot filename. The full filename
+            will be {prefix}_{timestamp}.pickle
+        max_entries: Maximum number of allocation entries to record.
+            Higher values capture more allocations but use more memory.
+
+    Usage:
+        with memory_snapshot_profiling("/path/to/output"):
+            model = load_model()
+
+    The output .pickle file can be visualized at https://pytorch.org/memory_viz
+
+    Example to enable during model loading:
+        VLLM_MEMORY_SNAPSHOT_DIR=/path/to/output python -m vllm.entrypoints.openai.api_server ...
+    """  # noqa
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Clear existing memory state for a cleaner baseline
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    # Start recording memory history with full stack traces
+    torch.cuda.memory._record_memory_history(
+        enabled="all",  # Record all allocations
+        stacks="all",  # Capture both Python and C++ stacks
+        max_entries=max_entries,
+    )
+
+    try:
+        yield
+    finally:
+        torch.cuda.synchronize()
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        snapshot_file = os.path.join(
+            output_dir, f"{filename_prefix}_{timestamp}.pickle"
+        )
+        torch.cuda.memory._dump_snapshot(snapshot_file)
+        torch.cuda.memory._record_memory_history(enabled=None)
+        logger.info(
+            "Memory snapshot saved to %s. Visualize at https://pytorch.org/memory_viz",
+            snapshot_file,
+        )

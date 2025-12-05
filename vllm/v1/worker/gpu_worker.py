@@ -42,7 +42,11 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    memory_profiling,
+    memory_snapshot_profiling,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -172,6 +176,17 @@ class Worker(WorkerBase):
         else:
             return nullcontext()
 
+    def _maybe_get_memory_snapshot_context(self) -> AbstractContextManager:
+        # Optional memory snapshot profiling for debugging OOM during loading
+        memory_snapshot_ctx: AbstractContextManager = nullcontext()
+        if envs.VLLM_MEMORY_SNAPSHOT_DIR:
+            memory_snapshot_ctx = memory_snapshot_profiling(
+                output_dir=envs.VLLM_MEMORY_SNAPSHOT_DIR,
+                filename_prefix=f"load_model_rank{self.rank}",
+                max_entries=envs.VLLM_MEMORY_SNAPSHOT_MAX_ENTRIES,
+            )
+        return memory_snapshot_ctx
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -285,7 +300,10 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(tag="weights"):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            self._maybe_get_memory_snapshot_context(),
+        ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
