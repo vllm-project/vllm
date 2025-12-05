@@ -146,6 +146,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
+    sequence_parallelism_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
