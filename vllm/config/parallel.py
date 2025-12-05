@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+EPLBPolicyOption = Literal["default"]
 
 
 @config
@@ -65,7 +66,8 @@ class EPLBConfig:
     """
     Whether to use non-blocking EPLB.
     """
-
+    policy: EPLBPolicyOption = "default"
+    """The policy type for expert parallel load balancing (EPLB)."""
     load_initial_load_window: bool = False
     """
     Whether to load initial load window.
