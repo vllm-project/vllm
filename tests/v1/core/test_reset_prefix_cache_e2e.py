@@ -21,6 +21,7 @@ def test_reset_prefix_cache_e2e(monkeypatch):
         max_num_batched_tokens=32,
         max_model_len=2048,
         compilation_config={"mode": 0},
+        dtype="float16",
     )
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams(
