@@ -609,53 +609,38 @@ __global__ void group_idx_and_topk_idx_kernel(
   int count_equalto_topkth_group = 0;
   bool if_proceed_next_topk = topk_group_value != neg_inf<T>();
   if (case_id < num_tokens && if_proceed_next_topk) {
+    auto process_group = [&](int i_group) {
+      if ((group_scores[i_group] > topk_group_value) ||
+          ((group_scores[i_group] == topk_group_value) &&
+           (count_equalto_topkth_group < num_equalto_topkth_group))) {
+        int32_t offset = i_group * num_experts_per_group;
+        for (int32_t i = lane_id; i < align_num_experts_per_group;
+             i += WARP_SIZE) {
+          T candidates = neg_inf<T>();
+          if (i < num_experts_per_group) {
+            // apply scoring function (if any) and add bias
+            T input = scores[offset + i];
+            if (is_finite(input)) {
+              T score = apply_scoring<SF>(input);
+              candidates = score + bias[offset + i];
+            }
+          }
+          queue.add(candidates, offset + i);
+        }
+        if (group_scores[i_group] == topk_group_value) {
+          count_equalto_topkth_group++;
+        }
+      }
+    };
+
     if constexpr (kUseStaticNGroup) {
 #pragma unroll
       for (int i_group = 0; i_group < NGroup; ++i_group) {
-        if ((group_scores[i_group] > topk_group_value) ||
-            ((group_scores[i_group] == topk_group_value) &&
-             (count_equalto_topkth_group < num_equalto_topkth_group))) {
-          int32_t offset = i_group * num_experts_per_group;
-          for (int32_t i = lane_id; i < align_num_experts_per_group;
-               i += WARP_SIZE) {
-            T candidates = neg_inf<T>();
-            if (i < num_experts_per_group) {
-              // apply scoring function (if any) and add bias
-              T input = scores[offset + i];
-              if (is_finite(input)) {
-                T score = apply_scoring<SF>(input);
-                candidates = score + bias[offset + i];
-              }
-            }
-            queue.add(candidates, offset + i);
-          }
-          if (group_scores[i_group] == topk_group_value) {
-            count_equalto_topkth_group++;
-          }
-        }
+        process_group(i_group);
       }
     } else {
       for (int i_group = 0; i_group < n_group_i32; ++i_group) {
-        if ((group_scores[i_group] > topk_group_value) ||
-            ((group_scores[i_group] == topk_group_value) &&
-             (count_equalto_topkth_group < num_equalto_topkth_group))) {
-          int32_t offset = i_group * num_experts_per_group;
-          for (int32_t i = lane_id; i < align_num_experts_per_group;
-               i += WARP_SIZE) {
-            T candidates = neg_inf<T>();
-            if (i < num_experts_per_group) {
-              T input = scores[offset + i];
-              if (is_finite(input)) {
-                T score = apply_scoring<SF>(input);
-                candidates = score + bias[offset + i];
-              }
-            }
-            queue.add(candidates, offset + i);
-          }
-          if (group_scores[i_group] == topk_group_value) {
-            count_equalto_topkth_group++;
-          }
-        }
+        process_group(i_group);
       }
     }
     queue.done();
@@ -679,8 +664,10 @@ __global__ void group_idx_and_topk_idx_kernel(
         value = apply_scoring<SF>(input);
         s_topk_value[i] = value;
       }
-      topk_sum +=
-          cg::reduce(tile, cuda_cast<float, T>(value), cg::plus<float>());
+      if constexpr (Renorm) {
+        topk_sum +=
+            cg::reduce(tile, cuda_cast<float, T>(value), cg::plus<float>());
+      }
     }
   }
 
