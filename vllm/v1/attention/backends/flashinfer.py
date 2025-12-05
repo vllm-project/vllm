@@ -482,9 +482,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_rank = 0
             self.dcp_kv_cache_interleave_size = 1
 
-        self.num_qo_heads = (
-            self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
-            * self.dcp_world_size
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
         )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
