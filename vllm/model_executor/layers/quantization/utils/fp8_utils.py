@@ -149,7 +149,12 @@ def _padded_cutlass2(
 ) -> torch.Tensor:
     pad_multiple = 4
 
-    padding = -qx.shape[0] % pad_multiple
+    # TODO(torch==2.10): torch semantics broken for PythonMod in 2.9:
+    #  so x<=0 -> x % y <= 0 (not actually python mod semantics).
+    #  https://github.com/pytorch/pytorch/issues/169602
+    #  We increment the padded dim to avoid a negative.
+    # padding = -qx.shape[0] % pad_multiple
+    padding = (qx.shape[0] * pad_multiple - qx.shape[0]) % pad_multiple
     # print(f"{padding=}")
     padded_qx = torch.nn.functional.pad(qx, (0, 0, 0, padding))
     assert len(x_scale.size()) == 2
