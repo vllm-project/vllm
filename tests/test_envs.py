@@ -365,3 +365,54 @@ class TestEnvSetWithChoices:
         with patch.dict(os.environ, {"TEST_ENV": "option1,option1,option2"}):
             env_func = env_set_with_choices("TEST_ENV", [], ["option1", "option2"])
             assert env_func() == {"option1", "option2"}
+
+
+class TestVllmConfigureLogging:
+    """Test cases for VLLM_CONFIGURE_LOGGING environment variable."""
+
+    def test_configure_logging_defaults_to_true(self):
+        """Test that VLLM_CONFIGURE_LOGGING defaults to True when not set."""
+        # Ensure the env var is not set
+        with patch.dict(os.environ, {}, clear=False):
+            if "VLLM_CONFIGURE_LOGGING" in os.environ:
+                del os.environ["VLLM_CONFIGURE_LOGGING"]
+
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is True
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_zero_string(self):
+        """Test that VLLM_CONFIGURE_LOGGING='0' evaluates to False."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "0"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is False
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_one_string(self):
+        """Test that VLLM_CONFIGURE_LOGGING='1' evaluates to True."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "1"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            result = envs.VLLM_CONFIGURE_LOGGING
+            assert result is True
+            assert isinstance(result, bool)
+
+    def test_configure_logging_with_invalid_value_raises_error(self):
+        """Test that invalid VLLM_CONFIGURE_LOGGING value raises ValueError."""
+        with patch.dict(os.environ, {"VLLM_CONFIGURE_LOGGING": "invalid"}):
+            # Clear cache if it exists
+            if hasattr(envs.__getattr__, "cache_clear"):
+                envs.__getattr__.cache_clear()
+
+            with pytest.raises(ValueError, match="invalid literal for int"):
+                _ = envs.VLLM_CONFIGURE_LOGGING
