@@ -1398,7 +1398,7 @@ class EngineArgs:
         model_config = self.create_model_config()
         renderer_config = RendererConfig(
             model_config=model_config,
-            tokenizer=self.tokenizer,
+            tokenizer=self.tokenizer or "",
             tokenizer_mode=self.tokenizer_mode,
             tokenizer_revision=self.tokenizer_revision,
             skip_tokenizer_init=self.skip_tokenizer_init,

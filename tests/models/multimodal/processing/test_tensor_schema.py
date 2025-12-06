@@ -11,7 +11,7 @@ import pytest
 import torch.nn as nn
 from PIL import Image
 
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, RendererConfig, VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -149,7 +149,10 @@ def initialize_dummy_model(
         backend="nccl",
     )
     initialize_model_parallel(tensor_model_parallel_size=1)
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+    )
     with set_current_vllm_config(vllm_config=vllm_config):
         with set_default_torch_dtype(model_config.dtype):
             model = model_cls(vllm_config=vllm_config)

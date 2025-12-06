@@ -19,6 +19,8 @@ TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 class RendererConfig:
     """Configuration for the renderer."""
 
+    # NOTE: In reality, this is a required argument.
+    # We provide a dummy default value here to generate the CLI args.
     model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """Provides model context to the renderer."""
 

@@ -5,7 +5,13 @@ import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    RendererConfig,
+    VllmConfig,
+)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
@@ -60,6 +66,7 @@ def _mock_input_processor(
     model_config.multimodal_config = _MockMMConfig(mm_cache_gb)  # type: ignore[attr-defined]
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
         device_config=DeviceConfig(device="cpu"),
     )
