@@ -9,11 +9,6 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "sentence-transformers/all-MiniLM-L12-v2"
 max_model_len = 128
 
@@ -44,7 +39,14 @@ def server():
         str(max_model_len),
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 

@@ -11,11 +11,6 @@ from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.entrypoints.pooling.score.protocol import RerankResponse
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "bfloat16"
 
@@ -24,7 +19,14 @@ DTYPE = "bfloat16"
 def server():
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 

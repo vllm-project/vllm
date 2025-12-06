@@ -51,6 +51,11 @@ async def test_non_asr_model(foscolo):
 @pytest.mark.asyncio
 async def test_basic_audio_with_lora(mary_had_lamb):
     """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # ROCm SPECIFIC CONFIGURATION:
+    # To ensure the test passes on ROCm, we modify the max model length to 512.
+    # We DO NOT apply this to other platforms to maintain strict upstream parity.
+    from vllm.platforms import current_platform
+
     # NOTE - careful to call this test before the module scoped server
     # fixture, otherwise it'll OOMkill the CI
     model_name = "ibm-granite/granite-speech-3.3-2b"
@@ -63,7 +68,7 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         "--lora-modules",
         f"{lora_model_name}={model_name}",
         "--max-model-len",
-        "2048",
+        "512" if current_platform.is_rocm() else "2048",
         "--max-num-seqs",
         "1",
     ]
