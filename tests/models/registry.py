@@ -176,15 +176,17 @@ class _HfExamplesInfo:
             model = self.default
 
         return ModelConfig(
-            model=model,
-            revision=self.revision,
-            trust_remote_code=self.trust_remote_code,
-            hf_overrides=self.hf_overrides,
-            enable_prompt_embeds=self.require_embed_inputs,
-            enable_mm_embeds=self.require_embed_inputs,
-            enforce_eager=self.enforce_eager,
-            dtype=self.dtype,
-            **kwargs,
+            **{
+                "model": model,
+                "revision": self.revision,
+                "trust_remote_code": self.trust_remote_code,
+                "hf_overrides": self.hf_overrides,
+                "enable_prompt_embeds": self.require_embed_inputs,
+                "enable_mm_embeds": self.require_embed_inputs,
+                "enforce_eager": self.enforce_eager,
+                "dtype": self.dtype,
+                **kwargs,
+            }
         )
 
     def build_renderer_config(
