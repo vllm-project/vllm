@@ -712,3 +712,24 @@ def convert_bf16_scales_to_fp8(
     chan_scales = chan_scales.view(orig_shape[:-1], -1)
 
     return fp8_scales, chan_scales
+
+
+def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
+    """
+    Convert int4b8 (packed to int32) to signed int4
+    """
+    assert t.is_cuda, "tensor must be on gpu"
+    assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
+
+    # loop through the 8 4-bit nibbles in each int32 entry
+    for i in range(8):
+        shift = 4 * i
+        # extract the i-th 4-bit nibble
+        nib = (t >> shift) & 0xF
+        # clear the original nibble by masking out
+        t &= ~(0xF << shift)
+        # convert int4b8 [0..15] to signed int4 [-8..7] by subtracting 8
+        # and update in-place
+        t |= ((nib - 8) & 0xF) << shift
+
+    return t

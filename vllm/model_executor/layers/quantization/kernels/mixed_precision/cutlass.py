@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     convert_bf16_scales_to_fp8,
+    convert_packed_uint4b8_to_signed_int4_inplace,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
@@ -75,6 +76,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
+            convert_packed_uint4b8_to_signed_int4_inplace(x.data)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x.data = ops.cutlass_encode_and_reorder_int4b(x.data.t().contiguous().t())
             return x
