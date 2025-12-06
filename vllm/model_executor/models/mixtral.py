@@ -139,6 +139,7 @@ class MixtralMoE(nn.Module):
             dp_size=dp_size,
             prefix=f"{prefix}.experts",
             enable_eplb=self.enable_eplb,
+            eplb_static=parallel_config.eplb_config.static,
             num_redundant_experts=self.n_redundant_experts,
         )
 
