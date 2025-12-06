@@ -276,7 +276,9 @@ class StructuredOutputManager:
                             )
                         ]
                     )
-
+                    if token == -1:
+                        # Stop advancing the grammar once we hit a padding token
+                        apply_bitmask = False
                     if (
                         apply_bitmask
                         and token is not None
