@@ -661,8 +661,9 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
         if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(
@@ -697,12 +698,19 @@ class VllmConfig:
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif self.model_config.is_encoder_decoder:
-                    logger.warning_once(
-                        "Encoder-decoder models do not support full cudagraphs. "
-                        "Overriding cudagraph_mode to PIECEWISE."
+                elif (
+                    self.model_config.is_encoder_decoder
+                    and self.compilation_config.cudagraph_mode
+                    not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+                ):
+                    logger.info_once(
+                        "Encoder-decoder models do not support %s. "
+                        "Overriding cudagraph_mode to FULL_DECODE_ONLY.",
+                        self.compilation_config.cudagraph_mode.name,
                     )
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    self.compilation_config.cudagraph_mode = (
+                        CUDAGraphMode.FULL_DECODE_ONLY
+                    )
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
