@@ -314,12 +314,13 @@ def test_sliding_window_remove_skipped_blocks():
 
 def test_get_num_blocks_to_allocate():
     block_size = 2
+    sliding_window_length = 2 * block_size
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        sliding_window=4,  # Placeholder value, not related to test result
+        sliding_window=sliding_window_length,
     )
 
     block_pool = BlockPool(
@@ -331,67 +332,83 @@ def test_get_num_blocks_to_allocate():
         KVCacheBlock(i + 1) for i in range(5)
     ]
 
-    num_blocks, evictable = manager.get_num_blocks_to_allocate(
-        "1", 20 * block_size, cached_blocks_1, 0
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            "1",
+            20 * block_size,
+            cached_blocks_1,
+            total_computed_tokens=len(cached_blocks_1) * block_size,
+        )
     )
-    assert num_blocks == 10
-    assert evictable == cached_blocks_1
-    assert num_blocks + len(evictable) == 20
+    assert (
+        num_new_blocks_to_allocate == 10
+        and num_evictable_blocks_to_allocate == sliding_window_length // block_size
+    )
 
-    num_blocks, evictable = manager.get_num_blocks_to_allocate(
-        "2", 20 * block_size, cached_blocks_2, 0
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            "2",
+            20 * block_size,
+            cached_blocks_2,
+            total_computed_tokens=len(cached_blocks_2) * block_size,
+        )
     )
-    assert num_blocks == 10
-    assert evictable == cached_blocks_2[5:]
-    assert num_blocks + len(evictable) == 20
+    assert (
+        num_new_blocks_to_allocate == 10
+        and num_evictable_blocks_to_allocate == sliding_window_length // block_size
+    )
 
 
 def test_evictable_cached_blocks_not_double_allocated():
     block_size = 2
+    sliding_window_length = 2 * block_size
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        sliding_window=16,
+        sliding_window=sliding_window_length,
     )
 
     block_pool = BlockPool(
-        num_gpu_blocks=10, enable_caching=True, hash_block_size=block_size
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
     )
     manager = get_sliding_window_manager(sliding_window_spec, block_pool)
 
     request_id = "req"
     evictable_block = block_pool.blocks[1]  # ref_cnt == 0, eviction candidate
 
-    num_blocks, evictable_blocks = manager.get_num_blocks_to_allocate(
-        request_id=request_id,
-        num_tokens=4,  # requires 2 blocks
-        new_computed_blocks=[evictable_block],  # one cached block hit
-        total_computed_tokens=0,
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=2 * block_size,
+            new_computed_blocks=[evictable_block],
+            total_computed_tokens=block_size,
+        )
     )
     # Free capacity check should count evictable cached blocks, but allocation
     # should only allocate the truly new block.
-    assert num_blocks == 1
-    assert evictable_blocks == [evictable_block]
-    assert num_blocks + len(evictable_blocks) == 2
+    assert num_new_blocks_to_allocate == 1 and num_evictable_blocks_to_allocate == 1
 
     manager.save_new_computed_blocks(
         request_id, [evictable_block], total_computed_tokens=block_size
     )
-    new_blocks = manager.allocate_new_blocks(request_id, num_blocks, num_tokens=4)
+    new_blocks = manager.allocate_new_blocks(
+        request_id, num_new_blocks_to_allocate, num_tokens=4
+    )
     assert len(new_blocks) == 1
     assert len(manager.req_to_blocks[request_id]) == 2
 
 
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
+    attention_chunk_size = 2 * block_size
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        attention_chunk_size=4,  # Placeholder value, not related to test result
+        attention_chunk_size=attention_chunk_size,
     )
 
     block_pool = BlockPool(
@@ -402,17 +419,34 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     cached_blocks_2 = [block_pool.null_block for _ in range(5)] + [
         KVCacheBlock(i + 1) for i in range(5)
     ]
+    cached_blocks_3 = [KVCacheBlock(i + 1) for i in range(5)]
 
-    num_blocks, evictable = manager.get_num_blocks_to_allocate(
-        "1", 20 * block_size, cached_blocks_1, 0
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            "1",
+            20 * block_size,
+            cached_blocks_1,
+            total_computed_tokens=len(cached_blocks_1) * block_size,
+        )
     )
-    assert num_blocks == 10
-    assert evictable == cached_blocks_1
-    assert num_blocks + len(evictable) == 20
+    assert num_new_blocks_to_allocate == 10 and num_evictable_blocks_to_allocate == 0
 
-    num_blocks, evictable = manager.get_num_blocks_to_allocate(
-        "2", 20 * block_size, cached_blocks_2, 0
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            "2",
+            20 * block_size,
+            cached_blocks_2,
+            total_computed_tokens=len(cached_blocks_2) * block_size,
+        )
     )
-    assert num_blocks == 10
-    assert evictable == cached_blocks_2[5:]
-    assert num_blocks + len(evictable) == 15
+    assert num_new_blocks_to_allocate == 10 and num_evictable_blocks_to_allocate == 0
+
+    num_new_blocks_to_allocate, num_evictable_blocks_to_allocate = (
+        manager.get_num_blocks_to_allocate(
+            "3",
+            20 * block_size,
+            cached_blocks_3,
+            total_computed_tokens=len(cached_blocks_3) * block_size,
+        )
+    )
+    assert num_new_blocks_to_allocate == 15 and num_evictable_blocks_to_allocate == 1
