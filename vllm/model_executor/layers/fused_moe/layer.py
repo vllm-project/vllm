@@ -26,6 +26,12 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    interleave_tensor as alpha_moe_interleave_tensor,
+)
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    is_alpha_moe_enabled,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -41,10 +47,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
-from vllm.model_executor.layers.fused_moe.alpha_moe import (
-    interleave_tensor as alpha_moe_interleave_tensor,
-    is_alpha_moe_enabled,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -585,9 +587,9 @@ class FusedMoE(CustomOp):
         # Track how many chunks (w1, w3) have been loaded for each expert
         # Interleave when both w1 and w3 are loaded
         self._alpha_moe_w13_chunks_loaded: list[int] = [0] * self.local_num_experts
-        self._alpha_moe_w13_scale_chunks_loaded: list[int] = (
-            [0] * self.local_num_experts
-        )
+        self._alpha_moe_w13_scale_chunks_loaded: list[int] = [
+            0
+        ] * self.local_num_experts
 
         self.quant_config = quant_config
 

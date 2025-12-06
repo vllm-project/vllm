@@ -19,6 +19,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.fused_moe.alpha_moe import (
+    _valid_alpha_moe,
+    alpha_moe_fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
@@ -31,10 +35,6 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
-)
-from vllm.model_executor.layers.fused_moe.alpha_moe import (
-    _valid_alpha_moe,
-    alpha_moe_fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,

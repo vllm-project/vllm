@@ -18,7 +18,6 @@ The config file can be generated using Alpha MoE's jit_moe.py script:
 
 import functools
 import json
-import os
 from typing import Any
 
 import torch
@@ -36,6 +35,19 @@ logger = init_logger(__name__)
 
 # Global flag to track if Alpha MoE is available
 _ALPHA_MOE_AVAILABLE: bool | None = None
+
+# Default Alpha MoE kernel configuration
+# Constraints from Alpha-MoE torch_interface.cpp:
+#   - block_n: must be 64 or 32
+#   - warp_n: must be 4 if block_n==64, or 8 if block_n==32
+#   - stages: must be > 0 and < 6 (i.e., 1-5)
+#   - block_m: must be > 0, <= 128, and divisible by 8
+_DEFAULT_ALPHA_MOE_CONFIG: dict[str, int] = {
+    "block_m": 128,
+    "block_n": 64,
+    "warp_n": 4,
+    "stages": 3,
+}
 
 
 def is_alpha_moe_available() -> bool:
@@ -62,10 +74,33 @@ def is_alpha_moe_enabled() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _load_alpha_moe_config(path: str) -> dict[str, Any]:
-    """Load and cache Alpha MoE configuration from JSON file."""
-    with open(path) as f:
-        return json.load(f)
+def _load_alpha_moe_config(path: str) -> dict[str, Any] | None:
+    """Load and cache Alpha MoE configuration from JSON file.
+
+    Args:
+        path: Path to the Alpha MoE configuration JSON file.
+
+    Returns:
+        Dictionary with configuration data, or None if loading fails.
+    """
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.warning(
+            "Alpha-MoE config file not found at %s. "
+            "Please generate a config using Alpha-MoE's jit_moe.py script.",
+            path,
+        )
+        return None
+    except json.JSONDecodeError as e:
+        logger.warning(
+            "Failed to parse Alpha-MoE config file at %s: %s. "
+            "Please ensure the config file is valid JSON.",
+            path,
+            e,
+        )
+        return None
 
 
 def get_best_config(config_path: str | None, num_tokens: int) -> dict[str, int]:
@@ -77,19 +112,33 @@ def get_best_config(config_path: str | None, num_tokens: int) -> dict[str, int]:
 
     Returns:
         Dictionary with kernel configuration parameters:
-        - block_m: Block size in M dimension
-        - block_n: Block size in N dimension
-        - warp_n: Number of warps in N dimension
-        - stages: Pipeline stages
+        - block_m: Block size in M dimension (8-128, divisible by 8)
+        - block_n: Block size in N dimension (64 or 32)
+        - warp_n: Number of warps in N dimension (4 if block_n=64, 8 if block_n=32)
+        - stages: Pipeline stages (1-5)
     """
     if config_path is None:
         config_path = envs.VLLM_ALPHA_MOE_CONFIG
 
     if config_path is None:
         # Return default configuration if no config file specified
-        return {"block_m": 128, "block_n": 256, "warp_n": 4, "stages": 3}
+        logger.info(
+            "No Alpha-MoE config file specified. Using default configuration. "
+            "For optimal performance, generate a config using Alpha-MoE's "
+            "jit_moe.py script and set VLLM_ALPHA_MOE_CONFIG."
+        )
+        return _DEFAULT_ALPHA_MOE_CONFIG.copy()
 
     best_conf = _load_alpha_moe_config(config_path)
+
+    if best_conf is None:
+        # Failed to load config, fall back to default
+        logger.warning(
+            "Failed to load Alpha-MoE config from %s. "
+            "Falling back to default configuration.",
+            config_path,
+        )
+        return _DEFAULT_ALPHA_MOE_CONFIG.copy()
 
     # Find the configuration with the closest number of tokens
     dist = float("inf")
@@ -100,8 +149,12 @@ def get_best_config(config_path: str | None, num_tokens: int) -> dict[str, int]:
             ret = val
 
     if ret is None:
-        # Fallback to default if config is empty
-        return {"block_m": 128, "block_n": 256, "warp_n": 4, "stages": 3}
+        # Config file is empty, fall back to default
+        logger.warning(
+            "Alpha-MoE config at %s is empty. Falling back to default configuration.",
+            config_path,
+        )
+        return _DEFAULT_ALPHA_MOE_CONFIG.copy()
 
     return ret
 
@@ -192,9 +245,7 @@ def alpha_moe_fused_experts(
     A, A_scale = per_token_group_quant_fp8(hidden_states, group_size)
 
     # Allocate output tensor and zero-initialize (required by Alpha MoE)
-    out = torch.zeros(
-        num_tokens, K, device=hidden_states.device, dtype=torch.bfloat16
-    )
+    out = torch.zeros(num_tokens, K, device=hidden_states.device, dtype=torch.bfloat16)
 
     # Align tokens to block size for MoE
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
@@ -272,10 +323,7 @@ def _valid_alpha_moe(
         return False
 
     # Check that weights are FP8
-    if w1.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-        return False
-
-    return True
+    return w1.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
 
 
 __all__ = [
@@ -286,4 +334,3 @@ __all__ = [
     "alpha_moe_fused_experts",
     "_valid_alpha_moe",
 ]
-
