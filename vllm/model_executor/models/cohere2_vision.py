@@ -331,8 +331,6 @@ class Cohere2VisionMultiModalProcessor(
     dummy_inputs=Cohere2VisionDummyInputsBuilder,
 )
 class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.": "vision_tower.",

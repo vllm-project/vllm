@@ -337,12 +337,12 @@ def is_residual_scattered_for_sp(
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled.
 
-    This follows the same logic as SequenceParallelismPass.is_applicable():
+    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
-    if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
+    if not vllm_config.compilation_config.pass_config.enable_sp:
         return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size

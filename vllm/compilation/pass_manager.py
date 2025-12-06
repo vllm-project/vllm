@@ -24,7 +24,11 @@ if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 
 from .fix_functionalization import FixFunctionalizationPass
-from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
+from .inductor_pass import (
+    CustomGraphPass,
+    InductorPass,
+    get_pass_context,
+)
 from .noop_elimination import NoOpEliminationPass
 
 logger = init_logger(__name__)
@@ -70,13 +74,13 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
-        shape = get_pass_context().runtime_shape
+        compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
-            if pass_.is_applicable(shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
             else:
-                logger.debug("Skipping %s with shape %s", pass_, shape)
+                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
 
         # post-cleanup goes before fix_functionalization
         # because it requires a functional graph
@@ -92,22 +96,23 @@ class PostGradPassManager(CustomGraphPass):
 
         # Set the current vllm config to allow tracing CustomOp instances
         with set_current_vllm_config(config, check_compile=False):
-            if self.pass_config.enable_noop:
+            if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sequence_parallelism:
+            if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]
-                if self.pass_config.enable_async_tp:
+                if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
-            if self.pass_config.enable_fi_allreduce_fusion:
+            if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
-            if self.pass_config.enable_fusion:
+            if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
+            if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
 
-            if self.pass_config.enable_attn_fusion:
+            if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
@@ -131,5 +136,9 @@ class PostGradPassManager(CustomGraphPass):
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
+
+        # Include the compile range in the uuid to ensure that inductor
+        # recompiles the graph for the new dynamic compile range.
+        state["compile_range"] = str(get_pass_context().compile_range)
 
         return InductorPass.hash_dict(state)
