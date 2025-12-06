@@ -154,13 +154,16 @@ class TritonAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -206,9 +209,6 @@ class TritonAttentionBackend(AttentionBackend):
 class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
-
-    def supports_quant_query_input(self) -> bool:
-        return current_platform.is_cuda()
 
     def __init__(
         self,
@@ -258,6 +258,8 @@ class TritonAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}."
             )
+
+        self.supports_quant_query_input = current_platform.is_cuda()
 
     def forward(
         self,

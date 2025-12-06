@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec

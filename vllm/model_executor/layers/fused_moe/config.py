@@ -28,10 +28,11 @@ logger = init_logger(__name__)
 if has_triton_kernels():
     try:
         from triton_kernels.matmul_ogs import PrecisionConfig
-    except ImportError:
+    except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible."
+            "version is compatible. Error: %s",
+            e,
         )
 
 
@@ -343,6 +344,10 @@ class FusedMoEQuantConfig:
     @property
     def use_mxfp4_w4a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == "mxfp4"
+
+    @property
+    def use_mxfp4_w4a4(self) -> bool:
+        return self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4"
 
     @property
     def use_nvfp4_w4a4(self) -> bool:
