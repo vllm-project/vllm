@@ -18,6 +18,14 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 90
 
     @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "Requires ROCm."
+        return super().is_supported(compute_capability)
+
+    @classmethod
     def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return (
