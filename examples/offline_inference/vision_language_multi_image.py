@@ -76,7 +76,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
