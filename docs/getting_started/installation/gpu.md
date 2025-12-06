@@ -14,9 +14,13 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:installation"
 
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:installation"
+
 ## Requirements
 
-- OS: Linux
+- OS: Linux (CUDA, ROCm, XPU) or macOS Sonoma+ (MPS)
 - Python: 3.10 -- 3.13
 
 !!! note
@@ -33,6 +37,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:requirements"
+
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:requirements"
 
 ## Set up using Python
 
@@ -52,6 +60,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:set-up-using-python"
 
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:set-up-using-python"
+
 ### Pre-built wheels {#pre-built-wheels}
 
 === "NVIDIA CUDA"
@@ -66,6 +78,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-wheels"
 
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:pre-built-wheels"
+
 ### Build wheel from source
 
 === "NVIDIA CUDA"
@@ -79,6 +95,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-wheel-from-source"
+
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:build-wheel-from-source"
 
 ## Set up using Docker
 
@@ -96,6 +116,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
 
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:pre-built-images"
+
 ### Build image from source
 
 === "NVIDIA CUDA"
@@ -110,6 +134,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
 
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:build-image-from-source"
+
 ## Supported features
 
 === "NVIDIA CUDA"
@@ -123,3 +151,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:supported-features"
+
+=== "Apple MPS"
+
+    --8<-- "docs/getting_started/installation/gpu.mps.inc.md:supported-features"
