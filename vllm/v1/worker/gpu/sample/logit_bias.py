@@ -76,7 +76,10 @@ def _logit_bias_kernel(
     block = tl.arange(0, BLOCK_SIZE)
     mask = block < n
     token_ids = tl.load(token_ids_ptr + req_idx * token_ids_stride + block, mask=mask)
-    bias = tl.load(bias_ptr + req_idx * bias_stride + block, mask=mask)
+    if bias_ptr is not None:
+        bias = tl.load(bias_ptr + req_idx * bias_stride + block, mask=mask)
+    else:
+        bias = float("-inf")
 
     logits = tl.load(logits_ptr + req_idx * logits_stride + token_ids, mask=mask)
     logits += bias
@@ -87,7 +90,7 @@ def apply_logit_bias(
     logits: torch.Tensor,
     num_logit_bias: torch.Tensor,
     token_ids: torch.Tensor,
-    bias: torch.Tensor,
+    bias: torch.Tensor | None,
 ) -> None:
     num_reqs = logits.shape[0]
     max_num_logit_bias = token_ids.shape[-1]
@@ -98,6 +101,22 @@ def apply_logit_bias(
         token_ids,
         token_ids.stride(0),
         bias,
-        bias.stride(0),
+        bias.stride(0) if bias is not None else 0,
         BLOCK_SIZE=triton.next_power_of_2(max_num_logit_bias),
+    )
+
+
+def apply_min_tokens(
+    logits: torch.Tensor,
+    pos: torch.Tensor,
+    min_seq_len: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+) -> None:
+    num_stop_token_ids = num_stop_token_ids * (pos < min_seq_len)
+    apply_logit_bias(
+        logits,
+        num_stop_token_ids,
+        stop_token_ids,
+        bias=None,
     )
