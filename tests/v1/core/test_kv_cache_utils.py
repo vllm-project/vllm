@@ -1798,3 +1798,60 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         )
     )
     assert block_hashes[1] == expected_hash2
+
+
+def test_auto_fit_max_model_len():
+    """Test that max_model_len=-1 auto-fits to available GPU memory."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=1024)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # With enough memory, max_model_len stays at the derived max
+    large_available_memory = mem_per_block_per_layer * 2 * 1024  # plenty of memory
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [large_available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
+
+    # Reset for next test
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    # With limited memory, max_model_len should be reduced
+    # Need memory for at least max_model_len tokens
+    # 32 blocks worth of memory for 2 layers = can fit 32*16=512 tokens
+    limited_memory = mem_per_block_per_layer * 2 * 32
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [limited_memory]
+    )
+    # Should be reduced to fit in memory
+    assert vllm_config.model_config.max_model_len < 1024
+    assert vllm_config.model_config.max_model_len > 0
+
+
+def test_auto_fit_max_model_len_not_triggered():
+    """Test that auto-fit is not triggered when original_max_model_len is not -1."""
+    model_config = ModelConfig(max_model_len=16)
+    # original_max_model_len should be None by default, not -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # This should work normally without auto-fit
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )
+    assert vllm_config.model_config.max_model_len == 16
