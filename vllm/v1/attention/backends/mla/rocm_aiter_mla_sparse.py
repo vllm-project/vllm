@@ -18,7 +18,7 @@ from vllm.attention.backends.utils import get_mla_dims
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (
-    MLACommonBaseImpl,
+    MLACommonImpl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
@@ -190,7 +190,7 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(MLACommonImpl[ROCMAiterMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
