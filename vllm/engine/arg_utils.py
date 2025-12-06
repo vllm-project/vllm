@@ -1608,12 +1608,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
-            logger.info(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.disable_nccl_for_dp_synchronization = True
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
