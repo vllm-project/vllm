@@ -82,6 +82,75 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
+def test_disable_compile_cache_config(vllm_runner, monkeypatch):
+    """Test that disable_compile_cache config option works."""
+    # Disable multiprocessing so that the counter is in the same process
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # Ensure env var is not set so we test the config option
+    monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
+
+    compilation_config = {
+        "cudagraph_mode": CUDAGraphMode.NONE,  # speed things up a bit
+        "disable_compile_cache": True,
+    }
+    with (
+        compilation_counter.expect(
+            num_cache_entries_updated=0, num_compiled_artifacts_saved=0
+        ),
+        # loading the model causes compilation (if enabled) to happen
+        vllm_runner(
+            "facebook/opt-125m",
+            compilation_config=compilation_config,
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
+@pytest.mark.parametrize(
+    "config_value,env_var_value,expected",
+    [
+        # Env var overrides config when config is False
+        (False, "1", True),
+        # Both config and env var disable cache
+        (True, "1", True),
+        # Config disables cache, env var not set
+        (True, None, True),
+        # Config enables cache, env var not set
+        (False, None, False),
+        # env var is set to 0, should be treated as not set, so config used
+        (True, "0", True),
+        (False, "0", False),
+    ],
+    ids=[
+        "env_var_overrides_config",
+        "both_disable_cache",
+        "config_disables_without_env_var",
+        "config_enables_without_env_var",
+    ],
+)
+def test_disable_compile_cache_config_and_env_var(
+    monkeypatch, config_value, env_var_value, expected
+):
+    """Test disable_compile_cache config and env var interaction."""
+    import vllm.envs as envs
+
+    # Set or unset the env var using monkeypatch
+    if env_var_value is not None:
+        monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+        monkeypatch.setattr(envs, "VLLM_DISABLE_COMPILE_CACHE", env_var_value)
+    else:
+        monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
+        monkeypatch.setattr(envs, "VLLM_DISABLE_COMPILE_CACHE", False)
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(disable_compile_cache=config_value)
+    )
+    assert config.compilation_config.disable_compile_cache is expected
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
 @pytest.mark.parametrize(
     "cudagraph_mode,num_cudagraph_captured",
     [

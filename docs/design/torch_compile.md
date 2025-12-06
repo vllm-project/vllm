@@ -23,7 +23,12 @@ The factors considered include:
 - PyTorch configs (see the `compute_hash` functions in the [compiler_interface.py](../../vllm/compilation/compiler_interface.py))
 - The model's forward function and the relevant functions called by the forward function (see below)
 
-With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by setting the environment variable `VLLM_DISABLE_COMPILE_CACHE=1`.
+With all these factors taken into consideration, usually we can guarantee that the cache is safe to use, and will not cause any unexpected behavior. Therefore, the cache is enabled by default. If you want to debug the compilation process, or if you suspect the cache is causing some issues, you can disable it by either:
+
+- Setting the config flag: `--compilation-config '{"disable_compile_cache": true}'`
+- Setting the environment variable: `VLLM_DISABLE_COMPILE_CACHE=1`
+
+The environment variable takes precedence over the config flag if both are set.
 
 A unique aspect of vLLM's `torch.compile` integration, is that we guarantee all the compilation finishes before we serve any requests. No requests will trigger new compilations. Otherwise, the engine would be blocked on that request, and the response time will have unexpected spikes.
 

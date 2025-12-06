@@ -946,6 +946,15 @@ class VllmConfig:
                 )
             self.compilation_config.debug_dump_path = env_path
 
+        # Handle VLLM_DISABLE_COMPILE_CACHE env var override
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            if not self.compilation_config.disable_compile_cache:
+                logger.info(
+                    "Config-specified disable_compile_cache=False is overridden"
+                    " by VLLM_DISABLE_COMPILE_CACHE=1"
+                )
+            self.compilation_config.disable_compile_cache = True
+
         def has_blocked_weights():
             if self.quant_config is not None:
                 if hasattr(self.quant_config, "weight_block_size"):

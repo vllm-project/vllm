@@ -434,6 +434,12 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
+    disable_compile_cache: bool = False
+    """If True, disable vLLM's torch.compile cache. The compile cache stores
+    compiled artifacts to disk to speed up subsequent runs. Disabling it is
+    useful for debugging compilation issues or when running in environments
+    where caching is not desired. Can also be set via VLLM_DISABLE_COMPILE_CACHE
+    environment variable, which takes precedence over this config option."""
     compile_cache_save_format: Literal["binary", "unpacked"] = field(
         default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
     )
@@ -697,6 +703,7 @@ class CompilationConfig:
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
             "debug_dump_path",
             "cache_dir",
+            "disable_compile_cache",
             "local_cache_dir",
             "bs_to_padded_graph_size",
             "traced_files",

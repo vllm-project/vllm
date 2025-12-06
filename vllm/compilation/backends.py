@@ -606,8 +606,14 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
+        # Build a config dict for cache checking that includes the disable flag
+        cache_check_config = self.inductor_config.copy()
+        cache_check_config["vllm_disable_compile_cache"] = (
+            self.compilation_config.disable_compile_cache
+        )
+
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
-        disable_cache = not is_compile_cache_enabled(self.inductor_config)
+        disable_cache = not is_compile_cache_enabled(cache_check_config)
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
