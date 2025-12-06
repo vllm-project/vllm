@@ -1188,6 +1188,13 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         self.disabled = False
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
+        if self.disabled:
+            logger.warning_once(
+                "AllReduce fusion pass is disabled for tensor parallel size %s; "
+                "skipping",
+                self.tp_size,
+            )
+            return False
         return compile_range.end <= self.max_token_num
 
     @VllmInductorPass.time_and_log
