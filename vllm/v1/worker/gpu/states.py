@@ -7,6 +7,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_cuda_view_from_cpu_tensor
 from vllm.v1.outputs import LogprobsTensors
@@ -86,6 +87,7 @@ class RequestState:
         self.temperature = self._make_param(self.max_num_reqs, torch.float32)
         self.top_p = self._make_param(self.max_num_reqs, torch.float32)
         self.top_k = self._make_param(self.max_num_reqs, torch.int32)
+        self.min_p = self._make_param(self.max_num_reqs, torch.float32)
         self.repetition_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.frequency_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.presence_penalty = self._make_param(self.max_num_reqs, torch.float32)
@@ -97,11 +99,14 @@ class RequestState:
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
         # Statistics for penalties.
-        # TODO(woosuk): These tensors are rarely used but can be extremely large.
-        # Optimize the memory usage.
-        self.prompt_bin_counts = torch.zeros(
-            self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
+        self.prompt_bin_mask = torch.zeros(
+            self.max_num_reqs,
+            cdiv(self.vocab_size, 32),
+            dtype=torch.int32,
+            device=self.device,
         )
+        # TODO(woosuk): This tensor is rarely used but can be extremely large.
+        # Optimize the memory usage.
         self.output_bin_counts = torch.zeros(
             self.max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
@@ -158,6 +163,7 @@ class RequestState:
         else:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
+        self.min_p.np[req_idx] = sampling_params.min_p
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
@@ -167,7 +173,7 @@ class RequestState:
                 self.prefill_token_ids.gpu[req_idx],
                 prefill_len,
                 prompt_len,
-                self.prompt_bin_counts[req_idx],
+                self.prompt_bin_mask[req_idx],
                 self.output_bin_counts[req_idx],
             )
 
@@ -213,6 +219,10 @@ class RequestState:
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
+        min_p = self.min_p.np[idx_mapping_np]
+        no_min_p = np.all(min_p == 0.0)
+        min_p = self.min_p.copy_np_to_gpu(min_p) if not no_min_p else None
+
         rep_penalty = self.repetition_penalty.np[idx_mapping_np]
         rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
         freq_penalty = self.frequency_penalty.np[idx_mapping_np]
@@ -232,6 +242,7 @@ class RequestState:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             repetition_penalty=rep_penalty,
             frequency_penalty=freq_penalty,
             presence_penalty=pres_penalty,
@@ -239,7 +250,7 @@ class RequestState:
             pos=pos,
             max_num_logprobs=max_num_logprobs,
             idx_mapping=idx_mapping,
-            prompt_bin_counts=self.prompt_bin_counts,
+            prompt_bin_mask=self.prompt_bin_mask,
             output_bin_counts=self.output_bin_counts,
         )
 

@@ -1,23 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
+from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
         ChatCompletionRequest as MistralChatCompletionRequest,
     )
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as TransformersMistralTokenizer,
-    )
+    from transformers import BatchEncoding
 
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
     from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+
+    try:
+        # Transformers v5
+        from transformers.tokenization_mistral_common import MistralCommonBackend
+    except ImportError:
+        # Transformers v4
+        from transformers.tokenization_mistral_common import (
+            MistralCommonTokenizer as MistralCommonBackend,
+        )
 
 logger = init_logger(__name__)
 
@@ -95,6 +103,8 @@ def _prepare_apply_chat_template_tools_and_messages(
     continue_final_message: bool = False,
     add_generation_prompt: bool = False,
 ) -> tuple[list["ChatCompletionMessageParam"], list[dict[str, Any]] | None]:
+    from mistral_common.protocol.instruct.tool_calls import Function, Tool
+
     if add_generation_prompt and continue_final_message:
         raise ValueError(
             "Cannot set both `add_generation_prompt` and "
@@ -137,6 +147,33 @@ def _prepare_apply_chat_template_tools_and_messages(
             if function.get("description") is None:
                 function["description"] = ""
 
+        # We filter not supported arguments to avoid throwing an error.
+        # TODO(juliendenize): remove this once OpenAI API is better supported by
+        # `mistral-common`.
+        tools_fields = set(Tool.model_fields.keys())
+        function_fields = set(Function.model_fields.keys())
+        for tool in tools:
+            tool_keys = list(tool.keys())
+            for tool_key in tool_keys:
+                if tool_key not in tools_fields:
+                    tool.pop(tool_key)
+                    logger.warning_once(
+                        f"'{tool_key}' is not supported by mistral-common for tools. "
+                        "It has been poped from the tool definition."
+                    )
+                if tool["type"] == "function":
+                    function_keys = list(tool["function"].keys())
+                    for function_key in function_keys:
+                        if function_key not in function_fields:
+                            tool["function"].pop(function_key)
+                            logger.warning_once(
+                                f"'{function_key}' is not supported by mistral-common "
+                                "for function tools. It has been poped from the "
+                                "function definition."
+                            )
+                else:
+                    raise ValueError("mistral-common only supports function tools.")
+
     return messages, tools
 
 
@@ -164,8 +201,43 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
+@TokenizerRegistry.register("mistral")
 class MistralTokenizer(TokenizerLike):
-    def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo_id: str | Path,
+        *args,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        download_dir: str | None = None,
+        **kwargs,
+    ) -> "MistralTokenizer":
+        from mistral_common.protocol.instruct.validator import ValidationMode
+
+        try:
+            # Transformers v5
+            from transformers.tokenization_mistral_common import MistralCommonBackend
+        except ImportError:
+            # Transformers v4
+            from transformers.tokenization_mistral_common import (
+                MistralCommonTokenizer as MistralCommonBackend,
+            )
+
+        tokenizer = MistralCommonBackend.from_pretrained(
+            path_or_repo_id,
+            *args,
+            mode=ValidationMode.test,
+            cache_dir=download_dir,
+            revision="main" if revision is None else revision,
+            **kwargs,
+        )
+
+        return cls(tokenizer)
+
+    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
+        super().__init__()
+
         from mistral_common.protocol.instruct.validator import ValidationMode
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
@@ -211,22 +283,6 @@ class MistralTokenizer(TokenizerLike):
         self._vocab = self.tokenizer._vocab
         self._max_token_id = self.vocab_size - 1
 
-    @classmethod
-    def from_pretrained(
-        cls, path_or_repo_id: str, *, revision: str | None = None
-    ) -> "MistralTokenizer":
-        from mistral_common.protocol.instruct.validator import ValidationMode
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as TransformersMistralTokenizer,
-        )
-
-        str_revision = "main" if revision is None else revision
-        return cls(
-            TransformersMistralTokenizer.from_pretrained(
-                path_or_repo_id, revision=str_revision, mode=ValidationMode.test
-            )
-        )
-
     def _get_special_token_ids(self) -> list[int]:
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
@@ -253,6 +309,9 @@ class MistralTokenizer(TokenizerLike):
             for i in all_special_ids
         ]
 
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
+
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
     @property
@@ -270,6 +329,10 @@ class MistralTokenizer(TokenizerLike):
     @property
     def eos_token_id(self) -> int:
         return self.tokenizer.eos_id
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.tokenizer.pad_id
 
     @property
     def is_fast(self) -> bool:
@@ -298,12 +361,12 @@ class MistralTokenizer(TokenizerLike):
 
     def __call__(
         self,
-        text: str | list[str] | list[int],
+        text: str | list[str],
         text_pair: str | None = None,
-        add_special_tokens: bool = False,
+        add_special_tokens: bool = True,
         truncation: bool = False,
         max_length: int | None = None,
-    ):
+    ) -> "BatchEncoding":
         if text_pair is not None:
             raise ValueError(
                 "`text_pair` is not supported by `MistralTokenizer.__call__`."
@@ -342,13 +405,11 @@ class MistralTokenizer(TokenizerLike):
         text: str,
         truncation: bool | None = None,
         max_length: int | None = None,
-        add_special_tokens: bool | None = None,
+        add_special_tokens: bool = True,
     ) -> list[int]:
         # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
         # is in, directly call self.transformers_tokenizer.encode(...).
-        encoded = self.tokenizer.encode(
-            text, bos=add_special_tokens is not False, eos=False
-        )
+        encoded = self.tokenizer.encode(text, bos=add_special_tokens, eos=False)
 
         if truncation is not False and max_length is not None:
             return encoded[:max_length]
@@ -363,6 +424,7 @@ class MistralTokenizer(TokenizerLike):
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
         continue_final_message = kwargs.get("continue_final_message", False)
+        tokenize = kwargs.get("tokenize", True)
         padding = kwargs.get("padding", False)
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
@@ -375,7 +437,7 @@ class MistralTokenizer(TokenizerLike):
             conversation=messages,
             tools=tools,
             continue_final_message=continue_final_message,
-            tokenize=True,
+            tokenize=tokenize,
             padding=padding,
             truncation=truncation,
             max_length=max_length,
@@ -383,13 +445,20 @@ class MistralTokenizer(TokenizerLike):
             return_dict=False,
         )
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
         # TODO(juliendenize): once https://github.com/huggingface/transformers/pull/41962
         # is in, directly call self.transformers_tokenizer.decode(...).
         if isinstance(ids, int):
             ids = [ids]
 
         return self.transformers_tokenizer.decode(
+            ids, skip_special_tokens=skip_special_tokens
+        )
+
+    def batch_decode(
+        self, ids: list[list[int]] | list[int], skip_special_tokens: bool = False
+    ) -> str:
+        return self.transformers_tokenizer.batch_decode(
             ids, skip_special_tokens=skip_special_tokens
         )
 
@@ -455,7 +524,7 @@ class MistralTokenizer(TokenizerLike):
     def convert_ids_to_tokens(
         self,
         ids: list[int],
-        skip_special_tokens: bool = True,
+        skip_special_tokens: bool = False,
     ) -> list[str]:
         from mistral_common.tokens.tokenizers.base import (
             SpecialTokenPolicy,
