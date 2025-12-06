@@ -49,6 +49,7 @@ blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
     # video processing, required by entrypoints/openai/test_video.py
+rapidfuzz==3.12.1
 
 # OpenAI compatibility and testing
 gpt-oss==0.0.8
