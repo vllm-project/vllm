@@ -184,13 +184,14 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model
-    workers, either "ray" or "mp" (multiprocessing). If the product
-    of pipeline_parallel_size and tensor_parallel_size is less than
-    or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, this will default
-    to "ray" if Ray is installed and fail otherwise. Note that tpu
-    only support Ray for distributed inference."""
+    """Backend to use for distributed model workers, either "ray" or "mp"
+    (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
+    is less than or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, an error will be raised. To use "mp"
+    you must also set nnodes, and to use "ray" you must manually set
+    distributed_executor_backend to "ray".
+
+    Note that tpu only support Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -566,8 +567,11 @@ class ParallelConfig:
             ):
                 gpu_count = cuda_device_count_stateless()
                 raise ValueError(
-                    f"Tensor parallel size ({self.world_size}) cannot be "
-                    f"larger than the number of available GPUs ({gpu_count})."
+                    f"World size ({self.world_size}) is larger than the number of "
+                    f"available GPUs ({gpu_count}) in this node. If this is "
+                    "intentional and you are using:\n"
+                    "- ray, set '--distributed-executor-backend ray'.\n"
+                    "- multiprocessing, set '--nnodes' appropriately."
                 )
             elif self.data_parallel_backend == "ray":
                 logger.info(
