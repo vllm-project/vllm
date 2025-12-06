@@ -106,7 +106,6 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
-
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
@@ -130,6 +129,11 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+        
+        # Get block_size from coordinator (includes DCP/PCP scaling)
+        self.block_size = (
+            self.coordinator.block_size if enable_caching else None
+        )
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
@@ -148,6 +152,40 @@ class KVCacheManager:
             The KV cache usage (between 0.0 and 1.0).
         """
         return self.block_pool.get_usage()
+
+    @property
+    def total_tokens(self) -> int:
+        """Get the total KV cache capacity in tokens.
+
+        Returns:
+            Total number of tokens that can be stored in the KV cache.
+            Calculated as: num_total_blocks × block_size
+        """
+        return self.block_pool.get_num_total_blocks() * self.block_size
+
+    @property
+    def free_tokens(self) -> int:
+        """Get the number of available tokens in the KV cache.
+
+        Returns:
+            Number of free tokens available for allocation.
+            Calculated as: num_free_blocks × block_size
+        """
+        return self.block_pool.get_num_free_blocks() * self.block_size
+
+    @property
+    def used_tokens(self) -> int:
+        """Get the number of currently used tokens in the KV cache.
+
+        Returns:
+            Number of tokens currently occupied in the KV cache.
+            Calculated as: total_tokens - free_tokens
+
+        Note:
+            This is a derived metric. The actual allocation is tracked
+            at the block level by BlockPool.
+        """
+        return self.total_tokens - self.free_tokens
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.
