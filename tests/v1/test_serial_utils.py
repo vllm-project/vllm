@@ -104,22 +104,31 @@ class MyRequest(msgspec.Struct):
 
 def test_multimodal_kwargs():
     e1 = MultiModalFieldElem(
-        "audio", "a0", torch.zeros(1000, dtype=torch.bfloat16), MultiModalBatchedField()
+        "audio",
+        "a0",
+        torch.zeros(1000, dtype=torch.bfloat16),
+        MultiModalBatchedField(),
     )
     e2 = MultiModalFieldElem(
         "video",
         "v0",
         [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
-        MultiModalFlatField([[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]], 0),
+        MultiModalFlatField(
+            slices=[[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]],
+            dim=0,
+        ),
     )
     e3 = MultiModalFieldElem(
-        "image", "i0", torch.zeros(1000, dtype=torch.int32), MultiModalSharedField(4)
+        "image",
+        "i0",
+        torch.zeros(1000, dtype=torch.int32),
+        MultiModalSharedField(batch_size=4),
     )
     e4 = MultiModalFieldElem(
         "image",
         "i1",
         torch.zeros(1000, dtype=torch.int32),
-        MultiModalFlatField([slice(1, 2, 3), slice(4, 5, 6)], 2),
+        MultiModalFlatField(slices=[slice(1, 2, 3), slice(4, 5, 6)], dim=2),
     )
     audio = MultiModalKwargsItem.from_elems([e1])
     video = MultiModalKwargsItem.from_elems([e2])
