@@ -14,25 +14,19 @@ def _logit_bias_kernel(
     token_ids_stride,
     bias_ptr,
     bias_stride,
-    vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     n = tl.load(num_logit_bias_ptr + req_idx)
-    if n == 0:
-        return
 
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(logits_ptr + req_idx * logits_stride + block, mask=mask)
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < n
+    token_ids = tl.load(token_ids_ptr + req_idx * token_ids_stride + block, mask=mask)
+    bias = tl.load(bias_ptr + req_idx * bias_stride + block, mask=mask)
 
-    # NOTE(woosuk): We assume n is small. If n is large, this loop will be slow.
-    for i in range(n):
-        token_id = tl.load(token_ids_ptr + req_idx * token_ids_stride + i)
-        bias = tl.load(bias_ptr + req_idx * bias_stride + i)
-        logits += bias * (block == token_id)
-    tl.store(logits_ptr + req_idx * logits_stride + block, logits, mask=mask)
+    logits = tl.load(logits_ptr + req_idx * logits_stride + token_ids, mask=mask)
+    logits += bias
+    tl.store(logits_ptr + req_idx * logits_stride + token_ids, logits, mask=mask)
 
 
 def apply_logit_bias(
@@ -41,10 +35,9 @@ def apply_logit_bias(
     token_ids: torch.Tensor,
     bias: torch.Tensor,
 ) -> None:
-    num_reqs, vocab_size = logits.shape
-    BLOCK_SIZE = 8192
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _logit_bias_kernel[(num_reqs, num_blocks)](
+    num_reqs = logits.shape[0]
+    max_num_logit_bias = token_ids.shape[-1]
+    _logit_bias_kernel[(num_reqs,)](
         logits,
         logits.stride(0),
         num_logit_bias,
@@ -52,6 +45,5 @@ def apply_logit_bias(
         token_ids.stride(0),
         bias,
         bias.stride(0),
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=triton.next_power_of_2(max_num_logit_bias),
     )
