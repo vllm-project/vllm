@@ -318,6 +318,8 @@ class OpenAIServingResponses(OpenAIServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
+        fbvscode.set_trace()
+
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
@@ -656,12 +658,9 @@ class OpenAIServingResponses(OpenAIServing):
             ]
             output = make_response_output_items_from_parsable_context(response_messages)
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
             if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
-                )
+                input_messages = context.input_messages
+                output_messages = context.output_messages
 
             # TODO: Calculate usage.
             # assert final_res.prompt_token_ids is not None
