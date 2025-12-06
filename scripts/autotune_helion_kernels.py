@@ -36,7 +36,11 @@ import torch
 # Add vLLM to path if not already available
 try:
     from vllm.compilation.helion.config_manager import ConfigManager
-    from vllm.compilation.helion.register import get_registered_kernels, get_kernel_by_name, HELION_AVAILABLE
+    from vllm.compilation.helion.register import (
+        HELION_AVAILABLE,
+        get_kernel_by_name,
+        get_registered_kernels,
+    )
     from vllm.config import VllmConfig
     from vllm.config.compilation import CompilationConfig
     from vllm.config.vllm import set_current_vllm_config
@@ -110,7 +114,10 @@ def check_requirements() -> bool:
 
 
 def autotune_kernel(
-    kernel_name: str, kernel_wrapper: "HelionKernelWrapper", output_dir: str, force: bool = False
+    kernel_name: str,
+    kernel_wrapper: "HelionKernelWrapper",
+    output_dir: str,
+    force: bool = False,
 ) -> bool:
     """
     Autotune a specific Helion kernel.
