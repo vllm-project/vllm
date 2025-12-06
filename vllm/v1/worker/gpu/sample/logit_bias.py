@@ -6,6 +6,58 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
+def _allowed_token_ids_kernel(
+    logits_ptr,
+    logits_stride,
+    num_allowed_token_ids_ptr,
+    allowed_token_ids_ptr,
+    allowed_token_ids_stride,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    n = tl.load(num_allowed_token_ids_ptr + req_idx)
+    if n == 0:
+        return
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < n
+    allowed_tokens = tl.load(
+        allowed_token_ids_ptr + req_idx * allowed_token_ids_stride + block, mask=mask
+    )
+    logits = tl.load(logits_ptr + req_idx * logits_stride + allowed_tokens, mask=mask)
+
+    for i in range(0, vocab_size, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        tl.store(
+            logits_ptr + req_idx * logits_stride + offset,
+            float("-inf"),
+            mask=offset < vocab_size,
+        )
+
+    tl.store(logits_ptr + req_idx * logits_stride + allowed_tokens, logits, mask=mask)
+
+
+def apply_allowed_token_ids(
+    logits: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+) -> None:
+    num_reqs, vocab_size = logits.shape
+    BLOCK_SIZE = 8192
+    assert allowed_token_ids.shape[-1] <= BLOCK_SIZE
+    _allowed_token_ids_kernel[(num_reqs,)](
+        logits,
+        logits.stride(0),
+        num_allowed_token_ids,
+        allowed_token_ids,
+        allowed_token_ids.stride(0),
+        vocab_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+@triton.jit
 def _logit_bias_kernel(
     logits_ptr,
     logits_stride,
