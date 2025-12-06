@@ -9,6 +9,10 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount);
 
+torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
+                         const std::optional<at::Tensor>& in_bias,
+                         const int64_t CuCount);
+
 void wvSplitKQ(const at::Tensor& in_a, const at::Tensor& in_b,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
                const at::Tensor& scale_a, const at::Tensor& scale_b,
