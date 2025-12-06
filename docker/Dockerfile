@@ -82,7 +82,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG GET_PIP_URL
 
 # Install system dependencies and uv, then create Python virtual environment
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+RUN --mount=type=cache,id=build,target=/var/lib/apt/lists \
+    echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -105,7 +106,8 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -s /opt/venv/bin/python3 /usr/bin/python3 \
     && ln -s /opt/venv/bin/python3-config /usr/bin/python3-config \
     && ln -s /opt/venv/bin/pip /usr/bin/pip \
-    && python3 --version && python3 -m pip --version
+    && python3 --version && python3 -m pip --version \
+    && gcc --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -123,10 +125,6 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN <<EOF
-gcc --version
-EOF
-
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
@@ -136,9 +134,8 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements/common.txt requirements/common.txt
-COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -158,9 +155,6 @@ ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 
-# install build dependencies
-COPY requirements/build.txt requirements/build.txt
-
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
@@ -169,6 +163,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -203,7 +198,9 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
@@ -249,9 +246,6 @@ ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 
-# install build dependencies
-COPY requirements/build.txt requirements/build.txt
-
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
@@ -259,7 +253,9 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
+# install build dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -308,13 +304,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
     find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
 
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
-COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=500
 ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
+
+# Check the size of the wheel if RUN_WHEEL_CHECK is true
 ARG RUN_WHEEL_CHECK=true
-RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.buildkite/check-wheel-size.py,target=check-wheel-size.py \
+    if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
         python3 check-wheel-size.py dist; \
     else \
         echo "Skipping wheel size check."; \
@@ -336,11 +334,12 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Install libnuma-dev, required by fastsafetensors (fixes #20384)
-RUN apt-get update && apt-get install -y --no-install-recommends libnuma-dev && rm -rf /var/lib/apt/lists/*
-COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.txt requirements/test.txt
-COPY requirements/dev.txt requirements/dev.txt
+RUN --mount=type=cache,id=build,target=/var/lib/apt/lists \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends libnuma-dev
+
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 #################### DEV IMAGE ####################
@@ -366,11 +365,11 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
-RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
-    echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
-
 # Install Python and other dependencies
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+RUN --mount=type=cache,id=final,target=/var/lib/apt/lists \
+    PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') \
+    && echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment \
+    && echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -461,14 +460,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
 
-COPY examples examples
-COPY benchmarks benchmarks
-COPY ./vllm/collect_env.py .
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-uv pip list
-
 # Install deepgemm wheel that has been built in the `build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
@@ -502,14 +493,19 @@ RUN --mount=type=bind,source=tools/install_gdrcopy.sh,target=/tmp/install_gdrcop
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 
+COPY examples examples
+COPY benchmarks benchmarks
+COPY ./vllm/collect_env.py .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /etc/environment && \
+    uv pip list
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
-
-ADD . /vllm-workspace/
 
 ARG PYTHON_VERSION
 
@@ -531,6 +527,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt \
@@ -539,6 +536,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=tests/vllm_test_utils/vllm_test_utils,target=tests/vllm_test_utils/vllm_test_utils \
+    --mount=type=bind,source=tests/vllm_test_utils/setup.py,target=tests/vllm_test_utils/setup.py \
     uv pip install --system -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
@@ -552,8 +551,7 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
-RUN mkdir src
-RUN mv vllm src/vllm
+COPY vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
@@ -571,9 +569,9 @@ ENV UV_HTTP_TIMEOUT=500
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    --mount=type=bind,source=requirements,target=requirements,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt; \
+        uv pip install --system -r requirements/kv_connectors.txt; \
     fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="0.42.0"; \
