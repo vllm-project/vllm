@@ -85,6 +85,10 @@ class FrontendArgs:
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    uvicorn_access_log_exclude_paths: list[str] = field(default_factory=lambda: [])
+    """Paths to exclude from uvicorn access log. For example, to exclude
+    /health and /metrics endpoints: --uvicorn-access-log-exclude-paths /health
+    --uvicorn-access-log-exclude-paths /metrics"""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
