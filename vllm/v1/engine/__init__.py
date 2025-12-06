@@ -210,6 +210,10 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
+    # Engine sleeping error - propagated to the API server.
+    sleeping_error: Exception | None = None
+    sleeping_error_request_id: str | None = None
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()

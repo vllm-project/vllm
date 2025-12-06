@@ -54,6 +54,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.exceptions import EngineSleepingError
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -291,6 +292,13 @@ class EngineCore:
         `request_wave`: indicate which wave of requests this is expected to
         belong to in DP case
         """
+        # Check if engine is sleeping before processing request.
+        if self.is_sleeping():
+            raise EngineSleepingError(
+                f"Cannot process request {request.request_id}: "
+                "Engine is sleeping. Call /wake_up to resume."
+            )
+
         # Validate the request_id type.
         if not isinstance(request.request_id, str):
             raise TypeError(
@@ -1112,7 +1120,17 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            self.add_request(req, request_wave)
+            try:
+                self.add_request(req, request_wave)
+            except EngineSleepingError as e:
+                # Send sleeping error back through output queue
+                # so it can be propagated to the API server.
+                self.output_queue.put_nowait(
+                    (0, EngineCoreOutputs(
+                        sleeping_error=e,
+                        sleeping_error_request_id=req.request_id,
+                    ))
+                )
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

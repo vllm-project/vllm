@@ -40,7 +40,7 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError, EngineSleepingError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -609,6 +609,18 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
+        # Engine is sleeping. Recoverable - user should call /wake_up.
+        except EngineSleepingError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine sleeping).", request_id)
+            raise
+
+        # Engine is dead. Do not abort since we shut down.
+        except EngineDeadError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine dead).", request_id)
+            raise
+
         # Request validation error.
         except ValueError as e:
             if self.log_requests:
@@ -662,6 +674,19 @@ class AsyncLLM(EngineClient):
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+
+                    # Handle sleeping error - propagate to the specific request
+                    if outputs.sleeping_error_request_id is not None:
+                        req_id = outputs.sleeping_error_request_id
+                        req_state = output_processor.request_states.get(req_id)
+                        if req_state is not None and req_state.queue is not None:
+                            req_state.queue.put(EngineSleepingError())
+                            output_processor.request_states.pop(req_id, None)
+                            # Trigger drained event if no more requests
+                            if not output_processor.request_states:
+                                output_processor._requests_drained.set()
+                        continue
+
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
@@ -830,6 +855,12 @@ class AsyncLLM(EngineClient):
         except EngineDeadError:
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
+            raise
+
+        # Engine is sleeping. Recoverable - user should call /wake_up.
+        except EngineSleepingError:
+            if self.log_requests:
+                logger.info("Request %s failed (engine sleeping).", request_id)
             raise
 
         # Request validation error.

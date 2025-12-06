@@ -6,6 +6,18 @@ class EngineGenerateError(Exception):
     pass
 
 
+class EngineSleepingError(Exception):
+    """Raised when the engine is sleeping and cannot process requests.
+    
+    This is a recoverable error - the user can call /wake_up to resume
+    the engine and retry their request. Returns HTTP 503 to indicate
+    the service is temporarily unavailable.
+    """
+
+    def __init__(self, message: str = "Engine is sleeping. Call /wake_up to resume."):
+        super().__init__(message)
+
+
 class EngineDeadError(Exception):
     """Raised when the EngineCore dies. Unrecoverable."""
 

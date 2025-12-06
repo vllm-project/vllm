@@ -19,7 +19,7 @@ from vllm.entrypoints.constants import (
 from vllm.entrypoints.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError, EngineSleepingError
 
 logger = init_logger(__name__)
 
@@ -174,6 +174,25 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
     will not automatically shut down. Instead, we use the watchdog
     background task for check for errored state.
     """
+
+    @app.exception_handler(EngineSleepingError)
+    async def sleeping_exception_handler(request: Request, exc: EngineSleepingError):
+        """Return 503 Service Unavailable when engine is sleeping.
+        
+        This is a recoverable error - the user can call /wake_up to
+        resume the engine and retry their request.
+        """
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "message": str(exc),
+                    "type": "EngineSleepingError",
+                    "code": HTTPStatus.SERVICE_UNAVAILABLE,
+                }
+            },
+        )
 
     @app.exception_handler(RuntimeError)
     @app.exception_handler(EngineDeadError)

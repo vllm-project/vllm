@@ -288,6 +288,18 @@ class OpenAIServingCompletion(OpenAIServing):
             return self._convert_generation_error_to_response(e)
         except ValueError as e:
             return self.create_error_response(e)
+        except Exception as e:
+            # Return 503 error response directly for EngineSleepingError.
+            from vllm.v1.engine.exceptions import EngineSleepingError
+            if isinstance(e, EngineSleepingError):
+                from vllm.entrypoints.openai.protocol import ErrorInfo, ErrorResponse
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type="EngineSleepingError",
+                        code=503,
+                    ))
+            raise
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
