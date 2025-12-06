@@ -351,6 +351,7 @@ def fused_moe_kernel(
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
+    use_unpermute: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -411,11 +412,20 @@ def fused_moe_kernel(
     # and accumulate
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    if not use_unpermute:
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    else:
+        offs_token = tl.where(
+            offs == 0,
+            pid_m,  # first element = pid_m
+            num_valid_tokens,  # remaining elements = constant
+        )
+
     token_mask = offs_token < num_valid_tokens
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
@@ -549,7 +559,7 @@ def invoke_fused_moe_kernel(
     B_scale: torch.Tensor | None,
     B_zp: torch.Tensor | None,
     topk_weights: torch.Tensor | None,
-    sorted_token_ids: torch.Tensor,
+    sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     mul_routed_weight: bool,
@@ -563,10 +573,12 @@ def invoke_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    use_unpermute: bool = False,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
-    assert sorted_token_ids.stride(0) == 1
+    if not use_unpermute:
+        assert sorted_token_ids.stride(0) == 1
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
@@ -586,14 +598,18 @@ def invoke_fused_moe_kernel(
 
     M = A.size(0)
     num_tokens = M * top_k
-
-    EM = sorted_token_ids.size(0)
-    if A.size(0) < config["BLOCK_SIZE_M"]:
-        # optimize for small batch_size.
-        # We assume that top_ids of each token is unique,
-        # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
-        # and we can skip some invalid blocks.
-        EM = min(sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"])
+    if not use_unpermute:
+        EM = sorted_token_ids.size(0)
+        if A.size(0) < config["BLOCK_SIZE_M"]:
+            # optimize for small batch_size.
+            # We assume that top_ids of each token is unique,
+            # so num_valid_experts <= batch_size <= BLOCK_SIZE_M,
+            # and we can skip some invalid blocks.
+            EM = min(
+                sorted_token_ids.size(0), A.size(0) * top_k * config["BLOCK_SIZE_M"]
+            )
+    else:
+        EM = num_tokens * config["BLOCK_SIZE_M"]
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
@@ -728,6 +744,7 @@ def invoke_fused_moe_kernel(
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             per_channel_quant=per_channel_quant,
+            use_unpermute=use_unpermute,
             HAS_BIAS=HAS_BIAS,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
@@ -1886,9 +1903,31 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+        # Enable unpermute when token fan-out is manageable and the WNA16 kernels
+        # (int4/int8 with block groups) are not required.
+
+        use_unpermute = (
+            expert_map is None
+            and tokens_in_chunk * top_k_num * 4 <= global_num_experts
+            and not (
+                (use_int8_w8a16 or use_int4_w4a16)
+                and block_shape is not None
+                and block_shape[1] > 0
+            )
         )
+
+        if not use_unpermute:
+            sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+                curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            )
+        else:
+            max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
+            expert_ids = curr_topk_ids.view(-1)
+            num_tokens_post_padded = torch.empty(
+                (1), dtype=torch.int32, device=topk_ids.device
+            )
+            num_tokens_post_padded.fill_(max_num_tokens_padded)
+            sorted_token_ids = None
 
         invoke_fused_moe_kernel(
             qcurr_hidden_states,
@@ -1912,6 +1951,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w1_bias,
+            use_unpermute=use_unpermute,
         )
 
         # Activation function with multiplication
@@ -1968,6 +2008,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w2_bias,
+            use_unpermute=use_unpermute,
         )
 
         ops.moe_sum(
