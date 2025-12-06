@@ -74,6 +74,7 @@ FROM ${BASE_IMAGE_NAME}
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
+ENV SOC_VERSION="ascend910b1"
 
 RUN pip config set global.index-url http://cache-service-vllm.nginx-pypi-cache.svc.cluster.local:${PYPI_CACHE_PORT}/pypi/simple && \
     pip config set global.trusted-host cache-service-vllm.nginx-pypi-cache.svc.cluster.local && \

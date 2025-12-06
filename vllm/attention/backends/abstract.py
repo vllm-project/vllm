@@ -289,6 +289,16 @@ class AttentionImpl(ABC, Generic[T]):
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
 
+    # Whether this attention implementation supports pre-quantized query input.
+    # When True, the attention layer will quantize queries before passing them
+    # to this backend, allowing torch.compile to fuse the quantization with
+    # previous operations. This is typically supported when using FP8 KV cache
+    # with compatible attention kernels (e.g., TRT-LLM).
+    # Subclasses should set this in __init__.
+    # TODO add support to more backends:
+    # https://github.com/vllm-project/vllm/issues/25584
+    supports_quant_query_input: bool = False
+
     dcp_world_size: int
     dcp_rank: int
 
@@ -365,22 +375,6 @@ class AttentionImpl(ABC, Generic[T]):
 
         :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
-        """
-        return False
-
-    def supports_quant_query_input(self) -> bool:
-        """
-        Check if this attention implementation supports pre-quantized query input.
-
-        When True, the attention layer will quantize queries before passing them
-        to this backend, allowing torch.compile to fuse the quantization with
-        previous operations. This is typically supported when using FP8 KV cache
-        with compatible attention kernels (e.g., TRT-LLM).
-        TODO add support to more backends:
-        https://github.com/vllm-project/vllm/issues/25584
-
-        Returns:
-            bool: True if the implementation can accept pre-quantized queries.
         """
         return False
 

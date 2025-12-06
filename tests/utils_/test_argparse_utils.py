@@ -460,23 +460,20 @@ def test_flat_product():
     ]
 
 
-def test_o_legacy_syntax_deprecation(caplog_vllm):
-    """Test that -O.* dotted syntax emits warnings and converts correctly to -cc syntax."""
+def test_o_dotted_syntax_error():
+    """Test that -O.* dotted syntax raises a clear error message."""
     parser = FlexibleArgumentParser()
     parser.add_argument("-cc", "--compilation-config", type=json.loads)
 
-    # Test that -O.backend gets converted correctly AND emits warning
-    args = parser.parse_args(["-O.backend=eager"])
-    assert args.compilation_config == {"backend": "eager"}
+    # Test that -O.* syntax raises a clear ValueError
+    with pytest.raises(ValueError, match=r"The -O\.\* syntax is no longer supported"):
+        parser.parse_args(["-O.backend=eager"])
 
-    # Check that deprecation warning was logged
-    assert len(caplog_vllm.records) >= 1
-    assert (
-        "The -O.* dotted syntax for --compilation-config is deprecated"
-        in caplog_vllm.text
-    )
+    with pytest.raises(ValueError, match=r"Please use -cc\.\* instead"):
+        parser.parse_args(["-O.mode=2"])
 
-    # Test that -O.mode gets converted correctly
-    # Note: warning_once won't emit again in same session
-    args = parser.parse_args(["-O.mode=2"])
-    assert args.compilation_config == {"mode": 2}
+    with pytest.raises(
+        ValueError,
+        match=r"replace '-O\.cudagraph_mode=NONE' with '-cc\.cudagraph_mode=NONE'",
+    ):
+        parser.parse_args(["-O.cudagraph_mode=NONE"])

@@ -51,7 +51,7 @@ tritonclient==2.51.0
 arctic-inference == 0.1.1 # Required for suffix decoding test
 numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
-runai-model-streamer[s3,gcs]==0.15.0
+runai-model-streamer[s3,gcs]==0.15.3
 fastsafetensors>=0.1.10
 pydantic>=2.12 # 2.11 leads to error on python 3.13
 decord==0.6.0

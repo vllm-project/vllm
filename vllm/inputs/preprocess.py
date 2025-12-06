@@ -198,7 +198,7 @@ class InputPreprocessor:
     ) -> dict[str, Any]:
         kwargs = dict[str, Any]()
 
-        if self.model_config.hf_config.model_type == "whisper":
+        if self.model_config.is_encoder_decoder:
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
@@ -573,7 +573,6 @@ class InputPreprocessor:
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs | None
-
         if is_explicit_encoder_decoder_prompt(prompt):
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
@@ -585,7 +584,9 @@ class InputPreprocessor:
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
+                decoder_inputs = self._prompt_to_llm_inputs(
+                    decoder_input, tokenization_kwargs=tokenization_kwargs
+                )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:

@@ -344,8 +344,6 @@ class DeepseekVL2MultiModalProcessor(
     dummy_inputs=DeepseekVL2DummyInputsBuilder,
 )
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language.": "language_model.",

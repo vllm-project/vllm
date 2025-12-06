@@ -121,7 +121,7 @@ class ReasoningParser:
         self,
         original_tag: str | None,
         tool_server: ToolServer | None,
-    ) -> str:
+    ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag
         Otherwise, None is returned
@@ -160,7 +160,10 @@ class ReasoningParserManager:
         if name in cls.lazy_parsers:
             return cls._load_lazy_parser(name)
 
-        raise KeyError(f"Reasoning parser '{name}' not found.")
+        registered = ", ".join(cls.list_registered())
+        raise KeyError(
+            f"Reasoning parser '{name}' not found. Available parsers: {registered}"
+        )
 
     @classmethod
     def list_registered(cls) -> list[str]:

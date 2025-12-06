@@ -775,7 +775,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
 class WhisperForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
-    merge_by_field_config = True
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",

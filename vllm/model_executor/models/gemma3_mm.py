@@ -483,8 +483,6 @@ class Gemma3MultiModalProjector(nn.Module):
 class Gemma3ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
