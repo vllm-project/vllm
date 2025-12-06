@@ -934,7 +934,7 @@ class AsyncLLM(EngineClient):
         return EngineDeadError()
 
 
-def vllm_process_callback(loop: AbstractEventLoop, engine_core: MPClient, outputs: list[EngineCoreOutput], engine_index : Optional[int] = 0) -> None:
+def vllm_process_callback(loop: AbstractEventLoop, engine_core: MPClient, outputs: list[EngineCoreOutput], engine_index : int | None = 0) -> None:
     """
     VLLM callback function used in BufferResponseProcessor.
 
