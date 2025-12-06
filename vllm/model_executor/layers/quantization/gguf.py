@@ -52,7 +52,10 @@ class GGUFConfig(QuantizationConfig):
         return "gguf"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
-        return [torch.half, torch.bfloat16, torch.float32]
+        # GGUF dequantization kernels use half precision (fp16) internally.
+        # bfloat16 causes incorrect output due to dtype mismatch in the kernels.
+        # float32 is supported but not recommended for performance reasons.
+        return [torch.half, torch.float32]
 
     @classmethod
     def get_min_capability(cls) -> int:
