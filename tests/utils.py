@@ -42,6 +42,13 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -1310,3 +1317,54 @@ def flat_product(*iterables: Iterable[Any]):
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
         yield tuple(itertools.chain(*normalized))
+
+
+class TestFP8Layer(torch.nn.Module):
+    """
+    Test helper class for evaluating FP8 linear operations with quantization.
+
+    It supports configurable activation and weight quantization parameters,
+    and provides a forward method that applies the FP8 linear transformation
+    with optional bias.
+
+    Args:
+        activation_quant_key (QuantKey): Key for activation quantization configuration.
+        weight_quant_key (QuantKey): Key for weight quantization configuration.
+        weight (torch.Tensor): Weight tensor for linear transformation.
+        weight_scale (torch.Tensor): Per-tensor or per-group scale for weights.
+        input_scale (torch.Tensor, optional): Scale tensor for input quantization.
+            Defaults to None.
+        out_dtype (torch.dtype, optional): Output tensor data type.
+            Defaults to torch.get_default_dtype().
+    """
+
+    def __init__(
+        self,
+        activation_quant_key: QuantKey,
+        weight_quant_key: QuantKey,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
+        out_dtype: torch.dtype | None = None,
+        force_kernel: FP8ScaledMMLinearKernel | None = None,
+    ):
+        super().__init__()
+        self.weight_scale = weight_scale
+        self.weight = weight
+        self.input_scale = input_scale
+        self.input_scale_ub = None
+        out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=out_dtype,
+            force_kernel=force_kernel,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
