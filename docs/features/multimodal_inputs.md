@@ -445,7 +445,7 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
 
 For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
 
-#### Audio Embeddings
+#### Audio Embedding Inputs
 
 You can pass pre-computed audio embeddings similar to image embeddings:
 
@@ -892,5 +892,11 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
     ```
 
 !!! note
-    Only one message can contain `{"type": "image_embeds"}`.
+    Multiple messages can now contain `{"type": "image_embeds"}`, enabling you to pass multiple image embeddings in a single request (similar to regular images). The number of embeddings is limited by `--limit-mm-per-prompt`.
+
+    **Important**: The embedding shape format differs based on the number of embeddings:
+
+    - **Single embedding**: 3D tensor of shape `(1, feature_size, hidden_size)`
+    - **Multiple embeddings**: List of 2D tensors, each of shape `(feature_size, hidden_size)`
+
     If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.
