@@ -78,7 +78,7 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
-    merge_by_field_config: ClassVar[bool] = False
+    merge_by_field_config: ClassVar[bool] = True
     """
     A flag that indicates which implementation of
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
@@ -836,6 +836,10 @@ class SupportsTranscription(Protocol):
     """
     Transcription models can opt out of text generation by setting this to
     `True`.
+    """
+    supports_segment_timestamp: ClassVar[bool] = False
+    """
+    Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
     def __init_subclass__(cls, **kwargs):

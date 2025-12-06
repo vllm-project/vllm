@@ -47,7 +47,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
@@ -1220,6 +1220,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Repetition penalty sampling parameter. Only has effect on "
         "openai-compatible backends.",
+    )
+    sampling_group.add_argument(
+        "--common-prefix-len",
+        type=int,
+        default=None,
+        help="Common prefix length shared by all prompts (used by random dataset)",
     )
 
     parser.add_argument(

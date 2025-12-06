@@ -12,7 +12,7 @@ SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
 # detect if python3.10+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,10) else 0)")
+has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
 if [[ "$has_new_python" -eq 0 ]]; then
     # use new python from docker
     docker pull python:3-slim
@@ -81,7 +81,10 @@ else
     alias_arg=""
 fi
 
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" $alias_arg
+# HACK: we do not need regex module here, but it is required by pre-commit hook
+# To avoid any external dependency, we simply replace it back to the stdlib re module
+sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" $alias_arg
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
