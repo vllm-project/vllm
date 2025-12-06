@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 # Registry for CustomOp -> Benchmark class associations
 _custom_op_benchmarks: dict[type["HelionCustomOp"], type] = {}
 
+
 # Import Helion types conditionally
 try:
     import helion
@@ -67,10 +68,54 @@ class HelionCustomOp(CustomOp):
         --override-neuron-config '{"custom_ops": ["none", "+my_helion_op"]}'  # Enable specific
     """
 
-    def __init__(self, *args, **kwargs):
-        """Initialize with singleton ConfigManager."""
+    def __init__(self, model_config=None, *args, **kwargs):
+        """
+        Initialize HelionCustomOp with optional model config for kernel configuration.
+
+        If model_config is provided, kernels declared via create_kernel() will be immediately
+        configured and available as callable attributes.
+
+        Args:
+            model_config: Optional vLLM ModelConfig for automatic kernel configuration
+            *args, **kwargs: Additional arguments passed to parent CustomOp
+        """
         super().__init__(*args, **kwargs)
         self._config_manager = ConfigManager.get_instance()
+        self._model_config = model_config
+
+    def create_kernel(self, kernel_wrapper):
+        """
+        Create and configure a kernel for this custom op.
+
+        This method requires model_config to be provided to the constructor,
+        and immediately configures the kernel, returning the PyTorch ops callable.
+
+        Args:
+            kernel_wrapper: HelionKernelWrapper instance to configure
+
+        Returns:
+            PyTorch ops callable (torch.ops.vllm_helion.{configured_op_name})
+
+        Example:
+            def __init__(self, model_config, *args, **kwargs):
+                super().__init__(model_config, *args, **kwargs)
+                self.silu_mul_fp8 = self.create_kernel(silu_mul_fp8)
+                # self.silu_mul_fp8 is now torch.ops.vllm_helion.silu_mul_fp8_4096
+        """
+        assert self._model_config is not None, (
+            f"{self.__class__.__name__}.create_kernel() requires model_config to be provided to constructor. "
+            f"Pass model_config when creating the instance: {self.__class__.__name__}(model_config=config)"
+        )
+
+        assert self.enabled(), (
+            f"{self.__class__.__name__} HelionCustomOp must be enabled to create kernels"
+        )
+
+        # Create and return the PyTorch ops callable
+        torch_op = kernel_wrapper.create_configured_op_from_model(
+            self._model_config, self._config_manager
+        )
+        return torch_op
 
     @abstractmethod
     def forward_helion(self, *args, **kwargs) -> torch.Tensor:
@@ -124,7 +169,7 @@ class HelionCustomOp(CustomOp):
         Example:
             if HelionCustomOp.is_helion_available():
                 from vllm.compilation.helion import SiluMulFp8Helion
-                op = SiluMulFp8Helion()
+                op = SiluMulFp8Helion(model_config)
         """
         try:
             import helion  # noqa: F401
@@ -132,43 +177,6 @@ class HelionCustomOp(CustomOp):
             return True
         except ImportError:
             return False
-
-    # Config Management Methods
-
-    def configure(self, model_config=None):
-        """
-        Configure all kernels with optimal config for the given model.
-
-        This is the main entry point for fusion passes - they call this method
-        to configure all kernels with the best config, then can call the kernels directly.
-
-        Args:
-            model_config: vLLM ModelConfig for optimal config selection
-
-        Example:
-            # In fusion pass:
-            helion_op.configure(vllm_config.model_config)
-            return helion_op.forward_helion(input, scale)
-        """
-        assert self.enabled(), (
-            f"{self.__class__.__name__} HelionCustomOp must be enabled"
-        )
-
-        # Handle case where model_config is None (e.g., during testing/compilation)
-        if model_config is None:
-            raise AssertionError(
-                f"{self.__class__.__name__}.configure() requires model_config to be provided. "
-                "Tests should create a mock ModelConfig with appropriate hidden size."
-            )
-
-        # Delegate to all helion kernels' configure methods
-        helion_kernels = self.helion_kernels
-        assert helion_kernels is not None and len(helion_kernels) > 0, (
-            f"{self.__class__.__name__}.helion_kernels returned empty list - ensure Helion is available"
-        )
-
-        for kernel in helion_kernels:
-            kernel.configure(model_config, self._config_manager)
 
     @property
     @abstractmethod

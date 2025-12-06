@@ -153,14 +153,15 @@ class KernelBenchmark(ABC):
 
         # Override enabled() method to return True for benchmarking
         original_enabled = custom_op_class.enabled
-        custom_op_class.enabled = classmethod(lambda cls: True)
+
+        # Temporarily override the enabled method
+        def always_enabled(cls):
+            return True
+        custom_op_class.enabled = classmethod(always_enabled)
 
         # Create instance and force re-dispatch
-        self._custom_op = custom_op_class()
+        self._custom_op = custom_op_class(model_config=self.model_config)
         self._custom_op._forward_method = self._custom_op.dispatch_forward()
-
-        # Configure the custom op if we have a model config
-        self._custom_op.configure(self.model_config)
 
     @staticmethod
     def time_kernel(
@@ -324,6 +325,7 @@ class KernelBenchmark(ABC):
         Returns:
             Output from Helion CustomOp (could be tensor, tuple, None, etc.)
         """
+        assert self._custom_op is not None, "CustomOp not initialized"
         return self._custom_op(*args, **kwargs)
 
     def get_shape_description(self, **shape_params) -> str:
@@ -342,7 +344,9 @@ class KernelBenchmark(ABC):
     # FIXME(gmagogsfm): This is a hack until Helion doesn't incorrectly
     # specialize 0/1 tensor dimensions during inputs binding.
     # https://github.com/pytorch/helion/issues/934
-    def _reorder_shapes_avoid_dimension_one_first(self, shapes: list[tuple]) -> list[tuple]:
+    def _reorder_shapes_avoid_dimension_one_first(
+        self, shapes: list[tuple]
+    ) -> list[tuple]:
         """
         Reorder shapes to avoid dimensions of 1 appearing first.
 
@@ -369,7 +373,9 @@ class KernelBenchmark(ABC):
         reordered = shapes_without_one + shapes_with_one
 
         if shapes_with_one:
-            print(f"Benchmark reordering: moved {len(shapes_with_one)} shapes with dimension 1 to end")
+            print(
+                f"Benchmark reordering: moved {len(shapes_with_one)} shapes with dimension 1 to end"
+            )
 
         return reordered
 

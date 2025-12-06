@@ -147,7 +147,7 @@ if HELION_AVAILABLE:
             available_configs: Dictionary mapping config keys to loaded Helion configs
 
         Returns:
-            Best matching Helion config from available_configs, or None if no suitable match
+            Tuple of (config_key, config) for the best match, or None if no suitable match
         """
         if not available_configs:
             return None
@@ -157,7 +157,7 @@ if HELION_AVAILABLE:
         # Try exact match first
         exact_key = str(target_hidden_size)
         if exact_key in available_configs:
-            return available_configs[exact_key]
+            return (exact_key, available_configs[exact_key])
 
         # Find closest match from available configs
         try:
@@ -182,11 +182,12 @@ if HELION_AVAILABLE:
                 f"No exact config for hidden_size={target_hidden_size}, "
                 f"using closest match: {closest_size}"
             )
-            return available_configs[closest_key]
+            return (closest_key, available_configs[closest_key])
 
         except Exception:
             # If parsing fails, just return the first available config
-            return next(iter(available_configs.values()))
+            first_key = next(iter(available_configs.keys()))
+            return (first_key, available_configs[first_key])
 
 
 # Now define the vLLM CustomOp wrapper
@@ -212,9 +213,24 @@ class SiluMulFp8Helion(HelionCustomOp):
         output: (num_tokens, hidden_size) with dtype float8_e4m3fn
     """
 
+    def __init__(self, model_config, *args, **kwargs):
+        """
+        Initialize the SiLU-mul-FP8 Helion custom op.
+
+        Args:
+            model_config: vLLM ModelConfig (required for immediate kernel configuration)
+            *args, **kwargs: Additional arguments passed to parent class
+        """
+        super().__init__(model_config, *args, **kwargs)
+        # Create and configure the kernel we will use
+        self.silu_mul_fp8 = self.create_kernel(silu_mul_fp8)
+
     def forward_helion(self, input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
-        Helion kernel implementation.
+        Helion kernel implementation using the configured kernel attribute.
+
+        This method uses the configured kernel that was immediately set up during
+        construction. self.silu_mul_fp8 is a ConfiguredHelionKernel instance.
 
         Args:
             input: Input tensor with shape (num_tokens, 2 * hidden_size)
@@ -223,7 +239,8 @@ class SiluMulFp8Helion(HelionCustomOp):
         Returns:
             Output tensor with shape (num_tokens, hidden_size) and dtype float8_e4m3fn
         """
-        return silu_mul_fp8(input, scale)
+        # Use the configured kernel attribute
+        return self.silu_mul_fp8(input, scale)
 
     @property
     def helion_kernels(self):
