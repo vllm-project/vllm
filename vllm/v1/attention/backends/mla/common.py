@@ -209,7 +209,9 @@ from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -1917,18 +1919,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
 
         if attn_metadata is None:
-            # During the profile run try to simulate to worse case output size
-            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
-            # since this can be large
-            _ = torch.empty(
-                (
-                    self.chunked_prefill_workspace_size,
-                    self.num_heads,
-                    self.qk_nope_head_dim + self.v_head_dim,
-                ),
-                device=k_c_normed.device,
-                dtype=k_c_normed.dtype,
-            )
+            # During the profile run or cudagraph capture try to simulate worst case
+            # output size for `self.kv_b_proj(kv_c_normed)` in
+            # `_compute_prefill_context` since this can be large
+            forward_ctx = get_forward_context()
+            if (
+                forward_ctx.is_memory_profile
+                or forward_ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            ):
+                _ = torch.empty(
+                    (
+                        self.chunked_prefill_workspace_size,
+                        self.num_heads,
+                        self.qk_nope_head_dim + self.v_head_dim,
+                    ),
+                    device=k_c_normed.device,
+                    dtype=k_c_normed.dtype,
+                )
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the
