@@ -86,10 +86,11 @@ void convert_vertical_slash_indexes_mergehead(
 #endif
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon);
+              double weight_bias, double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon);
+                        torch::Tensor& weight, double weight_bias,
+                        double epsilon);
 
 void fused_qk_norm_rope(torch::Tensor& qkv, int64_t num_heads_q,
                         int64_t num_heads_k, int64_t num_heads_v,

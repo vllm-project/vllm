@@ -131,6 +131,27 @@ struct alignas(16) _f16Vec {
     return *this;
   }
 
+  __device__ _f16Vec& operator+=(const float other) {
+    if constexpr (width % 2 == 0) {
+#pragma unroll
+      for (int i = 0; i < width; i += 2) {
+        float2 temp_f = Converter::convert(T2{data[i], data[i + 1]});
+        temp_f.x += other;
+        temp_f.y += other;
+        T2 temp = Converter::convert(temp_f);
+        data[i] = temp.x;
+        data[i + 1] = temp.y;
+      }
+    } else {
+#pragma unroll
+      for (int i = 0; i < width; ++i) {
+        float temp = Converter::convert(data[i]) + other;
+        data[i] = Converter::convert(temp);
+      }
+    }
+    return *this;
+  }
+
   __device__ _f16Vec& operator*=(const _f16Vec<scalar_t, width>& other) {
     if constexpr (width % 2 == 0) {
 #pragma unroll
