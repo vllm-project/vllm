@@ -690,8 +690,6 @@ class DotsVisionTransformer(nn.Module):
     dummy_inputs=DotsOCRDummyInputsBuilder,
 )
 class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".attn.qkv_proj.": ".attn.qkv.",

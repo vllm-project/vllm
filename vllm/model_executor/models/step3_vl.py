@@ -916,8 +916,6 @@ class Step3VisionTransformer(nn.Module):
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
 class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
