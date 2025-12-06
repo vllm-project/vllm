@@ -1297,7 +1297,7 @@ class OpenAIServing:
             generator = self.engine_client.generate(
                 engine_request,
                 sampling_params,
-                sub_request_id,
+                engine_request.request_id,
                 lora_request=lora_request,
                 priority=priority,
                 prompt_text=prompt_text,
