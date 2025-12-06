@@ -204,9 +204,8 @@ class Scheduler(SchedulerInterface):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         
         self.peak_split_enabled = False
-        self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
         if vllm_config.additional_config:
-            self.peak_split_enabled = vllm_config.additional_config.get("peak_split_enabled", False) if self.scheduler_config.chunked_prefill_enabled else False
+            self.peak_split_enabled = vllm_config.additional_config.get("peak_split_enabled", False) if self.scheduler_config.enable_chunked_prefill else False
             self.peak_split_factor = vllm_config.additional_config.get("peak_split_factor", 0.5)
 
         self.chunked_prefill_tail_optimization_factor = vllm_config.additional_config.get("chunked_prefill_tail_optimization_factor", 1)
@@ -240,13 +239,13 @@ class Scheduler(SchedulerInterface):
         # Peak Split-related
         if self.peak_split_enabled:
             if len(self.running) < self.peak_split_factor * self.max_num_running_reqs:
-                self.chunked_prefill_enabled = False
+                self.scheduler_config.enable_chunked_prefill = False
                 logger.debug(
-                    f"peak_split_enabled is {self.peak_split_enabled} and chunked_prefill_enabled is {self.chunked_prefill_enabled}")
+                    f"peak_split_enabled is {self.peak_split_enabled} and enable_chunked_prefill is {self.scheduler_config.enable_chunked_prefill}")
             else:
-                self.chunked_prefill_enabled = True
+                self.scheduler_config.enable_chunked_prefill = True
                 logger.debug(
-                    f"peak_split_enabled is {self.peak_split_enabled} and chunked_prefill_enabled is {self.chunked_prefill_enabled}")
+                    f"peak_split_enabled is {self.peak_split_enabled} and enable_chunked_prefill is {self.scheduler_config.enable_chunked_prefill}")
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -278,7 +277,7 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
             )
             if (0 < self.chunked_prefill_tail_optimization_factor * self.scheduler_config.long_prefill_token_threshold <=
-                    num_new_tokens and self.chunked_prefill_enabled):
+                    num_new_tokens and self.scheduler_config.enable_chunked_prefill):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
@@ -535,7 +534,7 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    if self.chunked_prefill_enabled:
+                    if self.scheduler_config.enable_chunked_prefill:
                         threshold = self.chunked_prefill_tail_optimization_factor * self.scheduler_config.long_prefill_token_threshold
                     else:
                         threshold = self.scheduler_config.long_prefill_token_threshold
