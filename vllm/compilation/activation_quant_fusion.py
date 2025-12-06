@@ -97,12 +97,24 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
         super().__init__(kFp8StaticTensorSym)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
-        # Create Helion op instance if available
-        self.helion_op = None
-        if HELION_IMPORT_AVAILABLE:
-            self.helion_op = SiluMulFp8Helion()
+        # Defer Helion custom op creation until register() is called with model_config
+        self.helion_custom_op = None
 
     def register(self, pm_pass: PatternMatcherPass, vllm_config: VllmConfig = None):
+        # Create Helion custom op instance if available and model_config is provided
+        if (
+            HELION_IMPORT_AVAILABLE
+            and vllm_config is not None
+            and vllm_config.model_config is not None
+        ):
+            try:
+                self.helion_custom_op = SiluMulFp8Helion(
+                    model_config=vllm_config.model_config
+                )
+            except Exception:
+                # If Helion custom op creation fails, continue without it
+                self.helion_custom_op = None
+
         def pattern(
             input: torch.Tensor,
             scale: torch.Tensor,
@@ -115,20 +127,10 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             input: torch.Tensor,
             scale: torch.Tensor,
         ):
-            # Check if Helion is enabled using the CustomOp's enabled() method
-            # This encapsulates all the enable/disable logic in one place
-            if self.helion_op is not None and self.helion_op.enabled():
-                # vLLM config should always be available in fusion passes
-                assert vllm_config is not None, (
-                    "vllm_config must be provided to fusion replacement function"
-                )
-
-                # Configure the HelionCustomOp with optimal config
-                # This sets the config on the kernel, doesn't return anything
-                self.helion_op.configure(vllm_config.model_config)
-
-                # Call the configured operation directly
-                return self.helion_op.forward_helion(input, scale)
+            # Check if Helion custom op is available and enabled
+            if self.helion_custom_op is not None and self.helion_custom_op.enabled():
+                # Call the configured operation directly (already configured during register())
+                return self.helion_custom_op.forward_helion(input, scale)
             else:
                 d = input.shape[-1] // 2
                 output_shape = input.shape[:-1] + (d,)
