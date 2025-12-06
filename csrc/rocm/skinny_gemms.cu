@@ -1246,7 +1246,7 @@ int mindiv(int N, int div1, int div2) {
   int nPrRnd = div1 * div2;
   int rnds[13];
   for (int i = 0; i < 13; i++) {
-    rnds[i] = N / nPrRnd;
+    rnds[i] = (N + nPrRnd - 1) / nPrRnd;
     nPrRnd -= div1;
   }
   for (int i = 12; i >= 0; i--)
@@ -1301,16 +1301,19 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                                        biasf4, c, __wvPrGrp, CuCount);     \
   }
 
-#define WVSPLIT_TILE(_sYT, __N) \
-  {                             \
-    if (_sYT <= 2)              \
-      WVSPLITK(1, 4, __N)       \
-    else if (_sYT <= 4 * 2)     \
-      WVSPLITK(2, 2, __N)       \
-    else if (_sYT <= 4 * 3)     \
-      WVSPLITK(3, 2, __N)       \
-    else                        \
-      WVSPLITK(4, 2, __N)       \
+#define WVSPLIT_TILE(_sYT, __N)                  \
+  {                                              \
+    bool fit_lds = (K_in * N_in <= max_lds_len); \
+    if (_sYT <= 2)                               \
+      WVSPLITK(1, 4, __N)                        \
+    else if (!fit_lds || (_sYT <= 4 * 2))        \
+      WVSPLITK(2, 2, __N)                        \
+    else if (_sYT <= 4 * 3)                      \
+      WVSPLITK(3, 2, __N)                        \
+    else if (__N == 4)                           \
+      WVSPLITK(4, 1, __N)                        \
+    else                                         \
+      WVSPLITK(4, 2, __N)                        \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
