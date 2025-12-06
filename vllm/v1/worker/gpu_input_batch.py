@@ -950,10 +950,9 @@ class InputBatch:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            # Replace placeholder token id with actual sampled id.
-            req_output_token_ids[-len(sampled_token_ids[prev_index]) :] = (
-                sampled_token_ids[prev_index]
-            )
+            # Replace placeholder token id(s) with actual sampled id(s).
+            if sampled_ids := sampled_token_ids[prev_index]:
+                req_output_token_ids[-len(sampled_ids) :] = sampled_ids
 
     @property
     def num_reqs(self) -> int:
