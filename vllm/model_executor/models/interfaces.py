@@ -284,7 +284,7 @@ def supports_multimodal(
             raise ValueError(
                 "`multimodal_cpu_fields` is no longer effective, "
                 "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
-                "(refer to https://github.com/vllm-project/vllm/pull/TBD), "
+                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
                 "and then remove the override from your model."
             )
 
