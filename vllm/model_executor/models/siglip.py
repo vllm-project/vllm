@@ -989,7 +989,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
