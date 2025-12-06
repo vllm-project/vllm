@@ -98,9 +98,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
-        self.dp_size = self.parallel_config.data_parallel_size
-        self.dp_rank = self.parallel_config.data_parallel_rank
-
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
@@ -268,7 +265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not skip_attn:
             self.prepare_dummy_attn_metadata(input_batch)
 
-        num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
+        dp_size = self.parallel_config.data_parallel_size
+        num_tokens_across_dp = make_num_tokens_across_dp(dp_size, num_tokens)
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(
@@ -312,7 +310,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._dummy_sampler_run(sample_hidden_states)
         if self.do_spec_decode:
             num_tokens_across_dp = make_num_tokens_across_dp(
-                self.dp_size, self.max_num_tokens
+                self.parallel_config.data_parallel_size, self.max_num_tokens
             )
             self.speculator.run_model(
                 self.max_num_tokens,
@@ -807,7 +805,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: SchedulerOutput,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if self.dp_size == 1:
+        dp_size = self.parallel_config.data_parallel_size
+        if dp_size == 1:
             # No DP. Only consider CUDA graphs.
             if total_num_scheduled_tokens == 0:
                 # Special case: no tokens to run.
@@ -835,11 +834,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_size_before_dp = -1
 
         assert cudagraph_size_before_dp is not None
+        dp_rank = self.parallel_config.data_parallel_rank
         num_tokens_across_dp, cudagraph_size_across_dp = get_batch_metadata_across_dp(
             total_num_scheduled_tokens,
             cudagraph_size_before_dp,
-            self.dp_size,
-            self.dp_rank,
+            dp_size,
+            dp_rank,
         )
         if all(cudagraph_size_across_dp >= 0):
             # If all ranks can use CUDA graph, pad to the maximum number of tokens
@@ -850,7 +850,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If any of the ranks cannot use CUDA graph, use eager mode for all ranks.
             # No padding is needed except for ranks that have no tokens to run.
             num_tokens_across_dp = torch.clamp(num_tokens_across_dp, min=1)
-            num_tokens_after_padding = num_tokens_across_dp[self.dp_rank]
+            num_tokens_after_padding = num_tokens_across_dp[dp_rank]
             cudagraph_mode = CUDAGraphMode.NONE
         return cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp
 

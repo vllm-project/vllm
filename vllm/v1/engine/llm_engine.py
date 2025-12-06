@@ -65,8 +65,9 @@ class LLMEngine:
 
         self.log_stats = log_stats
 
-        executor_backend = self.vllm_config.parallel_config.distributed_executor_backend
         parallel_config = vllm_config.parallel_config
+        executor_backend = parallel_config.distributed_executor_backend
+
         self.external_launcher_dp = (
             parallel_config.data_parallel_size > 1
             and executor_backend == "external_launcher"

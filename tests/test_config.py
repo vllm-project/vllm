@@ -205,8 +205,8 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
 )
 def test_moe_model_detection(model_id, expected_is_moe_model):
     model_config = ModelConfig(model_id)
-    # Just check that is_moe_model field exists and is a boolean
-    assert model_config.is_model_moe() == expected_is_moe_model
+    # Just check that is_moe field exists and is a boolean
+    assert model_config.is_moe == expected_is_moe_model
 
 
 @pytest.mark.parametrize(
@@ -224,7 +224,7 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 def test_is_quantized(model_id, quantized):
     model_config = ModelConfig(model_id)
     # Just check that quantized field exists and is a boolean
-    assert model_config.is_quantized() == quantized
+    assert model_config.is_quantized == quantized
 
 
 @pytest.mark.skipif(
@@ -925,7 +925,7 @@ def test_vllm_config_callable_defaults():
         model_config=quantized_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_quantized = lambda cfg: (
-        cfg.model_config is not None and cfg.model_config.is_quantized()
+        cfg.model_config is not None and cfg.model_config.is_quantized
     )
     assert enable_if_quantized(config_quantized) is True
     assert enable_if_quantized(config_no_model) is False
@@ -936,7 +936,7 @@ def test_vllm_config_callable_defaults():
         model_config=moe_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_sequential = lambda cfg: (
-        cfg.model_config is not None and not cfg.model_config.is_model_moe()
+        cfg.model_config is not None and not cfg.model_config.is_moe
     )
     assert enable_if_sequential(config_moe) is False
     assert enable_if_sequential(config_quantized) is True
@@ -1050,3 +1050,46 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "data_parallel_size",
+        "external_lb",
+        "expected_needs_coordinator",
+    ),
+    [
+        # Non-MoE model with DP=1 should not need coordinator
+        ("facebook/opt-125m", 1, False, False),
+        # Non-MoE model with DP>1 internal LB should need coordinator
+        ("facebook/opt-125m", 2, False, True),
+        # Non-MoE model with DP>1 external LB should not need coordinator
+        ("facebook/opt-125m", 2, True, False),
+        # MoE model with DP=1 should not need coordinator
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
+        # MoE model with DP>1 internal LB should need both coordinator
+        # and wave coordination
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
+        # MoE model with DP>1 external LB needs coordinator for wave coordination
+        # (wave coordination runs in coordinator process)
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
+    ],
+)
+def test_needs_dp_coordination(
+    model_id,
+    data_parallel_size,
+    external_lb,
+    expected_needs_coordinator,
+):
+    """Test that DP coordinator and wave coordination are configured correctly."""
+    from vllm.config import ParallelConfig
+
+    model_config = ModelConfig(model_id)
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=external_lb,
+    )
+    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
+
+    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
