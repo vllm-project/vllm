@@ -92,13 +92,14 @@ def run_test(
     *,
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
+    dtype: str = "half",
 ) -> None:
     prompt_list = PROMPTS * 10
     expected_list = EXPECTED[model] * 10
 
     with vllm_runner(
         model,
-        dtype="half",
+        dtype=dtype,
         max_model_len=448,
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
@@ -120,12 +121,28 @@ def run_test(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
 @create_new_process_for_each_test()
-def test_models(vllm_runner, model) -> None:
+def test_models(vllm_runner, model, dtype) -> None:
     run_test(
         vllm_runner,
         model,
         tensor_parallel_size=1,
+        dtype=dtype,
+    )
+
+
+@pytest.mark.cpu_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
+def test_models_cpu(vllm_runner, model, dtype) -> None:
+    # @create_new_process_for_each_test() does not work for some runners
+    # TODO: to fix cpu privilege issues in run-cpu-test-arm.sh
+    run_test(
+        vllm_runner,
+        model,
+        tensor_parallel_size=1,
+        dtype=dtype,
     )
 
 
