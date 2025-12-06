@@ -362,7 +362,7 @@ class MockModelConfig:
 
 @dataclass
 class MockRendererConfig:
-    model_config: MockModelConfig = MockModelConfig()
+    model_config: MockModelConfig = field(default_factory=MockModelConfig)
 
     tokenizer = MODEL_NAME
     tokenizer_mode = "auto"
