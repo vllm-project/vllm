@@ -936,12 +936,13 @@ class AsyncLLM(EngineClient):
 
 def vllm_process_callback(loop: AbstractEventLoop, engine_core: MPClient, outputs: list[EngineCoreOutput], engine_index : Optional[int] = 0) -> None:
     """
-    VLLM callback function used in BufferResponseProcessor
-    :param loop: the loop in async_llm to receive buffered responses from BufferResponseProcessor
-    :param engine_core: engine_core in async_llm
-    :param outputs: buffered responses to release
-    :param engine_index: Optional, use the index to release info to specific logger in async_llm
-    :return: None
+    VLLM callback function used in BufferResponseProcessor.
+
+    Args:
+        loop (AbstractEventLoop): The loop in async_llm to receive buffered responses from BufferResponseProcessor.
+        engine_core (MPClient): Engine core in async_llm.
+        outputs (list[EngineCoreOutput]): Buffered responses to release.
+        engine_index (Optional[int]): Use the index to release info to specific logger in async_llm. Defaults to 0.
     """
     engine_core_outputs = EngineCoreOutputs(outputs=outputs, engine_index = engine_index, is_buffered_outputs=True)
     loop.call_soon_threadsafe(engine_core.outputs_queue.put_nowait, engine_core_outputs)
