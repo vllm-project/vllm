@@ -9,6 +9,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.penalties import apply_penalties_and_temperature
 
 
@@ -61,6 +62,9 @@ class Sampler:
 
         # Apply penalties and temperature in place.
         apply_penalties_and_temperature(logits, sampling_metadata)
+        # Apply min_p in place.
+        apply_min_p(logits, sampling_metadata.min_p)
+        # Apply top_k and/or top_p. This might return a new tensor.
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
         )

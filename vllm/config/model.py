@@ -136,7 +136,8 @@ class ModelConfig:
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:\n
-    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "auto" will use the tokenizer from `mistral_common` for Mistral models
+    if available, otherwise it will use the "hf" tokenizer.\n
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
