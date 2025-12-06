@@ -278,7 +278,7 @@ class ParsableContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a MCP tool call"""
         last_message = self.parser.response_messages[-1]
-        # TODO: figure out which tools are MCP tools
+        # TODO(qandrew): figure out which tools are MCP tools
         if last_message.type == "function_call":  # noqa: SIM102
             if last_message.name in (
                 "code_interpreter",
