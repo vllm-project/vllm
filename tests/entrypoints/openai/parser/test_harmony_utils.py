@@ -4,7 +4,7 @@
 from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
 from openai_harmony import Author, Message, Role, TextContent
 
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.openai.parser.harmony_utils import (
     has_custom_tools,
     parse_input_to_harmony_message,
     parse_output_message,
