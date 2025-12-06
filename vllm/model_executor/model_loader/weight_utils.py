@@ -919,19 +919,68 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
+
             if weight_type.name not in ("F32", "BF16", "F16"):
+                # Quantized tensors: handled by quantization layers
                 name = name.replace("weight", "qweight")
-            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                # BF16 is currently the only "quantization" type that isn't
-                # actually quantized but is read as a raw byte tensor.
-                # Reinterpret as `torch.bfloat16` tensor.
-                weight = weight.view(np.uint16)
-                if reader.byte_order == "S":
-                    # GGUF endianness != system endianness
-                    weight = weight.byteswap()
-                param = torch.tensor(weight).view(torch.bfloat16)
-            else:
                 param = torch.tensor(weight)
+            else:
+                # Unquantized tensors: may need dtype conversion
+                # GGUF stores BF16/F16 as uint8 bytes but F32 as float32
+
+                # Check if already in target dtype
+                if weight.dtype == np.float32 and weight_type.name == "F32":
+                    # F32 tensors are stored directly as float32
+                    param = torch.from_numpy(np.array(weight))
+
+                elif weight.dtype == np.float16 and weight_type.name == "F16":
+                    # F16 tensors are stored directly as float16
+                    param = torch.from_numpy(np.array(weight))
+
+                elif weight.dtype == np.uint8:
+                    # Stored as bytes: convert to target dtype
+                    if weight_type.name == "BF16":
+                        # BF16: 2 bytes per value
+                        weight_uint16 = weight.view(np.uint16)
+                        if reader.byte_order == "S":
+                            # GGUF endianness != system endianness
+                            weight_uint16 = weight_uint16.byteswap()
+                        param = torch.from_numpy(weight_uint16).view(torch.bfloat16)
+
+                    elif weight_type.name == "F16":
+                        # F16 (float16): 2 bytes per value
+                        weight_uint16 = weight.view(np.uint16)
+                        if reader.byte_order == "S":
+                            weight_uint16 = weight_uint16.byteswap()
+                        param = torch.from_numpy(weight_uint16).view(torch.float16)
+
+                    elif weight_type.name == "F32":
+                        # F32 (float32): 4 bytes per value
+                        weight_float32 = weight.view(np.float32)
+                        if reader.byte_order == "S":
+                            weight_float32 = weight_float32.byteswap()
+                        param = torch.from_numpy(weight_float32)
+
+                    else:
+                        # Unknown format
+                        logger.warning(
+                            "Unknown uint8-stored weight type '%s' for tensor '%s'.",
+                            weight_type.name,
+                            name,
+                        )
+                        param = torch.tensor(weight)
+
+                else:
+                    # Unexpected dtype/type combination
+                    logger.warning(
+                        "Unexpected dtype '%s' for weight type '%s' in tensor '%s'. "
+                        "Falling back to torch.tensor().",
+                        weight.dtype,
+                        weight_type.name,
+                        name,
+                    )
+                    param = torch.tensor(weight)
+
             yield name, param
 
 
