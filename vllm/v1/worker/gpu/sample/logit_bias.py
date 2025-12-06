@@ -18,6 +18,8 @@ def _logit_bias_kernel(
 ):
     req_idx = tl.program_id(0)
     n = tl.load(num_logit_bias_ptr + req_idx)
+    if n == 0:
+        return
 
     block = tl.arange(0, BLOCK_SIZE)
     mask = block < n
