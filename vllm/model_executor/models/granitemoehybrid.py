@@ -49,7 +49,6 @@ from .utils import (
     maybe_prefix,
 )
 
-
 class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     def __init__(
         self,
@@ -80,7 +79,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
             model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.mixer",
+            prefix=f"{prefix}.mamba",
         )
 
         self.block_sparse_moe = None
@@ -558,6 +557,7 @@ class GraniteMoeHybridModel(nn.Module):
                         shard_id="w2",
                         expert_id=e,
                     )
+
             elif n.endswith(".block_sparse_moe.router.layer.weight"):
                 gate_name = n.replace(
                     ".block_sparse_moe.router.layer.weight",
