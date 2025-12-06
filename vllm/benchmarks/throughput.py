@@ -346,7 +346,10 @@ def get_requests(args, tokenizer):
         "output_len": args.output_len,
     }
 
-    if args.dataset_path is None or args.dataset_name == "random":
+    if args.dataset_name == "random" or (
+        args.dataset_path is None
+        and args.dataset_name not in {"prefix_repetition", "random-mm", "random-rerank"}
+    ):
         sample_kwargs["range_ratio"] = args.random_range_ratio
         sample_kwargs["prefix_len"] = args.prefix_len
         dataset_cls = RandomDataset
