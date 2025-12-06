@@ -5,7 +5,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 
@@ -301,7 +301,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
-            outputs=cast(list[CompletionOutput], outputs),
+            outputs=outputs,
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
@@ -339,10 +339,7 @@ class RequestState:
             stop_reason=stop_reason if finished else None,
         )
 
-    def _new_pooling_output(
-        self,
-        pooling_output: torch.Tensor,
-    ) -> PoolingOutput:
+    def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
 
 
@@ -695,9 +692,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
-            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
-                req_state.prompt_token_ids, req_state.prompt_embeds
-            ),
+            num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,

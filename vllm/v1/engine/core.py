@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import msgspec
 import zmq
@@ -420,7 +420,7 @@ class EngineCore:
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
-                future = cast(Future[ModelRunnerOutput], exec_future)
+                future = exec_future
             else:
                 exec_future.add_done_callback(self._log_err_callback(scheduler_output))
 
@@ -487,10 +487,8 @@ class EngineCore:
             request_ids = []
             while not self.aborts_queue.empty():
                 ids = self.aborts_queue.get_nowait()
-                if isinstance(ids, str):
-                    # Should be a list here, but also handle string just in case.
-                    ids = (ids,)
-                request_ids.extend(ids)
+                # Should be a list here, but also handle string just in case.
+                request_ids.extend((ids,) if isinstance(ids, str) else ids)
             # More efficient to abort all as a single batch.
             self.abort_requests(request_ids)
 
