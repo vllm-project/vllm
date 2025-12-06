@@ -8,8 +8,8 @@ from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
     ModelRunnerOutput,
-    SamplerOutput,
 )
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 
 class AsyncOutput(AsyncModelRunnerOutput):
@@ -54,6 +54,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 )
             else:
                 self.logprobs_tensors = None
+            if sampler_output.num_nans is not None:
+                self.num_nans = sampler_output.num_nans.to("cpu", non_blocking=True)
+            else:
+                self.num_nans = None
             self.num_sampled_tokens_cpu = num_sampled_tokens.to(
                 "cpu", non_blocking=True
             )
@@ -79,6 +83,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         for i in range(num_reqs):
             del sampled_token_ids[i][num_sampled_tokens_np[i] :]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
+
+        if self.num_nans is not None:
+            num_nans_np = self.num_nans.numpy()
+            self.model_runner_output.num_nans_in_logits = {
+                req_id: int(num_nans_np[i])
+                for i, req_id in enumerate(self.model_runner_output.req_ids)
+            }
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
