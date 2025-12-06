@@ -87,7 +87,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Returns:
             The number of new blocks to allocate.
-            The number of evictable blocks (i.e., ref_cnt == 0).
+            The number of evictable blocks (i.e., ref_cnt == 0) to allocate.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
