@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -26,18 +27,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheConnectorV1(KVConnectorBase_V1):
+class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
+        ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
+        # LMCache. Remove this once having LMCache-side support for new interfaces.
+        vllm_config.kv_cache_config = kv_cache_config  # type: ignore[attr-defined]
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
-        assert vllm_config.kv_transfer_config is not None
-        use_native = vllm_config.kv_transfer_config.get_from_extra_config(
+        assert vllm_config.kv_transfer_config is not None  # type: ignore[attr-defined]
+        use_native = vllm_config.kv_transfer_config.get_from_extra_config(  # type: ignore[attr-defined]
             "use_native", False
         )
         if use_native:
@@ -213,4 +217,18 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        # NOTE: LMCache overloads request_finished so `block_ids` here can be
+        # either list[int] or tuple[list[int], ...].
+        return self._lmcache_engine.request_finished(request, block_ids)
+
+    ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
+    # LMCache. Remove this once having LMCache-side support for new interfaces.
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # NOTE: LMCache overloads request_finished so `block_ids` here can be
+        # either list[int] or tuple[list[int], ...]. This could be changed in
+        # the future to separate these two methods.
         return self._lmcache_engine.request_finished(request, block_ids)

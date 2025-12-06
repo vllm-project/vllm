@@ -73,7 +73,8 @@ class KVCacheCoordinator(ABC):
         num_tokens: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
-    ) -> int:
+        total_computed_tokens: int,
+    ) -> tuple[list[int], list[int]]:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -85,26 +86,45 @@ class KVCacheCoordinator(ABC):
                 prefix caching.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            total_computed_tokens: Include both local and external tokens.
 
         Returns:
-            The number of blocks.
+            The number of new blocks to allocate for each kv cache group.
+            The number of evictable blocks to allocate for each kv cache group.
         """
-        num_blocks_to_allocate = 0
+        num_new_blocks_to_allocate = []
+        num_evictable_blocks_to_allocate = []
         for i, manager in enumerate(self.single_type_managers):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, []
+                (
+                    num_new_blocks_to_allocate_single_group,
+                    num_evictable_blocks_to_allocate_single_group,
+                ) = manager.get_num_blocks_to_allocate(
+                    request_id, num_encoder_tokens, [], 0
                 )
             else:
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_tokens, new_computed_blocks[i]
+                (
+                    num_new_blocks_to_allocate_single_group,
+                    num_evictable_blocks_to_allocate_single_group,
+                ) = manager.get_num_blocks_to_allocate(
+                    request_id,
+                    num_tokens,
+                    new_computed_blocks[i],
+                    total_computed_tokens,
                 )
-        return num_blocks_to_allocate
+            num_new_blocks_to_allocate.append(num_new_blocks_to_allocate_single_group)
+            num_evictable_blocks_to_allocate.append(
+                num_evictable_blocks_to_allocate_single_group
+            )
+        return num_new_blocks_to_allocate, num_evictable_blocks_to_allocate
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: tuple[Sequence[KVCacheBlock], ...]
+        self,
+        request_id: str,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        total_computed_tokens: int,
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -113,19 +133,31 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
+            total_computed_tokens: The total number of computed tokens, including
+                both local and external tokens.
         """
         for i, manager in enumerate(self.single_type_managers):
-            manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
+            manager.save_new_computed_blocks(
+                request_id, new_computed_blocks[i], total_computed_tokens
+            )
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self,
+        request_id: str,
+        num_blocks_to_allocate_per_group: list[int],
+        num_tokens: int,
+        num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
-        token slots.
+        token slots. If `num_blocks_to_allocate_per_group[i]` is smaller than
+        the number of blocks needed (in the case of sliding window attention),
+        the leading blocks will be padded with null blocks.
 
         Args:
             request_id: The request ID.
+            num_blocks_to_allocate_per_group: The number of blocks to allocate
+                for each kv cache group.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating
@@ -137,11 +169,12 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
+                num_blocks_to_allocate_per_group[i],
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
             )
-            for manager in self.single_type_managers
+            for i, manager in enumerate(self.single_type_managers)
         )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:

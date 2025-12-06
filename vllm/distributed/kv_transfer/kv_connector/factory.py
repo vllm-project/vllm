@@ -56,9 +56,12 @@ class KVConnectorFactory:
         # check if the connector supports HMA
         hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
         if hma_enabled and not supports_hma(connector_cls):
-            raise ValueError(
-                f"Connector {connector_cls.__name__} does not support HMA but "
-                f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."
+            ## REMOVE BEFORE MERGE (YIFAN): Revert this warning back to raising
+            # an ValueError.
+            logger.warning(
+                "Connector %s does not support HMA but HMA is enabled. Please set "
+                "--disable-hybrid-kv-cache-manager to disable HMA.",
+                connector_cls.__name__,
             )
 
         logger.info(

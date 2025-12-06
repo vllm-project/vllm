@@ -253,7 +253,18 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+
+        # Some blocks may be null blocks when enabling sparse attention or sliding
+        # window attention. For now, we only have sliding window attention, and
+        # null blocks must be at the beginning.
+        first_non_null_blk_idx = 0
         for i, blk in enumerate(new_full_blocks):
+            if not blk.is_null:
+                first_non_null_blk_idx = i
+                break
+
+        for i, blk in enumerate(new_full_blocks[first_non_null_blk_idx:]):
+            assert not blk.is_null
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
@@ -280,6 +291,8 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
+                    ## TODO(Yifan): here token_ids may be over-estimated for
+                    ## sliding window layers
                     token_ids=request.all_token_ids[
                         num_cached_blocks * block_size : num_full_blocks * block_size
                     ],

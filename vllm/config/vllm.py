@@ -66,7 +66,7 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise
     cudagraphs"""
     O2 = 2
     """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
@@ -894,19 +894,16 @@ class VllmConfig:
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector for now.
+                # NOTE(Yifan): warning when both kv connector and hybrid kv cache
+                # manager are enabled but don't disable hybrid kv cache manager here.
                 # TODO(Kuntai): have a more elegent solution to check and
                 # turn off HMA for connector that does not support HMA.
                 logger.warning(
-                    "Turning off hybrid kv cache manager because "
-                    "`--kv-transfer-config` is set. This will reduce the "
-                    "performance of vLLM on LLMs with sliding window attention "
-                    "or Mamba attention. If you are a developer of kv connector"
-                    ", please consider supporting hybrid kv cache manager for "
-                    "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                    "Warning: both kv connector and hybrid kv cache manager are "
+                    "enabled. However, not all kv connectors support HMA. Please "
+                    "check if the kv connector you are using supports HMA, or "
+                    "disable HMA by setting `--disable-hybrid-kv-cache-manager`."
                 )
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
