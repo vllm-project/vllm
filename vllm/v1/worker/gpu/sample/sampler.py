@@ -3,13 +3,15 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.config.model import LogprobsMode
-from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import apply_penalties_and_temperature
 
 
@@ -21,6 +23,7 @@ class Sampler:
         if logprobs_mode not in ["processed_logprobs", "raw_logprobs"]:
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
+        self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
 
     def __call__(
         self,
@@ -42,6 +45,7 @@ class Sampler:
         else:
             logprobs_tensors = None
 
+        num_nans = get_num_nans(processed_logits) if self.compute_nans else None
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -49,6 +53,7 @@ class Sampler:
             # token per request.
             sampled_token_ids=sampled.view(-1, 1),
             logprobs_tensors=logprobs_tensors,
+            num_nans=num_nans,
         )
         return sampler_output
 
@@ -63,7 +68,8 @@ class Sampler:
         # Apply penalties and temperature in place.
         apply_penalties_and_temperature(logits, sampling_metadata)
         # Apply min_p in place.
-        apply_min_p(logits, sampling_metadata.min_p)
+        if sampling_metadata.min_p is not None:
+            apply_min_p(logits, sampling_metadata.min_p)
         # Apply top_k and/or top_p. This might return a new tensor.
         logits = apply_top_k_top_p(
             logits, sampling_metadata.top_k, sampling_metadata.top_p
