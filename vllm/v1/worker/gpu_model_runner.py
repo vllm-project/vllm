@@ -400,8 +400,12 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(self.sampler)
 
         self.num_spec_tokens = 0
+        async_sps_zero_bubble_mode = False
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
+            async_sps_zero_bubble_mode = (
+                self.speculative_config.async_sps_zero_bubble_mode
+            )
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -596,6 +600,14 @@ class GPUModelRunner(
             device="cpu",
             pin_memory=self.pin_memory,
         )
+
+        self.async_sps_zero_bubble_mode = (
+            async_sps_zero_bubble_mode
+            and self.use_async_scheduling
+            and self.num_spec_tokens > 0
+            and not self.cascade_attn_enabled
+        )
+        self.async_spec_reqs_to_fix: set[str] = set()
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
@@ -856,7 +868,11 @@ class GPUModelRunner(
 
         # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
-        valid_sampled_token_count = self._get_valid_sampled_token_count()
+        valid_sampled_token_count = []
+        if not self.async_sps_zero_bubble_mode:
+            valid_sampled_token_count = self._get_valid_sampled_token_count()
+        else:
+            self.async_spec_reqs_to_fix.clear()
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -883,11 +899,19 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    assert self.input_batch.prev_req_id_to_index is not None
-                    prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
-                    num_accepted = valid_sampled_token_count[prev_req_index] - 1
-                    num_rejected = req_state.prev_num_draft_len - num_accepted
-                    num_computed_tokens -= num_rejected
+                    # If async_sps_zero_bubble_mode, assume all tokens are accepted,
+                    # and will adjust the inputs correctly in _adjust_inputs_on_gpu to
+                    # avoid cpu sync, which may cause gpu bubble in async scheduling.
+                    if self.async_sps_zero_bubble_mode:
+                        num_accepted = req_state.prev_num_draft_len
+                        num_rejected = 0
+                        self.async_spec_reqs_to_fix.add(req_id)
+                    else:
+                        assert self.input_batch.prev_req_id_to_index is not None
+                        prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
+                        num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                        num_rejected = req_state.prev_num_draft_len - num_accepted
+                        num_computed_tokens -= num_rejected
                     req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
@@ -993,7 +1017,14 @@ class GPUModelRunner(
             # we clear the spec_decoding info in scheduler_output and
             # use normal sampling but rejection_sampling.
             if self.use_async_scheduling:
-                req_state.prev_num_draft_len = num_spec_tokens
+                if (
+                    self.async_sps_zero_bubble_mode
+                    and req_id in self.async_spec_reqs_to_fix
+                ):
+                    req_state.pending_prev_num_draft_len = num_spec_tokens
+                else:
+                    req_state.prev_num_draft_len = num_spec_tokens
+                    req_state.pending_prev_num_draft_len = 0
                 if num_spec_tokens and self._draft_token_ids is None:
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
@@ -1015,12 +1046,17 @@ class GPUModelRunner(
     ) -> None:
         """Update the cached states after model execution.
 
-        This is used for MTP/EAGLE for hybrid models, as in linear attention,
-        only the last token's state is kept. In MTP/EAGLE, for draft tokens
-        the state are kept util we decide how many tokens are accepted for
-        each sequence, and a shifting is done during the next iteration
-        based on the number of accepted tokens.
+        This serves two purposes:
+        1. For async scheduling with speculative decoding (EAGLE SPS), fix the
+           CPU-side bookkeeping that optimistically assumed all draft tokens
+           were accepted to avoid earlier CPU synchronizations.
+        2. For hybrid models using MTP/EAGLE, keep track of how many draft
+           tokens were accepted so the next iteration can shift states.
         """
+
+        if self.async_sps_zero_bubble_mode:
+            self._finalize_async_spec_cpu_state()
+
         if not self.model_config.is_hybrid or not self.speculative_config:
             return
 
@@ -1047,6 +1083,59 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
+    def _finalize_async_spec_cpu_state(self) -> None:
+        """Synchronize CPU metadata after deferred speculative acceptance."""
+
+        if not self.async_sps_zero_bubble_mode:
+            return
+
+        assert self.parallel_config.pipeline_parallel_size == 1, (
+            "GPU async SPS is only supported without pipeline parallelism."
+        )
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        assert prev_req_id_to_index is not None
+        req_ids_to_fix = list(self.async_spec_reqs_to_fix)
+
+        if not req_ids_to_fix:
+            return
+
+        valid_sampled_token_count = self._get_valid_sampled_token_count()
+        if not valid_sampled_token_count:
+            return
+
+        for req_id in req_ids_to_fix:
+            prev_index = prev_req_id_to_index.get(req_id)
+            assert prev_index is not None and prev_index < len(
+                valid_sampled_token_count
+            ), f"req_id={req_id} not found or index out of range"
+            req_state = self.requests.get(req_id)
+            assert req_state is not None, f"req_id={req_id} not found in requests"
+
+            prev_draft_len = req_state.prev_num_draft_len
+            req_state.prev_num_draft_len = req_state.pending_prev_num_draft_len
+            req_state.pending_prev_num_draft_len = 0
+
+            num_accepted = valid_sampled_token_count[prev_index] - 1
+            assert num_accepted >= 0 and num_accepted <= prev_draft_len, (
+                f"Invalid num_accepted={num_accepted}, prev_draft_len={prev_draft_len}"
+            )
+            num_rejected = prev_draft_len - num_accepted
+            if num_rejected == 0:
+                continue
+            req_state.num_computed_tokens -= num_rejected
+
+            assert len(req_state.output_token_ids) >= num_rejected, (
+                f"output_token_ids length {len(req_state.output_token_ids)} < "
+                f"num_rejected {num_rejected}"
+            )
+            del req_state.output_token_ids[-num_rejected:]
+
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            assert req_index is not None, (
+                f"req_id={req_id} not found or index out of range"
+            )
+            self.input_batch.num_computed_tokens_cpu[req_index] -= num_rejected
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -1286,6 +1375,87 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _maybe_adjust_inputs_on_gpu(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        """adjust inputs correctly on gpu for async scheduling with spec decode.
+
+        In async scheduling with spec decode, we assume all speculated tokens
+        are accepted in update_states to avoid cpu sync, and will adjust the
+        inputs correctly based on the actual accepted token count in GPU."""
+
+        if not self.async_sps_zero_bubble_mode:
+            return
+
+        pre_valid_sampled_token_count = self.input_batch.pre_valid_sampled_token_count
+        if pre_valid_sampled_token_count is None:
+            return
+
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        if not prev_req_id_to_index or not self.async_spec_reqs_to_fix:
+            return
+
+        req_indices_to_correct = []
+        prev_req_indices = []
+        prev_num_draft_lens = []
+        tracked_req_ids = self.async_spec_reqs_to_fix
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if req_id not in tracked_req_ids:
+                continue
+            prev_index = prev_req_id_to_index.get(req_id)
+            assert prev_index is not None
+            req_indices_to_correct.append(i)
+            prev_req_indices.append(prev_index)
+            prev_num_draft_lens.append(self.requests[req_id].prev_num_draft_len)
+
+        if not req_indices_to_correct:
+            return
+
+        req_indices_tensor = torch.tensor(
+            req_indices_to_correct, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+        prev_req_indices_tensor = torch.tensor(
+            prev_req_indices, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+
+        # Compute the diff between optimistic and actual valid tokens cnt.
+        prev_num_draft_len_tensor = torch.tensor(
+            prev_num_draft_lens, dtype=torch.int64, pin_memory=self.pin_memory
+        ).to(self.device, non_blocking=True)
+
+        diff = (
+            prev_num_draft_len_tensor
+            + 1
+            - pre_valid_sampled_token_count[prev_req_indices_tensor].to(torch.int64)
+        )
+        self.seq_lens.gpu[req_indices_tensor] -= diff.int()
+
+        num_reqs = self.input_batch.num_reqs
+        req_indices_flat_cpu = np.repeat(
+            self.arange_np[:num_reqs], num_scheduled_tokens
+        )
+        req_indices_flat_gpu = torch.from_numpy(req_indices_flat_cpu).to(
+            self.device, non_blocking=True
+        )
+
+        diff_all_reqs = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+        diff_all_reqs[req_indices_tensor] = diff
+
+        diff_per_token = diff_all_reqs[req_indices_flat_gpu]
+        self.positions.gpu[: req_indices_flat_gpu.shape[0]] -= diff_per_token
+
+        if self.uses_mrope:
+            for dim in range(3):
+                self.mrope_positions.gpu[dim, : req_indices_flat_gpu.shape[0]] -= (
+                    diff_per_token
+                )
+
+        self.input_batch.block_table.compute_slot_mapping_gpu(
+            req_indices_flat_gpu, self.positions.gpu[: req_indices_flat_gpu.shape[0]]
+        )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1450,6 +1620,11 @@ class GPUModelRunner(
         else:
             # Common case (1D positions)
             self.positions.copy_to_gpu(total_num_scheduled_tokens)
+
+        self._maybe_adjust_inputs_on_gpu(
+            scheduler_output,
+            num_scheduled_tokens,
+        )
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -3168,6 +3343,7 @@ class GPUModelRunner(
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self.input_batch.prev_sampled_token_ids = None
+        self.input_batch.pre_valid_sampled_token_count = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -3312,6 +3488,7 @@ class GPUModelRunner(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
     ) -> None:
         if self.valid_sampled_token_count_event is None:
+            # Non async scheduling case. no need to copy.
             return
 
         default_stream = torch.cuda.current_stream()
@@ -3324,6 +3501,7 @@ class GPUModelRunner(
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
 
+        self.input_batch.pre_valid_sampled_token_count = valid_sampled_tokens_count
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     def _get_valid_sampled_token_count(self) -> list[int]:
@@ -4672,6 +4850,11 @@ class GPUModelRunner(
             attention_backend_list, kv_cache_config.kv_cache_groups
         )
 
+        # Check if all backends support async SPS zero bubble mode
+        self._check_async_sps_zero_bubble_support(
+            attention_backend_list, kv_cache_config.kv_cache_groups
+        )
+
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
@@ -4852,6 +5035,35 @@ class GPUModelRunner(
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
+
+    def _check_async_sps_zero_bubble_support(
+        self,
+        attention_backends: list[set[type[AttentionBackend]]],
+        kv_cache_groups: list[KVCacheGroupSpec],
+    ) -> None:
+        """
+        Check if all attention backends support async SPS zero bubble mode.
+        If any backend doesn't support it, disable the mode.
+        """
+        if not self.async_sps_zero_bubble_mode:
+            return
+
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+                if not builder_cls.supports_async_sps_zero_bubble(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                ):
+                    logger.warning(
+                        "Disabling async SPS zero bubble mode: attention backend "
+                        "%s does not support it (build() may depend on correct "
+                        "seq_lens_cpu or num_computed_tokens_cpu values).",
+                        attn_backend.__name__,
+                    )
+                    self.async_sps_zero_bubble_mode = False
+                    return
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
