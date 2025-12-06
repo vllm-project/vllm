@@ -21,124 +21,6 @@ logger = init_logger(__name__)
 vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 
 
-class ConfiguredHelionKernel:
-    """
-    A callable wrapper that executes a Helion kernel via PyTorch ops API.
-
-    This class registers a Helion kernel as a PyTorch custom op and provides
-    a callable interface that forwards to torch.ops.vllm_helion.{op_name}.
-    It preserves the original kernel's signature for proper PyTorch schema inference.
-    """
-
-    def __init__(
-        self,
-        helion_kernel_func,
-        config,
-        op_name: str,
-        namespace: str = "vllm_helion",
-        fake_impl=None,
-    ):
-        """
-        Initialize with a Helion kernel function and config, registering as PyTorch op.
-
-        Args:
-            helion_kernel_func: The original Helion kernel function
-            config: Helion config to compile with
-            op_name: Name for this configured kernel
-            namespace: PyTorch op namespace
-            fake_impl: Fake implementation to use (if None, will use fallback)
-        """
-        self.helion_kernel_func = helion_kernel_func
-        self.config = config
-        self.op_name = op_name
-        self.namespace = namespace
-        self.full_op_name = f"{namespace}::{op_name}"
-
-        # Copy signature and annotations from original kernel for PyTorch schema inference
-        import inspect
-
-        try:
-            # Extract signature using inspect and set it manually
-            original_signature = inspect.signature(helion_kernel_func)
-            self.__signature__ = original_signature
-        except Exception:
-            # If signature extraction fails, PyTorch will fall back to other methods
-            pass
-
-        if hasattr(helion_kernel_func, "__annotations__"):
-            self.__annotations__ = helion_kernel_func.__annotations__
-        if hasattr(helion_kernel_func, "__name__"):
-            self.__name__ = f"{helion_kernel_func.__name__}_{op_name}"
-        if hasattr(helion_kernel_func, "__globals__"):
-            self.__globals__ = helion_kernel_func.__globals__
-        else:
-            self.__globals__ = {}
-
-        # Copy other attributes that PyTorch might need
-        if hasattr(helion_kernel_func, "__doc__"):
-            self.__doc__ = (
-                f"Pre-configured {helion_kernel_func.__doc__ or 'Helion kernel'}"
-            )
-
-        # Register as PyTorch custom op if not already registered
-        self._register_pytorch_op(fake_impl)
-
-    def _register_pytorch_op(self, fake_impl):
-        """Register this configured kernel as a PyTorch custom op."""
-        # Check if already registered
-        try:
-            # Try to access the op to see if it exists
-            getattr(getattr(torch.ops, self.namespace), self.op_name)
-            logger.debug(f"Op {self.full_op_name} already registered")
-            return
-        except (AttributeError, RuntimeError):
-            # Op doesn't exist, need to create it
-            pass
-
-        logger.info(f"Registering configured op: {self.full_op_name}")
-
-        # Use provided fake implementation or create fallback
-        if fake_impl is None:
-            logger.warning(
-                f"No fake implementation provided for {self.op_name}, creating fallback"
-            )
-
-            def fake_impl(*args, **kwargs):
-                """Fallback fake implementation."""
-                bound = self.helion_kernel_func.bind(args)
-                default_config = (
-                    self.helion_kernel_func.configs[0]
-                    if hasattr(self.helion_kernel_func, "configs")
-                    and self.helion_kernel_func.configs
-                    else self.config
-                )
-                compiled_runner = bound.compile_config(default_config)
-                return compiled_runner(
-                    *args, **kwargs, _launcher=lambda *args, **kwargs: None
-                )
-
-        # Register the configured kernel as a PyTorch custom op
-        direct_register_custom_op(
-            op_name=self.op_name,
-            op_func=self,
-            mutates_args=None,
-            fake_impl=fake_impl,
-            target_lib=vllm_helion_lib,
-        )
-
-        logger.info(f"Registered configured op: {self.full_op_name}")
-
-    def __call__(self, *args, **kwargs):
-        """Execute the Helion kernel with the specific config."""
-        # Compile on first call since we need the actual arguments for binding
-        if not hasattr(self, "_compiled_kernel"):
-            logger.debug(f"First execution: compiling {self.op_name} with config")
-            bound = self.helion_kernel_func.bind(args)
-            self._compiled_kernel = bound.compile_config(self.config)
-
-        return self._compiled_kernel(*args, **kwargs)
-
-
 class HelionKernelWrapper:
     """
     Wrapper for Helion kernels that can create config-specific PyTorch custom ops.
@@ -147,8 +29,20 @@ class HelionKernelWrapper:
     with different configurations using the pattern: {kernel_name}_{config_key}
     """
 
-    def __init__(self, helion_kernel_func, op_name, namespace):
-        self.helion_kernel_func = helion_kernel_func
+    def __init__(
+        self,
+        raw_kernel_func,
+        op_name,
+        namespace,
+        helion_settings=None,
+        default_config=None,
+    ):
+        self.raw_kernel_func = raw_kernel_func  # Store the raw undecorated function
+        self.helion_settings = (
+            helion_settings  # Store helion.Settings for dynamic decoration
+        )
+        self.default_config = default_config  # Store default helion.Config
+        self._decorated_kernels = {}  # Dictionary to store decorated kernels by config hash
         self.op_name = op_name
         self.namespace = namespace
         self.base_op_name = f"{namespace}::{op_name}"
@@ -164,16 +58,16 @@ class HelionKernelWrapper:
         self._fake_impl = None
 
         # Copy attributes needed for PyTorch schema inference
-        self.__name__ = getattr(helion_kernel_func, "__name__", op_name)
-        self.__globals__ = getattr(helion_kernel_func, "__globals__", {})
-        self.__annotations__ = getattr(helion_kernel_func, "__annotations__", {})
+        self.__name__ = getattr(raw_kernel_func, "__name__", op_name)
+        self.__globals__ = getattr(raw_kernel_func, "__globals__", {})
+        self.__annotations__ = getattr(raw_kernel_func, "__annotations__", {})
 
         # Import here to avoid circular imports
         import inspect
 
         try:
             # Copy the original function's signature for PyTorch schema inference
-            self.__signature__ = inspect.signature(helion_kernel_func)
+            self.__signature__ = inspect.signature(raw_kernel_func)
         except (ValueError, TypeError):
             # If signature extraction fails, PyTorch will handle schema inference differently
             pass
@@ -196,10 +90,89 @@ class HelionKernelWrapper:
         """
         Delegate autotuning to the underlying Helion kernel function.
 
-        This method forwards the autotune call to the wrapped helion_kernel_func,
-        which has the @helion.kernel decorator and supports autotuning.
+        For autotuning, we apply @helion.kernel with just the settings (no config),
+        since the point of autotuning is to discover the optimal config.
         """
-        return self.helion_kernel_func.autotune(*args, **kwargs)
+        # Get or create decorated kernel for autotuning (no specific config needed)
+        decorated_kernel = self._get_autotune_kernel()
+        return decorated_kernel.autotune(*args, **kwargs)
+
+    def _apply_helion_decorator(self, config):
+        """
+        Apply @helion.kernel decorator to the raw function with specific config.
+
+        Args:
+            config: helion.Config instance to use for this decoration
+        """
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not available. Cannot apply helion.kernel decorator."
+            )
+
+        if self.helion_settings is None:
+            raise ValueError(
+                f"No helion_settings provided for kernel '{self.op_name}'. "
+                "Cannot apply @helion.kernel decorator."
+            )
+
+        # Create helion.kernel decorator arguments from settings and config
+        kernel_kwargs = {"config": config}
+
+        # Pass all settings from helion.Settings object if available
+        if self.helion_settings:
+            # Convert helion.Settings to dict, excluding private/internal attributes
+            settings_dict = self.helion_settings.to_dict()
+            kernel_kwargs.update(settings_dict)
+
+        # Apply the helion.kernel decorator
+        decorated_kernel = helion.kernel(**kernel_kwargs)(self.raw_kernel_func)
+
+        # Store in dictionary by config hash for reuse
+        if config is not None:
+            config_hash = hash(str(config.__dict__))
+            self._decorated_kernels[config_hash] = decorated_kernel
+
+        return decorated_kernel
+
+    def _get_autotune_kernel(self):
+        """
+        Get or create a helion kernel decorated for autotuning (no specific config).
+        """
+        if not hasattr(self, "_autotune_kernel"):
+            if not HELION_AVAILABLE:
+                raise ImportError(
+                    "Helion is not available. Cannot create autotune kernel."
+                )
+
+            # Create helion.kernel decorator arguments from settings only (no config)
+            kernel_kwargs = {}
+            if self.helion_settings:
+                settings_dict = self.helion_settings.to_dict()
+                kernel_kwargs.update(settings_dict)
+
+            # Apply the helion.kernel decorator for autotuning
+            self._autotune_kernel = helion.kernel(**kernel_kwargs)(self.raw_kernel_func)
+
+        return self._autotune_kernel
+
+    def _get_decorated_kernel(self, config):
+        """
+        Get or create a helion kernel decorated with a specific config.
+
+        Args:
+            config: helion.Config instance to use for decoration
+
+        Returns:
+            Decorated helion kernel for the given config
+        """
+        if config is None:
+            return self._get_autotune_kernel()
+
+        config_hash = hash(str(config.__dict__))
+        if config_hash not in self._decorated_kernels:
+            self._decorated_kernels[config_hash] = self._apply_helion_decorator(config)
+
+        return self._decorated_kernels[config_hash]
 
     def register_autotune_inputs_generator(self, generator_func):
         """
@@ -337,10 +310,8 @@ class HelionKernelWrapper:
                 "Helion is not available. Please install Helion to use autotuning."
             )
 
-        # Get the Helion kernel function
-        kernel_fn = self.helion_kernel_func
-        if kernel_fn is None:
-            raise RuntimeError(f"No Helion kernel available for {self.op_name}")
+        # Get the Helion kernel function for autotuning
+        kernel_fn = self._get_autotune_kernel()
 
         # Set reasonable defaults for tuner
         tuner_kwargs = tuner_kwargs or {}
@@ -435,14 +406,19 @@ class HelionKernelWrapper:
 
         logger.info(f"Creating configured op: {full_configured_op_name}")
 
-        # Create a ConfiguredHelionKernel instance which will register itself
-        ConfiguredHelionKernel(
-            self.helion_kernel_func,
-            optimal_config,
-            configured_op_name,
-            namespace=self.namespace,
+        # Get or create decorated kernel with the specific config
+        decorated_kernel = self._get_decorated_kernel(optimal_config)
+
+        # Register the decorated kernel directly as PyTorch custom op
+        direct_register_custom_op(
+            op_name=configured_op_name,
+            op_func=decorated_kernel,  # Use the decorated kernel directly
+            mutates_args=None,
             fake_impl=self._fake_impl,
+            target_lib=vllm_helion_lib,
         )
+
+        logger.info(f"Registered configured op: {full_configured_op_name}")
 
         # Return the registered PyTorch ops callable
         torch_op = getattr(getattr(torch.ops, self.namespace), configured_op_name)
@@ -492,6 +468,8 @@ def register_kernel(
     device_types: str = "cuda",
     mutates_args: tuple = (),
     fake_impl: Callable | None = None,
+    helion_settings=None,
+    default_config=None,
 ) -> Callable:
     """
     Decorator to register a Helion kernel as a PyTorch custom operation.
@@ -555,18 +533,17 @@ def register_kernel(
             )
             return helion_kernel_func
 
-        from helion.runtime.kernel import Kernel as HelionKernel
-
-        if not isinstance(helion_kernel_func, HelionKernel):
-            raise ValueError(
-                f"Function {helion_kernel_func.__name__} is not a Helion kernel. "
-                "Make sure to apply @helion.kernel decorator before @register_kernel."
-            )
+        # The function should be a raw undecorated function
+        # We will apply @helion.kernel dynamically when needed
 
         # Create the HelionKernelWrapper that will be registered as PyTorch custom op
         namespace = "vllm_helion"  # Fixed namespace for all Helion kernels
         kernel_wrapper = HelionKernelWrapper(
-            helion_kernel_func, final_op_name, namespace
+            helion_kernel_func,
+            final_op_name,
+            namespace,
+            helion_settings,
+            default_config,
         )
 
         # Register the wrapper as PyTorch custom op using vLLM's low-overhead function
@@ -585,17 +562,22 @@ def register_kernel(
                 Note: This fake kernel only generates shapes for compilation - config selection
                 happens in fusion passes where the actual Helion ops are inserted.
                 """
-                bound = helion_kernel_func.bind(args)
+                # Apply helion.kernel decorator temporarily for fake execution
+                temp_config = default_config if default_config else helion.Config()
 
-                # Use default config for fake execution (only for shape inference)
-                config = (
-                    helion_kernel_func.configs[0]
-                    if hasattr(helion_kernel_func, "configs")
-                    and helion_kernel_func.configs
-                    else helion.Config()
+                # Create helion.kernel decorator arguments
+                kernel_kwargs = {"config": temp_config}
+                if helion_settings:
+                    settings_dict = helion_settings.to_dict()
+                    kernel_kwargs.update(settings_dict)
+
+                # Apply the decorator
+                temp_decorated_kernel = helion.kernel(**kernel_kwargs)(
+                    helion_kernel_func
                 )
 
-                compiled_runner = bound.compile_config(config)
+                bound = temp_decorated_kernel.bind(args)
+                compiled_runner = bound.compile_config(temp_config)
 
                 return compiled_runner(
                     *args, **kwargs, _launcher=lambda *args, **kwargs: None

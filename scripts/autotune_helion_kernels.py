@@ -87,8 +87,8 @@ def list_kernels():
 
     for name, kernel_wrapper in kernels.items():
         # Get description from the kernel wrapper
-        full_op_name = kernel_wrapper.full_op_name
-        print(f"  {name:<30} - {full_op_name}")
+        base_op_name = kernel_wrapper.base_op_name
+        print(f"  {name:<30} - {base_op_name}")
 
     print(f"\nTotal: {len(kernels)} kernels")
 

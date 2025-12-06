@@ -49,11 +49,14 @@ if HELION_AVAILABLE:
         output_shape = input.shape[:-1] + (input.shape[-1] // 2,)
         return torch.empty(output_shape, dtype=torch.float8_e4m3fn, device=input.device)
 
-    @register_kernel(fake_impl=_silu_mul_fp8_custom_fake)
-    @helion.kernel(
-        autotune_baseline_atol=0.0,
-        autotune_baseline_rtol=0.0,
-        config=helion.Config(
+    @register_kernel(
+        fake_impl=_silu_mul_fp8_custom_fake,
+        helion_settings=helion.Settings(
+            autotune_baseline_atol=0.0,
+            autotune_baseline_rtol=0.0,
+            static_shapes=False,
+        ),
+        default_config=helion.Config(
             block_sizes=[1, 2048],
             flatten_loops=[True],
             indexing=["tensor_descriptor", "pointer", "tensor_descriptor", "pointer"],
@@ -69,7 +72,6 @@ if HELION_AVAILABLE:
             range_unroll_factors=[0],
             range_warp_specializes=[],
         ),
-        static_shapes=False,
     )
     def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """
