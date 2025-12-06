@@ -44,6 +44,16 @@ logger = init_logger(__name__)
 ALPHANUMERIC = ascii_letters + digits
 
 
+def _escape_json_control_chars(s: str) -> str:
+    """Escape control characters that would break JSON serialization.
+
+    Models sometimes emit raw control characters (literal newlines, tabs, etc.)
+    inside JSON strings. These must be escaped for valid JSON output.
+    Already-escaped sequences (like the two-char '\\n') are left untouched.
+    """
+    return s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
 class MistralToolCall(ToolCall):
     id: str = Field(default_factory=lambda: MistralToolCall.generate_random_id())
 
@@ -172,7 +182,7 @@ class MistralToolParser(ToolParser):
                 matches = self.fn_name_regex.findall(segment)
                 for match in matches:
                     fn_name = match[0]
-                    fn_args = match[1]
+                    fn_args = _escape_json_control_chars(match[1])
                     tool_calls.append(
                         MistralToolCall(
                             type="function",

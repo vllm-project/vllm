@@ -682,6 +682,36 @@ class TestEdgeCases:
         assert result.tool_calls == []
         assert result.content == ""
 
+    def test_raw_control_chars_escaped(self, mistral_tool_parser):
+        """Test that raw control characters in arguments are escaped.
+
+        Models sometimes emit literal newlines/tabs inside JSON strings.
+        These must be escaped to produce valid JSON output.
+        """
+        # Arguments with literal newline (not the escaped \n sequence)
+        model_output = '[TOOL_CALLS]run_agent{"prompt": "line1\nline2\ttabbed"}'
+        result = mistral_tool_parser.extract_tool_calls(model_output, request=None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        # The raw newline/tab should be escaped
+        args = result.tool_calls[0].function.arguments
+        assert "\\n" in args
+        assert "\\t" in args
+        assert "\n" not in args  # No literal newline
+        assert "\t" not in args  # No literal tab
+
+    def test_already_escaped_chars_unchanged(self, mistral_tool_parser):
+        """Test that already-escaped sequences are not double-escaped."""
+        # Arguments with properly escaped \n (two chars: backslash + n)
+        model_output = r'[TOOL_CALLS]run_agent{"prompt": "line1\nline2"}'
+        result = mistral_tool_parser.extract_tool_calls(model_output, request=None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        args = result.tool_calls[0].function.arguments
+        # Should still be \n, not \\n
+        assert "\\n" in args
+        assert "\\\\n" not in args
+
 
 class TestTokenBasedDetection:
     """Test that token-based detection works correctly."""
