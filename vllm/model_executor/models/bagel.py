@@ -36,6 +36,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processors.bagel import BagelProcessor
 from vllm.utils.tensor_schema import TensorSchema
 
 from .interfaces import (
@@ -187,6 +188,23 @@ class PositionEmbedding(nn.Module):
 
 class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
+
+    def get_hf_processor(self, **kwargs: object) -> BagelProcessor:
+        from vllm.transformers_utils.processor import cached_get_image_processor
+
+        image_processor = cached_get_image_processor(
+            self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
+            trust_remote_code=self.ctx.model_config.trust_remote_code,
+        )
+
+        tokenizer = self.get_tokenizer()
+
+        return BagelProcessor(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+            **kwargs,
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
