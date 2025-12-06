@@ -50,23 +50,19 @@ def _mock_input_processor(
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
-        skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
+    )
+    renderer_config = RendererConfig(
+        model_config=model_config,
         tokenizer="dummy",
+        skip_tokenizer_init=True,
     )
 
-    # Minimal multimodal_config to satisfy references in
-    # Processor.process_inputs.
-    class _MockMMConfig:
-        def __init__(self, gb: float):
-            self.mm_processor_cache_gb = gb
-
-    model_config.multimodal_config = _MockMMConfig(mm_cache_gb)  # type: ignore[attr-defined]
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
+        renderer_config=renderer_config,
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
         device_config=DeviceConfig(device="cpu"),
     )
