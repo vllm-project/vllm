@@ -15,6 +15,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    RendererConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -522,6 +523,7 @@ def test_encoder_instance_zero_kv_cache(
 
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         kv_transfer_config=kv_transfer_config,

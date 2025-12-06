@@ -19,6 +19,7 @@ from vllm.config import (
     CompilationMode,
     ModelConfig,
     PassConfig,
+    RendererConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -133,8 +134,10 @@ def test_qk_norm_rope_fusion(
     if enable_rope_custom_op:
         custom_ops.append("+rotary_embedding")
 
+    model_config = ModelConfig(dtype=dtype)
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,

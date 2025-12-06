@@ -9,7 +9,8 @@ import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config.model import ModelDType, TokenizerMode
+from vllm.config.model import ModelConfig, ModelDType
+from vllm.config.renderer import RendererConfig, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -169,6 +170,36 @@ class _HfExamplesInfo:
                 raise RuntimeError(msg)
             else:
                 pytest.skip(msg)
+
+    def build_model_config(self, model: str | None = None, **kwargs) -> ModelConfig:
+        if model is None:
+            model = self.default
+
+        return ModelConfig(
+            **{
+                "model": model,
+                "revision": self.revision,
+                "trust_remote_code": self.trust_remote_code,
+                "hf_overrides": self.hf_overrides,
+                "enable_prompt_embeds": self.require_embed_inputs,
+                "enable_mm_embeds": self.require_embed_inputs,
+                "enforce_eager": self.enforce_eager,
+                "dtype": self.dtype,
+                **kwargs,
+            }
+        )
+
+    def build_renderer_config(
+        self, model: str | None = None, **kwargs
+    ) -> RendererConfig:
+        model_config = self.build_model_config(model, **kwargs)
+
+        return RendererConfig(
+            model_config=model_config,
+            tokenizer=self.tokenizer or model_config.model,
+            tokenizer_mode=self.tokenizer_mode,
+            skip_tokenizer_init=self.require_embed_inputs,
+        )
 
 
 _TEXT_GENERATION_EXAMPLE_MODELS = {

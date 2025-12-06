@@ -29,8 +29,8 @@ from vllm.config.model import (
     HfOverrides,
     ModelDType,
     RunnerOption,
-    TokenizerMode,
 )
+from vllm.config.renderer import TokenizerMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -343,6 +343,7 @@ class LLM:
         logger.info("Supported tasks: %s", supported_tasks)
         self.supported_tasks = supported_tasks
 
+        self.renderer_config = self.llm_engine.renderer_config
         self.model_config = self.llm_engine.model_config
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
@@ -808,13 +809,13 @@ class LLM:
             list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
         tokenizer = self.get_tokenizer()
-        model_config = self.model_config
+        renderer_config = self.renderer_config
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
             tools,
             chat_template_content_format,
             tokenizer,
-            model_config=model_config,
+            renderer_config=renderer_config,
         )
 
         _chat_template_kwargs: dict[str, Any] = dict(
@@ -833,7 +834,7 @@ class LLM:
             # the chat message parsing for it.
             conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
-                model_config,
+                renderer_config,
                 content_format=resolved_content_format,
             )
 
@@ -847,7 +848,7 @@ class LLM:
                 prompt_str = apply_hf_chat_template(
                     tokenizer=tokenizer,
                     conversation=conversation,
-                    model_config=model_config,
+                    renderer_config=renderer_config,
                     **_chat_template_kwargs,
                 )
                 # Special tokens are already included in chat templates so
@@ -1290,6 +1291,7 @@ class LLM:
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
+        renderer_config = self.renderer_config
         model_config = self.model_config
 
         if isinstance(tokenizer, MistralTokenizer):
@@ -1317,7 +1319,7 @@ class LLM:
 
         for q, d in input_pairs:
             _, engine_prompt = get_score_prompt(
-                model_config=model_config,
+                renderer_config=renderer_config,
                 data_1=q,
                 data_2=d,
                 tokenizer=tokenizer,
