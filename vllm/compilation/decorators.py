@@ -392,7 +392,6 @@ def _support_torch_compile(
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
-
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
                 "torch_aot_compile",
@@ -413,7 +412,8 @@ def _support_torch_compile(
                         f, f_globals=self.forward.__globals__
                     )
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                loaded_fn.disable_guard_check()
+                if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
+                    loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
