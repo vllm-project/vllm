@@ -577,9 +577,6 @@ class AsyncLLM(EngineClient):
                         if i + 1 < len(slices):
                             await asyncio.sleep(0)
 
-                        if self.buffer_response:
-                            self.buffer_response_processor.abort_request(request_id)
-
                         # 3) Abort any reqs that finished due to stop strings.
                         await engine_core.abort_requests_async(
                             processed_outputs.reqs_to_abort
@@ -610,6 +607,10 @@ class AsyncLLM(EngineClient):
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
         all_request_ids = self.output_processor.abort_requests(request_ids)
+
+        if self.buffer_response:
+                            self.buffer_response_processor.abort_request(request_id)
+
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
