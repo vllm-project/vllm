@@ -339,7 +339,9 @@ class StructuredOutputManager:
             return True
 
         # Check if reasoning ends in *this* step
-        if self.reasoner.is_reasoning_end(request.all_token_ids):
+        if self.reasoner.is_reasoning_end_streaming(
+            request.all_token_ids, request.all_token_ids[request.num_computed_tokens :]
+        ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass
             structured_req.reasoning_ended = True
