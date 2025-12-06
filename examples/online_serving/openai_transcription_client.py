@@ -2,11 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This script demonstrates how to use the vLLM API server to perform audio
-transcription with the `openai/whisper-large-v3` model.
+transcription.
+- Provide the model name via CLI (`--model Qwen/Qwen3-Omni-30B-A3B-Instruct`).
+- Omit the model flag and let the script pick the first model returned by
+  `/v1/models` (useful when the server is already serving a single model).
 
-Before running this script, you must start the vLLM server with the following command:
+Example server start:
+    vllm serve openai/whisper-large-v3 or vllm serve Qwen/Qwen3-Omni-30B-A3B-Instruct
 
-    vllm serve openai/whisper-large-v3
+Example client usage:
+    python examples/online_serving/openai_transcription_client.py \\
+    --base-url http://localhost:8000/v1 --api-key EMPTY \\
+    --model Qwen/Qwen3-Omni-30B-A3B-Instruct
 
 Requirements:
 - vLLM with audio support
@@ -15,9 +22,10 @@ Requirements:
 
 The script performs:
 1. Synchronous transcription using OpenAI-compatible API.
-2. Streaming transcription using raw HTTP request to the vLLM server.
+2. Streaming transcription using OpenAI-compatible API.
 """
 
+import argparse
 import asyncio
 
 from openai import AsyncOpenAI, OpenAI
@@ -25,14 +33,14 @@ from openai import AsyncOpenAI, OpenAI
 from vllm.assets.audio import AudioAsset
 
 
-def sync_openai(audio_path: str, client: OpenAI):
+def sync_openai(audio_path: str, model: str, client: OpenAI):
     """
     Perform synchronous transcription using OpenAI-compatible API.
     """
     with open(audio_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
             file=f,
-            model="openai/whisper-large-v3",
+            model=model,
             language="en",
             response_format="json",
             temperature=0.0,
@@ -45,7 +53,7 @@ def sync_openai(audio_path: str, client: OpenAI):
         print("transcription result:", transcription.text)
 
 
-async def stream_openai_response(audio_path: str, client: AsyncOpenAI):
+async def stream_openai_response(audio_path: str, model: str, client: AsyncOpenAI):
     """
     Perform asynchronous transcription using OpenAI-compatible API.
     """
@@ -53,7 +61,7 @@ async def stream_openai_response(audio_path: str, client: AsyncOpenAI):
     with open(audio_path, "rb") as f:
         transcription = await client.audio.transcriptions.create(
             file=f,
-            model="openai/whisper-large-v3",
+            model=model,
             language="en",
             response_format="json",
             temperature=0.0,
@@ -72,25 +80,67 @@ async def stream_openai_response(audio_path: str, client: AsyncOpenAI):
     print()  # Final newline after stream ends
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="OpenAI-compatible transcription client for vLLM."
+    )
+    parser.add_argument(
+        "--base-url",
+        default="http://localhost:8000/v1",
+        help="vLLM server URL (default: http://localhost:8000/v1)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default="EMPTY",
+        help="API key for the server (default: EMPTY for local use)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Model name to use. If omitted, the script will try to infer"
+            "the first served model via /v1/models."
+        ),
+    )
+    return parser.parse_args()
+
+
+def resolve_model(client: OpenAI, user_model: str | None) -> str:
+    if user_model:
+        return user_model
+
+    try:
+        models = client.models.list()
+        if not getattr(models, "data", None):
+            raise RuntimeError("No models returned by /v1/models")
+        discovered_model = models.data[0].id
+        print(f"Using model returned by /v1/models: {discovered_model}")
+        return discovered_model
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to infer a model from /v1/models; please provide one with --model."
+        ) from exc
+
+
 def main():
+    args = parse_args()
     mary_had_lamb = str(AudioAsset("mary_had_lamb").get_local_path())
     winning_call = str(AudioAsset("winning_call").get_local_path())
 
     # Modify OpenAI's API key and API base to use vLLM's API server.
-    openai_api_key = "EMPTY"
-    openai_api_base = "http://localhost:8000/v1"
     client = OpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+        api_key=args.api_key,
+        base_url=args.base_url,
     )
 
-    sync_openai(mary_had_lamb, client)
+    model = resolve_model(client, args.model)
+    sync_openai(mary_had_lamb, model, client)
     # Run the asynchronous function
-    client = AsyncOpenAI(
-        api_key=openai_api_key,
-        base_url=openai_api_base,
+    async_client = AsyncOpenAI(
+        api_key=args.api_key,
+        base_url=args.base_url,
     )
-    asyncio.run(stream_openai_response(winning_call, client))
+    asyncio.run(stream_openai_response(winning_call, model, async_client))
 
 
 if __name__ == "__main__":
