@@ -521,7 +521,7 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         pytest.param(
             (
                 "eagle",
-                "LLM-Research/Llama-3.2-1B-Instruct",
+                "meta-llama/Llama-3.2-1B-Instruct",
                 "nm-testing/Llama3_2_1B_speculator.eagle3",
             ),
             marks=large_gpu_mark(min_gb=32),
