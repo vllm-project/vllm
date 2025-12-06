@@ -616,6 +616,37 @@ class NixlConnectorScheduler:
         )
 
         if params is not None and params.get("do_remote_prefill"):
+            # Check if blocks have expired before allocating
+            if (
+                params.get("block_expiry_time") is not None
+                and params.get("prefill_timestamp") is not None
+            ):
+                current_time = time.perf_counter()
+                prefill_timestamp = params["prefill_timestamp"]
+                block_expiry_time = params["block_expiry_time"]
+
+                # Calculate time difference: local - remote
+                time_diff = current_time - prefill_timestamp
+                # Convert remote expiry time to local time
+                local_expiry_time = block_expiry_time + time_diff
+                # Subtract buffer time (10 seconds) for safety
+                buffer_time = 10.0
+                local_expiry_time -= buffer_time
+
+                if current_time >= local_expiry_time:
+                    logger.warning(
+                        "Blocks for request %s have expired on scheduler side. "
+                        "Expiry time: %.3f, Current time: %.3f (with %.1fs buffer). "
+                        "Skipping remote prefill to avoid wasting block allocation.",
+                        request.request_id,
+                        local_expiry_time,
+                        current_time,
+                        buffer_time,
+                    )
+                    # Mark as not doing remote prefill anymore
+                    params["do_remote_prefill"] = False
+                    return 0, False
+
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             count = len(token_ids) - num_computed_tokens
@@ -794,10 +825,9 @@ class NixlConnectorScheduler:
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
 
-        # Calculate block expiry time (in local perf_counter time)
-        block_expiry_time = (
-            time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
-        )
+        # Calculate block expiry time and current timestamp (in local perf_counter time)
+        current_time = time.perf_counter()
+        block_expiry_time = current_time + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -809,6 +839,7 @@ class NixlConnectorScheduler:
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             block_expiry_time=block_expiry_time,
+            prefill_timestamp=current_time,  # For calculating time diff on decode side
         )
 
 
