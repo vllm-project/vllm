@@ -642,7 +642,15 @@ def sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    ops.indexer_k_quant_and_cache(
+    indexer_k_quant_cache_and_cache_func = ops.indexer_k_quant_and_cache
+    if current_platform.is_rocm():
+        from vllm.attention.ops.rocm_aiter_mla_sparse import (
+            indexer_k_quant_and_cache_triton,
+        )
+
+        indexer_k_quant_cache_and_cache_func = indexer_k_quant_and_cache_triton
+
+    indexer_k_quant_cache_and_cache_func(
         k,
         kv_cache,
         slot_mapping,
@@ -664,13 +672,26 @@ def sparse_attn_indexer(
                 device=k.device,
                 dtype=torch.uint8,
             )
-            ops.cp_gather_indexer_k_quant_cache(
+            cp_gather_indexer_k_quant_cache_func = ops.cp_gather_indexer_k_quant_cache
+            if current_platform.is_rocm():
+                from functools import partial
+
+                from vllm.attention.ops.rocm_aiter_mla_sparse import (
+                    cp_gather_indexer_k_quant_cache_triton,
+                )
+
+                cp_gather_indexer_k_quant_cache_func = partial(
+                    cp_gather_indexer_k_quant_cache_triton,
+                    token_to_seq=chunk.token_to_seq,
+                )
+            cp_gather_indexer_k_quant_cache_func(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
+
             fp8_mqa_logits_func = fp8_mqa_logits
             if current_platform.is_rocm():
                 from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
@@ -728,6 +749,7 @@ def sparse_attn_indexer(
             )
 
             fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+
         logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -737,10 +759,10 @@ def sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
+
         num_rows = logits.shape[0]
         assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-
         torch.ops._C.top_k_per_row_decode(
             logits,
             next_n,
@@ -750,6 +772,7 @@ def sparse_attn_indexer(
             logits.stride(0),
             logits.stride(1),
         )
+
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
