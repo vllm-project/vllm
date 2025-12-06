@@ -306,7 +306,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --mode wheel \
         ${PPLX_COMMIT_HASH:+--pplx-ref "$PPLX_COMMIT_HASH"} \
         ${DEEPEP_COMMIT_HASH:+--deepep-ref "$DEEPEP_COMMIT_HASH"} && \
-    find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete
+    if [ -d "/tmp/ep_kernels_workspace/nvshmem" ]; then find /tmp/ep_kernels_workspace/nvshmem -name '*.a' -delete; fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
@@ -484,8 +484,12 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+    sh -c 'if ls ep_kernels/dist/*.whl >/dev/null 2>&1; then \
+              uv pip install --system ep_kernels/dist/*.whl --verbose \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+           else \
+              echo "No DeepEP wheels to install; skipping."; \
+           fi'
 
 RUN --mount=type=bind,source=tools/install_gdrcopy.sh,target=/tmp/install_gdrcopy.sh,ro \
     set -eux; \
