@@ -13,8 +13,8 @@ from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
-batch_size_range = [1, 16, 32, 64, 128]
-seq_len_range = [1, 16, 64, 128, 256, 512, 1024, 2048, 4096]
+batch_size_range = [1, 16, 128]
+seq_len_range = [1, 16, 64, 1024, 4096]
 intermediate_size = [3072, 9728, 12288]
 configs = list(itertools.product(batch_size_range, seq_len_range, intermediate_size))
 
