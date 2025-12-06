@@ -75,7 +75,7 @@ torchgeo==0.7.0
 mteb==2.1.2
 
 # Data processing
-xgrammar==0.1.27
+xgrammar @ git+https://github.com/divakar-amd/xgrammar@3272f7c520564858056a60480d5afdf69ae79c84
 # Test async scheduling
 
 # Utilities
