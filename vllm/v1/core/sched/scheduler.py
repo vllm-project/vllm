@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     compute_encoder_budget,
@@ -445,6 +446,15 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                # Streaming: skip request if still waiting for next streaming req.
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    if request.streaming_queue:
+                        self._update_session(request)
+                    else:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -681,7 +691,7 @@ class Scheduler(SchedulerInterface):
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
             scheduled_resumed_reqs = []
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
                     req._all_token_ids,
@@ -690,7 +700,7 @@ class Scheduler(SchedulerInterface):
             ]
         else:
             new_reqs_data = [
-                NewRequestData.from_request(
+                self._make_new_request_data(
                     req, req_to_new_blocks[req.request_id].get_block_ids()
                 )
                 for req in scheduled_new_reqs
@@ -801,6 +811,75 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _update_session(self, session: Request) -> None:
+        """
+        Updates the waiting session with the next streaming request.
+
+        Removes the last output token (not yet scheduled) from `_all_token_ids`
+        because the new request's prompt tokens will replace it. Typically the decoded
+        outputs are scheduled as the next input in autoregressive decoding. When we
+        receive a new streaming request, the new prompt becomes our next input, so the
+        last output token is no longer needed and will not join the kv cache. This
+        ensures correct calculation of `num_new_tokens` in `schedule`.
+        """
+        assert session.streaming_queue is not None
+        request = session.streaming_queue.popleft()
+
+        num_new_tokens = session.num_tokens - session.num_computed_tokens
+        assert num_new_tokens in {0, 1}, f"got {num_new_tokens=}"
+        if num_new_tokens == 1:
+            assert session._all_token_ids[-1] == session._output_token_ids[-1]
+            del session._all_token_ids[-1]
+
+        session.continue_session = request.continue_session
+        if request.mm_features:
+            base = session.num_tokens
+            for mm_feature in request.mm_features:
+                mm_feature.mm_position = PlaceholderRange(
+                    offset=mm_feature.mm_position.offset + base,
+                    length=mm_feature.mm_position.length,
+                )
+            session.mm_features.extend(request.mm_features)
+
+        session._all_token_ids.extend(request.prompt_token_ids or [])
+        if session.prompt_token_ids is None:
+            session.prompt_token_ids = []
+        session.prompt_token_ids.extend(request.prompt_token_ids or [])
+        session.prompt_embeds = request.prompt_embeds
+        session.max_tokens = session.num_output_tokens + request.max_tokens
+        session.arrival_time = request.arrival_time
+        session.priority = request.priority
+        session.sampling_params = request.sampling_params
+        session.status = RequestStatus.WAITING
+
+        if self.log_stats:
+            session.record_event(EngineCoreEventType.QUEUED)
+
+    def _make_new_request_data(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
+    ) -> NewRequestData:
+        """
+        Creates NewRequestData for requests in waiting queue to be sent to
+        ModelRunner via SchedulerOutput.scheduled_new_reqs.
+
+        For streaming requests, we send all tokens, including past inputs and
+        decoded outputs, through the prompt field. Updated streaming requests
+        create new entries in InputBatch, so we need the full input history to
+        ensure alignment of mm offsets, kv cache, and token ids.
+
+        NOTE: Make sure that prompt_token_ids is a copy of the original request's
+        _all_token_ids. Since the scheduler updates _all_token_ids each iteration, the
+        corresponding prompt_token_ids reference in NewRequestData will be mistakenly
+        updated while decoding if we don't make a copy.
+        """
+        req_data = NewRequestData.from_request(request, block_ids, prefill_token_ids)
+        if request.continue_session:
+            req_data.prompt_token_ids = request._all_token_ids.copy()
+        return req_data
 
     def _make_cached_request_data(
         self,
@@ -1124,7 +1203,11 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
-                kv_transfer_params = self._free_request(request)
+                if request.continue_session:
+                    request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+                    self.waiting.add_request(request)
+                else:
+                    kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
@@ -1165,6 +1248,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        continue_session=request.continue_session,
                     )
                 )
             else:
@@ -1305,8 +1389,16 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        self.waiting.add_request(request)
-        self.requests[request.request_id] = request
+        if request.request_id not in self.requests:
+            self.waiting.add_request(request)
+            self.requests[request.request_id] = request
+        else:
+            session = self.requests[request.request_id]
+            assert session.streaming_queue is not None, (
+                "streaming queue must be initialized for session"
+            )
+            session.streaming_queue.append(request)
+
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1375,7 +1467,11 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        num_waiting = sum(
+            req.status != RequestStatus.WAITING_FOR_STREAMING_REQ
+            for req in self.waiting
+        )
+        return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0

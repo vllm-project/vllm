@@ -117,9 +117,6 @@ class RequestState:
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.prompt_len = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
-        )
         self.logprobs_processor = logprobs_processor
         self.detokenizer = detokenizer
         self.max_tokens_param = max_tokens_param
@@ -135,6 +132,12 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+
+    @property
+    def prompt_len(self) -> int:
+        return length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
 
     @classmethod
     def from_new_request(
@@ -420,7 +423,8 @@ class OutputProcessor:
     ) -> None:
         request_id = request.request_id
         if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
+            self._update_streaming_request_state(request, prompt)
+            return
 
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer,
@@ -437,6 +441,24 @@ class OutputProcessor:
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
+
+    def _update_streaming_request_state(
+        self, request: EngineCoreRequest, prompt: str | None
+    ) -> None:
+        if not EngineCoreRequest.continue_session:
+            raise ValueError(
+                f"Existing session {request.request_id} has to be updated with a \
+                streaming request with `continue_session=True`"
+            )
+        req_state = self.request_states[request.request_id]
+        if req_state.prompt and prompt:
+            req_state.prompt += prompt
+        if req_state.prompt_token_ids is not None and request.prompt_token_ids:
+            req_state.prompt_token_ids.extend(request.prompt_token_ids)
+        req_state.prompt_embeds = request.prompt_embeds
+        if req_state.stats is not None:
+            req_state.stats.arrival_time = request.arrival_time
+        req_state.is_prefilling = True
 
     def process_outputs(
         self,
@@ -519,7 +541,10 @@ class OutputProcessor:
                     request_outputs.append(request_output)
 
             # Free completed requests.
-            if finish_reason is not None:
+            if (
+                engine_core_output.finish_reason is not None
+                and not engine_core_output.continue_session
+            ):
                 self.request_states.pop(req_id)
                 # Remove parent request if applicable.
                 parent_req = req_state.parent_req
