@@ -2,9 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from enum import Enum
 
 import torch
 import torch.nn as nn
+
+
+class LoRAMappingType(Enum):
+    LANGUAGE = 1
+    TOWER = 2
+    CONNECTOR = 3
 
 
 @dataclass
@@ -12,6 +19,7 @@ class LoRAMapping:
     index_mapping: tuple[int, ...]
     prompt_mapping: tuple[int, ...]
     is_prefill: bool = False
+    type: LoRAMappingType = LoRAMappingType.LANGUAGE
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
