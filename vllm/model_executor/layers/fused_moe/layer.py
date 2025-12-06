@@ -5,7 +5,15 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Literal, cast, get_args, overload
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Protocol,
+    TypeAlias,
+    cast,
+    get_args,
+    overload,
+)
 
 import torch
 import torch.nn.functional as F
@@ -32,15 +40,24 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    grouped_topk,
+    zero_experts_compute_triton,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
+    rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -56,42 +73,37 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-if current_platform.is_cuda_alike():
-    from .fused_moe import eplb_map_to_physical_and_record, fused_experts
+if TYPE_CHECKING:
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeType,
+    )
 else:
-    fused_experts = None  # type: ignore
-    FusedMoEPermuteExpertsUnpermute = object  # type: ignore
-    FusedMoEPrepareAndFinalize = object  # type: ignore
 
-    def _eplb_map_to_physical_and_record(
+    class _NaiveEPDPPrepareAndFinalizeType(Protocol): ...
+
+
+NaiveEPDPPrepareAndFinalizeCls: TypeAlias = type[_NaiveEPDPPrepareAndFinalizeType]
+NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeCls | None = None
+
+if current_platform.is_cuda_alike():
+    from .fused_moe import eplb_map_to_physical_and_record
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeClass,
+    )
+
+    NaiveEPDPPrepareAndFinalize = _NaiveEPDPPrepareAndFinalizeClass
+else:
+
+    def eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
+        _expert_load_view: torch.Tensor,
+        _logical_to_physical_map: torch.Tensor,
+        _logical_replica_count: torch.Tensor,
+        _indices_type: torch.dtype | None,
     ) -> torch.Tensor:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
 
-    eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-    rocm_aiter_grouped_topk,
-)
-
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
-
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
-from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-    UnquantizedFusedMoEMethod,
-)
 
 logger = init_logger(__name__)
 
@@ -567,6 +579,7 @@ class FusedMoE(CustomOp):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
+            is_sequence_parallel=self.is_sequence_parallel,
             in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
@@ -1922,9 +1935,32 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
+        # If there are shared experts but we are not using a modular kernel, the
+        # shared experts must be called here
+        if has_separate_shared_experts:
+            assert self.shared_experts is not None
+
+            if self.shared_experts_stream is not None:
+                # Clone BEFORE switching streams to avoid race condition
+                # where routed_expert kernel may mutate hidden_states.
+                hidden_states_clone = hidden_states.clone()
+                self.shared_experts_stream.wait_stream(current_stream())
+
+                # Run shared experts in parallel on a separate stream
+                with torch.cuda.stream(self.shared_experts_stream):
+                    shared_output = self.shared_experts(hidden_states_clone)
+
+                # Record that the clone will be used by shared_experts_stream
+                # to avoid gc issue from deallocation of hidden_states_clone
+                # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+                # NOTE: we dont need shared_output.record_stream(current_stream())
+                # because we synch the streams before using shared_output.
+                hidden_states_clone.record_stream(self.shared_experts_stream)
+
+            else:
+                shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
 
         ctx = get_forward_context()
         sp_ctx = (
@@ -1933,9 +1969,27 @@ class FusedMoE(CustomOp):
             else nullcontext()
         )
 
+        modular_prepare_finalize = None
+        if isinstance(self.quant_method, FusedMoEModularMethod):
+            modular_prepare_finalize = self.quant_method.fused_experts.prepare_finalize
+
+        do_naive_dispatch = False
+        naive_prepare_finalize_cls = NaiveEPDPPrepareAndFinalize
+        if (
+            self.dp_size > 1
+            and modular_prepare_finalize is not None
+            and naive_prepare_finalize_cls is not None
+            and isinstance(
+                modular_prepare_finalize,
+                cast(type[object], naive_prepare_finalize_cls),
+            )
+        ):
+            do_naive_dispatch = True
+
         with sp_ctx:
-            if do_naive_dispatch_combine:
-                hidden_states_combined, router_logits = get_ep_group().dispatch(
+            # Matrix multiply.
+            if do_naive_dispatch:
+                hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
             # Run shared experts before matrix multiply.
@@ -1957,12 +2011,9 @@ class FusedMoE(CustomOp):
                     dim=0,
                 )
 
-            # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=hidden_states_combined
-                if do_naive_dispatch_combine
-                else hidden_states,
+                x=hidden_states,
                 router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
@@ -2004,32 +2055,25 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+
+            if (
+                self.zero_expert_num is not None
+                and self.zero_expert_num > 0
+                and self.shared_experts is None
+            ):
                 assert isinstance(final_hidden_states, tuple)
                 final_hidden_states, zero_expert_result = final_hidden_states
-
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
-                if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
-
-                if self.pcp_size > 1:
-                    states = get_pcp_group().reduce_scatter(
-                        states,
-                        dim=0,
-                    )
-
-                return states
 
             if self.shared_experts is not None:
                 return (
                     final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
+                    final_hidden_states[1],
                 )
             elif self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, torch.Tensor)
-                return (combine_output(final_hidden_states), zero_expert_result)
+                return (final_hidden_states, zero_expert_result)
             else:
-                return combine_output(final_hidden_states)
+                return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(

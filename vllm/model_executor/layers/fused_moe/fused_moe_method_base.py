@@ -56,9 +56,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(
-            self.moe, self.moe_quant_config, routing_tables
-        )
+        prepare_finalize = maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+
+        if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
+            from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
+
+            prepare_finalize = NaiveEPDPPrepareAndFinalize(
+                is_sequence_parallel=self.moe.is_sequence_parallel,
+                ep_size=self.moe.ep_size,
+            )
+
+        return prepare_finalize
 
     def select_gemm_impl(
         self,
