@@ -234,8 +234,10 @@ class CudaPlatformBase(Platform):
                 )
 
         scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
         if (
-            model_config.is_mm_prefix_lm
+            model_config is not None
+            and model_config.is_mm_prefix_lm
             and scheduler_config.is_multimodal_model
             and not scheduler_config.disable_chunked_mm_input
         ):
