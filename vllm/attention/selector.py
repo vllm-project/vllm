@@ -27,6 +27,7 @@ def get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    use_mm_prefix: bool = False,
     attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -52,6 +53,7 @@ def get_attn_backend(
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
+        use_mm_prefix=use_mm_prefix,
         attn_type=attn_type,
     )
 
@@ -66,6 +68,7 @@ def _cached_get_attn_backend(
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
+    use_mm_prefix: bool = False,
     attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
@@ -87,6 +90,7 @@ def _cached_get_attn_backend(
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             attn_type,
         )
     else:
@@ -99,6 +103,7 @@ def _cached_get_attn_backend(
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             attn_type,
         )
     if not attention_cls:
