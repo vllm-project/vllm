@@ -24,7 +24,11 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -300,6 +304,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -437,6 +443,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
+                    self._raise_if_error(finish_reason, request_id)
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -498,8 +506,11 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
+            logger.exception("Error in completion stream generator.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
@@ -530,6 +541,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                self._raise_if_error(output.finish_reason, request_id)
+
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
