@@ -54,7 +54,3 @@ The main script generates several log files:
 ## 3. KV Cache Sharing
 
 The `kv_cache_sharing_lmcache_v1.py` example demonstrates how to share KV caches between vLLM v1 instances.
-
-## 4. Disaggregated Prefill in vLLM v0
-
-The `disaggregated_prefill_lmcache_v0.py` provides an example of how to run disaggregated prefill in vLLM v0.
