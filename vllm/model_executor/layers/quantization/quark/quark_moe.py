@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
-    mxfp4_w4a16_moe_quant_config,
+    ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
+    OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -434,8 +435,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.static_input_scales = not self.input_quant.get("is_dynamic")
 
         self.weight_dtype = self.weight_quant["dtype"].replace("fp", "mxfp")
-        self.input_dtype = self.input_quant["dtype"]
+        self.input_dtype = self.input_quant["dtype"].replace("fp", "mxfp")
         self.fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype
+        )
 
         if self.static_input_scales:
             raise NotImplementedError(
@@ -445,11 +450,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
 
-        self.emulate = not current_platform.supports_mx() or not self.use_rocm_aiter_moe
+        self.emulate = not current_platform.supports_mx() or not (
+            self.use_rocm_aiter_moe and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+        )
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
                 f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
+                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
@@ -570,10 +578,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        # The default mxfp4 recipe is with activation fp16/bf16 dynamic quantzied
-        # and weight mxfp4 offline quantized.
-        return mxfp4_w4a16_moe_quant_config(
-            layer.w13_weight_scale, layer.w2_weight_scale
+        return ocp_mx_moe_quant_config(
+            quant_dtype=self.input_dtype,
+            weight_dtype=self.weight_dtype,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=None,
         )
 
     @property
@@ -613,22 +625,21 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 rocm_aiter_fused_experts,
             )
 
-            if hasattr(torch, "float4_e2m1fn_x2"):
-                w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
-                w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
-            else:
-                w13_weight = layer.w13_weight
-                w2_weight = layer.w2_weight
+            # if hasattr(torch, "float4_e2m1fn_x2"):
+            #     w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
+            #     w2_weight = layer.w2_weight.view(torch.float4_e2m1fn_x2)
+            # else:
+            #     w13_weight = layer.w13_weight
+            #     w2_weight = layer.w2_weight
 
             out = rocm_aiter_fused_experts(
                 x,
-                w13_weight,
-                w2_weight,
+                layer.w13_weight,
+                layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation=activation,
-                quant_config=self.get_fused_moe_quant_config(layer),
-                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts

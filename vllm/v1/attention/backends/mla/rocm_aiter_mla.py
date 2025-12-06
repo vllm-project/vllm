@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionLayer, MultipleOf
 from vllm.config import VllmConfig
@@ -18,7 +19,12 @@ from vllm.v1.attention.backends.mla.common import (
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.distributed.parallel_state import get_dcp_group, is_global_first_rank
+from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.platforms import current_platform
+from typing import ClassVar, Generic, TypeVar
 
+M = TypeVar("M", bound=MLACommonMetadata)
 
 class AiterMLABackend(MLACommonBackend):
     @staticmethod
@@ -200,6 +206,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             kv_sharing_target_layer_name,
             **mla_args,
         )
+        self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_fp4bmm_enabled()
         assert num_heads == 16 or num_heads == 128, (
             f"Aiter MLA only supports 16 or 128 number of heads.\n"
             f"Provided {num_heads} number of heads.\n"
@@ -236,22 +243,32 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         layer: AttentionLayer,
+        mla_output_zeros: torch.Tensor | None = None,
+        decode_q_cat: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if type(q) is tuple:
+        if decode_q_cat is not None:
+            q = decode_q_cat
+        elif type(q) is tuple:
             q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
-        o = torch.zeros(
-            B,
-            self.num_heads,
-            self.kv_lora_rank,
-            dtype=attn_metadata.decode.attn_out_dtype,
-            device=q.device,
-        )
+        if mla_output_zeros is not None:
+            o = mla_output_zeros
+            assert o.shape[0] == B, f"{o.shape[0]=} {B=}"
+            assert o.shape[1] == self.num_heads, f"{o.shape[1]=} {self.num_heads=}"
+            assert o.shape[2] == self.kv_lora_rank, f"{o.shape[2]=} {self.kv_lora_rank=}"
+        else:
+            o = torch.zeros(
+                B,
+                self.num_heads,
+                self.kv_lora_rank,
+                dtype=attn_metadata.decode.attn_out_dtype,
+                device=q.device,
+            )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
@@ -273,3 +290,239 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
         return o, None
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,  # key in unified attn
+        k_pe: torch.Tensor,  # value in unified attn
+        kv_cache: torch.Tensor,
+        attn_metadata: M,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for MLACommonImpl"
+            )
+
+        if attn_metadata is None:
+            # During the profile run try to simulate to worse case output size
+            # for `self.kv_b_proj(kv_c_normed)` in `_compute_prefill_context`
+            # since this can be large
+            _ = torch.empty(
+                (
+                    self.chunked_prefill_workspace_size,
+                    self.num_heads,
+                    self.qk_nope_head_dim + self.v_head_dim,
+                ),
+                device=k_c_normed.device,
+                dtype=k_c_normed.dtype,
+            )
+
+            # The zero fill is required when used with DP + EP
+            # to ensure all ranks within a DP group compute the
+            # same expert outputs.
+            return output.fill_(0)
+
+        if self.dcp_world_size is None:
+            self.dcp_world_size = get_dcp_group().world_size
+
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+
+        num_actual_toks = attn_metadata.num_actual_tokens
+
+        # Inputs and outputs may be padded for CUDA graphs
+        output_padded = output
+        output = output[:num_actual_toks, ...]
+        q = q[:num_actual_toks, ...]
+        k_c_normed = k_c_normed[:num_actual_toks, ...]
+        k_pe = k_pe[:num_actual_toks, ...]
+
+        assert (
+            attn_metadata.num_decodes is not None
+            and attn_metadata.num_prefills is not None
+            and attn_metadata.num_decode_tokens is not None
+        )
+
+        has_decode = attn_metadata.num_decodes > 0
+        has_prefill = attn_metadata.num_prefills > 0
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+        mla_output_zeros = None
+        decode_q_cat = None
+        # write the latent and rope to kv cache
+        if kv_cache.numel() > 0:
+            if positions is not None:
+                # positions is not None entails that Q and K are not RoPE embedded yet, therefore, fused_qk_rope_cat_and_cache_mla is called
+                assert hasattr(self, "rotary_emb"), f"rotary_emb not found in {self}"
+                from aiter.ops.triton.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
+                cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim = -1)
+                is_neox = self.rotary_emb.is_neox_style
+                q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+                q_out_dtype = current_platform.fp8_dtype() if fp8_attention else q.dtype
+                if self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled:
+                    decode_q_cat = torch.empty((num_decode_tokens, self.num_heads, self.W_K.shape[1] + self.qk_rope_head_dim), dtype = q_out_dtype, device=q.device)
+                if fp8_attention:
+                    kv_cache_og_dtype = kv_cache.dtype
+                    kv_cache = kv_cache.view(q_out_dtype)          
+                fused_output = fused_qk_rope_cat_and_cache_mla(
+                    q_nope,
+                    q_pe,
+                    k_c_normed.unsqueeze(1),
+                    k_pe,
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    is_neox,
+                    num_decode_toks_for_zeros=num_decode_tokens,
+                    apply_scale=(k_pe.dtype != kv_cache.dtype),
+                    q_out=None,
+                    decode_q_pe_out = decode_q_cat[... , -self.qk_rope_head_dim:] if self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled else None,
+                    k_pe_out=k_pe,
+                )
+                if num_decode_tokens > 0:
+                    q, _, k_pe, kv_cache, mla_output_zeros = fused_output
+                else:
+                    q, _, k_pe, kv_cache = fused_output
+                if fp8_attention:
+                    kv_cache = kv_cache.view(kv_cache_og_dtype)
+            else:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
+
+        decode_q = q[:num_decode_tokens]
+
+        prefill_q = q[num_decode_tokens:]
+        prefill_k_pe = k_pe[num_decode_tokens:]
+        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
+
+        if fp8_attention:
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+        if has_prefill:
+            self._forward_prefill(
+                prefill_q,
+                prefill_k_c_normed,
+                prefill_k_pe,
+                kv_cache,
+                attn_metadata,
+                layer._k_scale,
+                output=output[num_decode_tokens:],
+            )
+
+        if has_decode:
+            assert attn_metadata.decode is not None
+
+            decode_q_nope, decode_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+
+            if self.q_pad_num_heads is not None:
+                B, N, L = decode_q_pe.shape
+                decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                decode_pe_padded.resize_((B, N, L))
+                decode_pe_padded.copy_(decode_q_pe)
+                decode_q_pe = decode_pe_padded
+
+            if self.is_aiter_triton_fp4_bmm_enabled:
+                #x = x.view(-1, self.num_heads, self.kv_lora_rank)
+                decode_ql_nope = decode_q_cat[... , :self.W_K.shape[1]] if (kv_cache.numel() > 0 and positions is not None) else None
+                # decode_ql_nope = batched_gemm_a16wfp4(
+                #     decode_q_nope,
+                #     self.W_K,
+                #     self.W_K_scale,
+                #     y=decode_ql_nope,
+                #     transpose_bm=True,
+                #     prequant=True,
+                #     y_scale=layer._q_scale if fp8_attention else None,
+                # )
+                # decode_ql_nope = decode_ql_nope.transpose(0, 1)
+            elif self.is_aiter_triton_fp8_bmm_enabled:
+                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
+                decode_ql_nope = decode_q_cat[... , :self.W_K.shape[1]] if (kv_cache.numel() > 0 and positions is not None) else None
+                decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                    decode_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    group_size=128,
+                    YQ=decode_ql_nope,
+                    transpose_bm=True,
+                )
+            else:
+                # Pads the head_dim if necessary (for the underlying kernel)
+                N, B, P = decode_q_nope.shape
+                _, _, L = self.W_UK_T.shape
+
+                if self.q_pad_num_heads is not None:
+                    decode_ql_nope = decode_q_nope.new_empty(
+                        (self.q_pad_num_heads, B, L)
+                    )
+                    decode_ql_nope.resize_((N, B, L))
+                else:
+                    decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+
+                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
+
+                # Convert from (N, B, L) to (B, N, L)
+                decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+            if fp8_attention and not (self.is_aiter_triton_fp4_bmm_enabled or self.is_aiter_triton_fp8_bmm_enabled):
+                ql_nope_shape = decode_ql_nope.shape
+                decode_ql_nope, _ = ops.scaled_fp8_quant(
+                    decode_ql_nope.reshape(
+                        [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                    ),
+                    layer._q_scale,
+                )
+                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+                q_pe_shape = decode_q_pe.shape
+                decode_q_pe, _ = ops.scaled_fp8_quant(
+                    decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                    layer._q_scale,
+                )
+                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+
+            decode_q = (decode_ql_nope, decode_q_pe)
+            if self.dcp_world_size > 1:
+                assert not fp8_attention, "DCP not support fp8 kvcache now."
+                # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
+                decode_q = torch.cat(decode_q, dim=-1)
+                # decode_q do allgather in head dim.
+                decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
+            # call decode attn
+            attn_out, lse = self._forward_decode(
+                decode_q, kv_cache, attn_metadata, layer, mla_output_zeros=mla_output_zeros, decode_q_cat=decode_q_cat
+            )
+
+            # correct dcp attn_out with lse.
+            if self.dcp_world_size > 1:
+                attn_out = cp_lse_ag_out_rs(
+                    attn_out,
+                    lse,
+                    get_dcp_group(),
+                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                )
+
+            # v_up projection
+            self._v_up_proj(attn_out, out=output[:num_decode_tokens])
+        return output_padded

@@ -50,6 +50,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -265,11 +266,15 @@ class DeepseekV2MoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
-        if getattr(config, "topk_method", None) == "noaux_tc":
+        self.is_fusion_triton_shared_experts_enabled = rocm_aiter_ops.is_fusion_triton_shared_experts_enabled()
+        if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts, dtype=torch.float32)
-            )
+                torch.empty(config.n_routed_experts, dtype=torch.float32))
+            e_score_correction_bias = self.gate.e_score_correction_bias
+            if self.is_fusion_triton_shared_experts_enabled:
+                e_score_correction_bias = self.gate.e_score_correction_bias.to(torch.bfloat16)
         else:
+            e_score_correction_bias = None
             self.gate.e_score_correction_bias = None
 
         # Load balancing settings.
@@ -290,9 +295,45 @@ class DeepseekV2MoE(nn.Module):
         self.is_fusion_moe_shared_experts_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
-            self.shared_experts = None
-        else:
+        if self.is_fusion_triton_shared_experts_enabled:
+            self.use_triton_fused_shared_expert_fp8 = False
+            self.use_triton_fused_shared_expert_fp4 = False
+            self.rocm_aiter_triton_fused_shared_expert_func = None
+            self.rocm_aiter_triton_fused_down_proj_mul_add_func = None
+            if self.is_fusion_triton_shared_experts_enabled:
+                assert config.n_shared_experts is not None, f"config.n_shared_experts == None is detected in {self.__class__.__name__} please turn off VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS"
+                if quant_config.get_name() == 'fp8':
+                    self.use_triton_fused_shared_expert_fp8 = True
+                    self.rocm_aiter_triton_fused_shared_expert_func = torch.ops.vllm.rocm_aiter_triton_fused_shared_expert_fp8
+                    self.rocm_aiter_triton_fused_down_proj_mul_add_func = torch.ops.vllm.rocm_aiter_triton_fused_down_proj_mul_add_fp8
+                elif quant_config.get_name() == 'quark':
+                    self.use_triton_fused_shared_expert_fp4 = True
+                    self.rocm_aiter_triton_fused_shared_expert_func = torch.ops.vllm.rocm_aiter_triton_fused_shared_expert_fp4
+                    self.rocm_aiter_triton_fused_down_proj_mul_add_func = torch.ops.vllm.rocm_aiter_triton_fused_down_proj_mul_add_fp4
+                else:
+                    raise NotImplementedError(f"{quant_config.get_name()=} which is not supported for VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS")
+                logger.info(f"[Aiter] {self.__class__.__name__} is registered with {self.rocm_aiter_triton_fused_shared_expert_func.__name__} and {self.rocm_aiter_triton_fused_down_proj_mul_add_func.__name__}")
+
+            self.experts = FusedMoE(
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=getattr(config, "n_group", 1),
+                topk_group=getattr(config, "topk_group", 1),
+                prefix=f"{prefix}.experts",
+                scoring_func=getattr(config, "scoring_func", "softmax"),
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,
+            )
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
 
             self.shared_experts = DeepseekV2MLP(
@@ -304,37 +345,58 @@ class DeepseekV2MoE(nn.Module):
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
             )
+        else:
+            if config.n_shared_experts is None:
+                self.shared_experts = None
+            else:
+                intermediate_size = config.moe_intermediate_size * config.n_shared_experts
 
-        self.experts = SharedFusedMoE(
-            shared_experts=self.shared_experts,
-            gate=self.gate,
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=getattr(config, "n_group", 1),
-            topk_group=getattr(config, "topk_group", 1),
-            prefix=f"{prefix}.experts",
-            scoring_func=getattr(config, "scoring_func", "softmax"),
-            # we do scaling outside, set factor to 1.0 to avoid double mul
-            # aiter applies routed_scaling_factor internally
-            routed_scaling_factor=1.0
-            if not self.is_rocm_aiter_moe_enabled
-            else self.routed_scaling_factor,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=config.n_shared_experts
-            if self.is_fusion_moe_shared_experts_enabled
-            else None,
+                self.shared_experts = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    is_sequence_parallel=self.is_sequence_parallel,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
+
+            self.experts = SharedFusedMoE(
+                shared_experts=self.shared_experts,
+                gate=self.gate,
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=getattr(config, "n_group", 1),
+                topk_group=getattr(config, "topk_group", 1),
+                prefix=f"{prefix}.experts",
+                scoring_func=getattr(config, "scoring_func", "softmax"),
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                # aiter applies routed_scaling_factor internally
+                routed_scaling_factor=1.0
+                if not self.is_rocm_aiter_moe_enabled
+                else self.routed_scaling_factor,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,
+                n_shared_experts=config.n_shared_experts
+                if self.is_fusion_moe_shared_experts_enabled
+                else None,
+                skip_shared_experts = self.is_fusion_triton_shared_experts_enabled,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: tuple | torch.Tensor) -> torch.Tensor:
+        if isinstance(hidden_states, tuple):
+            hidden_states_shared, hidden_states = hidden_states
+        else:
+            hidden_states_shared = hidden_states
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -345,34 +407,70 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
+        if self.is_fusion_triton_shared_experts_enabled:
+            # assert isinstance(hidden_states_shared, tuple), f"hidden_states_shared must be a tuple of quantized acitvation and scales"
+            shared_output = None
+            shared_output_q, shared_output_s = None, None
+            hidden_states_shared, hidden_states_shared_scale = hidden_states_shared
+            shared_output_q, shared_output_s, router_logits = (
+                self.rocm_aiter_triton_fused_shared_expert_func(
+                    hidden_states_shared=hidden_states_shared,
+                    hidden_states_shared_scale=hidden_states_shared_scale,
+                    weight_gate_up=self.shared_experts.gate_up_proj.weight,
+                    weight_scale_gate_up=self.shared_experts.gate_up_proj.weight_scale,
+                    hidden_states_moe_gate=hidden_states,
+                    weight_moe_gate=self.gate.weight,
+                    bias_shared=(
+                        self.shared_experts.gate_up_proj.bias
+                        if not self.shared_experts.gate_up_proj.skip_bias_add
+                        else None
+                    ),
+                    bias_moe_gate=(
+                        self.gate.bias if not self.gate.skip_bias_add else None
+                    ),
+                )
             )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
+            # shared_output = self.shared_experts(hidden_states)
+            # router_logits, _ = self.gate(hidden_states)
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
+        else:
+            if self.experts.is_internal_router:
+                # In this case, the gate/router runs inside the FusedMoE class
+                fused_moe_out = self.experts(
+                    hidden_states=hidden_states, router_logits=hidden_states
+                )
+            else:
+                # router_logits: (num_tokens, n_experts)
+                router_logits, _ = self.gate(hidden_states)
+                fused_moe_out = self.experts(
+                    hidden_states=hidden_states, router_logits=router_logits
+                )
 
-        shared_output, final_hidden_states = fused_moe_out
-        if self.shared_experts is None:
-            assert shared_output is None
+            shared_output, final_hidden_states = fused_moe_out
+            if self.shared_experts is None:
+                assert shared_output is None
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
-        if hidden_states.dtype != torch.float16:
-            if not self.is_rocm_aiter_moe_enabled:
-                final_hidden_states *= self.routed_scaling_factor
-        elif self.shared_experts is not None:
-            assert shared_output is not None
-            shared_output *= 1.0 / self.routed_scaling_factor
+        if self.is_fusion_triton_shared_experts_enabled and hidden_states.dtype != torch.float16:
+            assert shared_output is None
+            final_hidden_states = self.rocm_aiter_triton_fused_down_proj_mul_add_func(shared_output_q, shared_output_s, self.shared_experts.down_proj.weight, self.shared_experts.down_proj.weight_scale, self.routed_scaling_factor, final_hidden_states)
+            # assert shared_output is not None
+            # final_hidden_states *= self.routed_scaling_factor
+            # final_hidden_states += shared_output
+        else:
+            if hidden_states.dtype != torch.float16:
+                if not self.is_rocm_aiter_moe_enabled:
+                    final_hidden_states *= self.routed_scaling_factor
+            elif self.shared_experts is not None:
+                assert shared_output is not None
+                shared_output *= 1.0 / self.routed_scaling_factor
 
-        if self.shared_experts is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
+            if self.shared_experts is not None:
+                assert shared_output is not None
+                final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -1125,6 +1223,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
+        self.is_fusion_triton_shared_experts_enabled = rocm_aiter_ops.is_fusion_triton_shared_experts_enabled()
+        self.use_triton_fused_rmsnorm_fp8_quant = False
+        self.use_triton_fused_rmsnorm_fp4_quant = False
+        if self.is_fusion_triton_shared_experts_enabled:
+            if quant_config.get_name() == 'fp8':
+                self.use_triton_fused_rmsnorm_fp8_quant = True
+            elif quant_config.get_name() == 'quark':
+                self.use_triton_fused_rmsnorm_fp4_quant = True
+            else:
+                raise NotImplementedError(f"{quant_config.get_name()=} which is not supported for VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS")
+            logger.info(f"[Aiter] {self.__class__.__name__} has {quant_config.get_name()=}")
 
         # verify MLA attention specific fields
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
@@ -1221,7 +1330,34 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1.0 / self.routed_scaling_factor
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        
+        if self.is_fusion_triton_shared_experts_enabled and isinstance(self.mlp, DeepseekV2MoE):
+            weight = self.post_attention_layernorm.weight
+            eps = self.post_attention_layernorm.variance_epsilon
+            if self.use_triton_fused_rmsnorm_fp8_quant:
+                from vllm._aiter_ops import AITER_FP8_DTYPE
+                from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+                (hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant, _, residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            group_size=128,
+                                                            dtype_quant=AITER_FP8_DTYPE, 
+                                                            res1=residual,
+                                                            output_unquantized_inp1=isinstance(self.mlp, DeepseekV2MoE))
+            else:
+                from aiter.ops.triton.fused_mxfp4_quant import fused_rms_mxfp4_quant
+                (hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant, _, residual = fused_rms_mxfp4_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            res1=residual,
+                                                            shuffle=False,
+                                                            scale_shuffle_padding=False,
+                                                            output_unquantized_inp1=isinstance(self.mlp, DeepseekV2MoE))
+
+            if isinstance(self.mlp, DeepseekV2MoE):
+                hidden_states = ((hidden_states_quant, hidden_states_quant_scales), hidden_states_unquant)
+            else:
+                hidden_states = (hidden_states_quant, hidden_states_quant_scales)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:

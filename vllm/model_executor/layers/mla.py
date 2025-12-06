@@ -8,7 +8,7 @@ from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
-
+from vllm.platforms import current_platform
 
 @dataclass
 class MLAModules:
@@ -103,6 +103,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            rotary_emb = self.rotary_emb if current_platform.is_rocm() else None
         )
 
         self.prefix = prefix
@@ -150,7 +151,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
+        if self.rotary_emb is not None and not current_platform.is_rocm():
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
@@ -163,12 +164,13 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
+        positions_rocm = None if not current_platform.is_rocm() else positions
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
-        )
+            positions=positions_rocm)
 
         return self.o_proj(attn_out)[0]
 

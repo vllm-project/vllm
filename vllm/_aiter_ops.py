@@ -652,7 +652,154 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     )
     return x_fp8, out_bs
 
+def _rocm_aiter_triton_fused_shared_expert_fp8_impl(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_gate_up: torch.Tensor,
+    weight_scale_gate_up: torch.Tensor,
+    hidden_states_moe_gate: torch.Tensor,
+    weight_moe_gate: torch.Tensor,
+    bias_shared: torch.Tensor,
+    bias_moe_gate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_gemm_a8w8_blockscale_a16w16 import fused_gemm_a8w8_blockscale_a16w16
+    from aiter.ops.triton.fused_fp8_quant import fused_reduce_act_mul_fp8_group_quant
+    
+    shared_output, router_logits = fused_gemm_a8w8_blockscale_a16w16(hidden_states_shared, weight_gate_up, hidden_states_shared_scale, weight_scale_gate_up, hidden_states_moe_gate, weight_moe_gate, 
+                                    bias_fp8=bias_shared, bias_bf16=bias_moe_gate, dtype=hidden_states_moe_gate.dtype, skip_reduce=True)
+    if shared_output.dim() == 3:
+        (shared_output_q, shared_output_s), router_logits = fused_reduce_act_mul_fp8_group_quant(shared_output, activation="silu", x2=router_logits, group_size=128, dtype_quant=AITER_FP8_DTYPE)
+    else:
+        (shared_output_q, shared_output_s), _ = fused_reduce_act_mul_fp8_group_quant(shared_output, activation="silu", x2=None, group_size=128, dtype_quant=AITER_FP8_DTYPE)
+    return shared_output_q, shared_output_s, router_logits
 
+def _rocm_aiter_triton_fused_shared_expert_fp8_fake(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_gate_up: torch.Tensor,
+    weight_scale_gate_up: torch.Tensor,
+    hidden_states_moe_gate: torch.Tensor,
+    weight_moe_gate: torch.Tensor,
+    bias_shared: torch.Tensor,
+    bias_moe_gate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M = hidden_states_shared.shape[0]
+    N = weight_gate_up.shape[0]
+    N_moe = weight_moe_gate.shape[0]
+    device = hidden_states_shared.device
+    group_size = 128
+    assert N % 2 == 0
+    N_half = N // 2
+    assert N_half == N_moe, f"{weight_moe_gate.shape}"
+    shared_output_q = torch.empty((M, N_half), dtype=AITER_FP8_DTYPE, device=device)
+    shared_output_s = torch.empty((M, (N_half + group_size - 1) // group_size), dtype=torch.float32, device=device)
+    router_logits = torch.empty((M, N_moe), dtype=hidden_states_moe_gate.dtype, device=device)
+    return shared_output_q, shared_output_s, router_logits
+
+
+def _rocm_aiter_triton_fused_down_proj_mul_add_fp8_impl(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_down_proj: torch.Tensor,
+    weight_scale_down_proj: torch.Tensor,
+    routed_scaling_factor: float,
+    final_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    from aiter.ops.triton.fused_gemm_a8w8_blockscale_mul_add import fused_gemm_a8w8_blockscale_mul_add
+
+    out = fused_gemm_a8w8_blockscale_mul_add(hidden_states_shared, weight_down_proj, hidden_states_shared_scale, weight_scale_down_proj, routed_scaling_factor, final_hidden_states, fuse_type=1)
+    return out
+
+
+def _rocm_aiter_triton_fused_down_proj_mul_add_fp8_fake(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_down_proj: torch.Tensor,
+    weight_scale_down_proj: torch.Tensor,
+    routed_scaling_factor: float,
+    final_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    out = torch.empty_like(final_hidden_states)
+    return out
+
+def _rocm_aiter_triton_fused_shared_expert_fp4_impl(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_gate_up: torch.Tensor,
+    weight_scale_gate_up: torch.Tensor,
+    hidden_states_moe_gate: torch.Tensor,
+    weight_moe_gate: torch.Tensor,
+    bias_shared: torch.Tensor,
+    bias_moe_gate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_gemm_afp4wfp4_a16w16 import fused_gemm_afp4wfp4_a16w16
+    from aiter.ops.triton.fused_mxfp4_quant import fused_reduce_act_mul_and_mxfp4_quant
+    
+    shared_output, router_logits = fused_gemm_afp4wfp4_a16w16(hidden_states_shared, weight_gate_up, hidden_states_shared_scale, weight_scale_gate_up.T, hidden_states_moe_gate, weight_moe_gate, 
+                                    is_fp4_preshuffled=False, bias_fp4=bias_shared, bias_bf16=bias_moe_gate, dtype=hidden_states_moe_gate.dtype, skip_reduce=True)
+    if shared_output.dim() == 3:
+        (shared_output_q, shared_output_s), router_logits = fused_reduce_act_mul_and_mxfp4_quant(shared_output, activation="silu", x2=router_logits, shuffle=False, scale_shuffle_padding=False, dtype=hidden_states_moe_gate.dtype)
+    else:
+        (shared_output_q, shared_output_s), _ = fused_reduce_act_mul_and_mxfp4_quant(shared_output, activation="silu", x2=None, shuffle=False, scale_shuffle_padding=False, dtype=hidden_states_moe_gate.dtype)
+
+    # assert bias_shared is None
+    # shared_output = gemm_afp4wfp4(hidden_states_shared, weight_gate_up, hidden_states_shared_scale, weight_scale_gate_up.T)
+    # router_logits = gemm_a16w16(hidden_states_moe_gate, weight_moe_gate, bias=bias_moe_gate) 
+    # shared_output_q, shared_output_s = act_mul_and_mxfp4_quant(shared_output, activation="silu", shuffle=False, scale_shuffle_padding=False)
+    
+    return shared_output_q, shared_output_s, router_logits
+
+
+def _rocm_aiter_triton_fused_shared_expert_fp4_fake(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_gate_up: torch.Tensor,
+    weight_scale_gate_up: torch.Tensor,
+    hidden_states_moe_gate: torch.Tensor,
+    weight_moe_gate: torch.Tensor,
+    bias_shared: torch.Tensor,
+    bias_moe_gate: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M = hidden_states_shared.shape[0]
+    N = weight_gate_up.shape[0]
+    N_moe = weight_moe_gate.shape[0]
+    device = hidden_states_shared.device
+    group_size = 32
+    assert N % 4 == 0
+    N_half = N // 2
+    assert N_half == 256, f"{weight_gate_up.shape}"
+    assert N_half == N_moe, f"{weight_moe_gate.shape}"
+    shared_output_q = torch.empty((M, N_half // 2), dtype=torch.uint8, device=device)
+    shared_output_s = torch.empty((M, (N_half + group_size - 1) // group_size), dtype=torch.uint8, device=device)
+    router_logits = torch.empty((M, N_moe), dtype=hidden_states_moe_gate.dtype, device=device)
+    return shared_output_q, shared_output_s, router_logits
+
+
+def _rocm_aiter_triton_fused_down_proj_mul_add_fp4_impl(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_down_proj: torch.Tensor,
+    weight_scale_down_proj: torch.Tensor,
+    routed_scaling_factor: float,
+    final_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    from aiter.ops.triton.fused_gemm_afp4wfp4_mul_add import fused_gemm_afp4wfp4_mul_add
+
+    out = fused_gemm_afp4wfp4_mul_add(hidden_states_shared, weight_down_proj, hidden_states_shared_scale, weight_scale_down_proj.T, routed_scaling_factor, final_hidden_states, fuse_type=1)
+    return out
+
+
+def _rocm_aiter_triton_fused_down_proj_mul_add_fp4_fake(
+    hidden_states_shared: torch.Tensor,
+    hidden_states_shared_scale: torch.Tensor,
+    weight_down_proj: torch.Tensor,
+    weight_scale_down_proj: torch.Tensor,
+    routed_scaling_factor: float,
+    final_hidden_states: torch.Tensor,
+) -> torch.Tensor:
+    out = torch.empty_like(final_hidden_states)
+    return out
+    
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -667,9 +814,11 @@ class rocm_aiter_ops:
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+    _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    _TRITON_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @classmethod
@@ -706,6 +855,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
+    
+    @classmethod
+    @if_aiter_supported
+    def is_fusion_triton_shared_experts_enabled(cls) -> bool:
+        return cls.is_fused_moe_enabled() and cls._TRITON_SHARED_EXPERTS_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -735,6 +889,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fp8bmm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
+    
+    @classmethod
+    @if_aiter_supported
+    def is_fp4bmm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
 
     @classmethod
     @if_aiter_supported
@@ -874,6 +1033,40 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
             )
+            
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_fused_shared_expert_fp8",
+                op_func=_rocm_aiter_triton_fused_shared_expert_fp8_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_fused_shared_expert_fp8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_fused_down_proj_mul_add_fp8",
+                op_func=_rocm_aiter_triton_fused_down_proj_mul_add_fp8_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_fused_down_proj_mul_add_fp8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_fused_shared_expert_fp4",
+                op_func=_rocm_aiter_triton_fused_shared_expert_fp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_fused_shared_expert_fp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+            
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_fused_down_proj_mul_add_fp4",
+                op_func=_rocm_aiter_triton_fused_down_proj_mul_add_fp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_fused_down_proj_mul_add_fp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1250,7 +1443,5 @@ class rocm_aiter_ops:
         """
         from aiter.ops.shuffle import shuffle_weight
 
-        return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
-
-
+        return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)    
 rocm_aiter_ops.register_ops_once()

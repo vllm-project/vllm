@@ -117,8 +117,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
+    VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -981,6 +983,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in ("true", "1")
     ),
+    # Whether to use aiter triton fp4 bmm kernel
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "False").lower() in ("true", "1")
+    ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
@@ -990,6 +997,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
+        in ("true", "1")
+    ),
+    # Whether to use aiter fusion triton shared experts ops.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.
