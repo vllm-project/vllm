@@ -883,11 +883,15 @@ def split_decodes_and_prefills(
         return 0, num_reqs, 0, num_tokens
 
     if require_uniform:
+        # check if we are in a padded uniform batch; this is used for full-CGs, some
+        # requests may have a query lenght of 0 but since they are padding its fine
+        # to treat them as decodes (ensures num_decodes matches the captured size)
+        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
+            return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
-        # 0-query len indicates a padded request; leave this at the back
-        # of the batch with the prefills
-        is_prefill = (query_lens > decode_threshold) | (query_lens == 0)
+        is_prefill = query_lens > decode_threshold
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
@@ -899,6 +903,33 @@ def split_decodes_and_prefills(
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
+
+def split_prefill_chunks(
+    seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
+) -> list[tuple[int, int]]:
+    """
+    Split the prefill requests into chunks such that the total sequence length
+    of each chunk is less than or equal to the workspace size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests on CPU.
+        workspace_size: The maximum workspace size (in tokens) per chunk.
+        request_offset: The offset to add to the request indices.
+    Returns:
+        A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
+    """
+    chunk_bounds = []
+    i, n = 0, len(seq_lens_cpu)
+    assert torch.all(seq_lens_cpu <= workspace_size).item()
+
+    while i < n:
+        start, chunk_total = i, 0
+        while i < n and (chunk_total + (s := seq_lens_cpu[i].item())) <= workspace_size:
+            chunk_total += s
+            i += 1
+        chunk_bounds.append((start + request_offset, i + request_offset))
+    return chunk_bounds
 
 
 def reorder_batch_to_split_decodes_and_prefills(
