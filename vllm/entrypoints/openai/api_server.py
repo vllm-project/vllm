@@ -979,7 +979,7 @@ def build_app(args: Namespace) -> FastAPI:
             else:
                 logger.warning(
                     "fastapi-offline is not installed. Falling back to "
-                    "standard FastAPI. Install with: pip install fastapi-offline"
+                    "standard FastAPI. Install with: pip install 'vllm[offline]'"
                 )
                 app = FastAPI(lifespan=lifespan)
         else:
