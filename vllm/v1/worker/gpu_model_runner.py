@@ -1638,7 +1638,6 @@ class GPUModelRunner(
                 dcp_local_seq_lens=dcp_local_seq_lens,
                 dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
             )
-
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, EagleProposer):
                     if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
@@ -2986,7 +2985,10 @@ class GPUModelRunner(
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
+                    self.parallel_config.num_of_microbatches
                 )
+
+                logger.info("jcz ubatch_slices: %s, ubatch_slices_padded: %s", ubatch_slices, ubatch_slices_padded)
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -4022,8 +4024,10 @@ class GPUModelRunner(
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-            should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded
+            should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded,
+            self.vllm_config.parallel_config.num_of_microbatches
         )
+        logger.info("jcz ubatch_slices: %s, ubatch_slices_padded: %s", ubatch_slices, ubatch_slices_padded)
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
@@ -4559,6 +4563,7 @@ class GPUModelRunner(
             # version of the graph
             allow_microbatching = (
                 self.parallel_config.enable_dbo
+                and self.parallel_config.num_of_microbatches > 1
                 and cudagraph_runtime_mode == CUDAGraphMode.FULL
                 and uniform_decode
                 and check_ubatch_thresholds(
@@ -4691,7 +4696,7 @@ class GPUModelRunner(
                     else None,
                     num_metadata_builders=1
                     if not self.parallel_config.enable_dbo
-                    else 2,
+                    else self.parallel_config.num_of_microbatches,
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
