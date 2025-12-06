@@ -253,7 +253,7 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            # TODO: Revert this once issue # is resolved
+            # TODO: [ROCm] Revert this once issue #30167 is resolved
             **(
                 {
                     "mm_processor_kwargs": {
