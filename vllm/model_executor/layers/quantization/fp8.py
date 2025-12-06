@@ -1059,8 +1059,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.rocm_aiter_moe_enabled
-            or self.use_marlin
+            self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
@@ -1092,9 +1091,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
-            "Marlin and ROCm AITER are not supported with all2all yet."
-        )
+        assert not self.use_marlin, "Marlin is not supported with all2all yet."
 
         assert self.moe_quant_config is not None
 
@@ -1121,6 +1118,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
             )
+        elif self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+                AiterExperts,
+            )
+
+            logger.debug(
+                "AiterExperts(%s): per_act_token=%s",
+                self.__class__.__name__,
+                False,
+            )
+            return AiterExperts(
+                quant_config=self.moe_quant_config,
+            )
+
         elif self.moe.is_lora_enabled:
             return TritonExperts(quant_config=self.moe_quant_config)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:

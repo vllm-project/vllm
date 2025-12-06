@@ -98,9 +98,24 @@ Currently, there are no pre-built ROCm wheels.
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-        
 
-4. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
+
+4. If you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
+
+    ```bash
+    git clone https://github.com/ROCm/mori.git
+    cd mori
+    git checkout $MORI_BRANCH_OR_COMMIT
+    git submodule sync; git submodule update --init --recursive
+    MORI_GPU_ARCHS="gfx942;gfx950" python3 install .
+    ```
+
+    !!! note
+        - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
+        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+
+
+5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
     ???+ console "Commands"
 

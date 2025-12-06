@@ -7,20 +7,14 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_aiter
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
-
-
-def is_aiter_found() -> bool:
-    from importlib.util import find_spec
-
-    return find_spec("aiter") is not None
-
 
 # `find_spec` is not torch.compile compatible.
 # In cases where aiter availability might have
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
-IS_AITER_FOUND = is_aiter_found()
+IS_AITER_FOUND = has_aiter()
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -87,6 +81,8 @@ def _rocm_aiter_fused_moe_impl(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -108,6 +104,8 @@ def _rocm_aiter_fused_moe_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        num_local_tokens=num_local_tokens,
+        dtype=output_dtype,
     )
 
 
@@ -125,6 +123,8 @@ def _rocm_aiter_fused_moe_fake(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -723,6 +723,8 @@ class rocm_aiter_ops:
         w2_scale: torch.Tensor | None = None,
         a1_scale: torch.Tensor | None = None,
         a2_scale: torch.Tensor | None = None,
+        num_local_tokens: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -738,6 +740,8 @@ class rocm_aiter_ops:
             w2_scale,
             a1_scale,
             a2_scale,
+            num_local_tokens,
+            output_dtype,
         )
 
     @staticmethod

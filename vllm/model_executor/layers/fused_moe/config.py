@@ -703,6 +703,7 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
+    local_ep_size: int  # number of local ep parallel groups
 
     @property
     def use_all2all_kernels(self):
@@ -722,6 +723,10 @@ class FusedMoEParallelConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
+
+    @property
+    def use_mori_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mori"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -840,6 +845,7 @@ class FusedMoEParallelConfig:
                 ep_rank=0,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
+                local_ep_size=1,
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -858,6 +864,7 @@ class FusedMoEParallelConfig:
             ep_rank=ep_rank,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
+            local_ep_size=vllm_parallel_config.data_parallel_size_local * tp_size_,
         )
 
 
@@ -929,6 +936,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):

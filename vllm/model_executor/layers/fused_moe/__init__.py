@@ -67,6 +67,9 @@ if HAS_TRITON:
         cutlass_moe_fp8,
     )
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.fused_aiter_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
@@ -95,6 +98,7 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
+        "AiterExperts",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders
