@@ -497,6 +497,18 @@ class MultiHeadAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
+        should_override_fa = (
+            multimodal_config is not None
+            and multimodal_config.mm_encoder_wrap_fa_in_custom_op
+        )
+        if self.is_flash_attn_backend and should_override_fa:
+            from vllm.attention.ops.vit_attn_wrappers import (
+                llama4_flash_attn_wrapper_call,
+            )
+
+            self._flash_attn_varlen_func = llama4_flash_attn_wrapper_call
+            assert self._flash_attn_varlen_func is not None
+
         logger.info_once(
             f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
@@ -541,6 +553,7 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
+                is_rocm_aiter=self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
