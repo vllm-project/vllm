@@ -201,7 +201,11 @@ class RocmPlatform(Platform):
             # TODO: Add support for other VL models in their model class.
             return AttentionBackendEnum.ROCM_AITER_FA
 
-        if on_gfx9() and find_spec("flash_attn") is not None:
+        if (
+            on_gfx9()
+            and find_spec("flash_attn") is not None
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
             return AttentionBackendEnum.FLASH_ATTN
 
         return AttentionBackendEnum.TORCH_SDPA

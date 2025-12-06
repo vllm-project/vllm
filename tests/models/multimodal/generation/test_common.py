@@ -253,8 +253,19 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
+            # TODO: Revert this once issue # is resolved
+            **(
+                {
+                    "mm_processor_kwargs": {
+                        "min_pixels": 256 * 28 * 28,
+                        "max_pixels": 1280 * 28 * 28,
+                    },
+                }
+                if current_platform.is_rocm()
+                else {}
+            ),
         },
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[large_gpu_mark(min_gb=80 if current_platform.is_rocm() else 32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
