@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import concurrent
 import json
 import os
 import sys
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
-import concurrent
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
@@ -125,11 +125,7 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    MistralTokenizer,
-    get_tokenizer,
-)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
@@ -331,14 +327,14 @@ class OpenAIServing:
             self._tokenizer_proc_pool_executor = ProcessPoolExecutor(
                 max_workers=self.tokenizer_worker_num,
                 initializer=self._init_proc_tokenizer,
-                initargs=(
-                    self.model_config.tokenizer, 
-                    self.model_config.tokenizer_mode, 
+                initargs=(  # type: ignore[arg-type]
+                    self.model_config.tokenizer,
+                    self.model_config.tokenizer_mode,
                     self.model_config.trust_remote_code,
-                    self.model_config.tokenizer_revision, 
+                    self.model_config.tokenizer_revision,
                     self.model_config.max_model_len,
                     self.do_lower_case,
-                )
+                ),
             )
 
             self._tokenize_prompt_input_or_inputs_async_proc_pool = make_async(
@@ -640,7 +636,6 @@ class OpenAIServing:
             self._async_tokenizer_pool[tokenizer] = async_tokenizer
         return async_tokenizer
 
-
     def _initialize_process_pool(self):
         """
         Initializes the process pool executor by submitting and waiting for dummy tasks.
@@ -648,8 +643,8 @@ class OpenAIServing:
         """
         executor: ProcessPoolExecutor | None = getattr(
             self, "_tokenizer_proc_pool_executor", None
-         )
-        
+        )
+
         if executor is None:
             logger.error("Process pool executor not found")
             raise ValueError("Process pool executor not initialized")
@@ -670,7 +665,7 @@ class OpenAIServing:
             for future in futures:
                 future.result()
             logger.info("Process pool initialized successfully")
-            
+
         except concurrent.futures.process.BrokenProcessPool as e:
             raise RuntimeError(f"Process pool initialization failed: {e}") from e
         except Exception as e:
@@ -736,15 +731,15 @@ class OpenAIServing:
     ) -> TextTokensPrompt:
         if do_lower_case:
             prompt = prompt.lower()
- 
+
         encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
         input_ids = encoded.input_ids
- 
+
         input_text = prompt
         return OpenAIServing._validate_input_static(
             request, input_ids, input_text, max_model_len
         )
- 
+
     @staticmethod
     def _tokenize_prompt_input_or_inputs_proc_pool(
         request: AnyRequest,
@@ -1229,7 +1224,8 @@ class OpenAIServing:
             if token_num > max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
