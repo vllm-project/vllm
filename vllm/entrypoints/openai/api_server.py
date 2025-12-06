@@ -26,6 +26,14 @@ from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Req
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+
+try:
+    from fastapi_offline import FastAPIOffline
+
+    FASTAPI_OFFLINE_AVAILABLE = True
+except ImportError:
+    FASTAPI_OFFLINE_AVAILABLE = False
+
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -963,7 +971,19 @@ def build_app(args: Namespace) -> FastAPI:
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
         )
     else:
-        app = FastAPI(lifespan=lifespan)
+        # Use FastAPIOffline for air-gapped environments if enabled
+        if args.enable_offline_docs:
+            if FASTAPI_OFFLINE_AVAILABLE:
+                app = FastAPIOffline(lifespan=lifespan)
+                logger.info("Using fastapi-offline for offline documentation support")
+            else:
+                logger.warning(
+                    "fastapi-offline is not installed. Falling back to "
+                    "standard FastAPI. Install with: pip install fastapi-offline"
+                )
+                app = FastAPI(lifespan=lifespan)
+        else:
+            app = FastAPI(lifespan=lifespan)
     app.state.args = args
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
