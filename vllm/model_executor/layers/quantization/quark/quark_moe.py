@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -47,6 +48,7 @@ __all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkOCP_MX_MoEMethod"]
 class QuarkMoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+        self.has_bias = self.moe.has_bias
 
     @staticmethod
     def get_moe_method(
@@ -130,7 +132,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        intermediate_size_per_partition_after_pad = round_up(intermediate_size_per_partition, 64)
+        layer.intermediate_size_per_partition = intermediate_size_per_partition_after_pad
         layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
@@ -141,7 +144,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                2 * intermediate_size_per_partition_after_pad,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -154,7 +157,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition,
+                intermediate_size_per_partition_after_pad,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -185,7 +188,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    2 * intermediate_size_per_partition_after_pad,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -219,6 +222,22 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         else:
             layer.w13_input_scale = None
             layer.w2_input_scale = None
+
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, 2 * intermediate_size_per_partition_after_pad, dtype=torch.bfloat16), requires_grad=False
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+        else:
+            layer.w13_bias, layer.w2_bias = None, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fp8 moe kernels require a single activation scale.
@@ -493,12 +512,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         params_dtype = torch.uint8
+        intermediate_size_per_partition_after_pad = round_up(intermediate_size_per_partition, 64)
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                2 * intermediate_size_per_partition_after_pad,
                 self.get_packed_dim(hidden_size, self.weight_dtype),
                 dtype=params_dtype,
             ),
@@ -512,7 +532,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
+                self.get_packed_dim(intermediate_size_per_partition_after_pad, self.weight_dtype),
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -525,7 +545,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_weight_scale = torch.nn.Parameter(
             torch.ones(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                2 * intermediate_size_per_partition_after_pad,
                 hidden_size // OCP_MX_BLOCK_SIZE,
                 dtype=params_dtype,
             ),
@@ -535,7 +555,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             torch.ones(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // OCP_MX_BLOCK_SIZE,
+                intermediate_size_per_partition_after_pad // OCP_MX_BLOCK_SIZE,
                 dtype=params_dtype,
             ),
             requires_grad=False,
@@ -545,6 +565,22 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+        if self.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, 2 * intermediate_size_per_partition_after_pad, dtype=torch.bfloat16), requires_grad=False
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+        else:
+            layer.w13_bias, layer.w2_bias = None, None
 
     def process_weights_after_loading(self, layer):
         if self.emulate:
