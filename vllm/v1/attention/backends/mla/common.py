@@ -2024,7 +2024,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
-            
+                        # Convert from (B, N, P) to (N, B, P)
+            decode_q_nope = decode_q_nope.transpose(0, 1)
+
+            if self.q_pad_num_heads is not None:
+                B, N, L = decode_q_pe.shape
+                decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                decode_pe_padded.resize_((B, N, L))
+                decode_pe_padded.copy_(decode_q_pe)
+                decode_q_pe = decode_pe_padded
+
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
                 
@@ -2042,7 +2051,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     prequant=True,
                     y_scale=layer._q_scale if fp8_attention else None,
                 )
-                #decode_ql_nope = decode_ql_nope.transpose(0, 1)
             elif self.is_aiter_triton_fp8_bmm_enabled:
                 # Convert from (B, N, P) to (N, B, P)
                 decode_q_nope = decode_q_nope.transpose(0, 1)
@@ -2060,11 +2068,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 _, _, L = self.W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
-                    decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, decode_q_pe.shape[-1]))
-                    decode_pe_padded.resize_((B, decode_q_pe.shape[1], decode_q_pe.shape[-1]))
-                    decode_pe_padded.copy_(decode_q_pe)
-                    decode_q_pe = decode_pe_padded
-                    
                     decode_ql_nope = decode_q_nope.new_empty(
                         (self.q_pad_num_heads, B, L)
                     )
@@ -2077,13 +2080,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
                 # Convert from (N, B, L) to (B, N, L)
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
-            
-            if self.q_pad_num_heads is not None and not self.is_aiter_triton_fp4_bmm_enabled:
-                B, N, L = decode_q_pe.shape
-                decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
-                decode_pe_padded.resize_((B, N, L))
-                decode_pe_padded.copy_(decode_q_pe)
-                decode_q_pe = decode_pe_padded
 
             if fp8_attention and not self.is_aiter_triton_fp4_bmm_enabled:
                 ql_nope_shape = decode_ql_nope.shape
