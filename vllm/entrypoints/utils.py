@@ -305,7 +305,7 @@ async def process_chat_template(
                 tokenizer=tokenizer,
                 chat_template=None,
                 tools=None,
-                renderer_config=renderer_config,
+                model_config=renderer_config.model_config,
             )
 
             if hf_chat_template != resolved_chat_template:

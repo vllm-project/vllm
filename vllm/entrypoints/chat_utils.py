@@ -452,9 +452,10 @@ This is needed because `lru_cache` does not cache when an exception happens.
 
 def _try_get_processor_chat_template(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-    renderer_config: RendererConfig,
+    *,
+    trust_remote_code: bool,
 ) -> str | None:
-    cache_key = (tokenizer.name_or_path, renderer_config.trust_remote_code)
+    cache_key = (tokenizer.name_or_path, trust_remote_code)
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -466,7 +467,7 @@ def _try_get_processor_chat_template(
                 PreTrainedTokenizerFast,
                 ProcessorMixin,
             ),
-            trust_remote_code=renderer_config.trust_remote_code,
+            trust_remote_code=trust_remote_code,
         )
         if (
             isinstance(processor, ProcessorMixin)
@@ -491,7 +492,7 @@ def resolve_hf_chat_template(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     *,
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
 ) -> str | None:
     # 1st priority: The given chat template
     if chat_template is not None:
@@ -499,7 +500,10 @@ def resolve_hf_chat_template(
 
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
-        chat_template = _try_get_processor_chat_template(tokenizer, renderer_config)
+        chat_template = _try_get_processor_chat_template(
+            tokenizer,
+            trust_remote_code=model_config.trust_remote_code,
+        )
         if chat_template is not None:
             return chat_template
 
@@ -515,8 +519,8 @@ def resolve_hf_chat_template(
 
     # 4th priority: Predefined fallbacks
     path = get_chat_template_fallback_path(
-        model_type=renderer_config.model_config.hf_config.model_type,
-        tokenizer_name_or_path=renderer_config.tokenizer,
+        model_type=model_config.hf_config.model_type,
+        tokenizer_name_or_path=tokenizer.name_or_path,
     )
     if path is not None:
         logger.info_once(
@@ -545,7 +549,7 @@ def _resolve_chat_template_content_format(
             tokenizer,
             chat_template=chat_template,
             tools=tools,
-            renderer_config=renderer_config,
+            model_config=renderer_config.model_config,
         )
     else:
         hf_chat_template = None
@@ -1768,7 +1772,7 @@ def apply_hf_chat_template(
         tokenizer,
         chat_template=chat_template,
         tools=tools,
-        renderer_config=renderer_config,
+        model_config=renderer_config.model_config,
     )
 
     if hf_chat_template is None:

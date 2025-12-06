@@ -1794,7 +1794,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         tokenizer,
         chat_template=None,
         tools=tools,
-        renderer_config=renderer_config,
+        model_config=renderer_config.model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -1868,7 +1868,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         tokenizer,
         chat_template=None,
         tools=tools,
-        renderer_config=renderer_config,
+        model_config=renderer_config.model_config,
     )
     with pytest.raises(
         ValueError, match="Found unexpected chat template kwargs from request"
@@ -1951,7 +1951,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         tokenizer,
         chat_template=None,
         tools=None,
-        renderer_config=renderer_config,
+        model_config=renderer_config.model_config,
     )
     assert isinstance(chat_template, str)
 
@@ -1999,7 +1999,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         tokenizer,
         chat_template=None,
         tools=None,
-        renderer_config=renderer_config,
+        model_config=renderer_config.model_config,
     )
     assert isinstance(chat_template, str)
 
