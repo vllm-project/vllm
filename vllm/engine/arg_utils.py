@@ -468,7 +468,7 @@ class EngineArgs:
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # Renderer fields
-    tokenizer: str | None = RendererConfig.tokenizer
+    tokenizer: str | None = None
     tokenizer_mode: TokenizerMode | str = RendererConfig.tokenizer_mode
     tokenizer_revision: str | None = RendererConfig.tokenizer_revision
     skip_tokenizer_init: bool = RendererConfig.skip_tokenizer_init
