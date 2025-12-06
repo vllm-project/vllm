@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 import signal
 import socket
+from collections.abc import Iterable
 from http import HTTPStatus
 from typing import Any
 
@@ -22,6 +24,57 @@ from vllm.utils.network_utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
+
+
+def build_access_log_path_filter(
+    excluded_paths: Iterable[str] | None = None,
+) -> logging.Filter | None:
+    """Create a lightweight logging.Filter that suppresses selected paths."""
+    normalized_paths = {p for p in (excluded_paths or ()) if p}
+    if not normalized_paths:
+        return None
+
+    def _looks_like_request_line(value: str) -> bool:
+        """Quick heuristic to distinguish request lines from client addresses."""
+        return " HTTP/" in value and value.count(" ") >= 2
+
+    def filter(record: logging.LogRecord) -> bool:
+        args = record.args
+        request_line: str | None = None
+
+        if isinstance(args, dict):
+            request_line = args.get("request_line")
+        elif isinstance(args, tuple):
+            for candidate in args:
+                if isinstance(candidate, dict):
+                    candidate_line = candidate.get("request_line")
+                    if isinstance(candidate_line, str):
+                        request_line = candidate_line
+                        break
+                elif isinstance(candidate, str) and _looks_like_request_line(candidate):
+                    request_line = candidate
+                    break
+
+        if not isinstance(request_line, str):
+            message = record.getMessage()
+            # message format: '127.0.0.1:12345 - "GET /metrics HTTP/1.1" 200 OK'
+            if '"' in message:
+                try:
+                    request_line = message.split('"')[1]
+                except IndexError:
+                    request_line = None
+
+        if not isinstance(request_line, str):
+            return True
+        parts = request_line.split()
+        if len(parts) < 2:
+            return True
+        request_path = parts[1].split("?", 1)[0]
+        return request_path not in normalized_paths
+
+    filter_obj = logging.Filter()
+    filter_obj.filter = filter  # type: ignore[assignment]
+    return filter_obj
 
 
 async def serve_http(
@@ -50,6 +103,11 @@ async def serve_http(
         "h11_max_incomplete_event_size", None
     )
     h11_max_header_count = uvicorn_kwargs.pop("h11_max_header_count", None)
+    # Extract optional access-log path exclusions, used to suppress
+    # specific noisy endpoints such as /metrics.
+    exclude_access_log_paths = tuple(
+        uvicorn_kwargs.pop("exclude_access_log_paths", ()) or ()
+    )
 
     # Set safe defaults if not provided
     if h11_max_incomplete_event_size is None:
@@ -62,6 +120,13 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
+
+    # Apply access-log filtering only if requested and only after the
+    # logging configuration has been loaded.
+    access_log_filter = build_access_log_path_filter(exclude_access_log_paths)
+    if access_log_filter:
+        logging.getLogger("uvicorn.access").addFilter(access_log_filter)
+
     server = uvicorn.Server(config)
     _add_shutdown_handlers(app, server)
 
