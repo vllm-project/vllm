@@ -62,7 +62,7 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
     ImageProcessorItems,
@@ -307,7 +307,7 @@ class PaddleOCRVLMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
