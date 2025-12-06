@@ -244,13 +244,6 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O."):
-                # Provide clear error for deprecated -O.* syntax
-                raise ValueError(
-                    f"The -O.* syntax is no longer supported. "
-                    f"Please use -cc.* instead. "
-                    f"For example, replace '{arg}' with '{arg.replace('-O', '-cc', 1)}'"
-                )
             elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # also handle -O=<optimization_level> here
