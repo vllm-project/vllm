@@ -1,7 +1,7 @@
 #include <optional>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <algorithm>
 
 #include "attention_dtypes.h"
@@ -186,7 +186,7 @@ void merge_attn_states_launcher(torch::Tensor& output,
   dim3 block(NUM_THREADS);
   dim3 grid((total_threads + NUM_THREADS - 1) / NUM_THREADS);
 
-  const c10::cuda::OptionalCUDAGuard device_guard(prefix_output.device());
+  const c10::DeviceGuard device_guard(prefix_output.device());
   auto stream = at::cuda::getCurrentCUDAStream();
 
   LAUNCH_MERGE_ATTN_STATES(scalar_t, NUM_THREADS);

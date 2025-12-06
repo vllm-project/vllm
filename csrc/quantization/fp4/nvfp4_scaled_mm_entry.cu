@@ -15,7 +15,7 @@
  */
 
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include "cutlass_extensions/common.hpp"
 
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
@@ -39,7 +39,7 @@ void cutlass_scaled_fp4_mm(torch::Tensor& D, const torch::Tensor& A,
                            const torch::Tensor& B_sf,
                            const torch::Tensor& alpha) {
   // Make sure we’re on A’s device.
-  const c10::cuda::OptionalCUDAGuard device_guard(device_of(A));
+  const c10::DeviceGuard device_guard(A.device());
   const int32_t sm = get_sm_version_num();
 
 #if defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100

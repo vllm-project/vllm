@@ -39,7 +39,7 @@ std::vector<std::string> supported_schedules_dispatch(
 
 template <typename MacheteKernel>
 torch::Tensor run_impl(MMArgs args) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(args.A));
+  const c10::DeviceGuard device_guard(args.A.device());
 
   auto device = args.A.device();
   auto stream = at::cuda::getCurrentCUDAStream(device.index());

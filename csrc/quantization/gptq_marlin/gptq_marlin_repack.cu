@@ -306,7 +306,7 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
   TORCH_CHECK(perm.dtype() == at::kInt, "perm type is not at::kInt");
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
+  const c10::DeviceGuard device_guard(b_q_weight.device());
   auto options = torch::TensorOptions()
                      .dtype(b_q_weight.dtype())
                      .device(b_q_weight.device());

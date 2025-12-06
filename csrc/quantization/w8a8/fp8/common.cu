@@ -2,7 +2,8 @@
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "quantization/vectorization_utils.cuh"
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include <ATen/cuda/Exceptions.h>
 
 namespace vllm {
@@ -151,7 +152,7 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
@@ -184,7 +185,7 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // scale tensor should be initialised to <=0 before reduction
@@ -228,7 +229,7 @@ void dynamic_per_token_scaled_fp8_quant(
   const int64_t in_row_stride = input.stride(-2);
   const int64_t out_row_stride = out.stride(-2);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(),

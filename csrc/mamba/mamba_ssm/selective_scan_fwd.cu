@@ -2,7 +2,7 @@
 // adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/selective_scan_fwd_kernel.cuh
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include "selective_scan.h"
 
 #include <c10/util/BFloat16.h>
@@ -782,7 +782,7 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        );
 
     
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(u));
+    const c10::DeviceGuard device_guard(u.device());
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), ssm_states.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t, state_t>(params, stream);

@@ -85,7 +85,7 @@ void paged_attention_v1_launcher(
 
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const c10::DeviceGuard device_guard(query.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
