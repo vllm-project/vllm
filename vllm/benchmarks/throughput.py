@@ -14,7 +14,7 @@ from typing import Any
 import torch
 import uvloop
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
@@ -35,6 +35,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
 
 
@@ -246,12 +247,15 @@ async def run_vllm_async(
 def run_hf(
     requests: list[SampleRequest],
     model: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
 ) -> float:
+    assert isinstance(tokenizer, PreTrainedTokenizerBase), (
+        "the hf backend only supports HF tokenizers"
+    )
     llm = AutoModelForCausalLM.from_pretrained(
         model, dtype=torch.float16, trust_remote_code=trust_remote_code
     )
@@ -692,15 +696,21 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.tokenizer is None:
-        args.tokenizer = args.model
     validate_args(args)
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code
+    if (
+        args.backend == "hf" or args.backend == "mii"
+    ) and args.tokenizer_mode == "auto":
+        # mistral_common tokenizer is only supported on vllm and vllm-chat backends;
+        # for hf and mii backends, we use hf tokenizer
+        args.tokenizer_mode = "hf"
+    tokenizer = get_tokenizer(
+        args.tokenizer,
+        tokenizer_mode=args.tokenizer_mode,
+        trust_remote_code=args.trust_remote_code,
     )
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
