@@ -32,9 +32,14 @@ class BufferResponseProcessor():
             engine_num: Optional[int] = 1
         ):
         """
-        Init BufferResponseProcessor and object is belonged to async_llm
-        :param process_callback: func to release responses to request when it meets slo requirements
-        :param engine_num: Optional, record the engine num for saving corresponding logs to different loggers in async_llm
+        Initializes the BufferResponseProcessor.
+
+        This object belongs to async_llm.
+
+        Args:
+            process_callback (Callable[[Any], Any]): Function to release responses to request when it meets SLO requirements.
+            global_slo_requirement (Optional[GlobalSLORequirement]): Global SLO requirements. Defaults to GlobalSLORequirement().
+            engine_num (Optional[int]): Record the engine number for saving corresponding logs to different loggers in async_llm. Defaults to 1.
         """
         self.process_callback = process_callback
         self.slo_send_factor = 0.95
@@ -51,9 +56,10 @@ class BufferResponseProcessor():
 
     def add_response(self, response: BufferedResponse) -> None:
         """
-        Add BufferedResponse to the BufferResponseProcessor.
-        :param response: class BufferedResponse with request_id, output and slo_requirement(optional)
-        :return: None
+        Adds a BufferedResponse to the BufferResponseProcessor.
+
+        Args:
+            response (BufferedResponse): A BufferedResponse object containing request_id, output, and optional SLO requirement.
         """
         with self._rw_lock.writer_lock:
             if response.request_id in self.response_container:
@@ -69,18 +75,21 @@ class BufferResponseProcessor():
 
     def abort_request(self, request_id: str) -> None:
         """
-        Remove the request from response_container once it is aborted
-        :param request_id: str
-        :return: None
+        Removes the request from response_container once it is aborted.
+
+        Args:
+            request_id (str): The ID of the request to abort.
         """
         with self._rw_lock.writer_lock:
             if request_id in self.response_container:
                 self.response_container[request_id].is_aborted = True
 
-    def _slo_checker(self) -> list[Any]:
+    def _slo_checker(self) -> Dict[int, list[Any]]:
         """
-        To filter outputs that are approaching to SLO requirements
-        :return: list[Any]
+        Filters outputs that are approaching SLO requirements.
+
+        Returns:
+            Dict[int, list[Any]]: A dictionary mapping engine indices to lists of outputs that are approaching their SLO requirements.
         """
         global SECOND_TO_MS
         to_send_outputs = {i: [] for i in range(self.engine_num)}
@@ -104,8 +113,9 @@ class BufferResponseProcessor():
 
     def _process_buffered_response(self) -> None:
         """
-        Loop to check slo in response_container and release buffered responses
-        :return: None
+        Continuously checks SLO requirements in response_container and releases buffered responses.
+
+        This method runs in a separate thread and processes responses based on their SLO requirements.
         """
         while self._running:
             to_send_output = self._slo_checker()
@@ -116,9 +126,13 @@ class BufferResponseProcessor():
 
     def _update_response_container_and_get_output(self, req_id: str):
         """
-        Update the request's info in response_container
-        :param req_id: str, request id
-        :return: Union None or outputs
+        Updates the request's information in response_container and retrieves output.
+
+        Args:
+            req_id (str): The request ID to update and retrieve output from.
+
+        Returns:
+            list[Any]: A list of outputs from the response queue.
         """
         with self._rw_lock.writer_lock:
             response = self.response_container[req_id]
@@ -146,8 +160,9 @@ class BufferResponseProcessor():
 
     def stop(self) -> None:
         """
-        End buffer_response_thread
-        :return: None
+        Stops the buffer_response_thread and cleans up resources.
+
+        This method terminates the background thread that processes buffered responses.
         """
         self._running = False
         if self._buffer_response_thread and self._buffer_response_thread.is_alive():
@@ -156,10 +171,14 @@ class BufferResponseProcessor():
 @staticmethod
 def bind_fixed_params(*fixed_args: Any, **fixed_kwargs: Any):
     """
-    Decorator to bind fixed parameters or arguments to callback function
-    :param fixed_args: fixed positional arguments
-    :param fixed_kwargs: fixed named arguments
-    :return: callback func with fixed parameters or arguments
+    Decorator to bind fixed parameters or arguments to a callback function.
+
+    Args:
+        *fixed_args (Any): Fixed positional arguments to bind to the callback function.
+        **fixed_kwargs (Any): Fixed keyword arguments to bind to the callback function.
+
+    Returns:
+        Callable[..., None]: A wrapped callback function with the fixed parameters bound.
     """
     def decorator(callback: Callable[..., None]) -> Callable[..., None]:
         def wrapped(*dynamic_args: Any, **dynamic_kwargs: Any) -> None:
