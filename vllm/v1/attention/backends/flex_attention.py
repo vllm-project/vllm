@@ -4,6 +4,7 @@
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
 from typing import ClassVar
 
 import torch
@@ -30,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
@@ -315,6 +317,14 @@ class FlexAttentionMetadata:
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
 
+    @cached_property
+    def logical_block_ids(self):
+        return torch.arange(
+            cdiv(self.max_seq_len, self.block_size),
+            device=self.block_table.device,
+            dtype=torch.long,
+        )
+
     def _convert_physical_to_logical(
         self,
         request_lookup: torch.Tensor,
@@ -493,6 +503,7 @@ class FlexAttentionMetadata:
 
         The direct path works as follows:
         1. For each query token, fetch blocks from block_table using max_seq_len
+           and exclude out of sliding window blocks if needed.
            (this fetches more blocks than needed for shorter sequences)
         2. Group query tokens into chunks of q_block_size
         3. For each group, deduplicate the blocks using unique_static_unsorted
@@ -517,6 +528,23 @@ class FlexAttentionMetadata:
         used_pages = self.block_table[
             self.doc_ids, : cdiv(self.max_seq_len, self.block_size)
         ]
+
+        if self.sliding_window and self.causal:
+            device = used_pages.device
+            assert self.doc_ids is not None
+            token_indices = torch.arange(
+                self.doc_ids.shape[0], device=device, dtype=torch.long
+            )
+            logical_q_idx = (
+                token_indices
+                - self.query_start_loc[self.doc_ids]
+                + self.decode_offset[self.doc_ids]
+            )
+            min_kv_idx = torch.clamp(logical_q_idx - (self.sliding_window - 1), min=0)
+            min_block_idx = min_kv_idx // self.block_size
+            sliding_mask = self.logical_block_ids >= min_block_idx[:, None]
+            used_pages.masked_fill_(~sliding_mask, 0)
+
         used_pages_padded = pad_to_multiple(
             used_pages, multiple=self.q_block_size, dim=0
         )
@@ -785,12 +813,6 @@ class FlexAttentionImpl(AttentionImpl):
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
-                # TODO: Support skipping the computation of sliding window
-                # in direct block mask building code path.
-                logger.warning_once(
-                    "Using direct block mask building with sliding window, "
-                    "which is suboptimal now. Performance may be degraded."
-                )
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
                 attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
@@ -906,7 +928,18 @@ def get_kernel_options(
 
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
-            max_shared_memory = device_props.shared_memory_per_block_optin
+            # ROCm doesn't expose shared_memory_per_block_optin attribute
+            # AMD GPUs typically have 64KB LDS (Local Data Share) per workgroup
+            if hasattr(device_props, "shared_memory_per_block_optin"):
+                max_shared_memory = device_props.shared_memory_per_block_optin
+            elif current_platform.is_rocm():
+                # ROCm fallback: use 64KB
+                max_shared_memory = 65536
+            else:
+                raise RuntimeError(
+                    "Unable to determine shared memory size on this hardware."
+                )
+
             if max_shared_memory < 144 * 1024:
                 block_m_candidate = ensure_divisible(
                     max(1, block_m_candidate // 2), block_m

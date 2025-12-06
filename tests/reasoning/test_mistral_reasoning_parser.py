@@ -5,7 +5,7 @@ import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction_mistral
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers import MistralTokenizer
 
 parser_name = "mistral"
 
