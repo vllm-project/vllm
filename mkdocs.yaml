@@ -87,7 +87,8 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
-            filters: []
+            filters:
+              - "!.*_pb2_grpc"  # Exclude auto-generated gRPC stubs
             summary:
               modules: true
             show_if_no_docstring: true
