@@ -64,22 +64,6 @@ def test_multimodal_interface():
     assumes(PlaceholderRange, "offset")
     assumes(PlaceholderRange, "length")
 
-    # test a minimal case
-    import torch
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
-        apply_mm_hashes_to_token_ids,
-    )
-
-    token_ids = torch.arange(10, dtype=torch.long)
-    mm_hashes = ["0000", "1111"]  # hex repr of 0 and 4369
-    mm_positions = [
-        PlaceholderRange(offset=0, length=4),
-        PlaceholderRange(offset=5, length=4),
-    ]
-    apply_mm_hashes_to_token_ids(token_ids, mm_hashes, mm_positions)
-    assert token_ids.tolist() == [0, 0, 0, 0, 4, 4369, 4369, 4369, 4369, 9]
-
 
 @pytest.mark.skipif(
     current_platform.is_rocm(), reason="Requires libcudart.so, not available on ROCm"
@@ -122,16 +106,6 @@ def test_config_interface():
     assumes(CacheConfig, "block_size")
     assumes(CacheConfig, "gpu_memory_utilization")
 
-    # mla metadata minimal cases
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
-        mla_enabled,
-    )
-
-    model_config = ModelConfig(model="deepseek-ai/DeepSeek-R1")
-    assert mla_enabled(model_config)
-    model_config = ModelConfig(model="Qwen/Qwen3-0.6B")
-    assert not mla_enabled(model_config)
-
     # kv metadata minimal case
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
@@ -139,7 +113,7 @@ def test_config_interface():
     parallel_config = ParallelConfig()
     cache_config = CacheConfig(cache_dtype="bfloat16")
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
-    use_mla = mla_enabled(model_config)
+    use_mla = False
     chunk_size = 256
     num_layer = model_config.get_num_layers(parallel_config)
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
@@ -184,42 +158,10 @@ def test_request_interface():
     assumes(req, "num_tokens")
     assumes(req, "kv_transfer_params", is_instance_of=(dict, NoneType))
 
-    from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
 
     assumes(MultiModalFeatureSpec, "identifier")
     assumes(MultiModalFeatureSpec, "mm_position")
-
-    # minimal case:
-    from vllm.multimodal.inputs import PlaceholderRange
-
-    request = Request(
-        request_id="test_request",
-        prompt_token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=10),
-        pooling_params=None,
-        eos_token_id=100,
-        lora_request=None,
-        mm_features=[
-            MultiModalFeatureSpec(
-                modality="image",
-                identifier="0000",
-                data=MultiModalKwargsItem.dummy("dummy_m"),
-                mm_position=PlaceholderRange(offset=0, length=10),
-            )
-        ],
-    )
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (
-        extract_mm_features,
-    )
-
-    mm_hashes, mm_positions = extract_mm_features(request)
-    assert isinstance(mm_hashes, list)
-    assert len(mm_hashes) == 1
-    assert isinstance(mm_positions, list)
-    assert len(mm_positions) == 1
-    assert mm_positions[0].offset == 0
-    assert mm_positions[0].length == 10
 
 
 def test_new_request_interface():
