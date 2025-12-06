@@ -175,6 +175,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_ALL2ALL_BACKEND: Literal[
         "naive",
         "pplx",
@@ -197,6 +198,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -1260,6 +1262,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
     ),
+    # Port used for Mooncake handshake between remote agents.
+    "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
+    ),
     # all2all backend for vllm's expert parallel communication
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
@@ -1368,6 +1374,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
+    "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
     ),
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL": lambda: bool(

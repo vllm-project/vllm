@@ -1246,14 +1246,8 @@ class AttentionMainLoop {
         // rescale sum and partial outputs
         if (need_rescale) {
           // compute rescale factor
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           // rescale sum
           new_sum_val += rescale_factor * init_sum_val;
@@ -1889,15 +1883,8 @@ class AttentionMainLoop {
                                    : curr_output_buffer;
           float rescale_factor = final_max > curr_max ? curr_max - final_max
                                                       : final_max - curr_max;
-
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           local_sum[head_idx] = final_max > curr_max
                                     ? final_sum + rescale_factor * curr_sum

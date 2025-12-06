@@ -221,8 +221,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # quark moe for mxfp4 w_dtype
-        if quant_config.use_mxfp4_w4a16:
+        # quark moe for mxfp4 w_dtype mxfp4 a_dtype
+        if quant_config.use_mxfp4_w4a4:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:

@@ -12,13 +12,13 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import Attention
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     CompilationMode,
@@ -335,6 +335,7 @@ def test_attention_quant_pattern(
             custom_ops=custom_ops_list,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend=backend),
     )
 
     # Create test inputs
@@ -352,7 +353,6 @@ def test_attention_quant_pattern(
     with (
         set_current_vllm_config(vllm_config_unfused),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_unfused = model_class(
             num_qo_heads=num_qo_heads,
@@ -378,7 +378,6 @@ def test_attention_quant_pattern(
     with (
         set_current_vllm_config(vllm_config),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_fused = model_class(
             num_qo_heads=num_qo_heads,

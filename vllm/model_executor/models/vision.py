@@ -11,7 +11,7 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -91,10 +91,7 @@ def get_vit_attn_backend(
     if attn_backend_override is not None:
         return attn_backend_override
 
-    # Lazy import to avoid circular dependency
-    from vllm.attention.selector import get_env_variable_attn_backend
-
-    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
+    selected_backend = get_current_vllm_config().attention_config.backend
     if selected_backend is not None:
         return selected_backend
 
