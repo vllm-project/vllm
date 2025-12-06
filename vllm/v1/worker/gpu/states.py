@@ -220,7 +220,8 @@ class RequestState:
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
         min_p = self.min_p.np[idx_mapping_np]
-        min_p = self.min_p.copy_np_to_gpu(min_p)
+        no_min_p = np.all(min_p == 0.0)
+        min_p = self.min_p.copy_np_to_gpu(min_p) if not no_min_p else None
 
         rep_penalty = self.repetition_penalty.np[idx_mapping_np]
         rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)

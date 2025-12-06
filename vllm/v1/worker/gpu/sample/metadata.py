@@ -13,7 +13,7 @@ class SamplingMetadata:
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
-    min_p: torch.Tensor
+    min_p: torch.Tensor | None
 
     repetition_penalty: torch.Tensor
     frequency_penalty: torch.Tensor
@@ -120,8 +120,9 @@ def _expand_sampling_metadata_kernel(
         top_k = tl.load(top_k_ptr + req_idx)
         tl.store(expanded_top_k_ptr + start_idx + block, top_k, mask=mask)
 
-    min_p = tl.load(min_p_ptr + req_idx)
-    tl.store(expanded_min_p_ptr + start_idx + block, min_p, mask=mask)
+    if min_p_ptr is not None:
+        min_p = tl.load(min_p_ptr + req_idx)
+        tl.store(expanded_min_p_ptr + start_idx + block, min_p, mask=mask)
 
     rep_penalty = tl.load(rep_penalty_ptr + req_idx)
     tl.store(expanded_rep_penalty_ptr + start_idx + block, rep_penalty, mask=mask)
