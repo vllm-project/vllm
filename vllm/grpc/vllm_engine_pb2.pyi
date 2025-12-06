@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
 from collections.abc import Iterable as _Iterable
 from collections.abc import Mapping as _Mapping
 from typing import ClassVar as _ClassVar

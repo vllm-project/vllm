@@ -64,7 +64,9 @@ def compile_protos():
                 if generated_file.exists():
                     content = generated_file.read_text()
                     if not content.startswith("# SPDX-License-Identifier"):
-                        generated_file.write_text(spdx_header + content)
+                        # Add mypy ignore-errors comment for all generated files
+                        header = spdx_header + "# mypy: ignore-errors\n"
+                        generated_file.write_text(header + content)
 
             print("✓ Protobuf compilation successful!")
             print(f"  Generated: {script_dir / 'vllm_engine_pb2.py'}")
