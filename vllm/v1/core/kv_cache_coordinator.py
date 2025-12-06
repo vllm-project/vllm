@@ -90,7 +90,7 @@ class KVCacheCoordinator(ABC):
 
         Returns:
             The number of new blocks to allocate for each kv cache group.
-            The number of evictable blocks to touch for each kv cache group.
+            The number of evictable blocks to allocate for each kv cache group.
         """
         num_new_blocks_to_allocate = []
         num_evictable_blocks_to_allocate = []

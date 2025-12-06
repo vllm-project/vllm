@@ -86,7 +86,7 @@ class SingleTypeKVCacheManager(ABC):
                 tokens.
 
         Returns:
-            The number of blocks.
+            The number of new blocks to allocate.
             The number of evictable blocks (i.e., ref_cnt == 0).
         """
 
