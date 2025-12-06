@@ -1,22 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from google.protobuf.internal import containers as _containers
+from collections.abc import Iterable as _Iterable
+from collections.abc import Mapping as _Mapping
+from typing import ClassVar as _ClassVar
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from google.protobuf.internal import containers as _containers
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class SamplingParams(_message.Message):
-    __slots__ = ("temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "max_tokens", "min_tokens", "stop", "stop_token_ids", "skip_special_tokens", "spaces_between_special_tokens", "ignore_eos", "n", "logprobs", "prompt_logprobs", "seed", "include_stop_str_in_output", "logit_bias", "truncate_prompt_tokens", "json_schema", "regex", "grammar", "structural_tag", "json_object", "choice")
+    __slots__ = (
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "repetition_penalty",
+        "max_tokens",
+        "min_tokens",
+        "stop",
+        "stop_token_ids",
+        "skip_special_tokens",
+        "spaces_between_special_tokens",
+        "ignore_eos",
+        "n",
+        "logprobs",
+        "prompt_logprobs",
+        "seed",
+        "include_stop_str_in_output",
+        "logit_bias",
+        "truncate_prompt_tokens",
+        "json_schema",
+        "regex",
+        "grammar",
+        "structural_tag",
+        "json_object",
+        "choice",
+    )
     class LogitBiasEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: int
         value: float
-        def __init__(self, key: _Optional[int] = ..., value: _Optional[float] = ...) -> None: ...
+        def __init__(
+            self, key: int | None = ..., value: float | None = ...
+        ) -> None: ...
+
     TEMPERATURE_FIELD_NUMBER: _ClassVar[int]
     TOP_P_FIELD_NUMBER: _ClassVar[int]
     TOP_K_FIELD_NUMBER: _ClassVar[int]
@@ -71,13 +104,42 @@ class SamplingParams(_message.Message):
     structural_tag: str
     json_object: bool
     choice: ChoiceConstraint
-    def __init__(self, temperature: _Optional[float] = ..., top_p: _Optional[float] = ..., top_k: _Optional[int] = ..., min_p: _Optional[float] = ..., frequency_penalty: _Optional[float] = ..., presence_penalty: _Optional[float] = ..., repetition_penalty: _Optional[float] = ..., max_tokens: _Optional[int] = ..., min_tokens: _Optional[int] = ..., stop: _Optional[_Iterable[str]] = ..., stop_token_ids: _Optional[_Iterable[int]] = ..., skip_special_tokens: bool = ..., spaces_between_special_tokens: bool = ..., ignore_eos: bool = ..., n: _Optional[int] = ..., logprobs: _Optional[int] = ..., prompt_logprobs: _Optional[int] = ..., seed: _Optional[int] = ..., include_stop_str_in_output: bool = ..., logit_bias: _Optional[_Mapping[int, float]] = ..., truncate_prompt_tokens: _Optional[int] = ..., json_schema: _Optional[str] = ..., regex: _Optional[str] = ..., grammar: _Optional[str] = ..., structural_tag: _Optional[str] = ..., json_object: bool = ..., choice: _Optional[_Union[ChoiceConstraint, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        temperature: float | None = ...,
+        top_p: float | None = ...,
+        top_k: int | None = ...,
+        min_p: float | None = ...,
+        frequency_penalty: float | None = ...,
+        presence_penalty: float | None = ...,
+        repetition_penalty: float | None = ...,
+        max_tokens: int | None = ...,
+        min_tokens: int | None = ...,
+        stop: _Iterable[str] | None = ...,
+        stop_token_ids: _Iterable[int] | None = ...,
+        skip_special_tokens: bool = ...,
+        spaces_between_special_tokens: bool = ...,
+        ignore_eos: bool = ...,
+        n: int | None = ...,
+        logprobs: int | None = ...,
+        prompt_logprobs: int | None = ...,
+        seed: int | None = ...,
+        include_stop_str_in_output: bool = ...,
+        logit_bias: _Mapping[int, float] | None = ...,
+        truncate_prompt_tokens: int | None = ...,
+        json_schema: str | None = ...,
+        regex: str | None = ...,
+        grammar: str | None = ...,
+        structural_tag: str | None = ...,
+        json_object: bool = ...,
+        choice: ChoiceConstraint | _Mapping | None = ...,
+    ) -> None: ...
 
 class ChoiceConstraint(_message.Message):
     __slots__ = ("choices",)
     CHOICES_FIELD_NUMBER: _ClassVar[int]
     choices: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, choices: _Optional[_Iterable[str]] = ...) -> None: ...
+    def __init__(self, choices: _Iterable[str] | None = ...) -> None: ...
 
 class TokenizedInput(_message.Message):
     __slots__ = ("original_text", "input_ids")
@@ -85,7 +147,9 @@ class TokenizedInput(_message.Message):
     INPUT_IDS_FIELD_NUMBER: _ClassVar[int]
     original_text: str
     input_ids: _containers.RepeatedScalarFieldContainer[int]
-    def __init__(self, original_text: _Optional[str] = ..., input_ids: _Optional[_Iterable[int]] = ...) -> None: ...
+    def __init__(
+        self, original_text: str | None = ..., input_ids: _Iterable[int] | None = ...
+    ) -> None: ...
 
 class GenerateRequest(_message.Message):
     __slots__ = ("request_id", "tokenized", "sampling_params", "stream")
@@ -97,7 +161,13 @@ class GenerateRequest(_message.Message):
     tokenized: TokenizedInput
     sampling_params: SamplingParams
     stream: bool
-    def __init__(self, request_id: _Optional[str] = ..., tokenized: _Optional[_Union[TokenizedInput, _Mapping]] = ..., sampling_params: _Optional[_Union[SamplingParams, _Mapping]] = ..., stream: bool = ...) -> None: ...
+    def __init__(
+        self,
+        request_id: str | None = ...,
+        tokenized: TokenizedInput | _Mapping | None = ...,
+        sampling_params: SamplingParams | _Mapping | None = ...,
+        stream: bool = ...,
+    ) -> None: ...
 
 class GenerateResponse(_message.Message):
     __slots__ = ("request_id", "chunk", "complete", "error")
@@ -109,7 +179,13 @@ class GenerateResponse(_message.Message):
     chunk: GenerateStreamChunk
     complete: GenerateComplete
     error: GenerateError
-    def __init__(self, request_id: _Optional[str] = ..., chunk: _Optional[_Union[GenerateStreamChunk, _Mapping]] = ..., complete: _Optional[_Union[GenerateComplete, _Mapping]] = ..., error: _Optional[_Union[GenerateError, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        request_id: str | None = ...,
+        chunk: GenerateStreamChunk | _Mapping | None = ...,
+        complete: GenerateComplete | _Mapping | None = ...,
+        error: GenerateError | _Mapping | None = ...,
+    ) -> None: ...
 
 class GenerateStreamChunk(_message.Message):
     __slots__ = ("token_ids", "prompt_tokens", "completion_tokens", "cached_tokens")
@@ -121,10 +197,22 @@ class GenerateStreamChunk(_message.Message):
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int
-    def __init__(self, token_ids: _Optional[_Iterable[int]] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., cached_tokens: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        token_ids: _Iterable[int] | None = ...,
+        prompt_tokens: int | None = ...,
+        completion_tokens: int | None = ...,
+        cached_tokens: int | None = ...,
+    ) -> None: ...
 
 class GenerateComplete(_message.Message):
-    __slots__ = ("output_ids", "finish_reason", "prompt_tokens", "completion_tokens", "cached_tokens")
+    __slots__ = (
+        "output_ids",
+        "finish_reason",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+    )
     OUTPUT_IDS_FIELD_NUMBER: _ClassVar[int]
     FINISH_REASON_FIELD_NUMBER: _ClassVar[int]
     PROMPT_TOKENS_FIELD_NUMBER: _ClassVar[int]
@@ -135,7 +223,14 @@ class GenerateComplete(_message.Message):
     prompt_tokens: int
     completion_tokens: int
     cached_tokens: int
-    def __init__(self, output_ids: _Optional[_Iterable[int]] = ..., finish_reason: _Optional[str] = ..., prompt_tokens: _Optional[int] = ..., completion_tokens: _Optional[int] = ..., cached_tokens: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        output_ids: _Iterable[int] | None = ...,
+        finish_reason: str | None = ...,
+        prompt_tokens: int | None = ...,
+        completion_tokens: int | None = ...,
+        cached_tokens: int | None = ...,
+    ) -> None: ...
 
 class GenerateError(_message.Message):
     __slots__ = ("message", "http_status_code", "details")
@@ -145,7 +240,12 @@ class GenerateError(_message.Message):
     message: str
     http_status_code: str
     details: str
-    def __init__(self, message: _Optional[str] = ..., http_status_code: _Optional[str] = ..., details: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        message: str | None = ...,
+        http_status_code: str | None = ...,
+        details: str | None = ...,
+    ) -> None: ...
 
 class EmbedRequest(_message.Message):
     __slots__ = ("request_id", "tokenized")
@@ -153,7 +253,11 @@ class EmbedRequest(_message.Message):
     TOKENIZED_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     tokenized: TokenizedInput
-    def __init__(self, request_id: _Optional[str] = ..., tokenized: _Optional[_Union[TokenizedInput, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        request_id: str | None = ...,
+        tokenized: TokenizedInput | _Mapping | None = ...,
+    ) -> None: ...
 
 class EmbedResponse(_message.Message):
     __slots__ = ("request_id", "complete", "error")
@@ -163,7 +267,12 @@ class EmbedResponse(_message.Message):
     request_id: str
     complete: EmbedComplete
     error: EmbedError
-    def __init__(self, request_id: _Optional[str] = ..., complete: _Optional[_Union[EmbedComplete, _Mapping]] = ..., error: _Optional[_Union[EmbedError, _Mapping]] = ...) -> None: ...
+    def __init__(
+        self,
+        request_id: str | None = ...,
+        complete: EmbedComplete | _Mapping | None = ...,
+        error: EmbedError | _Mapping | None = ...,
+    ) -> None: ...
 
 class EmbedComplete(_message.Message):
     __slots__ = ("embedding", "prompt_tokens", "embedding_dim")
@@ -173,7 +282,12 @@ class EmbedComplete(_message.Message):
     embedding: _containers.RepeatedScalarFieldContainer[float]
     prompt_tokens: int
     embedding_dim: int
-    def __init__(self, embedding: _Optional[_Iterable[float]] = ..., prompt_tokens: _Optional[int] = ..., embedding_dim: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        embedding: _Iterable[float] | None = ...,
+        prompt_tokens: int | None = ...,
+        embedding_dim: int | None = ...,
+    ) -> None: ...
 
 class EmbedError(_message.Message):
     __slots__ = ("message", "code")
@@ -181,7 +295,7 @@ class EmbedError(_message.Message):
     CODE_FIELD_NUMBER: _ClassVar[int]
     message: str
     code: str
-    def __init__(self, message: _Optional[str] = ..., code: _Optional[str] = ...) -> None: ...
+    def __init__(self, message: str | None = ..., code: str | None = ...) -> None: ...
 
 class HealthCheckRequest(_message.Message):
     __slots__ = ()
@@ -193,7 +307,7 @@ class HealthCheckResponse(_message.Message):
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
     healthy: bool
     message: str
-    def __init__(self, healthy: bool = ..., message: _Optional[str] = ...) -> None: ...
+    def __init__(self, healthy: bool = ..., message: str | None = ...) -> None: ...
 
 class AbortRequest(_message.Message):
     __slots__ = ("request_id", "reason")
@@ -201,7 +315,9 @@ class AbortRequest(_message.Message):
     REASON_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     reason: str
-    def __init__(self, request_id: _Optional[str] = ..., reason: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self, request_id: str | None = ..., reason: str | None = ...
+    ) -> None: ...
 
 class AbortResponse(_message.Message):
     __slots__ = ("success", "message")
@@ -209,14 +325,20 @@ class AbortResponse(_message.Message):
     MESSAGE_FIELD_NUMBER: _ClassVar[int]
     success: bool
     message: str
-    def __init__(self, success: bool = ..., message: _Optional[str] = ...) -> None: ...
+    def __init__(self, success: bool = ..., message: str | None = ...) -> None: ...
 
 class GetModelInfoRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class GetModelInfoResponse(_message.Message):
-    __slots__ = ("model_path", "is_generation", "max_context_length", "vocab_size", "supports_vision")
+    __slots__ = (
+        "model_path",
+        "is_generation",
+        "max_context_length",
+        "vocab_size",
+        "supports_vision",
+    )
     MODEL_PATH_FIELD_NUMBER: _ClassVar[int]
     IS_GENERATION_FIELD_NUMBER: _ClassVar[int]
     MAX_CONTEXT_LENGTH_FIELD_NUMBER: _ClassVar[int]
@@ -227,14 +349,27 @@ class GetModelInfoResponse(_message.Message):
     max_context_length: int
     vocab_size: int
     supports_vision: bool
-    def __init__(self, model_path: _Optional[str] = ..., is_generation: bool = ..., max_context_length: _Optional[int] = ..., vocab_size: _Optional[int] = ..., supports_vision: bool = ...) -> None: ...
+    def __init__(
+        self,
+        model_path: str | None = ...,
+        is_generation: bool = ...,
+        max_context_length: int | None = ...,
+        vocab_size: int | None = ...,
+        supports_vision: bool = ...,
+    ) -> None: ...
 
 class GetServerInfoRequest(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
 
 class GetServerInfoResponse(_message.Message):
-    __slots__ = ("active_requests", "is_paused", "last_receive_timestamp", "uptime_seconds", "server_type")
+    __slots__ = (
+        "active_requests",
+        "is_paused",
+        "last_receive_timestamp",
+        "uptime_seconds",
+        "server_type",
+    )
     ACTIVE_REQUESTS_FIELD_NUMBER: _ClassVar[int]
     IS_PAUSED_FIELD_NUMBER: _ClassVar[int]
     LAST_RECEIVE_TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
@@ -245,4 +380,11 @@ class GetServerInfoResponse(_message.Message):
     last_receive_timestamp: float
     uptime_seconds: float
     server_type: str
-    def __init__(self, active_requests: _Optional[int] = ..., is_paused: bool = ..., last_receive_timestamp: _Optional[float] = ..., uptime_seconds: _Optional[float] = ..., server_type: _Optional[str] = ...) -> None: ...
+    def __init__(
+        self,
+        active_requests: int | None = ...,
+        is_paused: bool = ...,
+        last_receive_timestamp: float | None = ...,
+        uptime_seconds: float | None = ...,
+        server_type: str | None = ...,
+    ) -> None: ...
