@@ -265,12 +265,14 @@ if HELION_AVAILABLE:
         )
         return out, residual_out
 
-    # Apply @helion.kernel decorator to the actual Helion kernel
-    @register_kernel("allreduce_add_rmsnorm", fake_impl=_allreduce_add_rmsnorm_fake)
-    @helion.kernel(
-        autotune_baseline_atol=0.0,
-        autotune_baseline_rtol=0.0,
-        config=helion.Config(
+    @register_kernel(
+        fake_impl=_allreduce_add_rmsnorm_fake,
+        helion_settings=helion.Settings(
+            autotune_baseline_atol=0.0,
+            autotune_baseline_rtol=0.0,
+            static_shapes=False,
+        ),
+        default_config=helion.Config(
             block_sizes=[2],
             indexing=[
                 "pointer",
@@ -306,7 +308,6 @@ if HELION_AVAILABLE:
             range_warp_specializes=[],
             reduction_loops=[None],
         ),
-        static_shapes=False,
     )
     def allreduce_add_rmsnorm(
         allreduce_buf: torch.Tensor,
@@ -426,7 +427,7 @@ if HELION_AVAILABLE:
             available_configs: Dictionary mapping config keys to loaded Helion configs
 
         Returns:
-            Best matching Helion config from available_configs, or None if no suitable match
+            Tuple of (config_key, config) for the best match, or None if no suitable match
         """
         if not available_configs:
             return None
@@ -436,7 +437,7 @@ if HELION_AVAILABLE:
         # Try exact match first
         exact_key = str(target_hidden_size)
         if exact_key in available_configs:
-            return available_configs[exact_key]
+            return (exact_key, available_configs[exact_key])
 
         # Find closest match from available configs
         try:
@@ -461,11 +462,12 @@ if HELION_AVAILABLE:
                 f"No exact config for hidden_size={target_hidden_size}, "
                 f"using closest match: {closest_size}"
             )
-            return available_configs[closest_key]
+            return (closest_key, available_configs[closest_key])
 
         except Exception:
             # If parsing fails, just return the first available config
-            return next(iter(available_configs.values()))
+            first_key = next(iter(available_configs.keys()))
+            return (first_key, available_configs[first_key])
 
 
 def helion_allreduce_add_rmsnorm(
@@ -573,17 +575,21 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
     or separate AllReduce + RMSNorm operations instead.
     """
 
-    def __init__(self, splits_per_rank: int = 4):
+    def __init__(self, model_config, splits_per_rank: int = 4, *args, **kwargs):
         """
         Initialize the AllReduceAddRMSNormHelion operation.
 
         Args:
+            model_config: vLLM ModelConfig (required for immediate kernel configuration)
             splits_per_rank: Number of splits for overlapping communication
                            and computation. Higher values provide more overlap
                            but may increase overhead. Default: 4
+            *args, **kwargs: Additional arguments passed to parent class
         """
-        super().__init__()
+        super().__init__(model_config, *args, **kwargs)
         self.splits_per_rank = splits_per_rank
+        # Create and configure the kernel we will use
+        self.allreduce_add_rmsnorm = self.create_kernel(allreduce_add_rmsnorm)
 
     def forward_helion(
         self,
@@ -593,7 +599,10 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
         rms_eps: float = 1e-6,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Helion implementation with overlapped AllReduce.
+        Helion implementation with overlapped AllReduce using configured kernel.
+
+        This method uses the configured kernel that was immediately set up during
+        construction. self.allreduce_add_rmsnorm is a ConfiguredHelionKernel instance.
 
         Args:
             input_shared: Shared tensor across ranks to be reduced [M, K]
@@ -662,7 +671,7 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
         self._buffer_cache: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
 
         # Initialize the CustomOp
-        self.op = AllReduceAddRMSNormHelion(splits_per_rank=4)
+        self.op = AllReduceAddRMSNormHelion(self.model_config, splits_per_rank=4)
 
     def supports_cudagraph(self) -> bool:
         """

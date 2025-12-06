@@ -103,7 +103,11 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 
     def ops_in_model_after(self):
         if self.use_helion:
-            return [torch.ops.vllm_helion.silu_mul_fp8]
+            # With dynamic decoration, we can't predict the exact op name
+            # Return a regex pattern to match any silu_mul_fp8_* op
+            import regex as re
+
+            return [re.compile(r".*vllm_helion.*silu_mul_fp8_\d+.*")]
         return [FUSED_OPS[kFp8StaticTensorSym]]
 
 
@@ -411,4 +415,22 @@ def test_fusion_silu_and_mul_quant_helion(
         backend.check_before_ops(model.ops_in_model_before())
 
         # In post-nodes, fused kernels should be present and quant op should not
-        backend.check_after_ops(model.ops_in_model_after())
+        expected_after_ops = model.ops_in_model_after()
+
+        # Handle regex patterns for dynamic op names
+        if expected_after_ops and hasattr(expected_after_ops[0], "match"):
+            # This is a regex pattern - check manually
+            pattern = expected_after_ops[0]
+            helion_op_found = False
+            for node in backend.graph_post_pass.nodes:
+                if node.op == "call_function" and hasattr(node.target, "name"):
+                    op_name = node.target.name()
+                    if pattern.match(op_name):
+                        helion_op_found = True
+                        break
+            assert helion_op_found, (
+                f"No op matching pattern {pattern.pattern} found in post-pass graph"
+            )
+        else:
+            # Standard OpOverload list - use existing method
+            backend.check_after_ops(expected_after_ops)
