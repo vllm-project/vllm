@@ -263,6 +263,7 @@ def supports_multimodal(
     res = getattr(model, "supports_multimodal", False)
 
     if res:
+        # We can remove this starting from v0.14
         merge_by_field_config = getattr(model, "merge_by_field_config", None)
         if merge_by_field_config is False:
             raise ValueError(
