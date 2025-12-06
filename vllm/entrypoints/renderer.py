@@ -5,7 +5,7 @@ import asyncio
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pybase64
 import torch
@@ -318,8 +318,11 @@ class CompletionRenderer(BaseRenderer):
         add_special_tokens: bool,
         cache_salt: str | None,
     ) -> EngineTokensPrompt:
-        """Tokenize text input asynchronously."""
-        async_tokenizer = self._get_async_tokenizer()
+        # Using a sync tokenizer is faster than using an async_tokenizer.
+        tokenizer = self.tokenizer
+
+        if tokenizer is None:
+            raise ValueError("No tokenizer available for text input processing")
 
         # Handle encoder-specific preprocessing
         if (
@@ -328,16 +331,14 @@ class CompletionRenderer(BaseRenderer):
         ):
             text = text.lower()
 
-        # Tokenize texts
-        if truncate_prompt_tokens is None:
-            encoded = await async_tokenizer(text, add_special_tokens=add_special_tokens)
-        else:
-            encoded = await async_tokenizer(
-                text,
-                add_special_tokens=add_special_tokens,
-                truncation=True,
-                max_length=truncate_prompt_tokens,
-            )
+        tokenization_kwargs: dict[str, Any] = {}
+        if add_special_tokens is not None:
+            tokenization_kwargs["add_special_tokens"] = add_special_tokens
+        if truncate_prompt_tokens is not None:
+            tokenization_kwargs["truncation"] = True
+            tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+        encoded = tokenizer(text, **tokenization_kwargs)
 
         return self._create_tokens_prompt(
             encoded.input_ids, max_length, cache_salt, text
