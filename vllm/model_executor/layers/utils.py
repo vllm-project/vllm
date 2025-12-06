@@ -183,6 +183,20 @@ direct_register_custom_op(
 )
 
 
+def aiter_unquantized_gemm_bpreshuffled(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return rocm_aiter_ops.gemm_weight_bpreshuffle(
+        input=x,
+        weight=weight,
+        bias=bias,
+        out_dtype=x.dtype,
+    )
+
+
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
         torch._C._cpu._is_amx_tile_supported()
@@ -242,8 +256,12 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def dispatch_unquantized_gemm(
+    rocm_aiter_weight_shuffled: bool = False,
+) -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
+        if rocm_aiter_weight_shuffled:
+            return aiter_unquantized_gemm_bpreshuffled
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
