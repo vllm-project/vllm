@@ -820,6 +820,15 @@ def get_attention_context(
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
+        if layer_name not in attn_metadata:
+            available_layers = list(attn_metadata.keys())[:10]
+            raise KeyError(
+                f"Layer '{layer_name}' not found in attn_metadata. "
+                f"Available layers (first 10): {available_layers}. "
+                f"Total layers in metadata: {len(attn_metadata)}. "
+                f"This may indicate a pipeline parallelism configuration issue "
+                f"where the KV cache config doesn't match the layers on this rank."
+            )
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]

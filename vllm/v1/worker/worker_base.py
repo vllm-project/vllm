@@ -216,12 +216,22 @@ class WorkerWrapperBase:
 
     def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
         """
-        Adjust the rpc_rank based on the given mapping.
+        Adjust the rpc_rank and global_rank based on the given mapping.
         It is only used during the initialization of the executor,
-        to adjust the rpc_rank of workers after we create all workers.
+        to adjust the ranks of workers after we create all workers.
+
+        For Ray executor, workers may be reordered after creation, and
+        this method updates both rpc_rank and global_rank to match the
+        new ordering. This is critical for correctly indexing into
+        kv_cache_configs during initialize_from_config.
         """
         if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
+            new_rank = rank_mapping[self.rpc_rank]
+            self.rpc_rank = new_rank
+            # Also update global_rank to match the new rpc_rank.
+            # This ensures that kv_cache_configs[self.global_rank] returns
+            # the correct config for this worker after reordering.
+            self.global_rank = new_rank
 
     def update_environment_variables(
         self,
