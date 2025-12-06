@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
     has_kv_transfer_group,
 )
 from vllm.forward_context import ForwardContext
+from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -470,6 +471,7 @@ class TestNixlHandshake:
                             num_xfers + 6,
                         ],
                         "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                        "remote_request_id": f"prefill-{request_id}",
                         "remote_host": "localhost",
                         "remote_port": 1234,
                         "remote_tp_size": 1,
@@ -536,6 +538,7 @@ class TestNixlHandshake:
             kv_transfer_params={
                 "remote_block_ids": [4, 5, 6],
                 "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                "remote_request_id": "prefill-id",
                 "remote_host": "localhost",
                 "remote_port": 1234,
                 "remote_tp_size": prefill_tp_size,
@@ -591,6 +594,7 @@ class TestNixlHandshake:
                 kv_transfer_params={
                     "remote_block_ids": [4, 5, 6],
                     "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                    "remote_request_id": f"prefill-id-{i}",
                     "remote_host": "localhost",
                     "remote_port": 1234,
                     "remote_tp_size": 1,
@@ -754,6 +758,7 @@ def test_kv_connector_stats(dist_init):
         kv_transfer_params={
             "remote_block_ids": [4, 5, 6],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
@@ -1107,7 +1112,26 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
-@pytest.mark.parametrize("attn_backend", ["FLASH_ATTN", "TRITON_ATTN"])
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        pytest.param(
+            "FLASH_ATTN",
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Attention backend FLASH_ATTN is not supported on ROCm",
+            ),
+        ),
+        pytest.param(
+            "ROCM_ATTN",
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(),
+                reason="Attention backend ROCM_ATTN is only supported on ROCm",
+            ),
+        ),
+        "TRITON_ATTN",
+    ],
+)
 def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
@@ -1129,6 +1153,10 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
         backend_cls = FlashAttentionBackend
+    elif attn_backend == "ROCM_ATTN":
+        from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+        backend_cls = RocmAttentionBackend
     else:  # TRITON_ATTN
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
@@ -1147,25 +1175,43 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
     }
 
     # Store tensor info for validation
-    expected_tensor_size = shared_tensor[0].element_size() * shared_tensor[0].numel()
-    expected_base_addrs = [
-        shared_tensor[0].data_ptr(),
-        shared_tensor[1].data_ptr(),
-        unique_tensor[0].data_ptr(),
-        unique_tensor[1].data_ptr(),
-    ]
 
+    test_shape = backend_cls.get_kv_cache_shape(
+        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+    )
+    is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
+
+    if is_blocks_first:
+        expected_tensor_size = shared_tensor.element_size() * shared_tensor.numel()
+        expected_base_addrs = [
+            shared_tensor.data_ptr(),
+            unique_tensor.data_ptr(),
+        ]
+        expected_num_entries = 2
+    else:
+        expected_tensor_size = (
+            shared_tensor[0].element_size() * shared_tensor[0].numel()
+        )
+        expected_base_addrs = [
+            shared_tensor[0].data_ptr(),
+            shared_tensor[1].data_ptr(),
+            unique_tensor[0].data_ptr(),
+            unique_tensor[1].data_ptr(),
+        ]
+        expected_num_entries = 4
+
+    nixl_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
     with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper"
-        ) as mock_nixl_wrapper,
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Event"
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"
-        ) as mock_thread,
-    ):  # noqa: E501
+        patch(f"{nixl_module}.NixlWrapper") as mock_nixl_wrapper,
+        patch(f"{nixl_module}.threading.Event"),
+        patch(f"{nixl_module}.threading.Thread") as mock_thread,
+        patch(f"{nixl_module}.get_attn_backend") as mock_get_attn_backend,
+    ):
+        # Ensure get_attn_backend returns the correct value due to
+        # _cached_get_attn_backend returning the backend from previous
+        # test run if not mocking.
+        mock_get_attn_backend.return_value = backend_cls
+
         # Create connector
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
         connector.connector_worker = FakeNixlConnectorWorker(
@@ -1188,7 +1234,7 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
         # Verify get_reg_descs was called with caches_data
         assert mock_wrapper_instance.get_reg_descs.called
         caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
-        assert len(caches_data) == 4
+        assert len(caches_data) == expected_num_entries
 
         for i, cache_entry in enumerate(caches_data):
             base_addr, size, _tp_rank, _ = cache_entry
@@ -1210,7 +1256,12 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
 
-        expected_block_len = expected_tensor_size // 2
+        num_blocks = 2
+        if is_blocks_first:
+            expected_block_len = expected_tensor_size // num_blocks // 2
+        else:
+            expected_block_len = expected_tensor_size // num_blocks
+
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
             assert block_len == expected_block_len, (
@@ -1307,7 +1358,7 @@ def test_shutdown_cleans_up_resources(dist_init):
         patch.object(nixl_wrapper, "remove_remote_agent") as mock_rem_agent,
         patch.object(nixl_wrapper, "deregister_memory") as mock_dereg,
     ):
-        worker._recving_transfers = {"req1": [(123, time.perf_counter())]}
+        worker._recving_transfers = {"req1": [123]}
         worker.src_xfer_side_handle = 456
         worker.dst_xfer_side_handles = {"engine1": 789}
         worker._remote_agents = {"engine1": {0: "agent1"}}
@@ -1470,6 +1521,7 @@ def test_handshake_failure_returns_finished(dist_init):
         kv_transfer_params={
             "remote_block_ids": [4, 5, 6],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
@@ -1519,6 +1571,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
         kv_transfer_params={
             "remote_block_ids": [10, 11, 12],
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
             "remote_port": 1234,
             "remote_tp_size": 1,
