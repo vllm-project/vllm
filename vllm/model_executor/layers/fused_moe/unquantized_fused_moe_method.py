@@ -316,6 +316,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
     def get_fused_moe_quant_config(
