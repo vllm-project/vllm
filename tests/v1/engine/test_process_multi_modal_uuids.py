@@ -50,6 +50,7 @@ def _mock_input_processor(
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
