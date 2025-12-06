@@ -684,6 +684,8 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
+                if self.batch_invariant_enabled:
+                    attn_metadata.max_num_splits = 1
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
