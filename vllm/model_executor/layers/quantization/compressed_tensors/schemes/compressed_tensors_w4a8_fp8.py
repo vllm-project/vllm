@@ -128,14 +128,15 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             ),
         )
 
-        # TODO(czhu): allocate the packed fp8 scales memory here?
-        # the scales will be expanded by 8x via `cutlass_pack_scale_fp8`
+        # After loading, we will transform bf16 -> fp8 ->
+        # expand by 8x via `cutlass_pack_scale_fp8`
+        # and construct per-channel fp32 scales.
         weight_scale_args = {
             "weight_loader": weight_loader,
             "data": torch.empty(
                 output_size_per_partition,
                 scales_and_zp_size,
-                dtype=torch.float8_e4m3fn,
+                dtype=params_dtype,
             ),
         }
 
@@ -152,17 +153,9 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             data=torch.empty(2, dtype=torch.int64), weight_loader=weight_loader
         )
 
-        # per-channel scales
-        weight_chan_scale = ChannelQuantScaleParameter(
-            data=torch.empty((output_size_per_partition, 1), dtype=torch.float32),
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-
         layer.register_parameter("weight_packed", weight)
         layer.register_parameter("weight_scale", weight_scale)
         layer.register_parameter("weight_shape", weight_shape)
-        layer.register_parameter("weight_chan_scale", weight_chan_scale)
 
         self.kernel = kernel_type(
             mp_linear_kernel_config,

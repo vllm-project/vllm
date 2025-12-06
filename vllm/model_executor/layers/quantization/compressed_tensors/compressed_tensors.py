@@ -256,7 +256,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     if format is not None
                     else is_activation_quantization_format(quant_format)
                 )
-                # TODO(czhu): w4a8fp8 is in packed-quantized format
+                # w4a8fp8 is in packed-quantized format
                 # but needs input activation quantization
                 input_activations = quant_config.get("input_activations")
                 if act_quant_format or input_activations:
