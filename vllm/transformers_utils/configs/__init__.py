@@ -12,9 +12,8 @@ Model configs may be defined in this directory for the following reasons:
 
 from __future__ import annotations
 import importlib
-from typing import Dict
 
-_CLASS_TO_MODULE: Dict[str, str] = {
+_CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
     "ChatGLMConfig": "vllm.transformers_utils.configs.chatglm",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
