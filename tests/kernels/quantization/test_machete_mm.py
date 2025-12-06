@@ -23,6 +23,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "These tests require machete_prepack_B, not supported on ROCm.",
+        allow_module_level=True,
+    )
+
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
