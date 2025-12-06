@@ -309,6 +309,9 @@ class MistralTokenizer(TokenizerLike):
             for i in all_special_ids
         ]
 
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
+
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
     @property
@@ -421,6 +424,7 @@ class MistralTokenizer(TokenizerLike):
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
         continue_final_message = kwargs.get("continue_final_message", False)
+        tokenize = kwargs.get("tokenize", True)
         padding = kwargs.get("padding", False)
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
@@ -433,7 +437,7 @@ class MistralTokenizer(TokenizerLike):
             conversation=messages,
             tools=tools,
             continue_final_message=continue_final_message,
-            tokenize=True,
+            tokenize=tokenize,
             padding=padding,
             truncation=truncation,
             max_length=max_length,

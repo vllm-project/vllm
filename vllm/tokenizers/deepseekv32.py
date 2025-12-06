@@ -54,6 +54,9 @@ class DeepseekV32Tokenizer(HfTokenizer):
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
 
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
+
     @property
     def all_special_tokens(self) -> list[str]:
         return self.tokenizer.all_special_tokens
