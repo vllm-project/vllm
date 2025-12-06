@@ -15,6 +15,7 @@ detokenization and return token IDs only.
 import asyncio
 from collections.abc import AsyncGenerator
 
+from vllm.grpc import vllm_engine_pb2
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -233,7 +234,7 @@ class GrpcRequestManager:
 
 
 def create_sampling_params_from_proto(
-    proto_params,
+    proto_params: vllm_engine_pb2.SamplingParams,
     stream: bool = True,
 ) -> SamplingParams:
     """

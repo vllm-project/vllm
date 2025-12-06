@@ -34,6 +34,7 @@ from vllm.grpc.grpc_request_manager import (
     create_sampling_params_from_proto,
 )
 from vllm.logger import init_logger
+from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -262,7 +263,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     def _chunk_response(
         self,
         request_id: str,
-        output,
+        output: RequestOutput,
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
@@ -308,7 +309,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     def _complete_response(
         self,
         request_id: str,
-        output,
+        output: RequestOutput,
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.

@@ -4,8 +4,8 @@
 """
 Compile vLLM protobuf definitions into Python code.
 
-This script uses grpcio-tools to generate *_pb2.py and *_pb2_grpc.py files
-from the vllm_engine.proto definition.
+This script uses grpcio-tools to generate *_pb2.py, *_pb2_grpc.py, and
+*_pb2.pyi (type stubs) files from the vllm_engine.proto definition.
 
 Usage:
     python vllm/grpc/compile_protos.py
@@ -44,6 +44,7 @@ def compile_protos():
                 f"--proto_path={vllm_package_root}",
                 f"--python_out={vllm_package_root}",
                 f"--grpc_python_out={vllm_package_root}",
+                f"--pyi_out={vllm_package_root}",  # Generate type stubs
                 str(script_dir / "vllm_engine.proto"),
             ]
         )
@@ -58,6 +59,7 @@ def compile_protos():
             for generated_file in [
                 script_dir / "vllm_engine_pb2.py",
                 script_dir / "vllm_engine_pb2_grpc.py",
+                script_dir / "vllm_engine_pb2.pyi",
             ]:
                 if generated_file.exists():
                     content = generated_file.read_text()
@@ -67,6 +69,7 @@ def compile_protos():
             print("✓ Protobuf compilation successful!")
             print(f"  Generated: {script_dir / 'vllm_engine_pb2.py'}")
             print(f"  Generated: {script_dir / 'vllm_engine_pb2_grpc.py'}")
+            print(f"  Generated: {script_dir / 'vllm_engine_pb2.pyi'} (type stubs)")
             return 0
         else:
             print(f"Error: protoc returned {result}")
