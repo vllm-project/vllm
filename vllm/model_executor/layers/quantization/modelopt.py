@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
+    flashinfer_trtllm_fp4_routed_moe,
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
@@ -1342,7 +1343,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "Accuracy may be affected."
             )
 
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
@@ -1499,6 +1500,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_gscale=layer.w2_input_scale_quant,
         )
 
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: FusedMoE,
@@ -1534,11 +1539,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+            and not enable_eplb
         ):
-            if enable_eplb:
-                raise NotImplementedError(
-                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
@@ -1555,6 +1557,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
+
+        # EPLB path
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            return flashinfer_trtllm_fp4_routed_moe(
+                layer=layer,
+                x=x,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+            )
 
         if self.use_marlin:
             return fused_marlin_moe(
