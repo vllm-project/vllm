@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
 
-from vllm.v1.core.sched.policy.weighted_score_softer import WeightedScoreSorter
+from vllm.v1.core.sched.policy.weighted_score_sorter import WeightedScoreSorter
 from vllm.v1.request import Request
 
 
