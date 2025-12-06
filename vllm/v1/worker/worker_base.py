@@ -118,6 +118,12 @@ class WorkerBase:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
 
+    def get_model_inspection(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        from vllm.model_inspection import format_model_inspection
+
+        return format_model_inspection(self.get_model())
+
     def load_model(self) -> None:
         """Load model onto target device."""
         raise NotImplementedError
