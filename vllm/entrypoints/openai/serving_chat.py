@@ -1316,6 +1316,20 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+        except Exception as e:
+            # Return 503 error response directly for EngineSleepingError
+            from vllm.v1.engine.exceptions import EngineSleepingError
+            if isinstance(e, EngineSleepingError):
+                from vllm.entrypoints.openai.protocol import ErrorResponse, ErrorInfo
+                return ErrorResponse(
+                    error=ErrorInfo(
+                        message=str(e),
+                        type="EngineSleepingError",
+                        code=503,
+                    )
+                )
+            # Re-raise other exceptions
+            raise
 
         assert final_res is not None
 
