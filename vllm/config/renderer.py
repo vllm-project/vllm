@@ -64,18 +64,31 @@ class RendererConfig:
         return self.model_config.trust_remote_code
 
     def __post_init__(self) -> None:
+        model_config = self.model_config
+
         # The tokenizer is consistent with the model by default.
         if not self.tokenizer:
-            self.tokenizer = self.model_config.original_model
+            self.tokenizer = (
+                ModelConfig.model
+                if model_config is None
+                else model_config.original_model
+            )
         if not self.tokenizer_revision:
-            self.tokenizer_revision = self.model_config.revision
+            self.tokenizer_revision = (
+                ModelConfig.revision if model_config is None else model_config.revision
+            )
 
         self.original_tokenizer = self.tokenizer
         self.tokenizer = maybe_model_redirect(self.original_tokenizer)
         self.maybe_pull_tokenizer_for_runai(self.tokenizer)
 
         # Multimodal GGUF models must use original repo for mm processing
-        if is_gguf(self.tokenizer) and self.model_config.is_multimodal_model:
+        is_multimodal_model = (
+            ModelConfig.is_multimodal_model
+            if model_config is None
+            else model_config.is_multimodal_model
+        )
+        if is_gguf(self.tokenizer) and is_multimodal_model:
             raise ValueError(
                 "Loading a multimodal GGUF model needs to use original "
                 "tokenizer. Please specify the unquantized hf model's "
