@@ -143,6 +143,7 @@ class FusedMoEQuantDesc:
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
     # Quantization alphas or gscales, used for nvfp4 types.
+    # W4A8 FP8: used for per-channel scales
     # TODO(bnell): put some of these in subclasses
     alpha_or_gscale: torch.Tensor | None = None
 
@@ -151,9 +152,6 @@ class FusedMoEQuantDesc:
 
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
-
-    # Per-channel scales when per-group scales are also used (W4A8)
-    chan_scale: torch.Tensor | None = None
 
 
 # TODO(bnell): have subclasses for specific moe methods?
@@ -310,14 +308,6 @@ class FusedMoEQuantConfig:
         return self._w2.alpha_or_gscale
 
     @property
-    def w1_chan_scale(self) -> torch.Tensor | None:
-        return self._w1.chan_scale
-
-    @property
-    def w2_chan_scale(self) -> torch.Tensor | None:
-        return self._w2.chan_scale
-
-    @property
     def use_fp8_w8a8(self) -> bool:
         return self.quant_dtype == torch.float8_e4m3fn
 
@@ -435,8 +425,6 @@ class FusedMoEQuantConfig:
         w2_bias: torch.Tensor | None = None,
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
-        w1_chan_scale: torch.Tensor | None = None,
-        w2_chan_scale: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
     ) -> "FusedMoEQuantConfig":
         """
@@ -455,17 +443,15 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+            per-channel scales for w1 (for W4A8 FP8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
+            per-channel scales for w2 (for W4A8 FP8).
         - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
         - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
         - w2_bias: Optional biases for w1 (GPT OSS Triton).
         - w1_zp: Optional w1 zero points for int4/int8 quantization.
         - w2_zp: Optional w2 zero points for int4/int8 quantization.
-        - w1_chan_scale: Optional per-channel scale to be used for w1 when
-          `w1_scale` is used by the group scales.
-        - w2_chan_scale: Optional per-channel scale to be used for w1 when
-          `w2_scale` is used by the group scales.
         """
         assert not isinstance(quant_dtype, str) or quant_dtype in {
             "nvfp4",
@@ -491,22 +477,10 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                weight_dtype,
-                w_shape,
-                w1_scale,
-                g1_alphas,
-                w1_zp,
-                w1_bias,
-                w1_chan_scale,
+                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype,
-                w_shape,
-                w2_scale,
-                g2_alphas,
-                w2_zp,
-                w2_bias,
-                w2_chan_scale,
+                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -704,8 +678,8 @@ def int8_w8a16_moe_quant_config(
 def int4_w4afp8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w1_chan_scale: torch.Tensor,
-    w2_chan_scale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
@@ -717,8 +691,8 @@ def int4_w4afp8_moe_quant_config(
         torch.float8_e4m3fn,  # quant dtype for activations
         w1_scale=w1_scale,
         w2_scale=w2_scale,
-        w1_chan_scale=w1_chan_scale,
-        w2_chan_scale=w2_chan_scale,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,

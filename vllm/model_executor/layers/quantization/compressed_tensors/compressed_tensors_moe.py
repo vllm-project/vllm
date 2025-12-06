@@ -2663,8 +2663,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         return int4_w4afp8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,  # group scale
             w2_scale=layer.w2_weight_scale,  # group scale
-            w1_chan_scale=layer.w13_weight_chan_scale,
-            w2_chan_scale=layer.w2_weight_chan_scale,
+            g1_alphas=layer.w13_weight_chan_scale,
+            g2_alphas=layer.w2_weight_chan_scale,
             per_act_token_quant=True,  # always use dynamc per-token
             per_out_ch_quant=True,  # always use per-channel
         )

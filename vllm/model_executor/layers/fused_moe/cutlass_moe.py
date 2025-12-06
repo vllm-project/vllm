@@ -1327,8 +1327,8 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
             self.w2_scale,
             a1q_scale,
             a2_scale,
-            self.w1_chan_scale,
-            self.w2_chan_scale,
+            self.g1_alphas,  # per-channel scales
+            self.g2_alphas,  # per-channel scales
             self.a_strides1,
             self.a_strides2,
             self.b_strides1,
