@@ -9,6 +9,7 @@ from vllm.config import (
     CacheConfig,
     DeviceConfig,
     ModelConfig,
+    MultiModalConfig,
     RendererConfig,
     VllmConfig,
 )
@@ -50,11 +51,12 @@ def _mock_input_processor(
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
-        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
     )
+    model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
+
     renderer_config = RendererConfig(
         model_config=model_config,
         tokenizer="dummy",
