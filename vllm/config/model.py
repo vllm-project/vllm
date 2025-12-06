@@ -4,7 +4,6 @@
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
-from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -137,7 +136,8 @@ class ModelConfig:
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:\n
-    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "auto" will use the tokenizer from `mistral_common` for Mistral models
+    if available, otherwise it will use the "hf" tokenizer.\n
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
@@ -466,18 +466,6 @@ class ModelConfig:
             hf_overrides_fn = None
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
-
-        if (
-            (backend := envs.VLLM_ATTENTION_BACKEND)
-            and backend == "FLASHINFER"
-            and find_spec("flashinfer") is None
-        ):
-            raise ValueError(
-                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
-                "module was not found. See "
-                "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
-                "for instructions on how to install it."
-            )
 
         from vllm.platforms import current_platform
 

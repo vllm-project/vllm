@@ -1116,8 +1116,6 @@ class NanoNemotronVLDummyInputsBuilder(
 class NemotronH_Nano_VL_V2(
     nn.Module, HasInnerState, IsHybrid, SupportsMultiModal, SupportsMultiModalPruning
 ):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
