@@ -28,6 +28,7 @@ else:
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
+    "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,

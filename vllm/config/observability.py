@@ -59,6 +59,11 @@ class ObservabilityConfig:
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
     dispatch modes, and their observed frequencies at every logging interval)."""
 
+    enable_layerwise_nvtx_tracing: bool = False
+    """Enable layerwise NVTX tracing. This traces the execution of each layer or
+    module in the model and attach informations such as input/output shapes to
+    nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
