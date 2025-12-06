@@ -344,8 +344,6 @@ class DeepseekOCRMultiModalProcessor(
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
 class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone

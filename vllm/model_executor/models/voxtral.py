@@ -330,8 +330,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 class VoxtralForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
-    merge_by_field_config = True
-
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {

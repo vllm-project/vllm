@@ -786,7 +786,6 @@ class HunYuanVLForConditionalGeneration(
     SupportsQuant,
     SupportsXDRoPE,
 ):
-    merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw"}
 
     # To ensure correct weight loading and mapping.

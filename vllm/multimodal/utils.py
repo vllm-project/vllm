@@ -426,7 +426,6 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    # TODO: After v0.13, remove merge_by_field_config attribute from model impls
     if merge_by_field_config is not None:
         logger.warning_once(
             "The `merge_by_field_config` argument of `group_mm_kwargs_by_modality` "
