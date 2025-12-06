@@ -76,6 +76,7 @@ def rank_worker(
     base_config: Config,
     weights: WeightTensors,
     verbose: bool,
+    exit_first: bool,
 ):
     current_platform.seed_everything(pgi.rank)
 
@@ -126,6 +127,8 @@ def rank_worker(
             format_result(verbose, config.describe())
         except Exception as ex:
             format_result(verbose, config.describe(), ex)
+            if exit_first:
+                raise ex
             exceptions.append(ex)
 
     if len(exceptions) > 0:
@@ -137,7 +140,7 @@ def rank_worker(
         print(f"{count} of {count} tests passed in child process, rank={pgi.rank}.")
 
 
-def run(config: Config, verbose: bool):
+def run(config: Config):
     assert config.is_valid()[0]
     assert not is_nyi_config(config)
 
@@ -145,7 +148,14 @@ def run(config: Config, verbose: bool):
 
     vllm_config, env_dict = config.make_env_data()
     parallel_launch_with_config(
-        config.world_size, rank_worker, vllm_config, env_dict, config, weights, verbose
+        config.world_size,
+        rank_worker,
+        vllm_config,
+        env_dict,
+        config,
+        weights,
+        config.verbose,
+        config.exit_first,
     )
 
 
@@ -221,6 +231,18 @@ def generate_valid_test_cases(
                 print(f"Test config {config} is nyi.")
             continue
 
+        if (
+            quant_config is not None
+            and quant_config.quant_dtype == torch.float8_e4m3fn
+            and not current_platform.has_device_capability(89)
+        ):
+            if verbose:
+                print(
+                    f"Test config {config} is not valid: Triton limitation: "
+                    "fp8e4nv data type is not supported on CUDA arch < 89."
+                )
+            continue
+
         cases.append(
             (
                 k,
@@ -278,9 +300,14 @@ def test_modular_kernel_combinations_multigpu(
         fused_experts_type=fused_experts_type,
         fused_moe_chunk_size=chunk_size,
         world_size=world_size,
+        verbose=pytestconfig.getoption("verbose") > 0,
+        exit_first=pytestconfig.getoption("maxfail") == 1,
     )
-    verbosity = pytestconfig.getoption("verbose")
-    run(config, verbosity > 0)
+
+    if config.verbose:
+        print(f"\nTesting {config.describe()}\n")
+
+    run(config)
 
 
 @pytest.mark.parametrize(
@@ -315,16 +342,14 @@ def test_modular_kernel_combinations_singlegpu(
         fused_experts_type=fused_experts_type,
         fused_moe_chunk_size=chunk_size,
         world_size=world_size,
+        verbose=pytestconfig.getoption("verbose") > 0,
+        exit_first=pytestconfig.getoption("maxfail") == 1,
     )
 
-    if (
-        quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
-    ) and not current_platform.has_device_capability(89):
-        pytest.skip(
-            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
-        )
-    verbosity = pytestconfig.getoption("verbose")
-    run(config, verbosity > 0)
+    if config.verbose:
+        print(f"\nTesting {config.describe()}\n")
+
+    run(config)
 
 
 if __name__ == "__main__":
@@ -341,4 +366,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = make_config(args)
 
-    run(config, True)
+    run(config)
