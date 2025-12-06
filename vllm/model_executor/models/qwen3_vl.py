@@ -1190,7 +1190,6 @@ class Qwen3VLForConditionalGeneration(
     SupportsMRoPE,
     SupportsEagle3,
 ):
-    merge_by_field_config = True
     multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
 
     packed_modules_mapping = {
