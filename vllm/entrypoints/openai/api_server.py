@@ -2142,6 +2142,7 @@ async def run_server_worker(
             # NOTE: When the 'disable_uvicorn_access_log' value is True,
             # no access log will be output.
             access_log=not args.disable_uvicorn_access_log,
+            access_log_exclude_paths=args.uvicorn_access_log_exclude_paths,
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
             ssl_keyfile=args.ssl_keyfile,
             ssl_certfile=args.ssl_certfile,
