@@ -127,7 +127,6 @@ from vllm.tracing import (
 )
 from vllm.transformers_utils.tokenizer import (
     AnyTokenizer,
-    MistralTokenizer,
     get_tokenizer,
 )
 from vllm.utils import random_uuid
@@ -1227,9 +1226,10 @@ class OpenAIServing:
             # Note: input length can be up to the entire model context length
             # since these requests don't generate tokens.
             if token_num > max_model_len:
-                operations: dict[type[AnyRequest], str] = {
-                    ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                operations: dict[type[Any], str] = {
+                    ScoreRequest:                    "score",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest:       "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
