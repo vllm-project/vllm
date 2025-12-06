@@ -53,7 +53,7 @@ from vllm.transformers_utils.configs.tarsier2 import Tarsier2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
-    "AfmoeConfig",  
+    "AfmoeConfig",
     "BagelConfig",
     "ChatGLMConfig",
     "DeepseekVLV2Config",
