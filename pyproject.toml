@@ -58,6 +58,7 @@ include = ["vllm*"]
 # Exclude generated protobuf files
 "vllm/grpc/*_pb2.py" = ["ALL"]
 "vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+"vllm/grpc/*_pb2.pyi" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
