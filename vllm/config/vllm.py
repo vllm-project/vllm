@@ -896,7 +896,7 @@ class VllmConfig:
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
                 # NOTE(Yifan): warning when both kv connector and hybrid kv cache
-                # manager are enabled.
+                # manager are enabled but don't disable hybrid kv cache manager here.
                 # TODO(Kuntai): have a more elegent solution to check and
                 # turn off HMA for connector that does not support HMA.
                 logger.warning(
@@ -905,7 +905,7 @@ class VllmConfig:
                     "check if the kv connector you are using supports HMA, or "
                     "disable HMA by setting `--disable-hybrid-kv-cache-manager`."
                 )
-            if self.kv_events_config is not None:  ## YIFAN: what is this?
+            if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if (

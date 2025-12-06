@@ -77,6 +77,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         role: KVConnectorRole,
         kv_cache_config: "KVCacheConfig",
     ):
+        ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
+        # LMCache. Remove this once having LMCache-side support for new interfaces.
         vllm_config.kv_cache_config = kv_cache_config
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
@@ -316,6 +318,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         # either list[int] or tuple[list[int], ...].
         return self._lmcache_engine.request_finished(request, block_ids)
 
+    ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
+    # LMCache. Remove this once having LMCache-side support for new interfaces.
     def request_finished_all_groups(
         self,
         request: "Request",
