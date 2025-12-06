@@ -135,6 +135,7 @@ class NixlAgentMetadata:
     block_lens: list[int]
     kv_cache_layout: str
     block_size: int
+    timestamp: float  # Time when metadata was created (from time.perf_counter())
 
 
 @dataclass
@@ -231,6 +232,7 @@ class ReqMeta:
     local_physical_block_ids: list[int]
     tp_size: int
     remote: RemoteMeta | None = None
+    block_expiry_time: float | None = None  # Expiry time for blocks (perf_counter)
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -251,6 +253,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            block_expiry_time=kv_transfer_params.get("block_expiry_time"),
         )
 
     def add_new_req_to_save(
@@ -791,6 +794,11 @@ class NixlConnectorScheduler:
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
 
+        # Calculate block expiry time (in local perf_counter time)
+        block_expiry_time = (
+            time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+        )
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -800,6 +808,7 @@ class NixlConnectorScheduler:
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            block_expiry_time=block_expiry_time,
         )
 
 
@@ -849,6 +858,8 @@ class NixlConnectorWorker:
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
+        # Map of engine_id -> time difference (local - remote) in seconds
+        self._time_diffs: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -1076,6 +1087,8 @@ class NixlConnectorWorker:
                         f"Failed to decode NixlAgentMetadata. Error: {e}"
                     ) from e
 
+                setup_agent_time = time.perf_counter()
+
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
                     raise RuntimeError(
@@ -1083,7 +1096,19 @@ class NixlConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                setup_agent_time = time.perf_counter()
+
+                # Calculate and store time difference.
+                remote_time = metadata.timestamp
+                time_diff = setup_agent_time - remote_time
+                self._time_diffs[expected_engine_id] = time_diff
+                logger.info(
+                    "Time difference with remote engine %s: %.3f seconds "
+                    "(local=%.3f, remote=%.3f)",
+                    expected_engine_id,
+                    time_diff,
+                    setup_agent_time,
+                    remote_time,
+                )
 
                 # Register Remote agent.
                 remote_agent_name = self.add_remote_agent(
@@ -1369,6 +1394,7 @@ class NixlConnectorWorker:
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
             block_size=self.block_size,
+            timestamp=time.perf_counter(),
         )
         # Wrap metadata in payload with hash for defensive decoding
         encoder = msgspec.msgpack.Encoder()
@@ -2039,6 +2065,36 @@ class NixlConnectorWorker:
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None
+
+        # Check if blocks have expired before attempting to retrieve them
+        if meta.block_expiry_time is not None:
+            # Get time difference for this remote engine
+            time_diff = self._time_diffs.get(meta.remote.engine_id, 0.0)
+            # Convert remote expiry time to local time
+            # block_expiry_time is in prefill's perf_counter time
+            # time_diff = local_time - remote_time at handshake
+            # So: local_expiry = remote_expiry + time_diff
+            local_expiry_time = meta.block_expiry_time + time_diff
+            # Subtract buffer time (10 seconds) for safety
+            buffer_time = 10.0
+            local_expiry_time -= buffer_time
+
+            current_time = time.perf_counter()
+            if current_time >= local_expiry_time:
+                logger.error(
+                    "Remote blocks for request %s have expired. "
+                    "Expiry time: %.3f, Current time: %.3f (with %.1fs buffer). "
+                    "Marking blocks as invalid and failing the request.",
+                    req_id,
+                    local_expiry_time,
+                    current_time,
+                    buffer_time,
+                )
+                # Mark all blocks as invalid
+                self._invalid_block_ids.update(meta.local_block_ids)
+                self._failed_recv_reqs.add(req_id)
+                return
+
         remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
             meta.remote.engine_id
         )
