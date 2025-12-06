@@ -18,7 +18,7 @@ from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -31,7 +31,7 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
 def _ref_convert_id_to_token(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     token_id: int,
 ) -> str:
     """Reference impl of logprobs detokenization.

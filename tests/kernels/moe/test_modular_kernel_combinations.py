@@ -46,6 +46,12 @@ meets_multi_gpu_requirements = pytest.mark.skipif(
     reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
 
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
+
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
