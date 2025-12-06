@@ -132,7 +132,7 @@ class KVConnectorModelRunnerMixin:
         # Ensure all async KV cache loads are complete before CUDA graph
         # capture/replay. During replay, the per-layer wait_for_layer_load()
         # calls in the attention layer decorator are bypassed.
-        if forward_ctx.cudagraph_runtime_mode != CUDAGraphMode.NONE:
+        if forward_ctx.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             kv_connector.wait_for_load()
 
         try:
