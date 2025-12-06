@@ -27,8 +27,8 @@ class UBatchContext:
         ready_barrier: threading.Barrier,
         cpu_wait_event: threading.Event,
         cpu_signal_event: threading.Event,
-        gpu_comm_done_event: torch.cuda.Event,
-        gpu_compute_done_event: torch.cuda.Event,
+        gpu_comm_done_event: torch.Event,
+        gpu_compute_done_event: torch.Event,
         schedule: str = "default",
     ):
         self.id = id
@@ -207,8 +207,8 @@ def make_ubatch_contexts(
     Create a context manager for micro-batching synchronization.
     """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
-    gpu_comm_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
-    gpu_compute_done_events = [torch.cuda.Event() for _ in range(num_micro_batches)]
+    gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
+    gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
 
     assert len(forward_contexts) == 2
 

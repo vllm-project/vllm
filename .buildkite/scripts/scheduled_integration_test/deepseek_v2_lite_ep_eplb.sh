@@ -17,7 +17,17 @@ wait_for_server() {
 }
 
 MODEL="deepseek-ai/DeepSeek-V2-lite"
-BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+
+# Set BACKENDS based on platform
+if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
+  # ROCm platform
+  BACKENDS=("allgather_reducescatter")
+  # Disable MOE padding for ROCm since it is causing eplb to fail
+  export VLLM_ROCM_MOE_PADDING=0
+else
+  # Non-ROCm platform (CUDA/other)
+  BACKENDS=("deepep_high_throughput" "deepep_low_latency")
+fi
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -40,6 +50,7 @@ for BACK in "${BACKENDS[@]}"; do
     --data-parallel-size 2 \
     --enable-expert-parallel \
     --enable-eplb \
+    --eplb-config '{"window_size":200,"step_interval":600}' \
     --trust-remote-code \
     --max-model-len 2048 \
     --port $PORT &

@@ -5,7 +5,6 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Optional, cast
 
-import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
@@ -47,12 +46,6 @@ class KVConnectorFactory:
         role: KVConnectorRole,
         kv_cache_config: Optional["KVCacheConfig"] = None,
     ) -> KVConnectorBase:
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Attempting to initialize a V1 Connector, "
-                f"but found {envs.VLLM_USE_V1=}"
-            )
-
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set to create a connector")
@@ -169,6 +162,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "LMCacheMPConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.lmcache_mp_connector",
+    "LMCacheMPConnector",
+)
+
+KVConnectorFactory.register_connector(
     "NixlConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
     "NixlConnector",
@@ -190,4 +189,9 @@ KVConnectorFactory.register_connector(
     "DecodeBenchConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
     "DecodeBenchConnector",
+)
+KVConnectorFactory.register_connector(
+    "MooncakeConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "MooncakeConnector",
 )

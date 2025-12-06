@@ -22,18 +22,18 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/flycatcher.jpeg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/somefish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/starfish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/snail.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/thistle.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/husky.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/orangetabbycat.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/guineapig.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/rabbit.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/horsepony.jpg",
 ]
 
 
@@ -76,7 +76,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -305,6 +305,28 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+# HunyuanOCR
+def load_hunyuan_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "tencent/HunyuanOCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholder = (
+        "<｜hy_place▁holder▁no▁100｜><｜hy_place▁holder▁no▁102｜><｜hy_place▁holder▁no▁101｜>"  # noqa: E501
+    ) * len(image_urls)
+    prompt = f"<｜hy_begin▁of▁sentence｜>{placeholder}{question}<｜hy_User｜>"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -1110,6 +1132,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         model=model_name,
         max_model_len=16384,
         max_num_seqs=16,
+        trust_remote_code=True,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -1221,7 +1244,10 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=32768,
         limit_mm_per_prompt={"image": len(image_urls)},
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
     )
 
     prompt = (
@@ -1318,6 +1344,7 @@ model_example_map = {
     "deepseek_ocr": load_deepseek_ocr,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
+    "hunyuan_vl": load_hunyuan_vl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
@@ -1351,10 +1378,18 @@ model_example_map = {
 }
 
 
-def run_generate(model, question: str, image_urls: list[str], seed: int | None):
+def run_generate(
+    model,
+    question: str,
+    image_urls: list[str],
+    seed: int | None,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = SamplingParams(
@@ -1377,7 +1412,13 @@ def run_generate(model, question: str, image_urls: list[str], seed: int | None):
         print("-" * 50)
 
 
-def run_chat(model: str, question: str, image_urls: list[str], seed: int | None):
+def run_chat(
+    model: str,
+    question: str,
+    image_urls: list[str],
+    seed: int | None,
+    tensor_parallel_size: int | None,
+):
     req_data = model_example_map[model](question, image_urls)
 
     # Disable other modalities to save memory
@@ -1387,6 +1428,8 @@ def run_chat(model: str, question: str, image_urls: list[str], seed: int | None)
     )
 
     engine_args = asdict(req_data.engine_args) | {"seed": seed}
+    if tensor_parallel_size is not None:
+        engine_args["tensor_parallel_size"] = tensor_parallel_size
     llm = LLM(**engine_args)
 
     sampling_params = (
@@ -1462,6 +1505,13 @@ def parse_args():
         default=2,
         help="Number of images to use for the demo.",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        "-tp",
+        type=int,
+        default=None,
+        help="Tensor parallel size to override the model's default setting. ",
+    )
     return parser.parse_args()
 
 
@@ -1469,13 +1519,20 @@ def main(args: Namespace):
     model = args.model_type
     method = args.method
     seed = args.seed
+    tensor_parallel_size = args.tensor_parallel_size
+
+    if tensor_parallel_size is not None and tensor_parallel_size < 1:
+        raise ValueError(
+            f"tensor_parallel_size must be a positive integer, "
+            f"got {tensor_parallel_size}"
+        )
 
     image_urls = IMAGE_URLS[: args.num_images]
 
     if method == "generate":
-        run_generate(model, QUESTION, image_urls, seed)
+        run_generate(model, QUESTION, image_urls, seed, tensor_parallel_size)
     elif method == "chat":
-        run_chat(model, QUESTION, image_urls, seed)
+        run_chat(model, QUESTION, image_urls, seed, tensor_parallel_size)
     else:
         raise ValueError(f"Invalid method: {method}")
 

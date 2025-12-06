@@ -6,17 +6,23 @@ import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
+)
+
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ExtractedToolCallInformation,
+    ResponsesRequest,
+    ResponseTextConfig,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
@@ -30,7 +36,7 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -56,11 +62,21 @@ class ToolParser:
         )
         # Set structured output params for tool calling
         if json_schema_from_tool is not None:
-            if request.structured_outputs is None:
+            if isinstance(request, ChatCompletionRequest):
                 request.structured_outputs = StructuredOutputsParams()
-            # tool_choice: "Forced Function" or "required" will override
-            # structured output json settings to make tool calling work correctly
-            request.structured_outputs.json = json_schema_from_tool
+                # tool_choice: "Forced Function" or "required" will override
+                # structured output json settings to make tool calling work correctly
+                request.structured_outputs.json = json_schema_from_tool
+            if isinstance(request, ResponsesRequest):
+                request.text = ResponseTextConfig()
+                request.text.format = ResponseFormatTextJSONSchemaConfig(
+                    name="tool_calling_response",
+                    schema=json_schema_from_tool,
+                    type="json_schema",
+                    description="Response format for tool calling",
+                    strict=True,
+                )
+
         return request
 
     def extract_tool_calls(
@@ -226,7 +242,7 @@ class ToolParserManager:
 
             if isinstance(name, str):
                 names = [name]
-            elif is_list_of(name, str):
+            elif name is not None and is_list_of(name, str):
                 names = name
             else:
                 names = [class_name]

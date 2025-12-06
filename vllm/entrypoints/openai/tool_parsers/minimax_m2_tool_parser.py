@@ -21,13 +21,13 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
 class MinimaxM2ToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         self.prev_tool_call_arr: list[dict] = []
@@ -93,7 +93,7 @@ class MinimaxM2ToolParser(ToolParser):
                 "tokens in the tokenizer!"
             )
 
-        logger.info(
+        logger.debug(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 

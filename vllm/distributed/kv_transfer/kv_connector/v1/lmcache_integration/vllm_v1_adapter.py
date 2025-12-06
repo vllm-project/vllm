@@ -29,6 +29,7 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
 from lmcache.v1.plugin.plugin_launcher import PluginLauncher
 
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -50,7 +51,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -724,7 +724,7 @@ class LMCacheConnectorV1Impl:
                 "max_model_len": getattr(
                     vllm_config.model_config, "max_model_len", None
                 ),
-                "vocab_size": getattr(vllm_config.model_config, "vocab_size", None),
+                "vocab_size": vllm_config.model_config.get_vocab_size(),
                 "num_layers": getattr(
                     vllm_config.model_config, "get_num_layers", lambda _: None
                 )(vllm_config.parallel_config),
@@ -745,10 +745,6 @@ class LMCacheConnectorV1Impl:
                 ),
                 "gpu_memory_utilization": getattr(
                     vllm_config.cache_config, "gpu_memory_utilization", None
-                ),
-                "swap_space": getattr(vllm_config.cache_config, "swap_space", None),
-                "enable_prefix_caching": getattr(
-                    vllm_config.cache_config, "enable_prefix_caching", None
                 ),
             },
         }
@@ -919,7 +915,7 @@ class LMCacheConnectorV1Impl:
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         """Start saving the a layer of KV cache from vLLM's paged buffer
