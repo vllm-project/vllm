@@ -84,9 +84,9 @@ class SupportsMultiModal(Protocol):
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
     """
 
-    multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
+    multimodal_cpu_fields: ClassVar[Set[str] | None] = None
     """
-    A set indicating CPU-only multimodal fields.
+    [DEPRECATED] A set indicating CPU-only multimodal fields.
     """
 
     _processor_factory: ClassVar[_ProcessorFactories]
@@ -277,6 +277,15 @@ def supports_multimodal(
             logger.warning_once(
                 "`merge_by_field_config=True` is redundant, "
                 "please remove the override from your model."
+            )
+
+        multimodal_cpu_fields = getattr(model, "multimodal_cpu_fields", None)
+        if multimodal_cpu_fields is not None:
+            raise ValueError(
+                "`multimodal_cpu_fields` is no longer effective, "
+                "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
+                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
+                "and then remove the override from your model."
             )
 
     return res
