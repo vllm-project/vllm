@@ -5,7 +5,7 @@ The `vllm serve` command is used to launch the OpenAI-compatible server.
 ## CLI Arguments
 
 The `vllm serve` command is used to launch the OpenAI-compatible server.
-To see the available options, take a look at the [CLI Reference](../cli/README.md#options)!
+To see the available options, take a look at the [CLI Reference](../cli/README.md)!
 
 ## Configuration file
 

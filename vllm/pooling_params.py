@@ -57,6 +57,7 @@ class PoolingParams(
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
+    skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -93,6 +94,8 @@ class PoolingParams(
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
+            if self.skip_reading_prefix_cache is None:
+                self.skip_reading_prefix_cache = True
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -121,6 +124,15 @@ class PoolingParams(
 
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
+
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of all pooling may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            if self.task in ["token_embed", "token_classify"]:
+                self.skip_reading_prefix_cache = True
+            else:
+                self.skip_reading_prefix_cache = False
 
         self._verify_step_pooling(pooler_config, valid_parameters)
 
@@ -207,6 +219,8 @@ class PoolingParams(
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
+            f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

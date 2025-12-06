@@ -984,8 +984,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
 
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "qkv_proj",
@@ -1180,7 +1178,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         )
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []

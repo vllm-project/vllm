@@ -423,8 +423,6 @@ def init_vision_tower_for_llava(
 class Mistral3ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -549,7 +547,7 @@ class Mistral3ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

@@ -19,13 +19,12 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -54,6 +53,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     extract_layer_index,
     fast_topk,
     is_pp_missing_parameter,
@@ -171,8 +171,6 @@ class Llama4Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -208,7 +206,6 @@ class Llama4Attention(nn.Module):
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.n_rep = self.num_heads // self.num_kv_heads
         self.qk_norm = (
@@ -248,8 +245,7 @@ class Llama4Attention(nn.Module):
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=int(rope_theta),
-                rope_scaling=rope_scaling if rope_scaling != "default" else None,
+                rope_parameters=config.rope_parameters,
                 is_neox_style=is_neox_style,
             )
             if not self.nope
@@ -331,8 +327,6 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
-        rope_theta = config.rope_theta
-        rope_scaling = config.rope_scaling
         max_position_embeddings = config.max_position_embeddings
 
         self.self_attn = Llama4Attention(
@@ -340,8 +334,6 @@ class Llama4DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=False,
@@ -738,6 +730,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, Llama4DecoderLayer)
             if isinstance(layer.feed_forward, Llama4MoE):
                 # Pick last one layer since the first ones may be dense layers.
@@ -774,6 +769,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             if isinstance(layer.feed_forward, Llama4MoE):
                 moe = layer.feed_forward
                 moe.n_local_physical_experts = num_local_physical_experts

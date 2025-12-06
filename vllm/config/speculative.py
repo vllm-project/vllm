@@ -2,26 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
-import hashlib
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
-    from vllm.config import ModelConfig
 else:
     PretrainedConfig = Any
-    ModelConfig = Any
 
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
@@ -29,31 +28,25 @@ else:
 
 logger = init_logger(__name__)
 
-SpeculativeMethod = Literal[
-    "ngram",
-    "eagle",
-    "eagle3",
-    "medusa",
-    "mlp_speculator",
-    "draft_model",
-    "deepseek_mtp",
-    "ernie_mtp",
-    "qwen3_next_mtp",
-    "mimo_mtp",
-    "longcat_flash_mtp",
-    "pangu_ultra_moe_mtp",
-    "mtp",
-    "suffix",
-]
-MTP_MODEL_TYPES = (
+MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
+    "mtp",
     "pangu_ultra_moe_mtp",
-)
+]
+EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+SpeculativeMethod = Literal[
+    "ngram",
+    "medusa",
+    "mlp_speculator",
+    "draft_model",
+    "suffix",
+    EagleModelTypes,
+]
 
 
 @config
@@ -169,11 +162,12 @@ class SpeculativeConfig:
         # Eagle3 affects the computation graph because it returns intermediate
         # hidden states in addition to the final hidden state.
         factors.append(self.method == "eagle3")
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        initial_architecture = hf_config.architectures[0]
         if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
@@ -233,6 +227,9 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
 
+        if initial_architecture == "MistralLarge3ForCausalLM":
+            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
+
         return hf_config
 
     def __post_init__(self):
@@ -244,7 +241,7 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
-        if self.method in MTP_MODEL_TYPES:
+        if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
             )
@@ -322,10 +319,6 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
-                # TODO: Move this import to the top once `ModelConfig`
-                # lives in `vllm.config.model`.
-                from vllm.config import ModelConfig
-
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -344,6 +337,7 @@ class SpeculativeConfig:
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
+                    config_format=self.target_model_config.config_format,
                 )
 
                 # Automatically detect the method
@@ -361,7 +355,9 @@ class SpeculativeConfig:
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
                     self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in MTP_MODEL_TYPES:
+                elif self.draft_model_config.hf_config.model_type in get_args(
+                    MTPModelTypes
+                ):
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -637,16 +633,6 @@ class SpeculativeConfig:
             )
 
         return self
-
-    @property
-    def num_lookahead_slots(self) -> int:
-        """The number of additional slots the scheduler should allocate per
-        step, in addition to the slots allocated for each known token.
-
-        This is equal to the number of speculative tokens, as each speculative
-        token must be scored.
-        """
-        return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")

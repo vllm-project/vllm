@@ -63,7 +63,7 @@ class RocmAttentionMetadata:
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
@@ -165,7 +165,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "Set --attention-config.backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 
@@ -238,12 +238,9 @@ class RocmAttentionImpl(AttentionImpl):
 
         RocmAttentionBackend.validate_head_size(head_size)
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "RocmAttentionImpl"
+                "Encoder self-attention is not implemented for RocmAttentionImpl"
             )
 
         self.fp8_dtype = current_platform.fp8_dtype()

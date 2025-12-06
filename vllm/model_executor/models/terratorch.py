@@ -64,7 +64,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type
 
 logger = init_logger(__name__)
 
@@ -220,14 +220,13 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor):
         )
 
 
-@default_pooling_type("All")
+@attn_type("attention_free")
 @MULTIMODAL_REGISTRY.register_processor(
     TerratorchMultiModalProcessor,
     info=TerratorchProcessingInfo,
     dummy_inputs=TerratorchInputBuilder,
 )
 class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
-    merge_by_field_config = True
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
@@ -251,7 +250,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
 
         self.pooler = DispatchPooler({"plugin": DummyPooler()})
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,

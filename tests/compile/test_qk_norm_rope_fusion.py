@@ -5,7 +5,8 @@ import pytest
 import torch
 
 from tests.compile.backend import TestBackend
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.matcher_utils import FLASHINFER_ROTARY_OP, RMS_OP, ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
@@ -113,8 +114,8 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason="Only test on cuda platform",
+    not current_platform.is_cuda_alike(),
+    reason="Only test on cuda and rocm platform",
 )
 def test_qk_norm_rope_fusion(
     eps, is_neox, enable_rms_norm_custom_op, enable_rope_custom_op, dtype
@@ -139,7 +140,7 @@ def test_qk_norm_rope_fusion(
             custom_ops=custom_ops,
             pass_config=PassConfig(
                 enable_qk_norm_rope_fusion=True,
-                enable_noop=True,
+                eliminate_noops=True,
             ),
         ),
     )

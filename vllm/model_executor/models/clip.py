@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Annotated, Literal
 
@@ -14,12 +14,12 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention import Attention
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -315,7 +315,7 @@ class CLIPVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -561,7 +561,7 @@ class CLIPTextTransformer(nn.Module):
             eps=config.layer_norm_eps,
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.token_embedding(input_ids)
 
     def forward(
@@ -784,7 +784,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     is_pooling_model = True
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    merge_by_field_config = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -842,7 +841,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             }
         )
 
-        # Assumes that self.forward is called after self.get_input_embeddings
+        # Assumes that self.forward is called after self.embed_input_ids
         self._is_text_input = True
 
     def get_text_features(
@@ -903,7 +902,42 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_language_model(self) -> torch.nn.Module:
         return self.text_model
 
-    def get_input_embeddings(
+    def _embed_text_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
+        *,
+        is_multimodal: torch.Tensor | None,
+        handle_oov_mm_token: bool,
+    ) -> torch.Tensor:
+        inputs_embeds = super()._embed_text_input_ids(
+            input_ids,
+            embed_input_ids,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        inputs_embeds_size = self.projection_dim
+        if inputs_embeds.shape[1] < inputs_embeds_size:
+            inputs_embeds = torch.cat(
+                [
+                    inputs_embeds,
+                    inputs_embeds.new_empty(
+                        inputs_embeds.shape[0],
+                        inputs_embeds_size - inputs_embeds.shape[1],
+                    ),
+                ],
+                dim=1,
+            )
+        elif inputs_embeds.shape[1] > inputs_embeds_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return inputs_embeds
+
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -917,16 +951,16 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -949,10 +983,16 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if not self._is_text_input:
             return inputs_embeds
 
-        # Text inputs
-        return self.get_text_features(
-            input_ids=input_ids, position_ids=positions, inputs_embeds=inputs_embeds
-        )
+        # NOTE: inputs_embeds in model runner has size text_config.projection_dim
+        # (instead of text_config.hidden_size) to accommodate image embeddings
+        hidden_size = self.text_embed_dim
+        if inputs_embeds.shape[1] > hidden_size:
+            inputs_embeds = inputs_embeds[:, :hidden_size]
+        elif inputs_embeds.shape[1] < hidden_size:
+            # No need to handle this case for now
+            raise NotImplementedError
+
+        return self.get_text_features(input_ids, positions, inputs_embeds)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(

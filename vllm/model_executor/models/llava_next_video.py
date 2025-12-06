@@ -299,8 +299,6 @@ class LlavaNextMultiModalProjector(nn.Module):
     dummy_inputs=LlavaNextVideoDummyInputsBuilder,
 )
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -422,7 +420,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         video_input = self._parse_and_validate_video_input(**kwargs)
         if video_input is None:
             return []

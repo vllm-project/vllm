@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
@@ -46,7 +46,7 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -59,10 +59,10 @@ class InputPreprocessor:
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
-                "You cannot pass text prompts when `skip_tokenizer_init` is True"
+                "You cannot pass text prompts when `skip_tokenizer_init=True`"
             )
 
         return self.tokenizer
@@ -198,7 +198,7 @@ class InputPreprocessor:
     ) -> dict[str, Any]:
         kwargs = dict[str, Any]()
 
-        if self.model_config.hf_config.model_type == "whisper":
+        if self.model_config.is_encoder_decoder:
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
@@ -228,22 +228,11 @@ class InputPreprocessor:
 
         return tokenizer.encode(prompt, **tokenization_kwargs)
 
-    def _get_mm_tokenizer(self) -> AnyTokenizer:
-        # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
-        # while using also multi-modal input
-        if not self.tokenizer:
-            return cast(AnyTokenizer, object())  # Dummy
-
-        tokenizer = self.get_tokenizer()
-        return tokenizer
-
     def _get_mm_processor(self) -> BaseMultiModalProcessor:
         if not hasattr(self, "_mm_processor"):
-            tokenizer = self._get_mm_tokenizer()
-
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
-                tokenizer=tokenizer,
+                tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
 
@@ -348,18 +337,15 @@ class InputPreprocessor:
         )
 
         inputs: TokenInputs | MultiModalInputs
-        if self.model_config.is_multimodal_model:
+        if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data") or {},
+                multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
-            if parsed_content.get("multi_modal_data"):
-                raise ValueError("This model does not support multimodal inputs")
-
             inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
@@ -377,18 +363,15 @@ class InputPreprocessor:
         prompt_text = parsed_content["prompt"]
 
         inputs: TokenInputs | MultiModalInputs
-        if self.model_config.is_multimodal_model:
+        if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data") or {},
+                multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
-            if parsed_content.get("multi_modal_data"):
-                raise ValueError("This model does not support multimodal inputs")
-
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
@@ -590,7 +573,6 @@ class InputPreprocessor:
         """
         encoder_inputs: SingletonInputs
         decoder_inputs: SingletonInputs | None
-
         if is_explicit_encoder_decoder_prompt(prompt):
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
@@ -602,7 +584,9 @@ class InputPreprocessor:
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
+                decoder_inputs = self._prompt_to_llm_inputs(
+                    decoder_input, tokenization_kwargs=tokenization_kwargs
+                )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:

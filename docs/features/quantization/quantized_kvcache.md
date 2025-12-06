@@ -78,7 +78,7 @@ Here's a complete example using `meta-llama/Llama-3.1-8B-Instruct` (most models 
     ```python
     from datasets import load_dataset
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
 
     # Select model and load it
     MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"

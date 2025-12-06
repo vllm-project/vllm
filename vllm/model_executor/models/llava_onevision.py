@@ -479,8 +479,6 @@ class LlavaOnevisionMultiModalProjector(nn.Module):
     dummy_inputs=LlavaOnevisionDummyInputsBuilder,
 )
 class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -763,7 +761,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         image_input: LlavaOnevisionImageInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
+            return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)
 
@@ -866,7 +864,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []

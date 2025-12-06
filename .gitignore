@@ -4,6 +4,9 @@
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
 
+# OpenAI triton kernels copied from source
+vllm/third_party/triton_kernels/*
+
 # triton jit
 .triton
 

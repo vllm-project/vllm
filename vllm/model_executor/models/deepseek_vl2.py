@@ -41,14 +41,13 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import (
     DeepseekVLV2Config,
     MlpProjectorConfig,
     VisionEncoderConfig,
 )
 from vllm.transformers_utils.processors.deepseek_vl2 import DeepseekVLV2Processor
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -345,8 +344,6 @@ class DeepseekVL2MultiModalProcessor(
     dummy_inputs=DeepseekVL2DummyInputsBuilder,
 )
 class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language.": "language_model.",
@@ -595,19 +592,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _process_image_input(
         self, image_input: DeepseekVL2ImageInputs
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            image_data = image_input["data"]
-            if is_list_of(image_data, torch.Tensor):
-                # it's already a list of tensors
-                return image_data
-            if len(image_data.shape) == 3:
-                # 3D tensor
-                return list(torch.unbind(image_data, dim=0))
-            raise ValueError(
-                "We expect batched 2D tensors; "
-                "this can be either a list of 2D tensors or a single 3D tensor."
-            )
+            return image_input["data"]
 
         pixel_values = image_input["data"]
         images_spatial_crop = image_input["images_spatial_crop"]
@@ -619,7 +606,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
