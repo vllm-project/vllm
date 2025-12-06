@@ -4125,6 +4125,7 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
+                    is_memory_profile=is_profile,
                 ),
             ):
                 outputs = self.model(
