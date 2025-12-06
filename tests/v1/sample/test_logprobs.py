@@ -528,9 +528,11 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         ),
     ],
 )
+@pytest.mark.parametrize("top_logprobs", [0, 3])
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, str],
+    top_logprobs: int,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -543,7 +545,7 @@ def test_spec_decode_logprobs(
 
     prompt = "Hello world " * 50
     sampling_params = SamplingParams(
-        temperature=0, logprobs=3, max_tokens=10, ignore_eos=False
+        temperature=0, logprobs=top_logprobs, max_tokens=10, ignore_eos=False
     )
     method, model_name, spec_model_name = model_setup
     max_model_len = 256
