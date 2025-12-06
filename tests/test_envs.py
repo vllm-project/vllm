@@ -13,6 +13,7 @@ from vllm.envs import (
     env_set_with_choices,
     env_with_choices,
     environment_variables,
+    get_vllm_port,
 )
 
 
@@ -55,6 +56,32 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     # Reset envs.__getattr__ back to none-cached version to
     # avoid affecting other tests
     envs.__getattr__ = envs.__getattr__.__wrapped__
+
+
+def test_get_vllm_port_not_set(monkeypatch: pytest.MonkeyPatch):
+    """If VLLM_PORT is not set, get_vllm_port should return None."""
+    monkeypatch.delenv("VLLM_PORT", raising=False)
+    assert get_vllm_port() is None
+
+
+def test_get_vllm_port_with_integer_value(monkeypatch: pytest.MonkeyPatch):
+    """If VLLM_PORT is an integer string, it should be parsed correctly."""
+    monkeypatch.setenv("VLLM_PORT", "8080")
+    assert get_vllm_port() == 8080
+
+
+def test_get_vllm_port_rejects_uri(monkeypatch: pytest.MonkeyPatch):
+    """If VLLM_PORT looks like a URI, a helpful error should be raised."""
+    monkeypatch.setenv("VLLM_PORT", "tcp://10.0.0.1:8080")
+    with pytest.raises(ValueError, match="appears to be a URI. This may be caused"):
+        get_vllm_port()
+
+
+def test_get_vllm_port_rejects_non_integer_non_uri(monkeypatch: pytest.MonkeyPatch):
+    """If VLLM_PORT is neither an int nor a URI, a generic error is raised."""
+    monkeypatch.setenv("VLLM_PORT", "not-a-port")
+    with pytest.raises(ValueError, match="must be a valid integer"):
+        get_vllm_port()
 
 
 class TestEnvWithChoices:
