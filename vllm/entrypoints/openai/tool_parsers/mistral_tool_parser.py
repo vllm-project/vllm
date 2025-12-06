@@ -16,7 +16,6 @@ models for reliable tool calling support.
 """
 
 import contextlib
-import json
 from collections.abc import Sequence
 from enum import Enum, auto
 from random import choices
@@ -165,7 +164,7 @@ class MistralToolParser(ToolParser):
             content: str | None = content_str if content_str.strip() else None
 
             # Parse tool calls from each segment after [TOOL_CALLS]
-            function_call_arr = []
+            tool_calls: list[MistralToolCall] = []
             for segment in model_output.split(self.bot_token):
                 if not segment.strip():
                     continue
@@ -173,24 +172,13 @@ class MistralToolParser(ToolParser):
                 matches = self.fn_name_regex.findall(segment)
                 for match in matches:
                     fn_name = match[0]
-                    args = match[1]
-                    function_call_arr.append(
-                        {"name": fn_name, "arguments": json.loads(args)}
+                    fn_args = match[1]
+                    tool_calls.append(
+                        MistralToolCall(
+                            type="function",
+                            function=FunctionCall(name=fn_name, arguments=fn_args),
+                        )
                     )
-
-            # Convert to MistralToolCall objects
-            tool_calls: list[MistralToolCall] = [
-                MistralToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=raw_function_call["name"],
-                        arguments=json.dumps(
-                            raw_function_call["arguments"], ensure_ascii=False
-                        ),
-                    ),
-                )
-                for raw_function_call in function_call_arr
-            ]
 
             return ExtractedToolCallInformation(
                 tools_called=True,
