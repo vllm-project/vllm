@@ -115,13 +115,51 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Is getattr needed?
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+
+        prepare_finalize = self.fused_experts.prepare_finalize
+        hidden_states, router_logits = prepare_finalize.preprocess_inputs(
+            x, router_logits, layer
+        )
+
+        if enable_eplb:
+            if self.supports_eplb:
+                assert expert_load_view is not None
+                assert logical_to_physical_map is not None
+                assert logical_replica_count is not None
+            else:
+                raise NotImplementedError(
+                    "EPLB is not supported for "
+                    f"{self.old_quant_method.__class__.__name__}."
+                )
+
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
-            hidden_states=x,
+            hidden_states=hidden_states,
             router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
         )
 
         result = self.fused_experts(
-            hidden_states=x,
+            hidden_states=hidden_states,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
@@ -133,7 +171,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=None if self.disable_expert_map else expert_map,
         )
 
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
+        result = prepare_finalize.postprocess_output(result, layer)
+
+        if zero_expert_num != 0 and zero_expert_type is not None:
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )
