@@ -79,12 +79,12 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
     ):
         ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
         # LMCache. Remove this once having LMCache-side support for new interfaces.
-        vllm_config.kv_cache_config = kv_cache_config
+        vllm_config.kv_cache_config = kv_cache_config  # type: ignore[attr-defined]
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
-        assert vllm_config.kv_transfer_config is not None
-        use_native = vllm_config.kv_transfer_config.get_from_extra_config(
+        assert vllm_config.kv_transfer_config is not None  # type: ignore[attr-defined]
+        use_native = vllm_config.kv_transfer_config.get_from_extra_config(  # type: ignore[attr-defined]
             "use_native", False
         )
         if use_native:
