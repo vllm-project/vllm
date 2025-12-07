@@ -29,7 +29,7 @@ class RendererLike(Protocol):
     # NOTE: Remove this once LLM.tokenizer.setter is removed
     @tokenizer.setter
     def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self._tokenizer = tokenizer
+        raise NotImplementedError
 
     def get_tokenizer(self) -> TokenizerLike:
         tokenizer = self.tokenizer
