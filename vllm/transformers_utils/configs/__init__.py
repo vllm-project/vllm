@@ -11,6 +11,7 @@ Model configs may be defined in this directory for the following reasons:
 """
 
 from __future__ import annotations
+
 import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
@@ -82,6 +83,7 @@ __all__ = [
     "Tarsier2Config",
 ]
 
+
 def __getattr__(name: str):
     if name in _CLASS_TO_MODULE:
         module_name = _CLASS_TO_MODULE[name]
@@ -89,6 +91,7 @@ def __getattr__(name: str):
         return getattr(module, name)
 
     raise AttributeError(f"module 'configs' has no attribute '{name}'")
+
 
 def __dir__():
     return sorted(list(__all__))
