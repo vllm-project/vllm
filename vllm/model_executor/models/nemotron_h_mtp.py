@@ -264,10 +264,7 @@ class NemotronHMultiTokenPredictor(nn.Module):
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         # Use the MTP layer (cycling for multi-step)
-        if spec_step_idx == 0:
-            layer_idx_str = "0"
-        else:
-            layer_idx_str = "1"
+        layer_idx_str = "0" if spec_step_idx == 0 else "1"
 
         hidden_states = self.layers[layer_idx_str](
             inputs_embeds,
@@ -362,7 +359,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         return self.logits_processor(self.lm_head, hidden_states)
 
     def should_use_spec_step_idx(self) -> bool:
-        return True if len(self.model.layers) > 1 else False
+        return len(self.model.layers) > 1
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load MTP weights with proper name remapping."""
@@ -386,7 +383,8 @@ class NemotronHMTP(nn.Module, SupportsPP):
             }
         else:
             raise RuntimeError(
-                f"SMOR: unsupported mtp_hybrid_override_pattern: {self.config.mtp_hybrid_override_pattern}"
+                "SMOR: unsupported mtp_hybrid_override_pattern: "
+                f"{self.config.mtp_hybrid_override_pattern}"
             )
 
         expert_params_mapping = []

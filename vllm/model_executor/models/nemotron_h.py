@@ -632,9 +632,7 @@ class NemotronHModel(nn.Module):
         return hidden_states
 
     def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
-        if weight_name.startswith("mtp."):
-            return True
-        return False
+        return weight_name.startswith("mtp.")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
