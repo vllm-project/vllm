@@ -718,7 +718,8 @@ class ModelConfig:
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
         if not isinstance(self.tokenizer, str):
             raise ValueError(
-                f"tokenizer must be a string, got {type(self.tokenizer).__name__}: {self.tokenizer!r}. "
+                f"tokenizer must be a string, got "
+                f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
                 "Please provide a valid tokenizer path or HuggingFace model ID."
             )
         if not isinstance(self.max_model_len, int):
