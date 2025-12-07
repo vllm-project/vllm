@@ -12,7 +12,6 @@ from vllm.config import (
     MultiModalConfig,
     VllmConfig,
 )
-from vllm.renderers.terratorch import TerratorchRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
@@ -63,7 +62,7 @@ def _mock_input_processor(
         device_config=DeviceConfig(device="cpu"),
     )
 
-    return InputProcessor(vllm_config, renderer=TerratorchRenderer(model_config, {}))
+    return InputProcessor(vllm_config)
 
 
 def test_multi_modal_uuids_length_mismatch_raises(monkeypatch):
