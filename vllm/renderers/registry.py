@@ -98,6 +98,7 @@ def renderer_from_config(config: "ModelConfig"):
         tokenizer_mode = "hf"
 
     tokenizer_kwargs = dict[str, Any](
+        tokenizer_name=tokenizer_name,
         trust_remote_code=trust_remote_code,
         revision=tokenizer_revision,
         **tokenizer_kwargs,
