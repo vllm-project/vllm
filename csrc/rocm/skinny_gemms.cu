@@ -1361,7 +1361,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   // capacity
   #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GrpsShrB>
 
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     __attribute__((amdgpu_waves_per_eu(1, 1)))
@@ -1372,7 +1372,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Use upper half of glbl buffer for atomic reduce counting
   int* cntr = (int*)(&glbl[M * N]);
 
-  constexpr int GrpsShrB = 2;
   constexpr int NTILE = 16;
   constexpr int WVLDS_ = (NTILE * THRDS * A_CHUNK);
   constexpr int APAD = 2;
@@ -1775,7 +1774,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 }
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N>
+          int UNRL, int N, int GrpsShrB>
 __global__ void wvSplitKrc_(const int K, const int M, const int Bx,
                             const int By, const scalar_t* B,
                             const scalar_t* __restrict__ A,
@@ -1818,10 +1817,10 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N)                          \
+#define WVSPLITKrc(_WvPrGrp, _YTILE, _UNRL, _N, _GrpsShrB)               \
   {                                                                      \
     dim3 block(64, _WvPrGrp);                                            \
-    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N>              \
+    wvSplitKrc_<fptype, 64, _YTILE, _WvPrGrp, 8, _UNRL, _N, _GrpsShrB>   \
         <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                      biasf4, glbl, c, CuCount);          \
   }
@@ -1838,13 +1837,13 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
     auto glbl = axl_glbl.data_ptr<float>();
     switch (N_in) {
       case 16:
-        WVSPLITKrc(4, 16, 1, 16) break;
+        WVSPLITKrc(4, 16, 1, 16, 1) break;
       case 32:
-        WVSPLITKrc(4, 16, 1, 32) break;
+        WVSPLITKrc(4, 16, 1, 32, 2) break;
       case 64:
-        WVSPLITKrc(4, 16, 1, 64) break;
+        WVSPLITKrc(4, 16, 1, 64, 2) break;
       case 128:
-        WVSPLITKrc(4, 16, 1, 128) break;
+        WVSPLITKrc(4, 16, 1, 128, 4) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
