@@ -3,10 +3,10 @@
 import importlib.util
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 import huggingface_hub
-from typing_extensions import assert_never, deprecated
+from typing_extensions import TypeVar, assert_never, deprecated
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -178,14 +178,18 @@ def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
     )
 
 
+_T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
 def get_tokenizer(
     tokenizer_name: str | Path,
     *args,
+    tokenizer_cls: type[_T] = TokenizerLike,
     trust_remote_code: bool = False,
     revision: str | None = None,
     download_dir: str | None = None,
     **kwargs,
-) -> TokenizerLike:
+) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
     tokenizer_mode, tokenizer_args, tokenizer_kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
@@ -197,8 +201,12 @@ def get_tokenizer(
     )
     tokenizer_kwargs.update(kwargs)
 
-    tokenizer_cls = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
-    tokenizer = tokenizer_cls.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
+    if tokenizer_cls == TokenizerLike:
+        tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
+    else:
+        tokenizer_cls_ = tokenizer_cls
+
+    tokenizer = tokenizer_cls_.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
@@ -230,36 +238,3 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
 )
 def init_tokenizer_from_config(model_config: "ModelConfig"):
     return cached_tokenizer_from_config(model_config)
-
-
-_T = TypeVar("_T", bound=TokenizerLike)
-
-
-def init_tokenizer(
-    tokenizer_cls: type[_T],
-    tokenizer_name: str | Path,
-    trust_remote_code: bool = False,
-    revision: str | None = None,
-    download_dir: str | None = None,
-    **kwargs,
-) -> _T:
-    tokenizer_mode, tokenizer_args, tokenizer_kwargs = cached_resolve_tokenizer_args(
-        tokenizer_name,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        download_dir=download_dir,
-        **kwargs,
-    )
-    tokenizer_kwargs.update(kwargs)
-
-    tokenizer = tokenizer_cls.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
-    if not tokenizer.is_fast:
-        logger.warning(
-            "Using a slow tokenizer. This might cause a significant "
-            "slowdown. Consider using a fast tokenizer instead."
-        )
-
-    return tokenizer  # type: ignore
-
-
-cached_init_tokenizer = lru_cache(init_tokenizer)

@@ -25,7 +25,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
-from vllm.tokenizers import cached_init_tokenizer
+from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
@@ -497,8 +497,8 @@ class HfRenderer(RendererLike):
         if config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = cached_init_tokenizer(
-                CachedHfTokenizer,  # type: ignore[type-abstract]
+            tokenizer = cached_get_tokenizer(
+                tokenizer_cls=CachedHfTokenizer,  # type: ignore[type-abstract]
                 **tokenizer_kwargs,
             )
             assert isinstance(tokenizer, HfTokenizer)
