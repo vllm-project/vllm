@@ -31,7 +31,7 @@ from .inputs import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import ModelConfig, RendererConfig, VllmConfig
 
     from .processing import ResolvedPromptUpdate
     from .registry import MultiModalRegistry
@@ -561,13 +561,13 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
 
 
 def _enable_processor_cache(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     mm_registry: "MultiModalRegistry",
 ) -> bool:
-    if not mm_registry.supports_multimodal_inputs(model_config):
+    if not mm_registry.supports_multimodal_inputs(renderer_config):
         return False
 
-    mm_config = model_config.get_multimodal_config()
+    mm_config = renderer_config.model_config.get_multimodal_config()
     return mm_config.mm_processor_cache_gb > 0
 
 
@@ -599,7 +599,7 @@ def processor_cache_from_config(
     """Return a `BaseMultiModalProcessorCache`, if enabled."""
     model_config = vllm_config.model_config
 
-    if not _enable_processor_cache(model_config, mm_registry):
+    if not _enable_processor_cache(vllm_config.renderer_config, mm_registry):
         return None
 
     if not _enable_ipc_cache(vllm_config):
@@ -611,14 +611,14 @@ def processor_cache_from_config(
 
 
 def processor_only_cache_from_config(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     mm_registry: "MultiModalRegistry",
 ):
     """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-    if not _enable_processor_cache(model_config, mm_registry):
+    if not _enable_processor_cache(renderer_config, mm_registry):
         return None
 
-    return MultiModalProcessorOnlyCache(model_config)
+    return MultiModalProcessorOnlyCache(renderer_config.model_config)
 
 
 class BaseMultiModalReceiverCache(
@@ -787,7 +787,7 @@ def engine_receiver_cache_from_config(
     """
     model_config = vllm_config.model_config
 
-    if not _enable_processor_cache(model_config, mm_registry):
+    if not _enable_processor_cache(vllm_config.renderer_config, mm_registry):
         return None
 
     if not _enable_ipc_cache(vllm_config):
@@ -809,9 +809,7 @@ def worker_receiver_cache_from_config(
     Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
     mm_processor_cache_type=="shm".
     """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
+    if not _enable_processor_cache(vllm_config.renderer_config, mm_registry):
         return None
 
     if not _enable_ipc_cache(vllm_config):

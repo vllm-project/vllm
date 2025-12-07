@@ -23,7 +23,7 @@ from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, RendererConfig
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
@@ -233,17 +233,18 @@ def cached_get_processor_without_dynamic_kwargs(
 
 
 def cached_processor_from_config(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
+    model_config = renderer_config.model_config
     if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
+        assert not is_gguf(renderer_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
             "should be used to correctly load processor."
         )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
+        model = renderer_config.tokenizer
+        revision = renderer_config.tokenizer_revision
     else:
         model = model_config.model
         revision = model_config.revision
@@ -297,9 +298,11 @@ cached_get_feature_extractor = lru_cache(get_feature_extractor)
 
 
 def cached_feature_extractor_from_config(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     **kwargs: Any,
 ):
+    model_config = renderer_config.model_config
+
     return cached_get_feature_extractor(
         model_config.model,
         revision=model_config.revision,
@@ -348,16 +351,17 @@ cached_get_image_processor = lru_cache(get_image_processor)
 
 
 def cached_image_processor_from_config(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     **kwargs: Any,
 ):
+    model_config = renderer_config.model_config
     if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
+        assert not is_gguf(renderer_config.tokenizer), (
             "For multimodal GGUF models, the original tokenizer "
             "should be used to correctly load image processor."
         )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
+        model = renderer_config.tokenizer
+        revision = renderer_config.tokenizer_revision
     else:
         model = model_config.model
         revision = model_config.revision
@@ -411,10 +415,12 @@ cached_get_video_processor = lru_cache(get_video_processor)
 
 
 def cached_video_processor_from_config(
-    model_config: "ModelConfig",
+    renderer_config: "RendererConfig",
     processor_cls: type[_V] | None = None,
     **kwargs: Any,
 ):
+    model_config = renderer_config.model_config
+
     return cached_get_video_processor(
         model_config.model,
         revision=model_config.revision,
