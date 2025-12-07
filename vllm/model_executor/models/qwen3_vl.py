@@ -1794,8 +1794,8 @@ class Qwen3VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         logger.info("=" * 80)
         logger.info("get_mrope_input_positions START")
-        logger.info(f"Total input_tokens: {len(input_tokens)}")
-        logger.info(f"Number of mm_features: {len(mm_features)}")
+        logger.info("Total input_tokens: %s", len(input_tokens))
+        logger.info("Number of mm_features: %s", len(mm_features))
 
         # Pre-collect actual frame token counts for EVS mode
         frame_token_counts_map = {}
@@ -1812,33 +1812,42 @@ class Qwen3VLForConditionalGeneration(
                         mm_feature.mm_position, t
                     )
                     assert token_counts is not None, (
-                        "EVS enabled but failed to extract frame token counts from is_embed mask"
+                        "EVS enabled but failed to extract frame token counts "
+                        "from is_embed mask"
                     )
                     frame_token_counts_map[mm_feature.mm_position.offset] = token_counts
                     logger.info(
-                        f"EVS mode: collected {len(token_counts)} frame token counts for offset {mm_feature.mm_position.offset}"
+                        "EVS mode: collected %s frame token counts for offset %s",
+                        len(token_counts),
+                        mm_feature.mm_position.offset,
                     )
-                    logger.info(f"  Token counts: {token_counts}")
+                    logger.info("  Token counts: %s", token_counts)
 
         llm_pos_ids_list = []
         st = 0
-        frame_idx = 0
         frame_counts_idx = {}
 
-        for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
-            input_tokens, mm_features
+        for frame_idx, (offset, llm_grid_h, llm_grid_w) in enumerate(
+            self.iter_mm_grid_hw(input_tokens, mm_features)
         ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
 
             logger.info("-" * 60)
-            logger.info(f"Frame {frame_idx}:")
-            logger.info(f"  offset={offset}, st={st}, text_len={text_len}")
+            logger.info("Frame %s:", frame_idx)
+            logger.info("  offset=%s, st=%s, text_len=%s", offset, st, text_len)
+            theoretical_tokens = llm_grid_h * llm_grid_w
             logger.info(
-                f"  grid=({llm_grid_h}, {llm_grid_w}), theoretical_tokens={llm_grid_h * llm_grid_w}"
+                "  grid=(%s, %s), theoretical_tokens=%s",
+                llm_grid_h,
+                llm_grid_w,
+                theoretical_tokens,
             )
-            logger.info(f"  st_idx={st_idx}")
-            logger.info(f"  current llm_pos_ids_list length: {len(llm_pos_ids_list)}")
+            logger.info("  st_idx=%s", st_idx)
+            logger.info(
+                "  current llm_pos_ids_list length: %s",
+                len(llm_pos_ids_list),
+            )
 
             # Determine actual token count for this frame FIRST
             base_offset = None
@@ -1849,7 +1858,9 @@ class Qwen3VLForConditionalGeneration(
             if base_offset is not None:
                 # EVS mode: use actual token count
                 assert base_offset in frame_token_counts_map, (
-                    f"Found base_offset {base_offset} but not in frame_token_counts_map"
+                    "Found base_offset {} but not in frame_token_counts_map".format(
+                        base_offset
+                    )
                 )
 
                 if base_offset not in frame_counts_idx:
@@ -1859,12 +1870,16 @@ class Qwen3VLForConditionalGeneration(
                 idx = frame_counts_idx[base_offset]
 
                 assert idx < len(counts), (
-                    f"EVS frame index {idx} out of range (total frames: {len(counts)})"
+                    "EVS frame index {} out of range (total frames: {})".format(
+                        idx, len(counts)
+                    )
                 )
 
                 actual_frame_tokens = counts[idx]
                 logger.info(
-                    f"  EVS mode: using actual_tokens={actual_frame_tokens} (vs theoretical={llm_grid_h * llm_grid_w})"
+                    "  EVS mode: using actual_tokens=%s (vs theoretical=%s)",
+                    actual_frame_tokens,
+                    theoretical_tokens,
                 )
                 frame_counts_idx[base_offset] += 1
             else:
@@ -1874,26 +1889,31 @@ class Qwen3VLForConditionalGeneration(
 
             # Add text segment
             if text_len > 0:
-                logger.info(f"  ✓ Adding text segment: text_len={text_len}")
+                logger.info("  ✓ Adding text segment: text_len=%s", text_len)
                 text_positions = (
                     np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
                 )
-                logger.info(f"    text_positions shape: {text_positions.shape}")
+                logger.info("    text_positions shape: %s", text_positions.shape)
                 logger.info(
-                    f"    text_positions range: [{text_positions.min()}, {text_positions.max()}]"
+                    "    text_positions range: [%s, %s]",
+                    text_positions.min(),
+                    text_positions.max(),
                 )
                 llm_pos_ids_list.append(text_positions)
                 st_idx += text_len
-                logger.info(f"    Updated st_idx to: {st_idx}")
+                logger.info("    Updated st_idx to: %s", st_idx)
             else:
                 logger.warning(
-                    f"  ⚠ SKIPPED text segment: text_len={text_len} (zero or negative)"
+                    "  ⚠ SKIPPED text segment: text_len=%s (zero or negative)",
+                    text_len,
                 )
                 logger.warning(
-                    f"    This means frame {frame_idx} starts immediately after previous frame"
+                    "    This means frame %s starts immediately after previous frame",
+                    frame_idx,
                 )
                 logger.warning(
-                    "    Possible cause: consecutive frames without text tokens between them"
+                    "    Possible cause: consecutive frames without text tokens "
+                    "between them"
                 )
 
             # Add frame segment with ACTUAL token count (not theoretical)
@@ -1901,63 +1921,78 @@ class Qwen3VLForConditionalGeneration(
             # Only take the first actual_frame_tokens positions
             frame_positions = grid_indices[:, :actual_frame_tokens] + st_idx
             logger.info("  Adding frame positions:")
-            logger.info(f"    frame_positions shape: {frame_positions.shape}")
+            logger.info("    frame_positions shape: %s", frame_positions.shape)
             logger.info(
-                f"    frame_positions range: [{frame_positions.min()}, {frame_positions.max()}]"
+                "    frame_positions range: [%s, %s]",
+                frame_positions.min(),
+                frame_positions.max(),
             )
             llm_pos_ids_list.append(frame_positions)
 
             # Update st using actual token count
             st = offset + actual_frame_tokens
 
-            logger.info(f"  Updated st to: {st}")
-            logger.info(f"  llm_pos_ids_list now has {len(llm_pos_ids_list)} segments")
-
-            frame_idx += 1
+            logger.info("  Updated st to: %s", st)
+            logger.info(
+                "  llm_pos_ids_list now has %s segments", len(llm_pos_ids_list)
+            )
 
         # 处理最后的文本部分
         logger.info("-" * 60)
         logger.info("Final text segment:")
-        logger.info(f"  st={st}, total_tokens={len(input_tokens)}")
+        logger.info("  st=%s, total_tokens=%s", st, len(input_tokens))
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            logger.info(f"  ✓ Adding final text: text_len={text_len}, st_idx={st_idx}")
+            logger.info(
+                "  ✓ Adding final text: text_len=%s, st_idx=%s", text_len, st_idx
+            )
             final_text_positions = (
                 np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
-            logger.info(f"    final_text_positions shape: {final_text_positions.shape}")
             logger.info(
-                f"    final_text_positions range: [{final_text_positions.min()}, {final_text_positions.max()}]"
+                "    final_text_positions shape: %s", final_text_positions.shape
+            )
+            logger.info(
+                "    final_text_positions range: [%s, %s]",
+                final_text_positions.min(),
+                final_text_positions.max(),
             )
             llm_pos_ids_list.append(final_text_positions)
         else:
             logger.info(
-                f"  ✗ No final text segment (st={st} >= len={len(input_tokens)})"
+                "  ✗ No final text segment (st=%s >= len=%s)",
+                st,
+                len(input_tokens),
             )
 
         logger.info("-" * 60)
         logger.info("Concatenating positions:")
-        logger.info(f"  Total segments: {len(llm_pos_ids_list)}")
+        logger.info("  Total segments: %s", len(llm_pos_ids_list))
         for i, seg in enumerate(llm_pos_ids_list):
-            logger.info(f"    Segment {i}: shape={seg.shape}")
+            logger.info("    Segment %s: shape=%s", i, seg.shape)
 
         llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
-        logger.info(f"  Concatenated positions shape: {llm_positions.shape}")
-        logger.info(f"  Expected shape: (3, {len(input_tokens)})")
+        logger.info("  Concatenated positions shape: %s", llm_positions.shape)
+        logger.info("  Expected shape: (3, %s)", len(input_tokens))
 
         if llm_positions.shape[1] != len(input_tokens):
             logger.error("  ✗✗✗ SHAPE MISMATCH! ✗✗✗")
             logger.error(
-                f"  Generated {llm_positions.shape[1]} positions for {len(input_tokens)} tokens"
+                "  Generated %s positions for %s tokens",
+                llm_positions.shape[1],
+                len(input_tokens),
             )
-            logger.error(f"  Difference: {llm_positions.shape[1] - len(input_tokens)}")
+            logger.error(
+                "  Difference: %s",
+                llm_positions.shape[1] - len(input_tokens),
+            )
         else:
             logger.info("  ✓ Shape matches!")
 
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-        logger.info(f"mrope_position_delta: {mrope_position_delta}")
+        logger.info("mrope_position_delta: %s", mrope_position_delta)
         logger.info("get_mrope_input_positions END")
         logger.info("=" * 80)
 
