@@ -7,6 +7,8 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
+import os
+
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
@@ -220,7 +222,15 @@ def _lora_expand(
     BLOCK_K = kernel_config["block_k"]
     NUM_WARPS = kernel_config["num_warps"]
     NUM_CTAS = kernel_config["num_ctas"]
-    NUM_STAGES = kernel_config["num_stages"]
+    # Reduce num_stages to prevent Triton LLVM pipeliner crashes with quantized
+    # models (e.g., Marlin/CompressedTensors). Lower stages reduce compiler
+    # optimization pressure. Similar to fused_moe.py which reduces num_stages
+    # for fp8_w8a8 quantization to avoid OutOfResources errors.
+    # Can be overridden via VLLM_LORA_EXPAND_MAX_STAGES.
+    max_stages = int(
+        os.getenv("VLLM_LORA_EXPAND_MAX_STAGES", "1")
+    )
+    NUM_STAGES = min(kernel_config["num_stages"], max_stages)
 
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 
