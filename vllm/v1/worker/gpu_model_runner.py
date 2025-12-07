@@ -169,9 +169,7 @@ from .utils import (
     MultiModalBudget,
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
-    gather_mm_placeholders,
     sanity_check_mm_encoder_outputs,
-    scatter_mm_placeholders,
 )
 
 if TYPE_CHECKING:
@@ -2185,12 +2183,9 @@ class GPUModelRunner(
             )
             encoder_outputs.extend(curr_group_outputs)
 
-        # Cache the encoder outputs by mm_hash
+        # Cache the encoder outputs by mm_hash (raw outputs without scattering)
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
-            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
-                is_embed=pos_info.is_embed,
-            )
+            self.encoder_cache[mm_hash] = output
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
@@ -2247,17 +2242,29 @@ class GPUModelRunner(
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
-                    is_embed = is_embed[start_idx:end_idx]
+                    # Calculate the number of embeddings before start_idx using the mask
+                    num_embeds_before = (
+                        is_embed[:start_idx].sum().item() if start_idx > 0 else 0
+                    )
+                    num_embeds_in_range = is_embed[start_idx:end_idx].sum().item()
+
+                    # Slice the cached encoder output using the actual embedding indices
+                    mm_embeds_item = encoder_output[
+                        num_embeds_before : num_embeds_before + num_embeds_in_range
+                    ]
+
+                    # Update the is_embed mask for the scheduled tokens
+                    is_embed_slice = is_embed[start_idx:end_idx]
+                else:
+                    # No mask: all positions are embeddings
+                    mm_embeds_item = encoder_output[start_idx:end_idx]
+                    is_embed_slice = None
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed is None else is_embed
+                    True if is_embed_slice is None else is_embed_slice
                 )
 
-                mm_embeds_item = gather_mm_placeholders(
-                    encoder_output[start_idx:end_idx],
-                    is_embed=is_embed,
-                )
                 mm_embeds_req.append(mm_embeds_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
@@ -4487,30 +4494,11 @@ class GPUModelRunner(
                         expected_num_items=max_mm_items_per_batch,
                     )
 
-                    # NOTE: This happens when encoder cache needs to store
-                    # the embeddings that encoder outputs are scattered onto.
-                    # In this case we create dummy embeddings of size
-                    # (max_tokens_for_modality, hidden_size) and scatter
-                    # encoder output into it.
-                    encoder_output_shape = dummy_encoder_outputs[0].shape
-                    max_mm_tokens_per_item = mm_budget.max_tokens_by_modality[
-                        dummy_modality
-                    ]
-                    if encoder_output_shape[0] < max_mm_tokens_per_item:
-                        encoder_hidden_size = encoder_output_shape[-1]
-                        expanded_outputs = []
-                        for output in dummy_encoder_outputs:
-                            expanded = output.new_zeros(
-                                (max_mm_tokens_per_item, encoder_hidden_size)
-                            )
-                            num_tokens = output.shape[0]
-                            expanded[:num_tokens].copy_(output)
-                            expanded_outputs.append(expanded)
-
-                        dummy_encoder_outputs = expanded_outputs
-
-                    # Cache the dummy encoder outputs.
-                    self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+                    # Store each output as a raw tensor (matching runtime format)
+                    # with unique keys for profiling. This ensures the cache stores
+                    # only actual embeddings, not scattered placeholders.
+                    for i, output in enumerate(dummy_encoder_outputs):
+                        self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
