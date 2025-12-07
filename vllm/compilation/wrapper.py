@@ -6,6 +6,7 @@ import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
+from typing import Any
 
 import torch
 import torch._C._dynamo.guards
@@ -13,6 +14,7 @@ import torch._C._dynamo.guards
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
 
 logger = init_logger(__name__)
 
@@ -85,12 +87,35 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
+    def check_invariants_and_forward(self, *args, **kwargs):
+        assert hasattr(self, "_check_shape_invariants")
+        self._check_shape_invariants(*args, **kwargs)
+
+        return self.forward(*args, **kwargs)
+
+    def _call_with_optional_nvtx_range(self, callable_fn, *args, **kwargs):
+        if self.layerwise_nvtx_tracing_enabled:
+            args_list = list(args)
+            kwargs_dict = dict(kwargs)
+            with layerwise_nvtx_marker_context(
+                "Torch Compiled Module (input):{}".format(self.__class__.__name__),
+                self,
+                in_tensor=args_list,
+                kwargs=kwargs_dict,
+            ) as ctx:
+                ctx.result = callable_fn(*args, **kwargs)
+            return ctx.result
+        return callable_fn(*args, **kwargs)
+
     def __init__(self):
         self.compiled = False
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
         mode = vllm_config.compilation_config.mode
+        self.layerwise_nvtx_tracing_enabled = (
+            vllm_config.observability_config.enable_layerwise_nvtx_tracing
+        )
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
@@ -104,6 +129,21 @@ class TorchCompileWithNoGuardsWrapper:
             # Drop all the guards.
             options["guard_filter_fn"] = lambda x: [False for _ in x]
 
+        # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
+        from vllm.compilation.decorators import DynamicShapesType
+
+        ds_type = vllm_config.compilation_config.dynamic_shapes_config.type
+        compiled_ptr: Any = self.forward
+        if ds_type == DynamicShapesType.UNBACKED:
+            if envs.VLLM_USE_BYTECODE_HOOK:
+                # reason is that bytecode does this hack torch._dynamo.eval_frame.
+                # remove_from_cache(self.original_code_object()) to force a new
+                # re-compilation.
+                raise ValueError(
+                    "UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0. "
+                )
+            compiled_ptr = self.check_invariants_and_forward
+
         if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 torch._dynamo.config.enable_aot_compile = True
@@ -114,7 +154,7 @@ class TorchCompileWithNoGuardsWrapper:
                 logger.warning(msg)
 
         self._compiled_callable = torch.compile(
-            self.forward,
+            compiled_ptr,
             fullgraph=True,
             dynamic=False,
             backend=backend,
@@ -146,13 +186,19 @@ class TorchCompileWithNoGuardsWrapper:
                 # Make sure a compilation is triggered by clearing dynamo
                 # cache.
                 torch._dynamo.eval_frame.remove_from_cache(self.original_code_object())
-                return self._compiled_callable(*args, **kwargs)
+                return self._call_with_optional_nvtx_range(
+                    self._compiled_callable, *args, **kwargs
+                )
             else:
                 with self._dispatch_to_compiled_code():
-                    return self.forward(*args, **kwargs)
+                    return self._call_with_optional_nvtx_range(
+                        self.forward, *args, **kwargs
+                    )
         else:
             with _compilation_context():
-                return self._compiled_callable(*args, **kwargs)
+                return self._call_with_optional_nvtx_range(
+                    self._compiled_callable, *args, **kwargs
+                )
 
     @abstractmethod
     def forward(self, *args, **kwargs): ...
