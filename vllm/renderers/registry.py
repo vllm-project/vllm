@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.tokenizers.registry import tokenizer_mode_kwargs_from_config
+from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import RendererLike
@@ -44,7 +44,7 @@ class RendererRegistry:
 
         return resolve_obj_by_qualname(f"{module}.{class_name}")
 
-    def init_renderer(
+    def load_renderer(
         self,
         renderer_mode: str,
         config: "ModelConfig",
@@ -68,12 +68,15 @@ RENDERER_REGISTRY._registry.update(
 
 
 def renderer_from_config(config: "ModelConfig", **kwargs):
-    tokenizer_mode, tokenizer_kwargs = tokenizer_mode_kwargs_from_config(config)
+    tokenizer_mode, tokenizer_args, tokenizer_kwargs = tokenizer_args_from_config(
+        config, **kwargs
+    )
     tokenizer_kwargs.update(kwargs)
+    tokenizer_kwargs["tokenizer_name"] = tokenizer_args[0]
 
     if config.tokenizer_mode == "auto" and config.model_impl == "terratorch":
         renderer_mode = "terratorch"
     else:
         renderer_mode = tokenizer_mode
 
-    return RENDERER_REGISTRY.init_renderer(renderer_mode, config, tokenizer_kwargs)
+    return RENDERER_REGISTRY.load_renderer(renderer_mode, config, tokenizer_kwargs)

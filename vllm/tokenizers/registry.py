@@ -3,7 +3,7 @@
 import importlib.util
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Literal, TypeVar
 
 import huggingface_hub
 from typing_extensions import assert_never, deprecated
@@ -27,10 +27,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_T = TypeVar("_T", bound=TokenizerLike)
 
-
-class TokenizerRegistry:
+class TokenizerRegistryType:
     def __init__(self) -> None:
         super().__init__()
 
@@ -60,15 +58,15 @@ class TokenizerRegistry:
 
         return resolve_obj_by_qualname(f"{module}.{class_name}")
 
-    def init_tokenizer(self, tokenizer_mode: str, *args, **kwargs) -> TokenizerLike:
+    def load_tokenizer(self, tokenizer_mode: str, *args, **kwargs) -> TokenizerLike:
         tokenizer_cls = self.load_tokenizer_cls(tokenizer_mode)
         return tokenizer_cls.from_pretrained(*args, **kwargs)
 
 
-TOKENIZER_REGISTRY = TokenizerRegistry()
-"""The global `TokenizerRegistry` instance."""
+TokenizerRegistry = TokenizerRegistryType()
+"""The global `TokenizerRegistryType` instance."""
 
-TOKENIZER_REGISTRY._registry.update(
+TokenizerRegistry._registry.update(
     {
         "deepseekv32": ("vllm.tokenizers.deepseekv32", "DeepseekV32Tokenizer"),
         "hf": ("vllm.tokenizers.hf", "CachedHfTokenizer"),
@@ -77,16 +75,18 @@ TOKENIZER_REGISTRY._registry.update(
 )
 
 
-def get_tokenizer(
-    tokenizer_cls: type[_T],
+def resolve_tokenizer_args(
     tokenizer_name: str | Path,
     *args,
+    runner_type: Literal["generate", "pooling"] = "generate",
+    tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     revision: str | None = None,
     download_dir: str | None = None,
     **kwargs,
-) -> _T:
-    """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
+):
+    tokenizer_kwargs = kwargs
+
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -113,7 +113,7 @@ def get_tokenizer(
     # Separate model folder from file path for GGUF models
     if is_gguf(tokenizer_name):
         if check_gguf_file(tokenizer_name):
-            kwargs["gguf_file"] = Path(tokenizer_name).name
+            tokenizer_kwargs["gguf_file"] = Path(tokenizer_name).name
             tokenizer_name = Path(tokenizer_name).parent
         elif is_remote_gguf(tokenizer_name):
             tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
@@ -123,34 +123,8 @@ def get_tokenizer(
                 quant_type,
                 revision=revision,
             )
-            kwargs["gguf_file"] = gguf_file
+            tokenizer_kwargs["gguf_file"] = gguf_file
 
-    tokenizer_args = (tokenizer_name, *args)
-    tokenizer_kwargs = dict[str, Any](
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        download_dir=download_dir,
-        **kwargs,
-    )
-
-    tokenizer = tokenizer_cls.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
-    if not tokenizer.is_fast:
-        logger.warning(
-            "Using a slow tokenizer. This might cause a significant "
-            "slowdown. Consider using a fast tokenizer instead."
-        )
-
-    return tokenizer  # type: ignore
-
-
-def tokenizer_mode_kwargs_from_config(config: "ModelConfig"):
-    tokenizer_name = config.tokenizer
-    tokenizer_mode = config.tokenizer_mode
-    tokenizer_revision = config.tokenizer_revision
-    trust_remote_code = config.trust_remote_code
-    tokenizer_kwargs = dict[str, Any]()
-
-    runner_type = config.runner_type
     if runner_type == "generate" or runner_type == "draft":
         tokenizer_kwargs["truncation_side"] = "left"
     elif runner_type == "pooling":
@@ -158,7 +132,6 @@ def tokenizer_mode_kwargs_from_config(config: "ModelConfig"):
     else:
         assert_never(runner_type)
 
-    tokenizer_mode = config.tokenizer_mode
     if tokenizer_mode == "slow":
         if tokenizer_kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
@@ -172,7 +145,7 @@ def tokenizer_mode_kwargs_from_config(config: "ModelConfig"):
         files_list = list_filtered_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=allow_patterns,
-            revision=tokenizer_revision,
+            revision=revision,
         )
         if len(files_list) > 0:
             tokenizer_mode = "mistral"
@@ -181,14 +154,58 @@ def tokenizer_mode_kwargs_from_config(config: "ModelConfig"):
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
+    tokenizer_args = (tokenizer_name, *args)
     tokenizer_kwargs = {
-        "tokenizer_name": tokenizer_name,
         "trust_remote_code": trust_remote_code,
-        "revision": tokenizer_revision,
+        "revision": revision,
         **tokenizer_kwargs,
     }
 
-    return tokenizer_mode, tokenizer_kwargs
+    return tokenizer_mode, tokenizer_args, tokenizer_kwargs
+
+
+cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
+
+
+def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    return cached_resolve_tokenizer_args(
+        config.tokenizer,
+        runner_type=config.runner_type,
+        tokenizer_mode=config.tokenizer_mode,
+        revision=config.tokenizer_revision,
+        trust_remote_code=config.trust_remote_code,
+        **kwargs,
+    )
+
+
+def get_tokenizer(
+    tokenizer_name: str | Path,
+    *args,
+    trust_remote_code: bool = False,
+    revision: str | None = None,
+    download_dir: str | None = None,
+    **kwargs,
+) -> TokenizerLike:
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
+    tokenizer_mode, tokenizer_args, tokenizer_kwargs = cached_resolve_tokenizer_args(
+        tokenizer_name,
+        *args,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        download_dir=download_dir,
+        **kwargs,
+    )
+    tokenizer_kwargs.update(kwargs)
+
+    tokenizer_cls = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
+    tokenizer = tokenizer_cls.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
+    if not tokenizer.is_fast:
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead."
+        )
+
+    return tokenizer  # type: ignore
 
 
 cached_get_tokenizer = lru_cache(get_tokenizer)
@@ -198,14 +215,13 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
 
-    tokenizer_mode, tokenizer_kwargs = tokenizer_mode_kwargs_from_config(model_config)
-    tokenizer_kwargs.update(kwargs)
-
-    tokenizer_cls = TOKENIZER_REGISTRY.load_tokenizer_cls(tokenizer_mode)
-
     return cached_get_tokenizer(
-        tokenizer_cls,  # type: ignore[arg-type]
-        **tokenizer_kwargs,
+        model_config.tokenizer,
+        runner_type=model_config.runner_type,
+        tokenizer_mode=model_config.tokenizer_mode,
+        revision=model_config.tokenizer_revision,
+        trust_remote_code=model_config.trust_remote_code,
+        **kwargs,
     )
 
 
@@ -214,3 +230,33 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
 )
 def init_tokenizer_from_config(model_config: "ModelConfig"):
     return cached_tokenizer_from_config(model_config)
+
+
+_T = TypeVar("_T", bound=TokenizerLike)
+
+
+def init_tokenizer(
+    tokenizer_cls: type[_T],
+    tokenizer_name: str | Path,
+    trust_remote_code: bool = False,
+    revision: str | None = None,
+    download_dir: str | None = None,
+    **kwargs,
+) -> _T:
+    tokenizer_mode, tokenizer_args, tokenizer_kwargs = cached_resolve_tokenizer_args(
+        tokenizer_name,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        download_dir=download_dir,
+        **kwargs,
+    )
+    tokenizer_kwargs.update(kwargs)
+
+    tokenizer = tokenizer_cls.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
+    if not tokenizer.is_fast:
+        logger.warning(
+            "Using a slow tokenizer. This might cause a significant "
+            "slowdown. Consider using a fast tokenizer instead."
+        )
+
+    return tokenizer  # type: ignore

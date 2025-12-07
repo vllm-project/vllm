@@ -43,7 +43,7 @@ class TestTokenizer(TokenizerLike):
 def test_customized_tokenizer():
     TokenizerRegistry.register("test_tokenizer", __name__, TestTokenizer.__name__)
 
-    tokenizer = TokenizerRegistry.init_tokenizer("test_tokenizer", "abc")
+    tokenizer = TokenizerRegistry.load_tokenizer("test_tokenizer", "abc")
     assert isinstance(tokenizer, TestTokenizer)
     assert tokenizer.path_or_repo_id == "abc"
     assert tokenizer.bos_token_id == 0

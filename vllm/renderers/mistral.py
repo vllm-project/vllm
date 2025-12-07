@@ -12,7 +12,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
-from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers import init_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -69,7 +69,7 @@ class MistralRenderer(RendererLike):
         if config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = get_tokenizer(MistralTokenizer, **tokenizer_kwargs)
+            tokenizer = init_tokenizer(MistralTokenizer, **tokenizer_kwargs)
 
         self._tokenizer = tokenizer
 

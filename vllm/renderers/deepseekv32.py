@@ -11,7 +11,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
-from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers import init_tokenizer
 from vllm.tokenizers.deepseekv32 import DeepseekV32Tokenizer
 
 from .protocol import RendererLike
@@ -40,7 +40,7 @@ class DeepseekV32Renderer(RendererLike):
         if config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = get_tokenizer(DeepseekV32Tokenizer, **tokenizer_kwargs)
+            tokenizer = init_tokenizer(DeepseekV32Tokenizer, **tokenizer_kwargs)
 
         self._tokenizer = tokenizer
 
