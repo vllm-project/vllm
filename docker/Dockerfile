@@ -138,8 +138,11 @@ WORKDIR /workspace
 # install build and runtime dependencies
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
+COPY requirements/constraints/common.txt requirements/constraints/common.txt
+COPY requirements/constraints/cuda.txt requirements/constraints/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+    -c requirements/constraints/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # cuda arch list used by torch
@@ -160,6 +163,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
+COPY requirements/constraints/build.txt requirements/constraints/build.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -170,6 +174,7 @@ ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+    -c requirements/constraints/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 WORKDIR /workspace
@@ -251,6 +256,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
+COPY requirements/constraints/build.txt requirements/constraints/build.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -261,6 +267,7 @@ ENV UV_LINK_MODE=copy
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+    -c requirements/constraints/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 WORKDIR /workspace
