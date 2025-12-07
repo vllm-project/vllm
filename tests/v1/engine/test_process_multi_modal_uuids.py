@@ -50,14 +50,17 @@ def _mock_input_processor(
     monkeypatch.setattr(VllmConfig, "__post_init__", lambda self: None, raising=True)
 
     model_config = ModelConfig(
+        tokenizer="dummy",
         skip_tokenizer_init=True,
         max_model_len=128,
         mm_processor_cache_gb=mm_cache_gb,
         generation_config="vllm",
     )
+    model_config.runner_type = "generate"
     model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=mm_cache_gb)
 
     vllm_config = VllmConfig(
+        model_config=model_config,
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
         device_config=DeviceConfig(device="cpu"),
     )
