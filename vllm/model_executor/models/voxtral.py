@@ -20,7 +20,7 @@ from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
 from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import RendererConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -176,7 +176,7 @@ class VoxtralProcessorAdapter:
 
 class VoxtralProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> MistralTokenizer:
-        tokenizer = cached_tokenizer_from_config(self.ctx.model_config)
+        tokenizer = cached_tokenizer_from_config(self.ctx.renderer_config)
         if not isinstance(tokenizer, MistralTokenizer):
             raise ValueError("This model requires `--tokenizer-mode mistral`")
 
@@ -339,7 +339,7 @@ class VoxtralForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
+        self.tokenizer = cached_tokenizer_from_config(vllm_config.renderer_config)
 
         # update quant config to so that ignored module and target module names
         # match the vLLM model names
@@ -450,9 +450,11 @@ class VoxtralForConditionalGeneration(
 
     @classmethod
     def get_speech_to_text_config(
-        cls, model_config: ModelConfig, task_type: str
+        cls,
+        renderer_config: RendererConfig,
+        task_type: str,
     ) -> SpeechToTextConfig:
-        tokenizer = cached_tokenizer_from_config(model_config)
+        tokenizer = cached_tokenizer_from_config(renderer_config)
         audio_config = tokenizer.instruct.audio_encoder.audio_config
         max_audio_clip_s = audio_config.chunk_length_s
         sample_rate = audio_config.sampling_rate
@@ -468,17 +470,17 @@ class VoxtralForConditionalGeneration(
     def get_generation_prompt(
         cls,
         audio: np.ndarray,
-        model_config: ModelConfig,
+        renderer_config: RendererConfig,  # not needed here
         stt_config: SpeechToTextConfig,
         language: str | None,
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
     ) -> PromptType:
-        tokenizer = cached_tokenizer_from_config(model_config)
+        tokenizer = cached_tokenizer_from_config(renderer_config)
         audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(
-            model=model_config.model,
+            model=renderer_config.model_config.model,
             audio=RawAudio.from_audio(audio),
             language=language,
         )
@@ -494,14 +496,14 @@ class VoxtralForConditionalGeneration(
         cls,
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
+        renderer_config: RendererConfig,
     ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
         """
-        tokenizer = cached_tokenizer_from_config(model_config)
+        tokenizer = cached_tokenizer_from_config(renderer_config)
         adapter = VoxtralProcessorAdapter(tokenizer)
         return adapter.get_num_audio_tokens(
             int(audio_duration_s * stt_config.sample_rate)

@@ -36,7 +36,6 @@ from vllm.transformers_utils.config import (
     uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
-    is_gguf,
     is_remote_gguf,
     maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
@@ -83,7 +82,6 @@ TaskOption = Literal[
     "transcription",
     "draft",
 ]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -131,18 +129,6 @@ class ModelConfig:
 
     Note that the model may support other tasks using the same model runner.
     """
-    tokenizer: SkipValidation[str] = None  # type: ignore
-    """Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    name or path will be used."""
-    tokenizer_mode: TokenizerMode | str = "auto"
-    """Tokenizer mode:\n
-    - "auto" will use the tokenizer from `mistral_common` for Mistral models
-    if available, otherwise it will use the "hf" tokenizer.\n
-    - "hf" will use the fast tokenizer if available.\n
-    - "slow" will always use the slow tokenizer.\n
-    - "mistral" will always use the tokenizer from `mistral_common`.\n
-    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
-    - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -168,22 +154,11 @@ class ModelConfig:
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
-    allowed_local_media_path: str = ""
-    """Allowing API requests to read local images or videos from directories
-    specified by the server file system. This is a security risk. Should only
-    be enabled in trusted environments."""
-    allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for
-    multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
     code_revision: str | None = None
     """The specific revision to use for the model code on the Hugging Face Hub.
-    It can be a branch name, a tag name, or a commit id. If unspecified, will
-    use the default version."""
-    tokenizer_revision: str | None = None
-    """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
     max_model_len: SkipValidation[int] = None  # type: ignore
@@ -230,10 +205,6 @@ class ModelConfig:
     preventing potential numerical issues. Note that even if this is set to
     False, cascade attention will be only used when the heuristic tells that
     it's beneficial."""
-    skip_tokenizer_init: bool = False
-    """Skip initialization of tokenizer and detokenizer. Expects valid
-    `prompt_token_ids` and `None` for prompt from the input. The generated
-    output will contain token ids."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
     `prompt_embeds` key.
@@ -294,8 +265,6 @@ class ModelConfig:
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
-    io_processor_plugin: str | None = None
-    """IOProcessor plugin name to load at model startup"""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None
@@ -308,7 +277,6 @@ class ModelConfig:
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
-    media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
@@ -335,18 +303,12 @@ class ModelConfig:
             "runner",
             "convert",
             "task",
-            "tokenizer",
-            "tokenizer_mode",
             "seed",
             "hf_config_path",
-            "allowed_local_media_path",
-            "allowed_media_domains",
-            "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
             "disable_cascade_attn",
-            "skip_tokenizer_init",
             "served_model_name",
             "config_format",
             "hf_token",
@@ -354,11 +316,9 @@ class ModelConfig:
             "logits_processor_pattern",
             "override_attention_dtype",
             "logits_processors",
-            "io_processor_plugin",
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",
-            "media_io_kwargs",
             "mm_processor_kwargs",
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
@@ -423,7 +383,6 @@ class ModelConfig:
         # Multimodal config init vars
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
-        media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
@@ -438,13 +397,8 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
-        self.model = maybe_model_redirect(self.model)
-        # The tokenizer is consistent with the model by default.
-        if self.tokenizer is None:
-            self.tokenizer = self.model
-        if self.tokenizer_revision is None:
-            self.tokenizer_revision = self.revision
-        self.tokenizer = maybe_model_redirect(self.tokenizer)
+        self.original_model = self.model
+        self.model = maybe_model_redirect(self.original_model)
 
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
@@ -465,7 +419,7 @@ class ModelConfig:
                     hf_overrides_kw[key] = value
             hf_overrides_fn = None
 
-        self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
+        self.maybe_pull_model_for_runai(self.model)
 
         from vllm.platforms import current_platform
 
@@ -648,7 +602,8 @@ class ModelConfig:
         )
 
         self.original_max_model_len = self.max_model_len
-        self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+        self.recalculate_max_model_len(self.original_max_model_len)
+
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             if (
@@ -664,7 +619,6 @@ class ModelConfig:
             mm_config_kwargs = dict(
                 limit_per_prompt=limit_mm_per_prompt,
                 enable_mm_embeds=enable_mm_embeds,
-                media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
@@ -682,16 +636,8 @@ class ModelConfig:
 
             self.multimodal_config = MultiModalConfig(**mm_config_kwargs)
 
-        # Multimodal GGUF models must use original repo for mm processing
-        if is_gguf(self.tokenizer) and self.is_multimodal_model:
-            raise ValueError(
-                "Loading a multimodal GGUF model needs to use original "
-                "tokenizer. Please specify the unquantized hf model's "
-                "repo name or path using the --tokenizer argument."
-            )
-
         if self.disable_sliding_window:
-            # Set after get_and_verify_max_len to ensure that max_model_len
+            # Set after recalculate_max_model_len to ensure that max_model_len
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
 
@@ -715,10 +661,9 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        if not isinstance(self.tokenizer, str):
-            raise ValueError("tokenizer must be a string after __post_init__.")
         if not isinstance(self.max_model_len, int):
             raise ValueError("max_model_len must be an integer after __post_init__.")
+
         return self
 
     def _get_transformers_backend_cls(self) -> str:
@@ -767,49 +712,17 @@ class ModelConfig:
         """The architecture vllm actually used."""
         return self._architecture
 
-    def maybe_pull_model_tokenizer_for_runai(self, model: str, tokenizer: str) -> None:
-        """Pull model/tokenizer from Object Storage to temporary
-        directory when needed.
-
-        Args:
-            model: Model name or path
-            tokenizer: Tokenizer name or path
-        """
-
-        if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
+    def maybe_pull_model_for_runai(self, model: str) -> None:
+        """Pull model from Object Storage to temporary directory when needed."""
+        if not is_runai_obj_uri(model):
             return
 
-        if is_runai_obj_uri(model):
-            object_storage_model = ObjectStorageModel(url=model)
-            object_storage_model.pull_files(
-                model, allow_pattern=["*.model", "*.py", "*.json"]
-            )
-            self.model_weights = model
-            self.model = object_storage_model.dir
-
-            # If tokenizer is same as model, download to same directory
-            if model == tokenizer:
-                object_storage_model.pull_files(
-                    model,
-                    ignore_pattern=[
-                        "*.pt",
-                        "*.safetensors",
-                        "*.bin",
-                        "*.tensors",
-                        "*.pth",
-                    ],
-                )
-                self.tokenizer = object_storage_model.dir
-                return
-
-        # Only download tokenizer if needed and not already handled
-        if is_runai_obj_uri(tokenizer):
-            object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
-            object_storage_tokenizer.pull_files(
-                model,
-                ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
-            )
-            self.tokenizer = object_storage_tokenizer.dir
+        object_storage_model = ObjectStorageModel(url=model)
+        object_storage_model.pull_files(
+            model, allow_pattern=["*.model", "*.py", "*.json"]
+        )
+        self.model_weights = model
+        self.model = object_storage_model.dir
 
     def _get_encoder_config(self):
         model = self.model
@@ -1712,30 +1625,38 @@ class ModelConfig:
             return dense_modules[-1]["out_features"]
         return self.get_hidden_size()
 
-    def get_and_verify_max_len(self, max_model_len: int):
+    def recalculate_max_model_len(
+        self,
+        original_max_model_len: int | None,
+        *,
+        tokenizer: str | None = None,
+        tokenizer_revision: str | None = None,
+    ) -> None:
         # Consider max_model_len in tokenizer_config only when
         # pooling models use absolute position_embedding.
+        # NOTE: For simplicity we assume `args.model == args.tokenizer`
+        # since this is
         tokenizer_config = None
         if (
             self.runner_type == "pooling"
             and getattr(self.hf_config, "position_embedding_type", "") == "absolute"
         ):
             tokenizer_config = try_get_tokenizer_config(
-                self.tokenizer,
+                tokenizer or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self.tokenizer_revision,
+                revision=tokenizer_revision or self.revision,
             )
-        max_model_len = _get_and_verify_max_len(
+
+        self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             tokenizer_config=tokenizer_config,
-            max_model_len=max_model_len,
+            max_model_len=original_max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config,
         )
-        logger.info("Using max model len %s", max_model_len)
-        return max_model_len
+        logger.info("Using max model len %s", self.max_model_len)
 
     @property
     def attn_type(self) -> AttnTypeStr:

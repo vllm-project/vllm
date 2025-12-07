@@ -4,6 +4,7 @@ import numpy as np
 
 from vllm.config import (
     ModelConfig,
+    RendererConfig,
     SpeculativeConfig,
     VllmConfig,
 )
@@ -69,6 +70,7 @@ def test_ngram_proposer():
         return NgramProposer(
             vllm_config=VllmConfig(
                 model_config=model_config,
+                renderer_config=RendererConfig(model_config=model_config),
                 speculative_config=SpeculativeConfig(
                     prompt_lookup_min=min_n,
                     prompt_lookup_max=max_n,

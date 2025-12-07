@@ -22,7 +22,7 @@ Declare supported languages and capabilities:
     import torch
     from torch import nn
 
-    from vllm.config import ModelConfig, SpeechToTextConfig
+    from vllm.config import RendererConfig, SpeechToTextConfig
     from vllm.inputs.data import PromptType
     from vllm.model_executor.models.interfaces import SupportsTranscription
     
@@ -52,7 +52,7 @@ This is for controlling general behavior of the API when serving your model:
         @classmethod
         def get_speech_to_text_config(
             cls,
-            model_config: ModelConfig,
+            renderer_config: RendererConfig,
             task_type: Literal["transcribe", "translate"],
         ) -> SpeechToTextConfig:
             return SpeechToTextConfig(
@@ -83,7 +83,7 @@ Return a dict containing `multi_modal_data` with the audio, and either a `prompt
             cls,
             audio: np.ndarray,
             stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
+            renderer_config: RendererConfig,
             language: str | None,
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
@@ -120,7 +120,7 @@ Return a dict with separate `encoder_prompt` and `decoder_prompt` entries:
             cls,
             audio: np.ndarray,
             stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
+            renderer_config: RendererConfig,
             language: str | None,
             task_type: Literal["transcribe", "translate"],
             request_prompt: str,
@@ -183,7 +183,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
             cls,
             audio_duration_s: float,
             stt_config: SpeechToTextConfig,
-            model_config: ModelConfig,
+            renderer_config: RendererConfig,
         ) -> int | None:
             # Return None if unknown; otherwise return an estimate.
             return int(audio_duration_s * stt_config.sample_rate // 320)  # example
@@ -216,7 +216,7 @@ Relevant server logic:
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
-                model_config=self.model_config,
+                renderer_config=self.renderer_config,
                 language=language,
                 task_type=self.task_type,
                 request_prompt=request.prompt,
