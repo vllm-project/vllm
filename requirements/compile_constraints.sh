@@ -36,14 +36,16 @@ uv pip compile "${SCRIPT_DIR}/cuda.txt" -o "${CONSTRAINTS_DIR}/cuda.txt" \
 # ROCm requirements (need unsafe-best-match for custom indexes)
 echo "Compiling ROCm requirements..."
 uv pip compile "${SCRIPT_DIR}/rocm.txt" -o "${CONSTRAINTS_DIR}/rocm.txt" \
-    --python-version ${PYTHON_VERSION}
+    --python-version ${PYTHON_VERSION} \
+    --index-strategy unsafe-best-match
 
 uv pip compile "${SCRIPT_DIR}/rocm-build.txt" -o "${CONSTRAINTS_DIR}/rocm-build.txt" \
     --python-version ${PYTHON_VERSION} \
     --index-strategy unsafe-best-match
 
 uv pip compile "${SCRIPT_DIR}/rocm-test.txt" -o "${CONSTRAINTS_DIR}/rocm-test.txt" \
-    --python-version ${PYTHON_VERSION}
+    --python-version ${PYTHON_VERSION} \
+    --index-strategy unsafe-best-match
 
 # TPU requirements
 echo "Compiling TPU requirements..."
