@@ -1933,9 +1933,7 @@ class Qwen3VLForConditionalGeneration(
             st = offset + actual_frame_tokens
 
             logger.info("  Updated st to: %s", st)
-            logger.info(
-                "  llm_pos_ids_list now has %s segments", len(llm_pos_ids_list)
-            )
+            logger.info("  llm_pos_ids_list now has %s segments", len(llm_pos_ids_list))
 
         # 处理最后的文本部分
         logger.info("-" * 60)
