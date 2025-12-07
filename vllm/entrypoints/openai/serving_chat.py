@@ -586,6 +586,11 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             if self.reasoning_parser:
+                if tokenizer is None:
+                    raise ValueError(
+                        "Tokenizer not available when `skip_tokenizer_init=True`"
+                    )
+
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
                     chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
@@ -599,6 +604,11 @@ class OpenAIServingChat(OpenAIServing):
         # Prepare the tool parser if it's needed
         try:
             if tool_choice_auto and self.tool_parser:
+                if tokenizer is None:
+                    raise ValueError(
+                        "Tokenizer not available when `skip_tokenizer_init=True`"
+                    )
+
                 tool_parsers: list[ToolParser | None] = [
                     self.tool_parser(tokenizer)
                 ] * num_choices
@@ -1350,6 +1360,11 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning = None
 
                 if self.tool_parser is not None:
+                    if tokenizer is None:
+                        raise ValueError(
+                            "Tokenizer not available when `skip_tokenizer_init=True`"
+                        )
+
                     tool_parser = self.tool_parser(tokenizer)
                     # NOTE: We use token_ids for openai tool parser
                     tool_call_info = tool_parser.extract_tool_calls(

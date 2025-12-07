@@ -524,7 +524,7 @@ class HfRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormat,
+        chat_template_content_format: ChatTemplateContentFormat = "auto",
         **kwargs,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
         model_config = self.config
@@ -559,7 +559,7 @@ class HfRenderer(RendererLike):
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-type]
+        return conversation, prompt  # type: ignore[return-value]
 
     async def render_messages_async(
         self,
@@ -599,4 +599,4 @@ class HfRenderer(RendererLike):
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-type]
+        return conversation, prompt  # type: ignore[return-value]

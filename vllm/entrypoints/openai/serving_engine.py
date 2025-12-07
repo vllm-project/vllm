@@ -94,6 +94,7 @@ from vllm.entrypoints.responses_utils import (
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType, SingletonPrompt
+from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
@@ -1092,6 +1093,7 @@ class OpenAIServing:
             **(chat_template_kwargs or {}),
         }
 
+        engine_prompt: EngineTokensPrompt | EngineTextPrompt
         conversation, engine_prompt = await renderer.render_messages_async(
             messages,
             chat_template_content_format=chat_template_content_format,
@@ -1099,12 +1101,13 @@ class OpenAIServing:
         )
 
         if "prompt_token_ids" not in engine_prompt:
-            engine_prompt = await self._tokenize_prompt_input_async(
+            tokenized_prompt = await self._tokenize_prompt_input_async(
                 request,
                 renderer.get_tokenizer(),
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
+            engine_prompt = EngineTokensPrompt(**tokenized_prompt)
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
@@ -1344,7 +1347,7 @@ class OpenAIServing:
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         enable_auto_tools: bool,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
         content: str | None = None,
@@ -1384,6 +1387,11 @@ class OpenAIServing:
             and enable_auto_tools
             and (request.tool_choice == "auto" or request.tool_choice is None)
         ):
+            if tokenizer is None:
+                raise ValueError(
+                    "Tokenizer not available when `skip_tokenizer_init=True`"
+                )
+
             # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer)
