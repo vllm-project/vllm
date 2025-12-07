@@ -41,6 +41,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
 )
 from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -88,7 +89,6 @@ from vllm.entrypoints.utils import (
     cli_env_setup,
     load_aware_call,
     log_non_default_args,
-    process_chat_template,
     process_lora_modules,
     with_cancellation,
 )
@@ -1098,9 +1098,7 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()

@@ -94,7 +94,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                tokenizer = await self.engine_client.get_tokenizer()
+                tokenizer = self.renderer.get_tokenizer()
                 renderer = self._get_renderer(tokenizer)
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.prompt,
@@ -136,8 +136,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokn-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
-
-        tokenizer = await self.engine_client.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
         self._log_inputs(
             request_id, request.tokens, params=None, lora_request=lora_request
@@ -157,7 +156,7 @@ class OpenAIServingTokenization(OpenAIServing):
     ) -> TokenizerInfoResponse | ErrorResponse:
         """Get comprehensive tokenizer information."""
         try:
-            tokenizer = await self.engine_client.get_tokenizer()
+            tokenizer = self.renderer.get_tokenizer()
             info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
             return TokenizerInfoResponse(**info)
         except Exception as e:

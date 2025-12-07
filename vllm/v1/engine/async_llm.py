@@ -709,7 +709,7 @@ class AsyncLLM(EngineClient):
     def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
         self.input_processor.tokenizer = tokenizer
 
-    async def get_tokenizer(self) -> TokenizerLike:
+    def get_tokenizer(self) -> TokenizerLike:
         return self.input_processor.get_tokenizer()
 
     @property
