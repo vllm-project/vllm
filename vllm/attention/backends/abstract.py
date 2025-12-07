@@ -224,7 +224,7 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
-        if use_mm_prefix != cls.supports_mm_prefix():
+        if use_mm_prefix and not cls.supports_mm_prefix():
             invalid_reasons.append(
                 "partial multimodal token full attention not supported"
             )
