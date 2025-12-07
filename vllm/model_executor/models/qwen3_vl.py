@@ -1866,13 +1866,12 @@ class Qwen3VLForConditionalGeneration(
                 # Non-EVS mode (or image): use theoretical grid size
                 actual_frame_tokens = llm_grid_h * llm_grid_w
 
-            # Add text segment if exists
-            if text_len > 0:
-                text_positions = (
-                    np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-                )
-                llm_pos_ids_list.append(text_positions)
-                st_idx += text_len
+            # Add text segment
+            text_positions = (
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+            llm_pos_ids_list.append(text_positions)
+            st_idx += text_len
 
             # Add frame segment with actual token count (not theoretical)
             grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
