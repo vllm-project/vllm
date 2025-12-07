@@ -13,7 +13,6 @@ from vllm.config import (
     CacheConfig,
     ModelConfig,
     ParallelConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -102,7 +101,6 @@ def get_vllm_config():
     parallel_config = ParallelConfig()
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         parallel_config=parallel_config,
@@ -813,7 +811,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
     attention_config = AttentionConfig(backend=AttentionBackendEnum.FLASHINFER)
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
         parallel_config=parallel_config,

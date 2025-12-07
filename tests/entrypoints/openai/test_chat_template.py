@@ -3,6 +3,7 @@
 
 import pytest
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import apply_hf_chat_template, load_chat_template
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.tokenizers import get_tokenizer
@@ -106,11 +107,24 @@ def test_get_gen_prompt(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config(model)
+    model_config = ModelConfig(
+        model,
+        tokenizer=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        revision=model_info.revision,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
+    )
 
+    # Initialize the tokenizer
     tokenizer = get_tokenizer(
-        renderer_config.tokenizer,
-        trust_remote_code=renderer_config.trust_remote_code,
+        tokenizer_name=model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code,
     )
     template_content = load_chat_template(chat_template=template)
 
@@ -129,7 +143,7 @@ def test_get_gen_prompt(
         tokenizer=tokenizer,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
-        renderer_config=renderer_config,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,

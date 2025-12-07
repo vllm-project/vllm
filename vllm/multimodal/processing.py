@@ -23,7 +23,7 @@ import torch
 from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from vllm.config import ModelConfig, RendererConfig
+    from vllm.config import ModelConfig
 
     from .cache import BaseMultiModalProcessorCache
     from .profiling import BaseDummyInputsBuilder
@@ -63,7 +63,6 @@ else:
     ProcessorMixin = object
 
     ModelConfig = object
-    RendererConfig = object
 
     BaseMultiModalProcessorCache = object
 
@@ -946,28 +945,11 @@ class InputProcessingContext:
     modify the inputs.
     """
 
-    renderer_config: RendererConfig
-    """The configuration of the renderer."""
+    model_config: ModelConfig
+    """The configuration of the model."""
 
     tokenizer: TokenizerLike | None
     """The tokenizer used to tokenize the inputs."""
-
-    @classmethod
-    def from_config(
-        cls,
-        renderer_config: RendererConfig,
-        *,
-        tokenizer: TokenizerLike | None = None,
-    ):
-        if tokenizer is None and not renderer_config.skip_tokenizer_init:
-            tokenizer = cached_tokenizer_from_config(renderer_config)
-
-        return cls(renderer_config, tokenizer)
-
-    @property
-    def model_config(self) -> ModelConfig:
-        """The configuration of the model."""
-        return self.renderer_config.model_config
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
@@ -1065,7 +1047,7 @@ class InputProcessingContext:
             typ = ProcessorMixin
 
         return cached_processor_from_config(
-            self.renderer_config,
+            self.model_config,
             processor_cls=typ,
             tokenizer=self.tokenizer,
             **kwargs,

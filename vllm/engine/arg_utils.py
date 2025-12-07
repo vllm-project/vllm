@@ -73,11 +73,11 @@ from vllm.config.model import (
     ModelDType,
     RunnerOption,
     TaskOption,
+    TokenizerMode,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
-from vllm.config.renderer import RendererConfig, TokenizerMode
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel
@@ -357,12 +357,17 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
+    tokenizer: str | None = ModelConfig.tokenizer
     hf_config_path: str | None = ModelConfig.hf_config_path
     runner: RunnerOption = ModelConfig.runner
     convert: ConvertOption = ModelConfig.convert
     task: TaskOption | None = ModelConfig.task
+    skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
+    tokenizer_mode: TokenizerMode | str = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
+    allowed_local_media_path: str = ModelConfig.allowed_local_media_path
+    allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
@@ -446,6 +451,7 @@ class EngineArgs:
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
+    tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | None = ModelConfig.quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -454,6 +460,9 @@ class EngineArgs:
     )
     enable_mm_embeds: bool = MultiModalConfig.enable_mm_embeds
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
+    media_io_kwargs: dict[str, dict[str, Any]] = get_field(
+        MultiModalConfig, "media_io_kwargs"
+    )
     mm_processor_kwargs: dict[str, Any] | None = MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
@@ -467,19 +476,9 @@ class EngineArgs:
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
+    io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
-    # Renderer fields
-    tokenizer: str | None = None
-    tokenizer_mode: TokenizerMode | str = RendererConfig.tokenizer_mode
-    tokenizer_revision: str | None = RendererConfig.tokenizer_revision
-    skip_tokenizer_init: bool = RendererConfig.skip_tokenizer_init
-    io_processor_plugin: str | None = None
-    media_io_kwargs: dict[str, dict[str, Any]] = get_field(
-        RendererConfig, "media_io_kwargs"
-    )
-    allowed_local_media_path: str = RendererConfig.allowed_local_media_path
-    allowed_media_domains: list[str] | None = RendererConfig.allowed_media_domains
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -631,14 +630,25 @@ class EngineArgs:
         model_group.add_argument("--runner", **model_kwargs["runner"])
         model_group.add_argument("--convert", **model_kwargs["convert"])
         model_group.add_argument("--task", **model_kwargs["task"], deprecated=True)
+        model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
+        model_group.add_argument("--tokenizer-mode", **model_kwargs["tokenizer_mode"])
         model_group.add_argument(
             "--trust-remote-code", **model_kwargs["trust_remote_code"]
         )
         model_group.add_argument("--dtype", **model_kwargs["dtype"])
         model_group.add_argument("--seed", **model_kwargs["seed"])
         model_group.add_argument("--hf-config-path", **model_kwargs["hf_config_path"])
+        model_group.add_argument(
+            "--allowed-local-media-path", **model_kwargs["allowed_local_media_path"]
+        )
+        model_group.add_argument(
+            "--allowed-media-domains", **model_kwargs["allowed_media_domains"]
+        )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
+        model_group.add_argument(
+            "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
+        )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
@@ -649,6 +659,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--disable-cascade-attn", **model_kwargs["disable_cascade_attn"]
+        )
+        model_group.add_argument(
+            "--skip-tokenizer-init", **model_kwargs["skip_tokenizer_init"]
         )
         model_group.add_argument(
             "--enable-prompt-embeds", **model_kwargs["enable_prompt_embeds"]
@@ -688,34 +701,8 @@ class EngineArgs:
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
         )
-
-        # Renderer arguments
-        renderer_kwargs = get_kwargs(RendererConfig)
-        renderer_group = parser.add_argument_group(
-            title="RendererConfig",
-            description=RendererConfig.__doc__,
-        )
-        renderer_group.add_argument("--tokenizer", **renderer_kwargs["tokenizer"])
-        renderer_group.add_argument(
-            "--tokenizer-mode", **renderer_kwargs["tokenizer_mode"]
-        )
-        renderer_group.add_argument(
-            "--tokenizer-revision", **renderer_kwargs["tokenizer_revision"]
-        )
-        renderer_group.add_argument(
-            "--skip-tokenizer-init", **renderer_kwargs["skip_tokenizer_init"]
-        )
-        renderer_group.add_argument(
-            "--media-io-kwargs", **renderer_kwargs["media_io_kwargs"]
-        )
-        renderer_group.add_argument(
-            "--allowed-local-media-path", **renderer_kwargs["allowed_local_media_path"]
-        )
-        renderer_group.add_argument(
-            "--allowed-media-domains", **renderer_kwargs["allowed_media_domains"]
-        )
-        renderer_group.add_argument(
-            "--io-processor-plugin", **renderer_kwargs["io_processor_plugin"]
+        model_group.add_argument(
+            "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
 
         # Model loading arguments
@@ -964,6 +951,9 @@ class EngineArgs:
         )
         multimodal_group.add_argument(
             "--enable-mm-embeds", **multimodal_kwargs["enable_mm_embeds"]
+        )
+        multimodal_group.add_argument(
+            "--media-io-kwargs", **multimodal_kwargs["media_io_kwargs"]
         )
         multimodal_group.add_argument(
             "--mm-processor-kwargs", **multimodal_kwargs["mm_processor_kwargs"]
@@ -1271,13 +1261,18 @@ class EngineArgs:
             runner=self.runner,
             convert=self.convert,
             task=self.task,
+            tokenizer=self.tokenizer,
+            tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
+            allowed_local_media_path=self.allowed_local_media_path,
+            allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
+            tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
@@ -1285,11 +1280,13 @@ class EngineArgs:
             logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
+            skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             enable_mm_embeds=self.enable_mm_embeds,
             interleave_mm_strings=self.interleave_mm_strings,
+            media_io_kwargs=self.media_io_kwargs,
             skip_mm_profiling=self.skip_mm_profiling,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -1307,6 +1304,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            io_processor_plugin=self.io_processor_plugin,
         )
 
     def validate_tensorizer_args(self):
@@ -1402,25 +1400,9 @@ class EngineArgs:
             )
 
         model_config = self.create_model_config()
-        renderer_config = RendererConfig(
-            model_config=model_config,
-            tokenizer=self.tokenizer or "",
-            tokenizer_mode=self.tokenizer_mode,
-            tokenizer_revision=self.tokenizer_revision,
-            skip_tokenizer_init=self.skip_tokenizer_init,
-            io_processor_plugin=self.io_processor_plugin,
-            media_io_kwargs=self.media_io_kwargs,
-            allowed_local_media_path=self.allowed_local_media_path,
-            allowed_media_domains=self.allowed_media_domains,
-        )
-
-        model_config.recalculate_max_model_len(
-            model_config.original_max_model_len,
-            tokenizer=renderer_config.tokenizer,
-            tokenizer_revision=renderer_config.tokenizer_revision,
-        )
-
         self.model = model_config.model
+        self.tokenizer = model_config.tokenizer
+
         self._check_feature_supported(model_config)
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_max_num_seqs_and_batched_tokens_args(
@@ -1803,7 +1785,6 @@ class EngineArgs:
             )
         config = VllmConfig(
             model_config=model_config,
-            renderer_config=renderer_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,

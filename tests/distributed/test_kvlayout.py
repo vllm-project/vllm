@@ -5,7 +5,6 @@ from vllm.config import (
     DeviceConfig,
     KVTransferConfig,
     ModelConfig,
-    RendererConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -48,7 +47,6 @@ def test_get_kv_connector_cache_layout_with_nixl_connector():
     vllm_config = VllmConfig(
         device_config=DeviceConfig("cpu"),
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         kv_transfer_config=kv_transfer_config,
     )
     with set_current_vllm_config(vllm_config):
@@ -72,7 +70,6 @@ def test_get_kv_connector_cache_layout_with_multi_connector():
     vllm_config = VllmConfig(
         device_config=DeviceConfig("cpu"),
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         kv_transfer_config=kv_transfer_config,
     )
     with set_current_vllm_config(vllm_config):

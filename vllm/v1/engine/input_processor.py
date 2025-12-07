@@ -43,7 +43,6 @@ class InputProcessor:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -55,7 +54,7 @@ class InputProcessor:
         self.mm_processor_cache = processor_cache_from_config(vllm_config, mm_registry)
 
         self.input_preprocessor = InputPreprocessor(
-            self.renderer_config,
+            self.model_config,
             tokenizer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
@@ -253,7 +252,7 @@ class InputProcessor:
         if not params.structured_outputs or not self.structured_outputs_config:
             return
 
-        if self.renderer_config.skip_tokenizer_init and params.structured_outputs:
+        if self.model_config.skip_tokenizer_init and params.structured_outputs:
             raise ValueError(
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
@@ -583,7 +582,7 @@ class InputProcessor:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
                 mm_processor = mm_registry.create_processor(
-                    self.renderer_config,
+                    model_config,
                     tokenizer=tokenizer,
                 )
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)

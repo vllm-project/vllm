@@ -24,7 +24,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.config import RendererConfig
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -205,18 +205,18 @@ def get_tokenizer(
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
-def cached_tokenizer_from_config(renderer_config: "RendererConfig", **kwargs):
+def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     return cached_get_tokenizer(
-        renderer_config.tokenizer,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        revision=renderer_config.tokenizer_revision,
-        trust_remote_code=renderer_config.trust_remote_code,
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        revision=model_config.tokenizer_revision,
+        trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
 
 
-def init_tokenizer_from_config(renderer_config: "RendererConfig"):
-    runner_type = renderer_config.model_config.runner_type
+def init_tokenizer_from_config(model_config: "ModelConfig"):
+    runner_type = model_config.runner_type
     if runner_type == "generate" or runner_type == "draft":
         truncation_side = "left"
     elif runner_type == "pooling":
@@ -225,9 +225,9 @@ def init_tokenizer_from_config(renderer_config: "RendererConfig"):
         assert_never(runner_type)
 
     return get_tokenizer(
-        renderer_config.tokenizer,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        trust_remote_code=renderer_config.trust_remote_code,
-        revision=renderer_config.tokenizer_revision,
+        model_config.tokenizer,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=model_config.tokenizer_revision,
         truncation_side=truncation_side,
     )

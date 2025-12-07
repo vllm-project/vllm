@@ -11,7 +11,6 @@ from vllm.config import (
     DeviceConfig,
     ModelConfig,
     ParallelConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -44,7 +43,6 @@ def test_worker_apply_lora(qwen3_lora_files):
 
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         load_config=LoadConfig(
             download_dir=None,
             load_format="dummy",

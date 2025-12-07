@@ -6,7 +6,7 @@ import pytest
 from scipy.spatial.distance import cosine
 
 from vllm import LLM, SamplingParams
-from vllm.config import ModelConfig, RendererConfig
+from vllm.config import ModelConfig
 
 from ....utils import RemoteOpenAIServer
 
@@ -31,8 +31,7 @@ def test_find_array():
         dtype="bfloat16",
         seed=0,
     )
-    renderer_config = RendererConfig(model_config=model_config)
-    pooling = GritLMMeanPool(renderer_config=renderer_config)
+    pooling = GritLMMeanPool(model_config=model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 

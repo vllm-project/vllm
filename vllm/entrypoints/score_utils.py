@@ -5,7 +5,7 @@ from typing import Any, TypeAlias, cast
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
-from vllm.config import ModelConfig, RendererConfig
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartImageEmbedsParam,
@@ -88,9 +88,9 @@ def _validate_score_input_lens(
 def parse_score_data(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None]:
-    mm_tracker = MultiModalItemTracker(renderer_config)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
     content_2 = _parse_score_content(data_2, mm_tracker)
@@ -176,7 +176,7 @@ def post_process_tokens(
 
 
 def get_score_prompt(
-    renderer_config: RendererConfig,
+    model_config: ModelConfig,
     tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
     data_1: str | ScoreContentPartParam,
@@ -185,14 +185,11 @@ def get_score_prompt(
     prompt_1, prompt_2, mm_data = parse_score_data(
         data_1,
         data_2,
-        renderer_config,
+        model_config,
     )
-
     from vllm.model_executor.model_loader import get_model_cls
 
-    model_config = renderer_config.model_config
     model = get_model_cls(model_config)
-
     if supports_score_template(model):
         full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
         prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)

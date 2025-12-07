@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.config import ModelConfig, RendererConfig, SchedulerConfig, VllmConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.reasoning import ReasoningParser
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -17,26 +17,19 @@ class TestReasoningStructuredOutput:
     """Test reasoning-aware structured output functionality."""
 
     @pytest.fixture
-    def mock_renderer_config(self):
-        """Create a mock RendererConfig."""
-        renderer_config = Mock(spec=RendererConfig)
-        renderer_config.skip_tokenizer_init = (
-            True  # Skip tokenizer init to avoid network calls
-        )
-
-        model_config = Mock(spec=ModelConfig)
-        model_config.get_vocab_size = Mock(return_value=50000)
-        model_config.trust_remote_code = False
+    def mock_model_config(self):
+        """Create a mock ModelConfig."""
+        config = Mock(spec=ModelConfig)
+        config.skip_tokenizer_init = True  # Skip tokenizer init to avoid network calls
+        config.get_vocab_size = Mock(return_value=50000)
         # Add missing runner_type attribute that tokenizer initialization expects
-        model_config.runner_type = "generate"
-        renderer_config.model_config = model_config
-
+        config.runner_type = "generate"
         # Add other attributes that tokenizer initialization might need
-        renderer_config.tokenizer = "test-tokenizer"
-        renderer_config.tokenizer_mode = "auto"
-        renderer_config.tokenizer_revision = None
-
-        return renderer_config
+        config.tokenizer = "test-tokenizer"
+        config.tokenizer_mode = "auto"
+        config.trust_remote_code = False
+        config.tokenizer_revision = None
+        return config
 
     @pytest.fixture
     def mock_scheduler_config(self):
@@ -46,10 +39,10 @@ class TestReasoningStructuredOutput:
         return config
 
     @pytest.fixture
-    def mock_vllm_config(self, mock_renderer_config, mock_scheduler_config):
+    def mock_vllm_config(self, mock_model_config, mock_scheduler_config):
         """Create a mock VllmConfig."""
         config = Mock(spec=VllmConfig)
-        config.renderer_config = mock_renderer_config
+        config.model_config = mock_model_config
         config.scheduler_config = mock_scheduler_config
         config.structured_outputs_config = Mock()
         config.structured_outputs_config.reasoning_parser = None

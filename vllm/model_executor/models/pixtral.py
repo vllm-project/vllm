@@ -193,7 +193,7 @@ class PixtralProcessorAdapter:
 
 class PixtralProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> MistralTokenizer:
-        tokenizer = cached_tokenizer_from_config(self.ctx.renderer_config)
+        tokenizer = cached_tokenizer_from_config(self.ctx.model_config)
         if not isinstance(tokenizer, MistralTokenizer):
             raise ValueError("This model requires `--tokenizer-mode mistral`")
 

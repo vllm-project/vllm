@@ -24,7 +24,6 @@ from vllm.config import (
     CompilationMode,
     ModelConfig,
     PassConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -326,7 +325,6 @@ def test_attention_quant_pattern(
     )
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         scheduler_config=SchedulerConfig(
             max_num_seqs=1024,
             max_model_len=model_config.max_model_len,
