@@ -46,6 +46,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -80,13 +83,13 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     all_close_1d,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
-    maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
     per_tensor_dequantize,
 )
@@ -409,8 +412,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Use per-token quantization for better perf if dynamic and cutlass
             if not self.act_q_static and cutlass_fp8_supported():
                 self.act_q_group_shape = GroupShape.PER_TOKEN
+                self.activation_quant_key = kFp8DynamicTokenSym
             else:
                 self.act_q_group_shape = GroupShape.PER_TENSOR
+                self.activation_quant_key = kFp8StaticTensorSym
 
         if self.block_quant:
             assert not self.act_q_static
@@ -422,9 +427,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=self.act_q_static,
-                act_quant_group_shape=self.act_q_group_shape,
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=kFp8StaticTensorSym,
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
             )
 
     def create_weights(
@@ -437,8 +444,6 @@ class Fp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        maybe_create_device_identity()
-
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -477,6 +482,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_loader=weight_loader,
             )
         layer.register_parameter("weight", weight)
+        layer.input_scale_ub = None
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
@@ -639,14 +645,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
