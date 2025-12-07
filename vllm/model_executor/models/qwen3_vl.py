@@ -1285,7 +1285,7 @@ class Qwen3VLForConditionalGeneration(
             self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-        self.return_pre_norm_hidden_states = False
+        self.return_pre_norm_hidden_states = True
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
