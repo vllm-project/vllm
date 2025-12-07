@@ -33,32 +33,24 @@ class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
 
     model: str = MODEL_NAME
+    tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
+    tokenizer_mode: str = "auto"
     max_model_len: int = 100
+    tokenizer_revision: str | None = None
     multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
     logits_processors: list[str] | None = None
     logits_processor_pattern: str | None = None
     diff_sampling_param: dict | None = None
+    allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
-
-
-@dataclass
-class MockRendererConfig:
-    """Minimal mock RendererConfig for testing."""
-
-    model_config: MockModelConfig
-
-    tokenizer: str = MODEL_NAME
-    tokenizer_mode: str = "auto"
-    tokenizer_revision: str | None = None
-    skip_tokenizer_init: bool = False
-    allowed_local_media_path: str = ""
-    allowed_media_domains: list[str] | None = None
 
 
 class MockLoRAResolver(LoRAResolver):
@@ -122,7 +114,6 @@ def mock_serving_setup():
     mock_engine.add_lora.reset_mock()
 
     mock_engine.model_config = MockModelConfig()
-    mock_engine.renderer_config = MockRendererConfig(mock_engine.model_config)
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 

@@ -91,7 +91,6 @@ class AsyncLLM(EngineClient):
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
 
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
@@ -109,15 +108,15 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        if self.renderer_config.skip_tokenizer_init:
+        if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_config(self.renderer_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
-            self.renderer_config.io_processor_plugin,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).

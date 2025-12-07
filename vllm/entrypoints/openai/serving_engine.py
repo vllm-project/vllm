@@ -291,7 +291,6 @@ class OpenAIServing:
 
         self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
-        self.renderer_config = self.models.renderer_config
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
@@ -1101,18 +1100,18 @@ class OpenAIServing:
         Sequence[RequestPrompt],
         list[EngineTokensPrompt],
     ]:
-        renderer_config = self.renderer_config
+        model_config = self.model_config
 
         resolved_content_format = resolve_chat_template_content_format(
             chat_template,
             tool_dicts,
             chat_template_content_format,
             tokenizer,
-            renderer_config=renderer_config,
+            model_config=model_config,
         )
         conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
             messages,
-            renderer_config,
+            model_config,
             content_format=resolved_content_format,
         )
 
@@ -1139,14 +1138,14 @@ class OpenAIServing:
             request_prompt = tokenizer.apply_chat_template(
                 conversation=conversation,
                 messages=messages,
-                model_config=renderer_config.model_config,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer=tokenizer,
                 conversation=conversation,
-                renderer_config=renderer_config,
+                model_config=model_config,
                 **_chat_template_kwargs,
             )
 

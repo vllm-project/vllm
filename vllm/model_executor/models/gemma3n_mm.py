@@ -18,7 +18,7 @@ from transformers.models.gemma3n import (
 )
 from transformers.models.siglip import SiglipImageProcessorFast
 
-from vllm.config import RendererConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -760,7 +760,7 @@ class Gemma3nForConditionalGeneration(
         cls,
         audio: np.ndarray,
         stt_config: SpeechToTextConfig,
-        renderer_config: RendererConfig,
+        model_config: ModelConfig,
         language: Optional[str],
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
@@ -798,9 +798,7 @@ class Gemma3nForConditionalGeneration(
 
     @classmethod
     def get_speech_to_text_config(
-        cls,
-        renderer_config: RendererConfig,
-        task_type: str,
+        cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         return SpeechToTextConfig(
             # Let's set this to 30 as suggested in the docs for now, although

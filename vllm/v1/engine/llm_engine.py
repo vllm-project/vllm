@@ -60,7 +60,6 @@ class LLMEngine:
     ) -> None:
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
@@ -84,15 +83,15 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.renderer_config.skip_tokenizer_init:
+        if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = init_tokenizer_from_config(self.renderer_config)
+            tokenizer = init_tokenizer_from_config(self.model_config)
 
         self.input_processor = InputProcessor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
             self.vllm_config,
-            self.renderer_config.io_processor_plugin,
+            self.model_config.io_processor_plugin,
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).

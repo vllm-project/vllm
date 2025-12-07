@@ -9,7 +9,6 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
-    RendererConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -133,7 +132,6 @@ def create_scheduler(
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
