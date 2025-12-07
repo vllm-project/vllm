@@ -1811,12 +1811,10 @@ class Qwen3VLForConditionalGeneration(
                     token_counts = self._get_actual_frame_token_counts(
                         mm_feature.mm_position, t
                     )
-                    assert (
-                        token_counts is not None
-                    ), "EVS enabled but failed to extract frame token counts from is_embed mask"
-                    frame_token_counts_map[mm_feature.mm_position.offset] = (
-                        token_counts
+                    assert token_counts is not None, (
+                        "EVS enabled but failed to extract frame token counts from is_embed mask"
                     )
+                    frame_token_counts_map[mm_feature.mm_position.offset] = token_counts
                     logger.info(
                         f"EVS mode: collected {len(token_counts)} frame token counts for offset {mm_feature.mm_position.offset}"
                     )
@@ -1850,9 +1848,9 @@ class Qwen3VLForConditionalGeneration(
 
             if base_offset is not None:
                 # EVS mode: use actual token count
-                assert (
-                    base_offset in frame_token_counts_map
-                ), f"Found base_offset {base_offset} but not in frame_token_counts_map"
+                assert base_offset in frame_token_counts_map, (
+                    f"Found base_offset {base_offset} but not in frame_token_counts_map"
+                )
 
                 if base_offset not in frame_counts_idx:
                     frame_counts_idx[base_offset] = 0
@@ -1860,9 +1858,9 @@ class Qwen3VLForConditionalGeneration(
                 counts = frame_token_counts_map[base_offset]
                 idx = frame_counts_idx[base_offset]
 
-                assert idx < len(
-                    counts
-                ), f"EVS frame index {idx} out of range (total frames: {len(counts)})"
+                assert idx < len(counts), (
+                    f"EVS frame index {idx} out of range (total frames: {len(counts)})"
+                )
 
                 actual_frame_tokens = counts[idx]
                 logger.info(
