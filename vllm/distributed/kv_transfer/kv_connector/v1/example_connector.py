@@ -65,7 +65,7 @@ class ReqMeta:
 
 
 @dataclass
-class SharedStorageConnectorMetadata(KVConnectorMetadata):
+class ExampleConnectorMetadata(KVConnectorMetadata):
     requests: list[ReqMeta] = field(default_factory=list)
 
     def add_request(
@@ -81,7 +81,7 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
         )
 
 
-class SharedStorageConnector(KVConnectorBase_V1):
+class ExampleConnector(KVConnectorBase_V1):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU
@@ -157,7 +157,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         # Get the metadata
         metadata: KVConnectorMetadata = self._get_connector_metadata()
-        assert isinstance(metadata, SharedStorageConnectorMetadata)
+        assert isinstance(metadata, ExampleConnectorMetadata)
 
         if metadata is None:
             logger.warning(
@@ -241,7 +241,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
         connector_metadata = self._get_connector_metadata()
-        assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
+        assert isinstance(connector_metadata, ExampleConnectorMetadata)
         for request in connector_metadata.requests:
             if request.is_store:
                 filename = self._generate_filename_debug(
@@ -315,7 +315,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        meta = SharedStorageConnectorMetadata()
+        meta = ExampleConnectorMetadata()
 
         total_need_load = 0
         for new_req in scheduler_output.scheduled_new_reqs:
