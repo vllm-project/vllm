@@ -199,7 +199,6 @@ def get_tokenizer(
         download_dir=download_dir,
         **kwargs,
     )
-    tokenizer_kwargs.update(kwargs)
 
     if tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
