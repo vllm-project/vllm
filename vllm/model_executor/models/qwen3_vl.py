@@ -1811,14 +1811,16 @@ class Qwen3VLForConditionalGeneration(
                     token_counts = self._get_actual_frame_token_counts(
                         mm_feature.mm_position, t
                     )
-                    if token_counts:
-                        frame_token_counts_map[mm_feature.mm_position.offset] = (
-                            token_counts
-                        )
-                        logger.info(
-                            f"EVS mode: collected {len(token_counts)} frame token counts for offset {mm_feature.mm_position.offset}"
-                        )
-                        logger.info(f"  Token counts: {token_counts}")
+                    assert (
+                        token_counts is not None
+                    ), "EVS enabled but failed to extract frame token counts from is_embed mask"
+                    frame_token_counts_map[mm_feature.mm_position.offset] = (
+                        token_counts
+                    )
+                    logger.info(
+                        f"EVS mode: collected {len(token_counts)} frame token counts for offset {mm_feature.mm_position.offset}"
+                    )
+                    logger.info(f"  Token counts: {token_counts}")
 
         llm_pos_ids_list = []
         st = 0
@@ -1881,8 +1883,12 @@ class Qwen3VLForConditionalGeneration(
                 if offset >= feat_offset:
                     base_offset = feat_offset
 
-            if base_offset is not None and base_offset in frame_token_counts_map:
+            if base_offset is not None:
                 # EVS mode: use actual token count
+                assert (
+                    base_offset in frame_token_counts_map
+                ), f"Found base_offset {base_offset} but not in frame_token_counts_map"
+
                 if base_offset not in frame_counts_idx:
                     frame_counts_idx[base_offset] = 0
 
@@ -1900,7 +1906,7 @@ class Qwen3VLForConditionalGeneration(
                 st = offset + actual_tokens
                 frame_counts_idx[base_offset] += 1
             else:
-                # Non-EVS mode: use theoretical grid size
+                # Non-EVS mode (or image): use theoretical grid size
                 st = offset + llm_grid_h * llm_grid_w
                 logger.info("  Non-EVS mode: using theoretical token count")
 
