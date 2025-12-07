@@ -586,6 +586,15 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
+        if (
+            self.scheduler_config.async_scheduling
+            and not self.parallel_config.disable_nccl_for_dp_synchronization
+        ):
+            logger.info(
+                "Disabling NCCL for DP synchronization when using async scheduling."
+            )
+            self.parallel_config.disable_nccl_for_dp_synchronization = True
+
         from vllm.platforms import current_platform
 
         if (

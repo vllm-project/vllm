@@ -13,6 +13,7 @@ class SamplingMetadata:
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
+    min_p: torch.Tensor | None
 
     repetition_penalty: torch.Tensor
     frequency_penalty: torch.Tensor
@@ -44,6 +45,7 @@ class SamplingMetadata:
         # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
         top_p = None
         top_k = None
+        min_p = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         # NOTE(woosuk): We must set penalties to their default values to make sure
         # the penalties kernel does not touch the placeholder bin_counts tensors.
         repetition_penalty = torch.ones(num_reqs, dtype=torch.float32, device=device)
@@ -64,6 +66,7 @@ class SamplingMetadata:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             repetition_penalty=repetition_penalty,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
@@ -85,6 +88,8 @@ def _expand_sampling_metadata_kernel(
     expanded_top_p_ptr,
     top_k_ptr,
     expanded_top_k_ptr,
+    min_p_ptr,
+    expanded_min_p_ptr,
     rep_penalty_ptr,
     expanded_rep_penalty_ptr,
     freq_penalty_ptr,
@@ -115,6 +120,10 @@ def _expand_sampling_metadata_kernel(
         top_k = tl.load(top_k_ptr + req_idx)
         tl.store(expanded_top_k_ptr + start_idx + block, top_k, mask=mask)
 
+    if min_p_ptr is not None:
+        min_p = tl.load(min_p_ptr + req_idx)
+        tl.store(expanded_min_p_ptr + start_idx + block, min_p, mask=mask)
+
     rep_penalty = tl.load(rep_penalty_ptr + req_idx)
     tl.store(expanded_rep_penalty_ptr + start_idx + block, rep_penalty, mask=mask)
 
@@ -138,6 +147,7 @@ def expand_sampling_metadata(
     expanded_temp = create_empty(sampling_metadata.temperature)
     expanded_top_p = create_empty(sampling_metadata.top_p)
     expanded_top_k = create_empty(sampling_metadata.top_k)
+    expanded_min_p = create_empty(sampling_metadata.min_p)
     expanded_repetition_penalty = create_empty(sampling_metadata.repetition_penalty)
     expanded_frequency_penalty = create_empty(sampling_metadata.frequency_penalty)
     expanded_presence_penalty = create_empty(sampling_metadata.presence_penalty)
@@ -151,6 +161,8 @@ def expand_sampling_metadata(
         expanded_top_p,
         sampling_metadata.top_k,
         expanded_top_k,
+        sampling_metadata.min_p,
+        expanded_min_p,
         sampling_metadata.repetition_penalty,
         expanded_repetition_penalty,
         sampling_metadata.frequency_penalty,
@@ -166,6 +178,7 @@ def expand_sampling_metadata(
         temperature=expanded_temp,
         top_p=expanded_top_p,
         top_k=expanded_top_k,
+        min_p=expanded_min_p,
         seeds=expanded_seeds,
         repetition_penalty=expanded_repetition_penalty,
         frequency_penalty=expanded_frequency_penalty,
