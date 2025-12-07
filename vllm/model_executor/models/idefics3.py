@@ -576,8 +576,6 @@ class Idefics3Model(nn.Module):
     dummy_inputs=Idefics3DummyInputsBuilder,
 )
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
