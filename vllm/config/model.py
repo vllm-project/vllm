@@ -4,6 +4,7 @@
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -1216,6 +1217,19 @@ class ModelConfig:
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False
+
+    @cached_property
+    def is_mm_prefix_lm(self) -> bool:
+        """Whether to use bidirectional attention for mm positions."""
+        MM_PREFIX_LM_MODELS = (
+            "gemma3",
+            # TODO(Isotr0py): Disable paligemma for now before
+            # we supports soft cap attention for FlexAttention
+            # "paligemma",
+        )
+        if not hasattr(self.hf_config, "model_type"):
+            return False
+        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
     def get_head_size(self) -> int:
         # TODO remove hard code
