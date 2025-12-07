@@ -1202,16 +1202,16 @@ class EagleProposer:
                     input_ids = self.input_ids[:num_input_tokens]
                     inputs_embeds = None
 
-            model_kwargs = {}
-            if self.pass_spec_step_idx:
-                model_kwargs["spec_step_idx"] = 0
+                model_kwargs = {}
+                if self.pass_spec_step_idx:
+                    model_kwargs["spec_step_idx"] = 0
 
                 self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(num_input_tokens),
                     hidden_states=self.hidden_states[:num_input_tokens],
                     inputs_embeds=inputs_embeds,
-                **model_kwargs,
+                    **model_kwargs,
                 )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:

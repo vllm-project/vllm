@@ -698,12 +698,6 @@ class MambaManager(SingleTypeKVCacheManager):
                     computed.append(cached)
                 break  # we just need the last match - early stopping
 
-        # TODO - do we need to pop the last block if use_eagle is True?
-        # With hybrid models, it seems unnecessary,
-        # since it is done in the full attention manager.
-        # Popping again means the last 2 blocks are popped overall,
-        # and the performance is hit hard.
-
         return computed_blocks
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
