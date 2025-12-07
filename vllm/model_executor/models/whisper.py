@@ -66,6 +66,7 @@ from vllm.v1.attention.backend import (
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsTranscription,
 )
@@ -790,14 +791,12 @@ class WhisperForConditionalGeneration(
     nn.Module,
     SupportsTranscription,
     SupportsMultiModal,
+    SupportsLoRA,
 ):
+    # LoRA-specific attributes
     packed_modules_mapping = {
-        "self_attn.qkv_proj": [
-            "self_attn.q_proj",
-            "self_attn.k_proj",
-            "self_attn.v_proj",
-        ],
-        "encoder_attn.kv_proj": ["encoder_attn.k_proj", "encoder_attn.v_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "kv_proj": ["k_proj", "v_proj"],
     }
 
     hf_to_vllm_mapper = WeightsMapper(
