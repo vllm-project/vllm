@@ -617,6 +617,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("per_token_group_fp8_quant", torch::kCUDA,
            &per_token_group_quant_fp8);
 
+  // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
+  // TMA-aligned scales for DeepGEMM.
+  ops.def(
+      "per_token_group_fp8_quant_packed(Tensor input, Tensor! output_q, "
+      "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
+      "float fp8_max) -> ()");
+  ops.impl("per_token_group_fp8_quant_packed", torch::kCUDA,
+           &per_token_group_quant_8bit_packed);
+
   // Compute per-token-group INT8 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "

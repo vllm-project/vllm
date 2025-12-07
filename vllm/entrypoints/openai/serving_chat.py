@@ -21,7 +21,8 @@ from vllm.entrypoints.chat_utils import (
     get_history_tool_calls_cnt,
     make_tool_call_id,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
@@ -30,7 +31,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_input_to_harmony_message,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,

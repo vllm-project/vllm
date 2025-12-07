@@ -299,6 +299,14 @@ void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
                                 torch::Tensor& output_s, int64_t group_size,
                                 double eps, double int8_min, double int8_max);
+
+// Fused activation quantisation + DeepGEMM-compatible UE8M0-packed scales.
+void per_token_group_quant_8bit_packed(const torch::Tensor& input,
+                                       torch::Tensor& output_q,
+                                       torch::Tensor& output_s_packed,
+                                       int64_t group_size, double eps,
+                                       double min_8bit, double max_8bit);
+
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
