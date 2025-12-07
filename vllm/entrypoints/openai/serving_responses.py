@@ -27,6 +27,10 @@ from openai.types.responses import (
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
+    ResponseMcpCallArgumentsDeltaEvent,
+    ResponseMcpCallArgumentsDoneEvent,
+    ResponseMcpCallCompletedEvent,
+    ResponseMcpCallInProgressEvent,
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -44,6 +48,7 @@ from openai.types.responses import (
     response_function_web_search,
     response_text_delta_event,
 )
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
@@ -733,6 +738,26 @@ class OpenAIServingResponses(OpenAIServing):
                     self.response_store[response.id] = response
         return response
 
+    def _is_mcp_tool_by_namespace(self, recipient: str | None) -> bool:
+        """
+        Determine if a tool call is an MCP tool based on recipient prefix.
+
+        - Tools starting with "functions." are function calls
+        - Everything else is an MCP tool
+        """
+        if recipient is None:
+            return False
+
+        # Function calls have "functions." prefix
+        # Everything else is an MCP tool
+        return not recipient.startswith("functions.")
+
+    _TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
+        "python": "code_interpreter",
+        "container": "container",
+        "browser": "web_search_preview",
+    }
+
     def _topk_logprobs(
         self,
         logprobs: dict[int, SampleLogprob],
@@ -1029,8 +1054,7 @@ class OpenAIServingResponses(OpenAIServing):
                     del prev_msgs[prev_final_msg_idx + 1 :]
                     for msg in recent_turn_msgs:
                         assert isinstance(msg, OpenAIHarmonyMessage)
-                        if msg.channel != "analysis":
-                            prev_msgs.append(msg)
+                        prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
@@ -1560,6 +1584,47 @@ class OpenAIServingResponses(OpenAIServing):
                                     item=function_call_item,
                                 )
                             )
+                        elif (
+                            self._is_mcp_tool_by_namespace(previous_item.recipient)
+                            and current_item_id is not None
+                            and current_item_id.startswith("mcp_")
+                        ):
+                            server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(
+                                previous_item.recipient, previous_item.recipient
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseMcpCallArgumentsDoneEvent(
+                                    type="response.mcp_call_arguments.done",
+                                    arguments=previous_item.content[0].text,
+                                    name=previous_item.recipient,
+                                    item_id=current_item_id,
+                                    output_index=current_output_index,
+                                    sequence_number=-1,
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseMcpCallCompletedEvent(
+                                    type="response.mcp_call.completed",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item_id=current_item_id,
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemDoneEvent(
+                                    type="response.output_item.done",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=McpCall(
+                                        type="mcp_call",
+                                        arguments=previous_item.content[0].text,
+                                        name=previous_item.recipient,
+                                        id=current_item_id,
+                                        server_label=server_label,
+                                        status="completed",
+                                    ),
+                                )
+                            )
                     elif previous_item.channel == "analysis":
                         content = ResponseReasoningTextContent(
                             text=previous_item.content[0].text,
@@ -1743,36 +1808,124 @@ class OpenAIServingResponses(OpenAIServing):
                 elif (
                     ctx.parser.current_channel == "commentary"
                     or ctx.parser.current_channel == "analysis"
-                ) and ctx.parser.current_recipient == "python":
+                ) and ctx.parser.current_recipient is not None:
+                    recipient = ctx.parser.current_recipient
+                    is_mcp_tool = self._is_mcp_tool_by_namespace(recipient)
+                    if is_mcp_tool:
+                        server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(
+                            recipient, recipient
+                        )
+                        if not sent_output_item_added:
+                            sent_output_item_added = True
+                            current_item_id = f"mcp_{random_uuid()}"
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemAddedEvent(
+                                    type="response.output_item.added",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=McpCall(
+                                        type="mcp_call",
+                                        id=current_item_id,
+                                        name=recipient,
+                                        arguments="",
+                                        server_label=server_label,
+                                        status="in_progress",
+                                    ),
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseMcpCallInProgressEvent(
+                                    type="response.mcp_call.in_progress",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item_id=current_item_id,
+                                )
+                            )
+                        yield _increment_sequence_number_and_return(
+                            ResponseMcpCallArgumentsDeltaEvent(
+                                type="response.mcp_call_arguments.delta",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=ctx.parser.last_content_delta,
+                            )
+                        )
+                    else:
+                        if not sent_output_item_added:
+                            sent_output_item_added = True
+                            current_item_id = f"tool_{random_uuid()}"
+                            yield _increment_sequence_number_and_return(
+                                ResponseOutputItemAddedEvent(
+                                    type="response.output_item.added",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item=ResponseCodeInterpreterToolCallParam(
+                                        type="code_interpreter_call",
+                                        id=current_item_id,
+                                        code=None,
+                                        container_id="auto",
+                                        outputs=None,
+                                        status="in_progress",
+                                    ),
+                                )
+                            )
+                            yield _increment_sequence_number_and_return(
+                                ResponseCodeInterpreterCallInProgressEvent(
+                                    type="response.code_interpreter_call.in_progress",
+                                    sequence_number=-1,
+                                    output_index=current_output_index,
+                                    item_id=current_item_id,
+                                )
+                            )
+                        yield _increment_sequence_number_and_return(
+                            ResponseCodeInterpreterCallCodeDeltaEvent(
+                                type="response.code_interpreter_call_code.delta",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=ctx.parser.last_content_delta,
+                            )
+                        )
+                elif (
+                    (
+                        ctx.parser.current_channel == "commentary"
+                        or ctx.parser.current_channel == "analysis"
+                    )
+                    and ctx.parser.current_recipient is not None
+                    and ctx.parser.current_recipient.startswith("mcp.")
+                ):
                     if not sent_output_item_added:
                         sent_output_item_added = True
-                        current_item_id = f"tool_{random_uuid()}"
+                        current_item_id = f"mcp_{random_uuid()}"
+                        mcp_name = ctx.parser.current_recipient[len("mcp.") :]
+
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
                                 type="response.output_item.added",
                                 sequence_number=-1,
                                 output_index=current_output_index,
-                                item=ResponseCodeInterpreterToolCallParam(
-                                    type="code_interpreter_call",
+                                item=McpCall(
+                                    type="mcp_call",
                                     id=current_item_id,
-                                    code=None,
-                                    container_id="auto",
-                                    outputs=None,
+                                    name=mcp_name,
+                                    arguments="",
+                                    server_label=mcp_name,
                                     status="in_progress",
                                 ),
                             )
                         )
                         yield _increment_sequence_number_and_return(
-                            ResponseCodeInterpreterCallInProgressEvent(
-                                type="response.code_interpreter_call.in_progress",
+                            ResponseMcpCallInProgressEvent(
+                                type="response.mcp_call.in_progress",
                                 sequence_number=-1,
                                 output_index=current_output_index,
                                 item_id=current_item_id,
                             )
                         )
+
                     yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCodeDeltaEvent(
-                            type="response.code_interpreter_call_code.delta",
+                        ResponseMcpCallArgumentsDeltaEvent(
+                            type="response.mcp_call_arguments.delta",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
@@ -1870,30 +2023,111 @@ class OpenAIServingResponses(OpenAIServing):
 
                 if (
                     self.tool_server is not None
-                    and self.tool_server.has_tool("python")
                     and previous_item.recipient is not None
-                    and previous_item.recipient.startswith("python")
+                    and current_item_id is not None
+                    and sent_output_item_added
                 ):
+                    recipient = previous_item.recipient
+                    # Handle MCP tool completion
+                    is_mcp_tool = self._is_mcp_tool_by_namespace(
+                        recipient
+                    ) and current_item_id.startswith("mcp_")
+                    if is_mcp_tool:
+                        server_label = self._TOOL_NAME_TO_MCP_SERVER_LABEL.get(
+                            recipient, recipient
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseMcpCallArgumentsDoneEvent(
+                                type="response.mcp_call_arguments.done",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                arguments=previous_item.content[0].text,
+                                name=recipient,
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseMcpCallCompletedEvent(
+                                type="response.mcp_call.completed",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseOutputItemDoneEvent(
+                                type="response.output_item.done",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=McpCall(
+                                    type="mcp_call",
+                                    id=current_item_id,
+                                    name=recipient,
+                                    arguments=previous_item.content[0].text,
+                                    server_label=server_label,
+                                    status="completed",
+                                ),
+                            )
+                        )
+                    else:
+                        yield _increment_sequence_number_and_return(
+                            ResponseCodeInterpreterCallCodeDoneEvent(
+                                type="response.code_interpreter_call_code.done",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                code=previous_item.content[0].text,
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseCodeInterpreterCallInterpretingEvent(
+                                type="response.code_interpreter_call.interpreting",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseCodeInterpreterCallCompletedEvent(
+                                type="response.code_interpreter_call.completed",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                            )
+                        )
+                        yield _increment_sequence_number_and_return(
+                            ResponseOutputItemDoneEvent(
+                                type="response.output_item.done",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=ResponseCodeInterpreterToolCallParam(
+                                    type="code_interpreter_call",
+                                    id=current_item_id,
+                                    code=previous_item.content[0].text,
+                                    container_id="auto",
+                                    outputs=[],
+                                    status="completed",
+                                ),
+                            )
+                        )
+                if (
+                    previous_item.recipient is not None
+                    and previous_item.recipient.startswith("mcp.")
+                ):
+                    mcp_name = previous_item.recipient[len("mcp.") :]
                     yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCodeDoneEvent(
-                            type="response.code_interpreter_call_code.done",
+                        ResponseMcpCallArgumentsDoneEvent(
+                            type="response.mcp_call_arguments.done",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
-                            code=previous_item.content[0].text,
+                            arguments=previous_item.content[0].text,
+                            name=mcp_name,
                         )
                     )
                     yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallInterpretingEvent(
-                            type="response.code_interpreter_call.interpreting",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        )
-                    )
-                    yield _increment_sequence_number_and_return(
-                        ResponseCodeInterpreterCallCompletedEvent(
-                            type="response.code_interpreter_call.completed",
+                        ResponseMcpCallCompletedEvent(
+                            type="response.mcp_call.completed",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
@@ -1904,13 +2138,12 @@ class OpenAIServingResponses(OpenAIServing):
                             type="response.output_item.done",
                             sequence_number=-1,
                             output_index=current_output_index,
-                            item=ResponseCodeInterpreterToolCallParam(
-                                type="code_interpreter_call",
+                            item=McpCall(
+                                type="mcp_call",
                                 id=current_item_id,
-                                code=previous_item.content[0].text,
-                                container_id="auto",
-                                # TODO: add outputs here
-                                outputs=[],
+                                name=mcp_name,
+                                arguments=previous_item.content[0].text,
+                                server_label=mcp_name,
                                 status="completed",
                             ),
                         )
