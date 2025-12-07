@@ -4,7 +4,7 @@
 import torch
 
 from vllm.model_executor.layers.fused_moe.triton_bitonic_sort import (
-    bitonic_sort32_descending,
+    bitonic_sort_warp_size_descending,
 )
 from vllm.triton_utils import tl, triton
 
@@ -159,14 +159,16 @@ def _topk_softmax_kernel(
                 )  # [ROWS_PER_PID, BLOCKN]
                 logits = numerator / denominator
 
-            if warp_size == N:
+            if N == BLOCK_N and warp_size == N:
+                # TODO(ijpq): we should enable this sort when N <= warp_size,
+                # but need align tensor's layout with warp.
+                # leverage PTX to sort warp_size experts to bypass sharedmemory
                 idx = tl.arange(0, warp_size)[None, :]
                 idxs = tl.broadcast_to(idx, (ROWS_PER_PID, warp_size))
-                sorted_val, sorted_idx = bitonic_sort32_descending(
+                sorted_val, sorted_idx = bitonic_sort_warp_size_descending(
                     val=logits, idx=idxs
                 )  # [ROWS_PER_PID, 32]
                 tl.static_assert(sorted_val.shape == (ROWS_PER_PID, warp_size))
-                # USE_BITONIC: tl.constexpr = True
             else:
                 for k in tl.static_range(topk):
                     cur_max = tl.max(
@@ -184,7 +186,6 @@ def _topk_softmax_kernel(
                         cur_idx == offs_n[None, :]
                     )  # [ROWSPERPID,1] [1,BLOCKN]
                     logits = tl.where(mask_selected, float("-inf"), logits)
-                # USE_BITONIC: tl.constexpr = False
 
             if RENORM:
                 if USE_BITONIC:

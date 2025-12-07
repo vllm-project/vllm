@@ -3,9 +3,9 @@
 import torch
 
 from vllm.model_executor.layers.fused_moe.triton_bitonic_sort import (
-    bitonic_ce_descending_wrapper,
-    bitonic_sort32_descending,
-    bitonic_sort32_descending_wrapper,
+    bitonic_compare_exchange_descending_wrapper,
+    bitonic_sort_warp_size_descending,
+    bitonic_sort_warp_size_descending_wrapper,
 )
 from vllm.triton_utils import tl, triton
 
@@ -55,11 +55,11 @@ def test_bitonic_descending():
     )
 
     # assert stride 1 is correct when constructing bitonic
-    bitonic_ce_descending_wrapper[(1,)](val, seq, new_val, new_seq, 1)
+    bitonic_compare_exchange_descending_wrapper[(1,)](val, seq, new_val, new_seq, 1, 1)
     torch.testing.assert_close(new_seq, ref_1_seq)
 
     # assert final sort result
-    bitonic_sort32_descending_wrapper[(1,)](val, seq, new_val, new_seq)
+    bitonic_sort_warp_size_descending_wrapper[(1,)](val, seq, new_val, new_seq)
     seq = seq.flip(0)
     torch.testing.assert_close(new_seq, seq)
 
@@ -78,7 +78,7 @@ def test_bitonic_2d_kernel(
 
     idxs = tl.broadcast_to(offs_col[None, :], (ROWS, 32)).to(tl.int32)  # [ROWS, 32]
 
-    sorted_vals, sorted_idxs = bitonic_sort32_descending(vals, idxs)
+    sorted_vals, sorted_idxs = bitonic_sort_warp_size_descending(vals, idxs)
 
     tl.store(out_val_ptr + offs_row[:, None] * 32 + offs_col[None, :], sorted_vals)
     tl.store(out_idx_ptr + offs_row[:, None] * 32 + offs_col[None, :], sorted_idxs)

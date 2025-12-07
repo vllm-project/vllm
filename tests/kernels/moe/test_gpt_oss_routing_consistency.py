@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize("num_tokens", [10, 128, 1024])
-@pytest.mark.parametrize("num_experts", [32, 65, 128])
+@pytest.mark.parametrize("num_experts", [8, 16, 32, 65, 128])
 @pytest.mark.parametrize("topk", [1, 2, 3, 4])
 @pytest.mark.parametrize("renorm", [True, False])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="only available on CUDA")
