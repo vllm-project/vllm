@@ -3,7 +3,7 @@
 import importlib.util
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import huggingface_hub
 from typing_extensions import assert_never, deprecated
@@ -23,7 +23,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from .protocol import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config.model import ModelConfig, RunnerType
 
 logger = init_logger(__name__)
 
@@ -78,7 +78,7 @@ TokenizerRegistry._registry.update(
 def resolve_tokenizer_args(
     tokenizer_name: str | Path,
     *args,
-    runner_type: Literal["generate", "pooling"] = "generate",
+    runner_type: "RunnerType" = "generate",
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     revision: str | None = None,
