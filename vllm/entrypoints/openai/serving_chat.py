@@ -1646,7 +1646,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         logprobs: dict[int, Logprob],
         top_logprobs: int | None,
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         should_return_as_token_id: bool,
     ) -> list[ChatCompletionLogProb]:
         return [
