@@ -25,7 +25,7 @@ _VLLM_RENDERERS = {
 
 @dataclass
 class RendererRegistry:
-    # Renderer name ->  (renderer module, renderer class)
+    # Renderer mode ->  (renderer module, renderer class)
     renderers: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def register(self, renderer_mode: str, module: str, class_name: str) -> None:
@@ -63,8 +63,8 @@ class RendererRegistry:
 
 RENDERER_REGISTRY = RendererRegistry(
     {
-        key: (f"vllm.renderers.{mod_relname}", cls_name)
-        for key, (mod_relname, cls_name) in _VLLM_RENDERERS.items()
+        mode: (f"vllm.renderers.{mod_relname}", cls_name)
+        for mode, (mod_relname, cls_name) in _VLLM_RENDERERS.items()
     }
 )
 """The global `RendererRegistry` instance."""

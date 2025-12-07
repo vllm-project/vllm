@@ -38,6 +38,7 @@ _VLLM_TOKENIZERS = {
 
 @dataclass
 class _TokenizerRegistry:
+    # Tokenizer mode ->  (tokenizer module, tokenizer class)
     tokenizers: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def register(self, tokenizer_mode: str, module: str, class_name: str) -> None:
@@ -70,8 +71,8 @@ class _TokenizerRegistry:
 
 TokenizerRegistry = _TokenizerRegistry(
     {
-        key: (f"vllm.tokenizers.{mod_relname}", cls_name)
-        for key, (mod_relname, cls_name) in _VLLM_TOKENIZERS.items()
+        mode: (f"vllm.tokenizers.{mod_relname}", cls_name)
+        for mode, (mod_relname, cls_name) in _VLLM_TOKENIZERS.items()
     }
 )
 
