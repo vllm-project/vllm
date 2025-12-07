@@ -350,7 +350,8 @@ steps:
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
-    - vllm/
+    - vllm/v1/attention
+    - vllm/model_executor/layers
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -387,6 +388,7 @@ steps:
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test

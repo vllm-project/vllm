@@ -629,8 +629,8 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support chunked prefill.",
+            True,
+            "Pooling models with causal attn and all pooling support chunked prefill.",
         ),
         (
             "BAAI/bge-base-en",
@@ -748,8 +748,8 @@ def test_is_chunked_prefill_supported(
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support prefix caching.",
+            True,
+            "Pooling models with causal attn and all pooling support prefix caching.",
         ),
         (
             "BAAI/bge-base-en",
