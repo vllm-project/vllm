@@ -229,7 +229,10 @@ class Attention(nn.Module, AttentionLayerBase):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
-        self.use_mm_prefix = vllm_config.model_config.is_mm_prefix_lm
+
+        # NOTE: model_config may be None during certain tests
+        model_config = vllm_config.model_config
+        self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
