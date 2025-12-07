@@ -30,7 +30,7 @@ class TerratorchRenderer(RendererLike):
         if not config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
 
-    @property
+    @property  # type: ignore[override]
     def tokenizer(self) -> TokenizerLike | None:
         return None
 

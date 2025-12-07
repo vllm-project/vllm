@@ -44,7 +44,7 @@ class DeepseekV32Renderer(RendererLike):
 
         self._tokenizer = tokenizer
 
-    @property
+    @property  # type: ignore[override]
     def tokenizer(self) -> DeepseekV32Tokenizer | None:
         return self._tokenizer
 
@@ -77,11 +77,12 @@ class DeepseekV32Renderer(RendererLike):
             messages=messages,
             **kwargs,
         )
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -106,11 +107,12 @@ class DeepseekV32Renderer(RendererLike):
             messages=messages,
             **kwargs,
         )
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data_future is not None:
             prompt["multi_modal_data"] = await mm_data_future
         if mm_uuids is not None:

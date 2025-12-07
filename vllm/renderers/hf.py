@@ -497,12 +497,15 @@ class HfRenderer(RendererLike):
         if config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = cached_init_tokenizer(CachedHfTokenizer, **tokenizer_kwargs)
+            tokenizer = cached_init_tokenizer(
+                CachedHfTokenizer,  # type: ignore[type-abstract]
+                **tokenizer_kwargs,
+            )
             assert isinstance(tokenizer, HfTokenizer)
 
         self._tokenizer = tokenizer
 
-    @property
+    @property  # type: ignore[override]
     def tokenizer(self) -> HfTokenizer | None:
         return self._tokenizer
 
@@ -545,11 +548,12 @@ class HfRenderer(RendererLike):
             conversation,
             **kwargs,
         )
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -560,7 +564,7 @@ class HfRenderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormat,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         **kwargs,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
         model_config = self.config
@@ -584,11 +588,12 @@ class HfRenderer(RendererLike):
             conversation,
             **kwargs,
         )
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data_future is not None:
             prompt["multi_modal_data"] = await mm_data_future
         if mm_uuids is not None:

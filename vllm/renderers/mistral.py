@@ -78,7 +78,7 @@ class MistralRenderer(RendererLike):
             safe_apply_chat_template, executor=self._apply_chat_template_executor
         )
 
-    @property
+    @property  # type: ignore[override]
     def tokenizer(self) -> MistralTokenizer | None:
         return self._tokenizer
 
@@ -107,11 +107,12 @@ class MistralRenderer(RendererLike):
         )
 
         prompt_raw = safe_apply_chat_template(tokenizer, messages, **kwargs)
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -134,11 +135,12 @@ class MistralRenderer(RendererLike):
         prompt_raw = await self._apply_chat_template_async(
             tokenizer, messages, **kwargs
         )
-        if isinstance(prompt_raw, str):
-            prompt = TextPrompt(prompt=prompt_raw)
-        else:
-            prompt = TokensPrompt(prompt_token_ids=prompt_raw)
 
+        prompt = (
+            TextPrompt(prompt=prompt_raw)
+            if isinstance(prompt_raw, str)
+            else TokensPrompt(prompt_token_ids=prompt_raw)
+        )
         if mm_data_future is not None:
             prompt["multi_modal_data"] = await mm_data_future
         if mm_uuids is not None:
