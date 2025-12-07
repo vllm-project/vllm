@@ -365,6 +365,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
 
     def __init__(self, base_layer: QKVParallelLinear) -> None:
         super().__init__(base_layer)
+        # There are three LoRA layer.
+        self.n_slices = len(self.base_layer.output_sizes)
 
         self.q_proj_shard_size = self.base_layer.num_heads * self.base_layer.head_size
         self.kv_proj_shard_size = (
@@ -373,23 +375,16 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         self.q_shard_id = self.tp_rank
         self.kv_shard_id = self.tp_rank // self.base_layer.num_kv_head_replicas
 
-        # Build output_slices and output_ids dynamically to support both
-        # QKV (3 slices) and KV-only (2 slices) configurations.
-        # KV-only is used in cross-attention layers (e.g., Whisper encoder_attn).
-        slices = []
-        ids = []
-        if self.q_proj_shard_size > 0:
-            slices.append(self.q_proj_shard_size)
-            ids.append(self.q_shard_id)
-        if self.kv_proj_shard_size > 0:
-            slices.append(self.kv_proj_shard_size)
-            ids.append(self.kv_shard_id)
-            slices.append(self.kv_proj_shard_size)
-            ids.append(self.kv_shard_id)
-
-        self.output_slices = tuple(slices)
-        self.output_ids = tuple(ids)
-        self.n_slices = len(self.output_slices)
+        self.output_slices = (
+            self.q_proj_shard_size,
+            self.kv_proj_shard_size,
+            self.kv_proj_shard_size,
+        )
+        self.output_ids = (
+            self.q_shard_id,
+            self.kv_shard_id,
+            self.kv_shard_id,
+        )
 
     def create_lora_weights(
         self,
@@ -412,11 +407,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        # Support both QKV (3 modules) and KV-only (2 modules) configurations
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) in (
-            2,
-            3,
-        )
+        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 3
 
 
 # These following layers are based on the tensor parallelism strategy given in
@@ -557,18 +548,21 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
-        # NOTE: lora_a contains n_slices subloras, and each sublora could be None.
-        # n_slices is 3 for QKV and 2 for KV-only configurations.
-        shard_size = [self.lora_a_stacked[i].shape[2] for i in range(self.n_slices)]
-        start_idx = [self.tp_rank * shard_size[i] for i in range(self.n_slices)]
-        result: list[torch.Tensor | None] = []
-        for i in range(self.n_slices):
-            lora_a_i = lora_a[i]
-            if lora_a_i is not None:
-                result.append(lora_a_i[start_idx[i] : start_idx[i] + shard_size[i], :])
-            else:
-                result.append(None)
-        return result
+        # NOTE: lora_a contains 3 subloras, and each sublora could be None.
+        shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
+        start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
+        lora_a = [
+            lora_a[0][start_idx[0] : start_idx[0] + shard_size[0], :]
+            if lora_a[0] is not None
+            else None,
+            lora_a[1][start_idx[1] : start_idx[1] + shard_size[1], :]
+            if lora_a[1] is not None
+            else None,
+            lora_a[2][start_idx[2] : start_idx[2] + shard_size[2], :]
+            if lora_a[2] is not None
+            else None,
+        ]
+        return lora_a
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         return _mcp_apply(x, bias, self)
