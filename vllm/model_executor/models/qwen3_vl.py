@@ -1842,42 +1842,7 @@ class Qwen3VLForConditionalGeneration(
             logger.info(f"  st_idx={st_idx}")
             logger.info(f"  current llm_pos_ids_list length: {len(llm_pos_ids_list)}")
 
-            # 关键检查点
-            if text_len > 0:
-                logger.info(f"  ✓ Adding text segment: text_len={text_len}")
-                text_positions = (
-                    np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-                )
-                logger.info(f"    text_positions shape: {text_positions.shape}")
-                logger.info(
-                    f"    text_positions range: [{text_positions.min()}, {text_positions.max()}]"
-                )
-                llm_pos_ids_list.append(text_positions)
-                # Update st_idx for video frame positions
-                st_idx += text_len
-                logger.info(f"    Updated st_idx to: {st_idx}")
-            else:
-                logger.warning(
-                    f"  ⚠ SKIPPED text segment: text_len={text_len} (zero or negative)"
-                )
-                logger.warning(
-                    f"    This means frame {frame_idx} starts immediately after previous frame"
-                )
-                logger.warning(
-                    "    Possible cause: consecutive frames without text tokens between them"
-                )
-
-            grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
-            frame_positions = grid_indices + st_idx
-            logger.info("  Adding frame positions:")
-            logger.info(f"    frame_positions shape: {frame_positions.shape}")
-            logger.info(
-                f"    frame_positions range: [{frame_positions.min()}, {frame_positions.max()}]"
-            )
-            llm_pos_ids_list.append(frame_positions)
-
-            # FIX: Use actual token count from EVS mask instead of theoretical grid size
-            # Find the base offset for this video feature
+            # Determine actual token count for this frame FIRST
             base_offset = None
             for feat_offset in frame_token_counts_map:
                 if offset >= feat_offset:
@@ -1899,16 +1864,53 @@ class Qwen3VLForConditionalGeneration(
                     counts
                 ), f"EVS frame index {idx} out of range (total frames: {len(counts)})"
 
-                actual_tokens = counts[idx]
+                actual_frame_tokens = counts[idx]
                 logger.info(
-                    f"  EVS mode: using actual_tokens={actual_tokens} (vs theoretical={llm_grid_h * llm_grid_w})"
+                    f"  EVS mode: using actual_tokens={actual_frame_tokens} (vs theoretical={llm_grid_h * llm_grid_w})"
                 )
-                st = offset + actual_tokens
                 frame_counts_idx[base_offset] += 1
             else:
                 # Non-EVS mode (or image): use theoretical grid size
-                st = offset + llm_grid_h * llm_grid_w
+                actual_frame_tokens = llm_grid_h * llm_grid_w
                 logger.info("  Non-EVS mode: using theoretical token count")
+
+            # Add text segment
+            if text_len > 0:
+                logger.info(f"  ✓ Adding text segment: text_len={text_len}")
+                text_positions = (
+                    np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+                )
+                logger.info(f"    text_positions shape: {text_positions.shape}")
+                logger.info(
+                    f"    text_positions range: [{text_positions.min()}, {text_positions.max()}]"
+                )
+                llm_pos_ids_list.append(text_positions)
+                st_idx += text_len
+                logger.info(f"    Updated st_idx to: {st_idx}")
+            else:
+                logger.warning(
+                    f"  ⚠ SKIPPED text segment: text_len={text_len} (zero or negative)"
+                )
+                logger.warning(
+                    f"    This means frame {frame_idx} starts immediately after previous frame"
+                )
+                logger.warning(
+                    "    Possible cause: consecutive frames without text tokens between them"
+                )
+
+            # Add frame segment with ACTUAL token count (not theoretical)
+            grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
+            # Only take the first actual_frame_tokens positions
+            frame_positions = grid_indices[:, :actual_frame_tokens] + st_idx
+            logger.info("  Adding frame positions:")
+            logger.info(f"    frame_positions shape: {frame_positions.shape}")
+            logger.info(
+                f"    frame_positions range: [{frame_positions.min()}, {frame_positions.max()}]"
+            )
+            llm_pos_ids_list.append(frame_positions)
+
+            # Update st using actual token count
+            st = offset + actual_frame_tokens
 
             logger.info(f"  Updated st to: {st}")
             logger.info(f"  llm_pos_ids_list now has {len(llm_pos_ids_list)} segments")
