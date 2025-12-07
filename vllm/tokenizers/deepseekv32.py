@@ -45,7 +45,7 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         messages: list["ChatCompletionMessageParam"],
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
-    ) -> str:
+    ) -> str | list[int]:
         thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
@@ -58,7 +58,19 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
             messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
             drop_thinking = False
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
+
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+
+        if kwargs.get("tokenize", True):
+            tokenizer_kwargs = {
+                k: kwargs[k] for k in ("truncation", "max_length") if k in kwargs
+            }
+            return self.encode(
+                prompt_str,
+                add_special_tokens=False,
+                **tokenizer_kwargs,
+            )
+
         return prompt_str
 
     def num_special_tokens_to_add(self) -> int:
