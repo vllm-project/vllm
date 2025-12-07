@@ -88,7 +88,7 @@ class DeepseekV32Renderer(RendererLike):
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return conversation, prompt  # type: ignore[return-type]
 
     async def render_messages_async(
         self,
@@ -118,4 +118,4 @@ class DeepseekV32Renderer(RendererLike):
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt
+        return conversation, prompt  # type: ignore[return-type]
