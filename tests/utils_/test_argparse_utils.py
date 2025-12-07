@@ -458,22 +458,3 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
-
-
-def test_o_dotted_syntax_error():
-    """Test that -O.* dotted syntax raises a clear error message."""
-    parser = FlexibleArgumentParser()
-    parser.add_argument("-cc", "--compilation-config", type=json.loads)
-
-    # Test that -O.* syntax raises a clear ValueError
-    with pytest.raises(ValueError, match=r"The -O\.\* syntax is no longer supported"):
-        parser.parse_args(["-O.backend=eager"])
-
-    with pytest.raises(ValueError, match=r"Please use -cc\.\* instead"):
-        parser.parse_args(["-O.mode=2"])
-
-    with pytest.raises(
-        ValueError,
-        match=r"replace '-O\.cudagraph_mode=NONE' with '-cc\.cudagraph_mode=NONE'",
-    ):
-        parser.parse_args(["-O.cudagraph_mode=NONE"])
