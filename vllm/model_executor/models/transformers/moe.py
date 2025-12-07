@@ -24,6 +24,7 @@ import torch.nn as nn
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.interfaces import MixtureOfExperts
@@ -32,6 +33,8 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import log_replacement
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -229,6 +232,29 @@ class MoEMixin(MixtureOfExperts):
             activation = "swigluoai"
         elif "grok1" in wrapped_arch:
             activation = "gelu"
+
+        # Auto-calculate num_redundant_experts if needed BEFORE expert mapping
+        # This must happen before get_expert_mapping() since it uses this value
+        enable_eplb = self.parallel_config.enable_eplb
+        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
+        if enable_eplb and num_redundant_experts == -1:
+            from vllm.distributed import get_ep_group
+
+            ep_size = get_ep_group().world_size
+            remainder = num_experts % ep_size
+            num_redundant_experts = (ep_size - remainder) % ep_size
+            # Update config so get_expert_mapping() uses correct value
+            self.parallel_config.eplb_config.num_redundant_experts = (
+                num_redundant_experts
+            )
+            logger.info(
+                "Auto-calculated num_redundant_experts=%d in MoE model "
+                "(num_experts=%d, ep_size=%d). This happens when the expert "
+                "count wasn't available during VllmConfig initialization.",
+                num_redundant_experts,
+                num_experts,
+                ep_size,
+            )
 
         # Expert mapping for `AutoWeightsLoader`
         expert_mapping = self.get_expert_mapping()

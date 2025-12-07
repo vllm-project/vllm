@@ -17,7 +17,7 @@ Before using EP, you need to install the necessary dependencies. We are actively
 vLLM provides multiple communication backends for EP. Use `--all2all-backend` to select one:
 
 | Backend | Use Case | Features | Best For |
-|---------|----------|----------|----------|
+| --------- | ---------- | ---------- | ---------- |
 | `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
 | `pplx` | Single node | Chunked prefill support, efficient intra-node communication | Single-node deployments, development |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
@@ -35,13 +35,14 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:
 
 ```text
-EP_SIZE = TP_SIZE × DP_SIZE
+EP_SIZE = TP_SIZE × DP_SIZE × PCP_SIZE
 ```
 
 Where:
 
 - `TP_SIZE`: Tensor parallel size
 - `DP_SIZE`: Data parallel size
+- `PCP_SIZE`: Prefill context parallel size (default: 1)
 - `EP_SIZE`: Expert parallel size (computed automatically)
 
 ### Layer Behavior with EP Enabled
@@ -50,7 +51,7 @@ When EP is enabled, different layers in MoE models behave differently:
 
 | Layer Type | Behavior | Parallelism Used |
 |------------|----------|------------------|
-| **Expert (MoE) Layers** | Sharded across all EP ranks | Expert Parallel (EP) of size `TP × DP` |
+| **Expert (MoE) Layers** | Sharded across all EP ranks | Expert Parallel (EP) of size `TP × DP × PCP` |
 | **Attention Layers** | Behavior depends on TP size | See below |
 
 **Attention layer parallelism:**
@@ -58,13 +59,13 @@ When EP is enabled, different layers in MoE models behave differently:
 - **When `TP = 1`**: Attention weights are **replicated** across all DP ranks (data parallelism)
 - **When `TP > 1`**: Attention weights are **sharded** using tensor parallelism across TP ranks within each DP group
 
-For example, with `TP=2, DP=4` (8 GPUs total):
+For example, with `TP=2, DP=4, PCP=1` (8 GPUs total):
 
-- Expert layers form an EP group of size 8, with experts distributed across all GPUs
+- Expert layers form an EP group of size 8 (2 × 4 × 1), with experts distributed across all GPUs
 - Attention layers use TP=2 within each of the 4 DP groups
 
 !!! note "Key Difference from Data Parallel Deployment"
-    Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
+    Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP × PCP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
 
 ### Example Command
 
@@ -148,11 +149,11 @@ When enabled, vLLM collects load statistics with every forward pass and periodic
 Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. The available keys and their descriptions are:
 
 | Parameter | Description | Default |
-|-----------|-------------|---------|
-| `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
-| `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
+| ----------- | ------------- | --------- |
+| `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
+| `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution. Set to `-1` for automatic calculation (default), `0` for no redundancy, or a positive value for manual control. | `-1` (auto) |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 
@@ -174,6 +175,42 @@ vllm serve Qwen/Qwen3-30B-A3B \
             --eplb-config.num_redundant_experts 2 \
             --eplb-config.log_balancedness true
     ```
+
+### Automatic Redundant Expert Calculation
+
+By default (`num_redundant_experts=-1`), vLLM automatically calculates the minimum number of redundant experts needed to ensure even distribution across EP ranks. This eliminates the need for manual calculation and makes EPLB easier to adopt.
+
+The calculation uses this formula:
+
+```python
+num_redundant_experts = (ep_size - (num_logical_experts % ep_size)) % ep_size
+```
+
+**Examples:**
+
+- **DeepSeek-V3** (256 experts) with EP=8: `num_redundant_experts = 0` (256 % 8 == 0, already evenly divisible)
+- **Custom model** (100 experts) with EP=12: `num_redundant_experts = 8` (need 108 total for even distribution)
+- **Model with 7 experts** and EP=4: `num_redundant_experts = 1` (need 8 total for even distribution)
+
+**When to override automatic calculation:**
+
+While the automatic value ensures correct operation, you may want to set a higher value for better load balancing:
+
+```bash
+# Use automatic calculation (recommended for first-time users)
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --enable-eplb
+
+# Explicitly set to 0 (no redundancy)
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --enable-eplb \
+    --eplb-config '{"num_redundant_experts":0}'
+
+# Override with higher value for better load balancing
+vllm serve deepseek-ai/DeepSeek-V3-0324 \
+    --enable-eplb \
+    --eplb-config '{"num_redundant_experts":32}'
+```
 
 ### Expert Distribution Formula
 
