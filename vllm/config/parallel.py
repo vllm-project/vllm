@@ -53,8 +53,15 @@ class EPLBConfig:
     of the last `lb_window_size` steps will be used for rearranging experts.
     """
 
-    num_redundant_experts: int = Field(default=0, ge=0)
-    """Number of redundant experts to use for expert parallelism."""
+    num_redundant_experts: int = Field(default=-1, ge=-1)
+    """Number of redundant experts to use for expert parallelism.
+
+    If set to -1 (default), the minimum valid value will be automatically
+    calculated based on the model's expert configuration and EP size to
+    ensure even distribution across ranks.
+    Set to 0 for no redundancy, or a higher value to improve load balancing
+    at the cost of additional KV cache memory.
+    """
 
     log_balancedness: bool = False
     """
@@ -68,6 +75,52 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    def auto_set_num_redundant_experts(
+        self,
+        num_logical_experts: int,
+        ep_size: int,
+        enable_eplb: bool,
+    ) -> None:
+        """Auto-calculate num_redundant_experts when set to -1.
+
+        This calculates the minimum number of redundant experts needed to
+        ensure even distribution across EP ranks.
+
+        Formula: (num_logical_experts + num_redundant_experts) % ep_size == 0
+
+        Args:
+            num_logical_experts: Number of logical experts in the model
+            ep_size: Expert parallel world size (TP_SIZE × DP_SIZE)
+            enable_eplb: Whether EPLB is enabled
+        """
+        # Only auto-calculate if EPLB is enabled and value is -1 (auto)
+        if not enable_eplb:
+            return
+        if self.num_redundant_experts != -1:
+            return
+
+        # Validate inputs
+        if num_logical_experts <= 0:
+            # Not a MoE model or couldn't determine expert count
+            # Set to 0 as safe fallback
+            self.num_redundant_experts = 0
+            return
+
+        # Calculate minimum redundant experts needed for even distribution
+        remainder = num_logical_experts % ep_size
+        min_redundant_experts = (ep_size - remainder) % ep_size
+
+        # Update config value
+        self.num_redundant_experts = min_redundant_experts
+
+        logger.info(
+            "Auto-calculated num_redundant_experts=%d for EPLB "
+            "(num_logical_experts=%d, ep_size=%d)",
+            min_redundant_experts,
+            num_logical_experts,
+            ep_size,
+        )
 
 
 @config
@@ -309,13 +362,17 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.eplb_config.num_redundant_experts != 0:
+            if self.eplb_config.num_redundant_experts > 0:
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "
-                    "enabled. Either enable EPLB or unset "
-                    "num_redundant_experts."
+                    "enabled. Either enable EPLB or set "
+                    "num_redundant_experts to -1 (auto) or 0."
                 )
+            elif self.eplb_config.num_redundant_experts == -1:
+                # If EPLB is disabled, auto-calculation is not possible.
+                # Default to 0 redundant experts as a safe fallback.
+                self.eplb_config.num_redundant_experts = 0
 
         return self
 
