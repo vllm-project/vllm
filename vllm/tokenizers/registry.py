@@ -184,7 +184,7 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 def get_tokenizer(
     tokenizer_name: str | Path,
     *args,
-    tokenizer_cls: type[_T] = TokenizerLike,
+    tokenizer_cls: type[_T] = TokenizerLike,  # type: ignore[assignment]
     trust_remote_code: bool = False,
     revision: str | None = None,
     download_dir: str | None = None,
