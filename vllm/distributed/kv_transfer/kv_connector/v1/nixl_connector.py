@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import msgspec
 import numpy as np
@@ -21,7 +21,6 @@ import zmq
 
 from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
-from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
@@ -1226,8 +1225,11 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         for layer_name, cache_or_caches in xfer_buffers.items():
-
-            cache_list = cache_or_caches if not self.cross_layers and split_k_and_v else [cache_or_caches]
+            cache_list = (
+                cache_or_caches
+                if not self.cross_layers and split_k_and_v
+                else [cache_or_caches]
+            )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 if base_addr in seen_base_addresses:
