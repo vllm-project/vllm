@@ -23,10 +23,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Inference-only LLaMA model compatible with HuggingFace weights."""
+"""Inference-only Jais2 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -122,8 +121,6 @@ class Jais2Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -154,7 +151,6 @@ class Jais2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -484,33 +480,6 @@ class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
-
-    # BitandBytes specific attributes
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-    }
-
-    mistral_mapping = {
-        "layers": "model.layers",
-        "attention": "self_attn",
-        "wq": "q_proj",
-        "wk": "k_proj",
-        "wv": "v_proj",
-        "wo": "o_proj",
-        "attention_norm": "input_layernorm",
-        "feed_forward": "mlp",
-        "w1": "gate_proj",
-        "w2": "down_proj",
-        "w3": "up_proj",
-        "ffn_norm": "post_attention_layernorm",
-        "tok_embeddings": "model.embed_tokens",
-        "output": "lm_head",
-        "norm": "model.norm",
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -586,39 +555,4 @@ class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(
-            self.maybe_remap_mistral(name, loaded_weight)
-            for name, loaded_weight in weights
-        )
-
-    # This function is used to remap the mistral format as
-    # used by Mistral and Jais2
-    def maybe_remap_mistral(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
-    ) -> tuple[str, torch.Tensor]:
-        def permute(w: torch.Tensor, n_heads: int):
-            attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
-
-            return (
-                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
-                .transpose(1, 2)
-                .reshape(attn_in, attn_out)
-            )
-
-        mapping = self.mistral_mapping
-        modules = name.split(".")
-
-        # rotary embeds should be sliced
-        if "wk" in modules:
-            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads)
-        elif "wq" in modules:
-            loaded_weight = permute(loaded_weight, self.config.num_attention_heads)
-
-        for item in modules:
-            if item in mapping and mapping[item] not in name:
-                name = name.replace(item, mapping[item])
-
-        return name, loaded_weight
+        return loader.load_weights(weights)
