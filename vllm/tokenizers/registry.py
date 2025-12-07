@@ -260,3 +260,6 @@ def init_tokenizer(
         )
 
     return tokenizer  # type: ignore
+
+
+cached_init_tokenizer = lru_cache(init_tokenizer)
