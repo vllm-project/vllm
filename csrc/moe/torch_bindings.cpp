@@ -19,7 +19,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
+      "                     Tensor! num_tokens_post_pad,"
+      "                     Tensor? maybe_expert_map) -> ()");
   m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
