@@ -3,11 +3,11 @@
 
 import inspect
 from functools import cache
-from typing import cast, get_args
+from typing import NamedTuple, cast, get_args
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.registry import (
     MAMBA_TYPE_TO_BACKEND_MAP,
     MambaAttentionBackendEnum,
@@ -17,6 +17,29 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+
+class AttentionSelectorConfig(NamedTuple):
+    head_size: int
+    dtype: torch.dtype
+    kv_cache_dtype: CacheDType | None
+    block_size: int | None
+    use_mla: bool = False
+    has_sink: bool = False
+    use_sparse: bool = False
+    attn_type: AttentionType = AttentionType.DECODER
+
+    def __repr__(self):
+        return (
+            f"AttentionSelectorConfig(head_size={self.head_size}, "
+            f"dtype={self.dtype}, "
+            f"kv_cache_dtype={self.kv_cache_dtype}, "
+            f"block_size={self.block_size}, "
+            f"use_mla={self.use_mla}, "
+            f"has_sink={self.has_sink}, "
+            f"use_sparse={self.use_sparse}, "
+            f"attn_type={self.attn_type})"
+        )
 
 
 def get_attn_backend(
@@ -43,8 +66,7 @@ def get_attn_backend(
     vllm_config = get_current_vllm_config()
     backend_enum = vllm_config.attention_config.backend
 
-    return _cached_get_attn_backend(
-        backend=backend_enum,
+    attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
         kv_cache_dtype=cast(CacheDType | None, kv_cache_dtype),
@@ -55,18 +77,16 @@ def get_attn_backend(
         attn_type=attn_type,
     )
 
+    return _cached_get_attn_backend(
+        backend=backend_enum,
+        attn_selector_config=attn_selector_config,
+    )
+
 
 @cache
 def _cached_get_attn_backend(
     backend,
-    head_size: int,
-    dtype: torch.dtype,
-    kv_cache_dtype: CacheDType | None,
-    block_size: int | None,
-    use_mla: bool = False,
-    has_sink: bool = False,
-    use_sparse: bool = False,
-    attn_type: str | None = None,
+    attn_selector_config: AttentionSelectorConfig,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
@@ -79,27 +99,13 @@ def _cached_get_attn_backend(
         )
         attention_cls = current_platform.get_attn_backend_cls(
             backend,
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            True,  # use_v1
-            use_mla,
-            has_sink,
-            use_sparse,
-            attn_type,
+            use_v1=True,  # use_v1
+            **attn_selector_config._asdict(),
         )
     else:
         attention_cls = current_platform.get_attn_backend_cls(
             backend,
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            use_mla,
-            has_sink,
-            use_sparse,
-            attn_type,
+            attn_selector_config=attn_selector_config,
         )
     if not attention_cls:
         raise ValueError(
