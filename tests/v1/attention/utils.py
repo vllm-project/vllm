@@ -16,6 +16,7 @@ from vllm.config import (
     LoadConfig,
     ModelConfig,
     ParallelConfig,
+    RendererConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -216,6 +217,7 @@ def create_vllm_config(
 
     return VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         parallel_config=parallel_config,
         scheduler_config=scheduler_config,

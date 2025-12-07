@@ -164,7 +164,7 @@ class Scheduler(SchedulerInterface):
         # This can be changed when we make encoder cache for embedding caching
         # across requests.
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=vllm_config.model_config,
+            renderer_config=vllm_config.renderer_config,
             scheduler_config=vllm_config.scheduler_config,
             mm_registry=mm_registry,
         )

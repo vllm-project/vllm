@@ -42,8 +42,10 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
             "Write a short story about a robot that dreams for the first time.\n"
         )
 
-        model_config = vllm_model.llm.llm_engine.model_config
-        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
+        llm_engine = vllm_model.llm.llm_engine
+        model_config = llm_engine.model_config
+        renderer_config = llm_engine.renderer_config
+        tokenizer = llm_engine.tokenizer
 
         # asserts on the bert model config file
         assert model_config.encoder_config["max_seq_length"] == 512
@@ -54,8 +56,8 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.normalize
 
         # asserts on the tokenizer loaded
-        assert model_config.tokenizer == "BAAI/bge-base-en-v1.5"
-        assert model_tokenizer.model_max_length == 512
+        assert renderer_config.tokenizer == "BAAI/bge-base-en-v1.5"
+        assert tokenizer.model_max_length == 512
 
         def check_model(model):
             assert isinstance(model, BertEmbeddingModel)
@@ -86,8 +88,10 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
             "Write a short story about a robot that dreams for the first time.\n"
         )
 
-        model_config = vllm_model.llm.llm_engine.model_config
-        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
+        llm_engine = vllm_model.llm.llm_engine
+        model_config = llm_engine.model_config
+        renderer_config = llm_engine.renderer_config
+        tokenizer = llm_engine.tokenizer
 
         # asserts on the bert model config file
         assert model_config.encoder_config["max_seq_length"] == 512
@@ -98,8 +102,8 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.pooler_config.normalize
 
         # asserts on the tokenizer loaded
-        assert model_config.tokenizer == "intfloat/multilingual-e5-base"
-        assert model_tokenizer.model_max_length == 512
+        assert renderer_config.tokenizer == "intfloat/multilingual-e5-base"
+        assert tokenizer.model_max_length == 512
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
@@ -128,7 +132,7 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
             "Write a short story about a robot that dreams for the first time.\n"
         )
 
-        assert vllm_model.llm.llm_engine.model_config.tokenizer == model_name
+        assert vllm_model.llm.llm_engine.renderer_config.tokenizer == model_name
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)

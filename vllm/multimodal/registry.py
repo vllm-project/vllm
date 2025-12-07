@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
 
 from .cache import BaseMultiModalProcessorCache
 from .processing import (
@@ -22,7 +22,7 @@ from .profiling import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, RendererConfig
     from vllm.model_executor.models.interfaces import SupportsMultiModal
 
 logger = init_logger(__name__)
@@ -114,17 +114,18 @@ class MultiModalRegistry:
 
         return mm_options if len(mm_options) > 0 else None
 
-    def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
+    def supports_multimodal_inputs(self, renderer_config: "RendererConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
         Returns True if the model is multimodal with any non-zero supported
         modalities, otherwise returns False, effectively running in
         text-only mode.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_multimodal_model:
             return False
 
-        info = self._create_processing_info(model_config, tokenizer=None)
+        info = self._create_processing_info(renderer_config, tokenizer=None)
         supported_modalities = info.get_supported_mm_limits()
 
         mm_config = model_config.get_multimodal_config()
@@ -144,7 +145,7 @@ class MultiModalRegistry:
 
     def get_max_tokens_per_item_by_modality(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
         profiler_limits: Mapping[str, int] | None = None,
@@ -153,10 +154,11 @@ class MultiModalRegistry:
         Get the maximum number of tokens per data item from each modality based
         on underlying model configuration.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, cache=cache)
+        processor = self.create_processor(renderer_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         seq_len = model_config.max_model_len
@@ -171,7 +173,7 @@ class MultiModalRegistry:
 
     def get_mm_limits_per_prompt(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         *,
         cache: BaseMultiModalProcessorCache | None = None,
     ) -> Mapping[str, int]:
@@ -179,10 +181,11 @@ class MultiModalRegistry:
         Get the maximum number of multi-modal input instances for each modality
         that are allowed per prompt for a model class.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(model_config, cache=cache)
+        processor = self.create_processor(renderer_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
         return profiler.get_mm_limits()
 
@@ -228,30 +231,21 @@ class MultiModalRegistry:
         assert hasattr(model_cls, "_processor_factory")
         return cast("SupportsMultiModal", model_cls)
 
-    def _create_processing_ctx(
-        self,
-        model_config: "ModelConfig",
-        tokenizer: TokenizerLike | None = None,
-    ) -> InputProcessingContext:
-        if tokenizer is None and not model_config.skip_tokenizer_init:
-            tokenizer = cached_tokenizer_from_config(model_config)
-
-        return InputProcessingContext(model_config, tokenizer)
-
     def _create_processing_info(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         *,
         tokenizer: TokenizerLike | None = None,
     ) -> BaseProcessingInfo:
-        model_cls = self._get_model_cls(model_config)
+        model_cls = self._get_model_cls(renderer_config.model_config)
         factories = model_cls._processor_factory
-        ctx = self._create_processing_ctx(model_config, tokenizer)
+
+        ctx = InputProcessingContext.from_config(renderer_config, tokenizer=tokenizer)
         return factories.info(ctx)
 
     def create_processor(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         *,
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
@@ -259,19 +253,19 @@ class MultiModalRegistry:
         """
         Create a multi-modal processor for a specific model and tokenizer.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
 
-        ctx = self._create_processing_ctx(model_config, tokenizer)
-
+        ctx = InputProcessingContext.from_config(renderer_config, tokenizer=tokenizer)
         return factories.build_processor(ctx, cache=cache)
 
     def get_decoder_dummy_data(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
         *,
@@ -280,15 +274,15 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by `model_config`.
+        The model is identified by `renderer_config`.
         """
-        processor = self.create_processor(model_config, cache=cache)
+        processor = self.create_processor(renderer_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
-        mm_options = self._extract_mm_options(model_config)
+        mm_options = self._extract_mm_options(renderer_config.model_config)
 
         dummy_data = profiler.get_decoder_dummy_data(seq_len, mm_counts, mm_options)
 
@@ -304,7 +298,7 @@ class MultiModalRegistry:
 
     def get_encoder_dummy_data(
         self,
-        model_config: "ModelConfig",
+        renderer_config: "RendererConfig",
         seq_len: int,
         mm_counts: Mapping[str, int] | None = None,
         *,
@@ -313,15 +307,15 @@ class MultiModalRegistry:
         """
         Create dummy data for profiling the memory usage of a model.
 
-        The model is identified by `model_config`.
+        The model is identified by `renderer_config`.
         """
-        processor = self.create_processor(model_config, cache=cache)
+        processor = self.create_processor(renderer_config, cache=cache)
         profiler: MultiModalProfiler = MultiModalProfiler(processor)
 
         # Extract configurable options from multimodal config.
         # Only include modalities that use advanced option types so legacy
         # count-only behavior remains unchanged.
-        mm_options = self._extract_mm_options(model_config)
+        mm_options = self._extract_mm_options(renderer_config.model_config)
 
         dummy_data = profiler.get_encoder_dummy_data(seq_len, mm_counts, mm_options)
 
@@ -336,13 +330,15 @@ class MultiModalRegistry:
 
         return dummy_data
 
-    def get_encdec_max_encoder_len(self, model_config: "ModelConfig") -> int:
+    def get_encdec_max_encoder_len(self, renderer_config: "RendererConfig") -> int:
         """
         Get the maximum length of the encoder input for encoder-decoder models.
         """
+        model_config = renderer_config.model_config
         if not model_config.is_encoder_decoder:
             return 0
-        max_tokens = self.get_max_tokens_per_item_by_modality(model_config)
+
+        max_tokens = self.get_max_tokens_per_item_by_modality(renderer_config)
         if not max_tokens:
             # TODO - this function assumes encoder-decoder models are
             # multimodal. This will need to change when adding support for more

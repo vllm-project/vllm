@@ -7,6 +7,7 @@ from vllm.attention.layer import Attention
 from vllm.config import (
     CacheConfig,
     ModelConfig,
+    RendererConfig,
     SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -45,6 +46,7 @@ def get_vllm_config():
     )
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         scheduler_config=scheduler_config,
     )

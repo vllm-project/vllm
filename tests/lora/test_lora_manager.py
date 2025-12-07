@@ -8,7 +8,7 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, RendererConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
@@ -422,7 +422,11 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     )
 
     model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+        lora_config=lora_config,
+    )
 
     vllm_config.scheduler_config.max_num_seqs = 4
     vllm_config.scheduler_config.max_num_batched_tokens = 2
@@ -525,7 +529,11 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
     )
 
     model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+        lora_config=lora_config,
+    )
 
     vllm_config.scheduler_config.max_num_seqs = 4
     vllm_config.scheduler_config.max_num_batched_tokens = 2

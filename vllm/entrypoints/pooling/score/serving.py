@@ -160,10 +160,8 @@ class ServingScores(OpenAIServing):
         data_1: str | ScoreContentPartParam,
         data_2: str | ScoreContentPartParam,
     ) -> tuple[str, TokensPrompt]:
-        model_config = self.model_config
-
         full_prompt, engine_prompt = get_score_prompt(
-            model_config=model_config,
+            renderer_config=self.renderer_config,
             data_1=data_1,
             data_2=data_2,
             tokenizer=tokenizer,
