@@ -21,6 +21,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
     "EAGLEConfig": "vllm.transformers_utils.configs.eagle",
     "FlexOlmoConfig": "vllm.transformers_utils.configs.flex_olmo",
+    "HunYuanVLConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HunYuanVLTextConfig": "vllm.transformers_utils.configs.hunyuan_vl",
+    "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
     # `FalconConfig` class from the official HuggingFace transformers library.
