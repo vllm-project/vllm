@@ -48,7 +48,8 @@ class XPUPlatform(Platform):
         block_size: int,
         use_mla: bool,
         has_sink: bool,
-        use_sparse,
+        use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout

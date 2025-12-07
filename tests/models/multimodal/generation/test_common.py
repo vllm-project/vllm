@@ -382,7 +382,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
-        num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],

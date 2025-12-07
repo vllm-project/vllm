@@ -216,6 +216,7 @@ class RocmPlatform(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        use_mm_prefix,
         attn_type: str | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
