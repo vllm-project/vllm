@@ -39,7 +39,6 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
-from .renderer import RendererConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -182,8 +181,6 @@ class VllmConfig:
     # try to download a model
     model_config: ModelConfig = Field(default=None)
     """Model configuration."""
-    renderer_config: RendererConfig = Field(default_factory=RendererConfig)
-    """Renderer configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
     parallel_config: ParallelConfig = Field(default_factory=ParallelConfig)
@@ -744,7 +741,7 @@ class VllmConfig:
             from vllm.multimodal import MULTIMODAL_REGISTRY
 
             self.scheduler_config.max_num_encoder_input_tokens = (
-                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.renderer_config)
+                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
             )
             logger.debug(
                 "Encoder-decoder model detected: setting "
@@ -1189,13 +1186,11 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def recalculate_max_model_len(self, original_max_model_len: int | None) -> None:
-        # Can only be called during try_verify_and_update_config
-        self.model_config.recalculate_max_model_len(
-            original_max_model_len,
-            tokenizer=self.renderer_config.tokenizer,
-            tokenizer_revision=self.renderer_config.tokenizer_revision,
-        )
+    def recalculate_max_model_len(self, max_model_len: int):
+        # Can only be called in try_verify_and_update_config
+        model_config = self.model_config
+        max_model_len = model_config.get_and_verify_max_len(max_model_len)
+        self.model_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
         if self.model_config is None:
@@ -1269,11 +1264,11 @@ class VllmConfig:
         return (
             f"model={self.model_config.model!r}, "
             f"speculative_config={self.speculative_config!r}, "
-            f"tokenizer={self.renderer_config.tokenizer!r}, "
-            f"skip_tokenizer_init={self.renderer_config.skip_tokenizer_init}, "
-            f"tokenizer_mode={self.renderer_config.tokenizer_mode}, "
+            f"tokenizer={self.model_config.tokenizer!r}, "
+            f"skip_tokenizer_init={self.model_config.skip_tokenizer_init}, "
+            f"tokenizer_mode={self.model_config.tokenizer_mode}, "
             f"revision={self.model_config.revision}, "
-            f"tokenizer_revision={self.renderer_config.tokenizer_revision}, "
+            f"tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
             f"max_seq_len={self.model_config.max_model_len}, "

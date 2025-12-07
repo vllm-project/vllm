@@ -31,6 +31,4 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
         model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    assert (
-        MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.renderer_config) is expected
-    )
+    assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected

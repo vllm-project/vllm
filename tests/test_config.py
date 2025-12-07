@@ -13,7 +13,6 @@ from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PoolerConfig,
-    RendererConfig,
     SchedulerConfig,
     VllmConfig,
     update_config,
@@ -477,41 +476,27 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
     ],
 )
-def test_recalculate_max_model_len(
+def test_get_and_verify_max_len(
     model_id, max_model_len, expected_max_len, should_raise
 ):
-    """Test recalculate_max_model_len with different configurations."""
+    """Test get_and_verify_max_len with different configurations."""
     model_config = ModelConfig(model_id)
 
     if should_raise:
         with pytest.raises(ValueError):
-            model_config.recalculate_max_model_len(
-                max_model_len,
-                tokenizer=model_id,
-                tokenizer_revision=None,
-            )
+            model_config.get_and_verify_max_len(max_model_len)
     else:
-        model_config.recalculate_max_model_len(
-            max_model_len,
-            tokenizer=model_id,
-            tokenizer_revision=None,
-        )
-        assert model_config.max_model_len == expected_max_len
+        actual_max_len = model_config.get_and_verify_max_len(max_model_len)
+        assert actual_max_len == expected_max_len
 
 
-class MockModelConfig:
-    """Simple mock object for testing maybe_pull_model_for_runai"""
+class MockConfig:
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, tokenizer: str):
         self.model = model
-
-
-class MockRendererConfig:
-    """Simple mock object for testing maybe_pull_tokenizer_for_runai"""
-
-    def __init__(self, model_config: MockModelConfig):
-        self.model_config = model_config
-        self.tokenizer = model_config.model
+        self.tokenizer = tokenizer
+        self.model_weights = None
 
 
 @pytest.mark.parametrize(
@@ -529,65 +514,59 @@ def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
     mock_pull_files.return_value = None
 
     # Create first mock and run the method
-    model_config1 = MockModelConfig(model=s3_url)
-    renderer_config1 = MockRendererConfig(model_config=model_config1)
-    ModelConfig.maybe_pull_model_for_runai(model_config1, s3_url)
-    RendererConfig.maybe_pull_tokenizer_for_runai(renderer_config1, s3_url)
+    config1 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config1, s3_url, s3_url)
 
     # Check that model and tokenizer point to existing directories
-    assert os.path.exists(model_config1.model), (
-        f"Model directory does not exist: {model_config1.model}"
+    assert os.path.exists(config1.model), (
+        f"Model directory does not exist: {config1.model}"
     )
-    assert os.path.isdir(model_config1.model), (
-        f"Model path is not a directory: {model_config1.model}"
+    assert os.path.isdir(config1.model), (
+        f"Model path is not a directory: {config1.model}"
     )
-    assert os.path.exists(renderer_config1.tokenizer), (
-        f"Tokenizer directory does not exist: {renderer_config1.tokenizer}"
+    assert os.path.exists(config1.tokenizer), (
+        f"Tokenizer directory does not exist: {config1.tokenizer}"
     )
-    assert os.path.isdir(renderer_config1.tokenizer), (
-        f"Tokenizer path is not a directory: {renderer_config1.tokenizer}"
+    assert os.path.isdir(config1.tokenizer), (
+        f"Tokenizer path is not a directory: {config1.tokenizer}"
     )
 
     # Verify that the paths are different from the original S3 URL
-    assert model_config1.model != s3_url, (
-        "Model path should be converted to local directory"
-    )
-    assert renderer_config1.tokenizer != s3_url, (
+    assert config1.model != s3_url, "Model path should be converted to local directory"
+    assert config1.tokenizer != s3_url, (
         "Tokenizer path should be converted to local directory"
     )
 
     # Store the original paths
-    created_model_dir = model_config1.model
-    create_tokenizer_dir = renderer_config1.tokenizer
+    created_model_dir = config1.model
+    create_tokenizer_dir = config1.tokenizer
 
     # Create a new mock and run the method with the same S3 URL
-    model_config2 = MockModelConfig(model=s3_url)
-    renderer_config2 = MockRendererConfig(model_config=model_config2)
-    ModelConfig.maybe_pull_model_for_runai(model_config2, s3_url)
-    RendererConfig.maybe_pull_tokenizer_for_runai(renderer_config2, s3_url)
+    config2 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config2, s3_url, s3_url)
 
     # Check that the new directories exist
-    assert os.path.exists(model_config2.model), (
-        f"Model directory does not exist: {model_config2.model}"
+    assert os.path.exists(config2.model), (
+        f"Model directory does not exist: {config2.model}"
     )
-    assert os.path.isdir(model_config2.model), (
-        f"Model path is not a directory: {model_config2.model}"
+    assert os.path.isdir(config2.model), (
+        f"Model path is not a directory: {config2.model}"
     )
-    assert os.path.exists(renderer_config2.tokenizer), (
-        f"Tokenizer directory does not exist: {renderer_config2.tokenizer}"
+    assert os.path.exists(config2.tokenizer), (
+        f"Tokenizer directory does not exist: {config2.tokenizer}"
     )
-    assert os.path.isdir(renderer_config2.tokenizer), (
-        f"Tokenizer path is not a directory: {renderer_config2.tokenizer}"
+    assert os.path.isdir(config2.tokenizer), (
+        f"Tokenizer path is not a directory: {config2.tokenizer}"
     )
 
     # Verify that the paths are deterministic (same as before)
-    assert model_config2.model == created_model_dir, (
+    assert config2.model == created_model_dir, (
         f"Model paths are not deterministic. "
-        f"Original: {created_model_dir}, New: {model_config2.model}"
+        f"Original: {created_model_dir}, New: {config2.model}"
     )
-    assert renderer_config2.tokenizer == create_tokenizer_dir, (
+    assert config2.tokenizer == create_tokenizer_dir, (
         f"Tokenizer paths are not deterministic. "
-        f"Original: {create_tokenizer_dir}, New: {renderer_config2.tokenizer}"
+        f"Original: {create_tokenizer_dir}, New: {config2.tokenizer}"
     )
 
 
@@ -601,36 +580,28 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     s3_url2 = "s3://example-bucket-2/model/"
 
     # Create mocks with different S3 URLs and run the method
-    model_config1 = MockModelConfig(model=s3_url1)
-    renderer_config1 = MockRendererConfig(model_config=model_config1)
-    ModelConfig.maybe_pull_model_for_runai(model_config1, s3_url1)
-    RendererConfig.maybe_pull_tokenizer_for_runai(renderer_config1, s3_url1)
+    config1 = MockConfig(model=s3_url1, tokenizer=s3_url1)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config1, s3_url1, s3_url1)
 
-    model_config2 = MockModelConfig(model=s3_url2)
-    renderer_config2 = MockRendererConfig(model_config=model_config2)
-    ModelConfig.maybe_pull_model_for_runai(model_config2, s3_url2)
-    RendererConfig.maybe_pull_tokenizer_for_runai(renderer_config2, s3_url2)
+    config2 = MockConfig(model=s3_url2, tokenizer=s3_url2)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config2, s3_url2, s3_url2)
 
     # Verify that different URLs produce different directories
-    assert model_config1.model != model_config2.model, (
+    assert config1.model != config2.model, (
         f"Different S3 URLs should create different model directories. "
-        f"URL1 model: {model_config1.model}, URL2 model: {model_config2.model}"
+        f"URL1 model: {config1.model}, URL2 model: {config2.model}"
     )
-    assert renderer_config1.tokenizer != renderer_config2.tokenizer, (
+    assert config1.tokenizer != config2.tokenizer, (
         f"Different S3 URLs should create different tokenizer directories. "
-        f"URL1 tokenizer: {renderer_config1.tokenizer}, "
-        f"URL2 tokenizer: {renderer_config2.tokenizer}"
+        f"URL1 tokenizer: {config1.tokenizer}, "
+        f"URL2 tokenizer: {config2.tokenizer}"
     )
 
     # Verify that both sets of directories exist
-    assert os.path.exists(model_config1.model) and os.path.isdir(model_config1.model)
-    assert os.path.exists(renderer_config1.tokenizer) and os.path.isdir(
-        renderer_config1.tokenizer
-    )
-    assert os.path.exists(model_config2.model) and os.path.isdir(model_config2.model)
-    assert os.path.exists(renderer_config2.tokenizer) and os.path.isdir(
-        renderer_config2.tokenizer
-    )
+    assert os.path.exists(config1.model) and os.path.isdir(config1.model)
+    assert os.path.exists(config1.tokenizer) and os.path.isdir(config1.tokenizer)
+    assert os.path.exists(config2.model) and os.path.isdir(config2.model)
+    assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,7 @@ from contextlib import nullcontext
 import numpy as np
 import pytest
 
-from vllm.config import ModelConfig, RendererConfig
+from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import (
     InputProcessingContext,
@@ -920,9 +920,8 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
         model=model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    renderer_config = RendererConfig(model_config=model_config)
 
-    processor = MULTIMODAL_REGISTRY.create_processor(renderer_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     processor._supported_mm_limits = {"image": num_supported}
 
     profiler = MultiModalProfiler(processor)
@@ -956,9 +955,8 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         model=model_id,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
-    renderer_config = RendererConfig(model_config=model_config)
 
-    processor = MULTIMODAL_REGISTRY.create_processor(renderer_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     rng = np.random.RandomState(0)
     image = random_image(rng, min_wh=128, max_wh=256)
@@ -1014,13 +1012,11 @@ def test_hf_processor_init_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    model_config = ModelConfig(model_id, mm_processor_kwargs=config_kwargs)
-    renderer_config = RendererConfig(
-        model_config=model_config,
-        tokenizer=model_id,
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
+        tokenizer=None,
     )
 
-    ctx = InputProcessingContext.from_config(renderer_config)
     processor = ctx.get_hf_processor(
         DummyProcessor,  # type: ignore[arg-type]
         **inference_kwargs,
@@ -1049,13 +1045,11 @@ def test_hf_processor_call_kwargs(
     inference_kwargs,
     expected_kwargs,
 ):
-    model_config = ModelConfig(model_id, mm_processor_kwargs=config_kwargs)
-    renderer_config = RendererConfig(
-        model_config=model_config,
-        tokenizer=model_id,
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
+        tokenizer=None,
     )
 
-    ctx = InputProcessingContext.from_config(renderer_config)
     processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)

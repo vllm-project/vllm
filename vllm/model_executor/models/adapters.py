@@ -415,7 +415,7 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    renderer_config = model.vllm_config.renderer_config
+    model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
 
@@ -447,10 +447,10 @@ def load_weights_using_from_2_way_softmax(
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
-        renderer_config.tokenizer,
-        revision=renderer_config.tokenizer_revision,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        trust_remote_code=renderer_config.trust_remote_code,
+        model_config.tokenizer,
+        revision=model_config.tokenizer_revision,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
     )
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
@@ -473,7 +473,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    renderer_config = model.vllm_config.renderer_config
+    model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
 
@@ -501,10 +501,10 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
-        renderer_config.tokenizer,
-        revision=renderer_config.tokenizer_revision,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        trust_remote_code=renderer_config.trust_remote_code,
+        model_config.tokenizer,
+        revision=model_config.tokenizer_revision,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
     )
 
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]

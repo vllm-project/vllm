@@ -85,7 +85,7 @@ class EagleProposer:
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            vllm_config.renderer_config
+            vllm_config.model_config
         )
 
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None

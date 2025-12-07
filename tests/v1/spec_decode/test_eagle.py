@@ -19,7 +19,6 @@ from vllm.config import (
     DeviceConfig,
     ModelConfig,
     ParallelConfig,
-    RendererConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
@@ -62,7 +61,6 @@ def _create_proposer(
 
     vllm_config = VllmConfig(
         model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
         cache_config=CacheConfig(),
         speculative_config=speculative_config,
         device_config=DeviceConfig(device=current_platform.device_type),

@@ -10,7 +10,7 @@ from vllm.multimodal import MultiModalRegistry
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.config import RendererConfig, SchedulerConfig
+    from vllm.config import ModelConfig, SchedulerConfig
 
 logger = init_logger(__name__)
 
@@ -250,7 +250,7 @@ class EncoderCacheManager:
 
 
 def compute_encoder_budget(
-    renderer_config: "RendererConfig",
+    model_config: "ModelConfig",
     scheduler_config: "SchedulerConfig",
     mm_registry: MultiModalRegistry,
 ) -> tuple[int, int]:
@@ -263,9 +263,9 @@ def compute_encoder_budget(
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
     """
-    if mm_registry.supports_multimodal_inputs(renderer_config):
+    if mm_registry.supports_multimodal_inputs(model_config):
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            renderer_config
+            model_config
         )
 
         return compute_mm_encoder_budget(
