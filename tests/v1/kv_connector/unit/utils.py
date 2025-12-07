@@ -15,6 +15,7 @@ from vllm.config import (
     DeviceConfig,
     KVTransferConfig,
     ModelConfig,
+    RendererConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -127,6 +128,7 @@ def create_vllm_config(
     return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),

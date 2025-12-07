@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, RendererConfig
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.tokenizers import MistralTokenizer
@@ -19,10 +19,16 @@ def serving() -> OpenAIServing:
 
     # Create minimal mocks
     engine_client = Mock()
+
     model_config = Mock(spec=ModelConfig)
     model_config.max_model_len = 32768
+
+    renderer_config = Mock(spec=RendererConfig)
+    renderer_config.model_config = model_config
+
     models = Mock(spec=OpenAIServingModels)
     models.model_config = model_config
+    models.renderer_config = renderer_config
     models.input_processor = Mock()
     models.io_processor = Mock()
 

@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, RendererConfig, VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
@@ -110,11 +110,14 @@ def _create_vllm_config(
     mm_processor_cache_gb: float,
     enable_ipc: bool,
 ):
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=mm_processor_cache_gb,
+    )
+
     return VllmConfig(
-        model_config=ModelConfig(
-            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-            mm_processor_cache_gb=mm_processor_cache_gb,
-        ),
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         parallel_config=ParallelConfig(data_parallel_size=1 if enable_ipc else 2),
     )
 
@@ -506,13 +509,15 @@ def _run_test_cache_eviction_shm(
 
 
 def test_cache_eviction_shm_cache():
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_type="shm",
+        mm_shm_cache_max_object_size_mb=6,
+        mm_processor_cache_gb=15.2 * MiB_bytes / GiB_bytes,
+    )
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
-            mm_processor_cache_type="shm",
-            mm_shm_cache_max_object_size_mb=6,
-            mm_processor_cache_gb=15.2 * MiB_bytes / GiB_bytes,
-        ),
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
     )
     sender_cache = ShmObjectStoreSenderCache(vllm_config)
     receiver_cache = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())

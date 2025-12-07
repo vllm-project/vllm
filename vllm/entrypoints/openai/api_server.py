@@ -1099,7 +1099,7 @@ async def init_app_state(
     logger.info("Supported tasks: %s", supported_tasks)
 
     resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
+        args.chat_template, engine_client, vllm_config.renderer_config
     )
 
     if args.tool_server == "demo":

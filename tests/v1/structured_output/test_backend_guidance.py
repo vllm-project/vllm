@@ -6,7 +6,7 @@ from concurrent.futures import Future
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.config import StructuredOutputsConfig, VllmConfig
+from vllm.config import RendererConfig, StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
@@ -72,8 +72,11 @@ def test_backend_guidance_rollback_terminated():
 def test_grammar_bitmask_with_specdec():
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
     prompt = tokenizer.encode('{"a": "b"}')
+
+    model_config = ModelConfig(tokenizer=TOKENIZER)
     vllm_config = VllmConfig(
-        model_config=ModelConfig(tokenizer=TOKENIZER),
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config, tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
         speculative_config=SpeculativeConfig(model="[ngram]", num_speculative_tokens=3),
     )
@@ -137,8 +140,11 @@ def test_grammar_init_async_and_sync(async_grammar):
 
     # Use "external_launcher" for sync mode, None for async mode
     executor_backend = None if async_grammar else "external_launcher"
+
+    model_config = ModelConfig(tokenizer=TOKENIZER)
     vllm_config = VllmConfig(
-        model_config=ModelConfig(tokenizer=TOKENIZER),
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config, tokenizer=TOKENIZER),
         structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
         parallel_config=ParallelConfig(distributed_executor_backend=executor_backend),
     )

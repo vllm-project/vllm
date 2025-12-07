@@ -17,6 +17,7 @@ from vllm.config import (
     DeviceConfig,
     ModelConfig,
     PassConfig,
+    RendererConfig,
     VllmConfig,
     get_current_vllm_config,
     set_current_vllm_config,
@@ -276,6 +277,7 @@ def sequence_parallelism_pass_on_test_model(
 
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         device_config=device_config,
         compilation_config=compilation_config,
     )

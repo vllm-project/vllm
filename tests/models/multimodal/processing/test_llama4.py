@@ -30,7 +30,7 @@ def test_processor_override(
         limit_mm_per_prompt={"image": num_imgs},
         mm_processor_cache_gb=mm_processor_cache_gb,
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
     config = processor.info.get_hf_config()
     tokenizer = processor.info.get_tokenizer()
     hf_processor = processor.info.get_hf_processor()

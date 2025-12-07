@@ -24,7 +24,7 @@ def test_processor_override(
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
     prompt = "<image>" * num_imgs
     image = Image.new("RGB", size=(364, 364))
     mm_data = {"image": [image] * num_imgs}
@@ -83,7 +83,7 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"image": num_imgs},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
 
     image_ratios = [
         (171, 152),

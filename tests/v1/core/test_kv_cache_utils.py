@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import ModelConfig, RendererConfig, SchedulerConfig, VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -667,7 +667,10 @@ def test_metrics_empty_stats():
 
 def test_get_kv_cache_configs_multiple_workers():
     model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+    )
 
     ref_kv_cache_spec = new_kv_cache_spec()
     same_kv_cache_specs = [
@@ -1136,6 +1139,7 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
 
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         scheduler_config=scheduler_config,
     )
 
@@ -1175,6 +1179,7 @@ def test_get_max_concurrency_for_kv_cache_config():
 
     vllm_config = VllmConfig(
         model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
         scheduler_config=scheduler_config,
     )
 
@@ -1293,7 +1298,10 @@ def test_allocate_with_lookahead():
 def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+    )
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     # all layers are full attention -> single group
@@ -1584,7 +1592,11 @@ def test_get_kv_cache_config_one_worker():
 
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        renderer_config=RendererConfig(model_config=model_config),
+    )
     kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [0])
     assert kv_cache_configs == [
         KVCacheConfig(

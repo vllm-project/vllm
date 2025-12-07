@@ -1169,16 +1169,17 @@ class NemotronH_Nano_VL_V2(
         self.mlp1 = self.mlp1.to(self.language_model.config.dtype)
 
         self.config = config
-        self.model_config = vllm_config.model_config
 
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
-        tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
-        self._img_start_token_ids = tokenizer.encode(
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.renderer_config)
+        self._img_start_token_ids = self._tokenizer.encode(
             IMG_START, add_special_tokens=False
         )
-        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
-        self._img_context_token_ids = tokenizer.encode(
+        self._img_end_token_ids = self._tokenizer.encode(
+            IMG_END, add_special_tokens=False
+        )
+        self._img_context_token_ids = self._tokenizer.encode(
             IMG_CONTEXT, add_special_tokens=False
         )
 
@@ -1364,7 +1365,7 @@ class NemotronH_Nano_VL_V2(
         input_embeds for the LLM.
         """
         device = video_embeddings.device
-        tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer = self._tokenizer
 
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized

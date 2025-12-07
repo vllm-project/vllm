@@ -347,7 +347,7 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_image_processor(self, **kwargs: object):
         return cached_image_processor_from_config(
-            self.ctx.model_config,
+            self.ctx.renderer_config,
             **kwargs,
         )
 

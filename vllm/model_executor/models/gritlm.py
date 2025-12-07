@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import RendererConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (
     DispatchPooler,
@@ -29,12 +29,12 @@ logger = init_logger(__name__)
 class GritLMMeanPool(nn.Module):
     """As `MeanPool`, but only includes non-instruction tokens."""
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, renderer_config: RendererConfig):
         super().__init__()
 
-        self.model_config = model_config
+        self.renderer_config = renderer_config
 
-        tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer = cached_tokenizer_from_config(self.renderer_config)
 
         # Collect the tokens needed for pattern matching.
         # "▁<" is different from "_<". The former uses "▁" to indicate that
@@ -174,10 +174,10 @@ class GritLMMeanPool(nn.Module):
 
 
 class GritLMPooler(Pooler):
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self, renderer_config: RendererConfig):
         super().__init__()
 
-        self.pooling = GritLMMeanPool(model_config)
+        self.pooling = GritLMMeanPool(renderer_config)
         self.head = PoolerHead(PoolerNormalize())
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
@@ -238,6 +238,6 @@ class GritLM(LlamaForCausalLM):
             self.pooler = DispatchPooler(
                 {
                     "token_embed": Pooler.for_token_embed(pooler_config),
-                    "embed": GritLMPooler(vllm_config.model_config),
+                    "embed": GritLMPooler(vllm_config.renderer_config),
                 }
             )
