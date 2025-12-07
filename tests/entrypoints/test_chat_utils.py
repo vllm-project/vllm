@@ -1767,7 +1767,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config()
+    renderer_config = model_info.build_renderer_config(model)
 
     tokenizer = get_tokenizer(
         renderer_config.tokenizer,
@@ -1856,7 +1856,7 @@ def test_resolve_hf_chat_template_kwargs(sample_json_schema, model, expected_kwa
         "enable_thinking": True,
     }
 
-    renderer_config = model_info.build_renderer_config()
+    renderer_config = model_info.build_renderer_config(model)
 
     tokenizer = get_tokenizer(
         renderer_config.tokenizer,
@@ -1939,7 +1939,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config()
+    renderer_config = model_info.build_renderer_config(model)
 
     tokenizer = get_tokenizer(
         renderer_config.tokenizer,
@@ -1987,7 +1987,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config()
+    renderer_config = model_info.build_renderer_config(model)
 
     tokenizer = get_tokenizer(
         renderer_config.tokenizer,

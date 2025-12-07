@@ -185,6 +185,7 @@ def test_model_tensor_schema(model_id: str):
         dtype = model_info.dtype
 
     renderer_config = model_info.build_renderer_config(
+        model_id,
         hf_overrides=hf_overrides_fn,
         dtype=dtype,
     )

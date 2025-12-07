@@ -517,7 +517,7 @@ def resolve_hf_chat_template(
             exc_info=True,
         )
 
-    # 4th priority: Predefined fallbacks
+    # 4th priority: Predefined fallbacks]
     path = get_chat_template_fallback_path(
         model_type=model_config.hf_config.model_type,
         tokenizer_name_or_path=tokenizer.name_or_path,

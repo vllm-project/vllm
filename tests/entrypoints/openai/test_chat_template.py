@@ -106,7 +106,7 @@ def test_get_gen_prompt(
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config()
+    renderer_config = model_info.build_renderer_config(model)
 
     tokenizer = get_tokenizer(
         renderer_config.tokenizer,

@@ -296,6 +296,7 @@ def build_model_context(
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
     renderer_config = model_info.build_renderer_config(
+        model_id,
         runner=runner,
         dtype=dtype,
         seed=0,
