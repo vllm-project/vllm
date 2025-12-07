@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
@@ -42,15 +43,7 @@ class XPUPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        head_size: int,
-        dtype: torch.dtype,
-        kv_cache_dtype: str | None,
-        block_size: int,
-        use_mla: bool,
-        has_sink: bool,
-        use_sparse: bool,
-        use_mm_prefix: bool,
-        attn_type: str | None = None,
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
@@ -60,7 +53,7 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
-        if use_sparse:
+        if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
@@ -71,7 +64,7 @@ class XPUPlatform(Platform):
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
-                f"with use_mla: {use_mla}"
+                f"with use_mla: {attn_selector_config.use_mla}"
             )
 
         logger.info("Using Flash Attention backend.")
