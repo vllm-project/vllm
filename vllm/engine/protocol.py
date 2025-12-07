@@ -11,6 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -25,6 +26,10 @@ class EngineClient(ABC):
     model_config: ModelConfig
     input_processor: InputProcessor
     io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> RendererLike: ...
 
     @property
     @abstractmethod

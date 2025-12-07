@@ -4,9 +4,11 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import apply_hf_chat_template, load_chat_template
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.hf import HfTokenizer
 
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import VLLM_PATH
@@ -123,6 +125,7 @@ def test_get_gen_prompt(
 
     # Initialize the tokenizer
     tokenizer = get_tokenizer(
+        HfTokenizer,
         tokenizer_name=model_config.tokenizer,
         trust_remote_code=model_config.trust_remote_code,
     )
@@ -139,14 +142,15 @@ def test_get_gen_prompt(
     )
 
     # Call the function and get the result
-    result = apply_hf_chat_template(
-        tokenizer=tokenizer,
-        conversation=mock_request.messages,
-        chat_template=mock_request.chat_template or template_content,
-        model_config=model_config,
+    result = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        mock_request.messages,
         tools=None,
+        chat_template=mock_request.chat_template or template_content,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,
+        tokenize=False,
     )
 
     # Test assertion

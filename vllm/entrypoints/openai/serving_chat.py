@@ -188,7 +188,8 @@ class OpenAIServingChat(OpenAIServing):
 
             model_name = self.models.model_name(lora_request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
 
             tool_parser = self.tool_parser
 
@@ -236,7 +237,7 @@ class OpenAIServingChat(OpenAIServing):
                     engine_prompts,
                 ) = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    renderer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,

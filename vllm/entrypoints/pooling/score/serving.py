@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Request
@@ -38,7 +39,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -59,6 +61,8 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
+
+        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
     async def _embedding_score(
         self,

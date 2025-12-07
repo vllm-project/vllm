@@ -22,7 +22,8 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.logger import init_logger
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
