@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,15 +29,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class TokenizerRegistryType:
-    def __init__(self) -> None:
-        super().__init__()
+_VLLM_TOKENIZERS = {
+    "deepseekv32": ("deepseekv32", "DeepseekV32Tokenizer"),
+    "hf": ("hf", "CachedHfTokenizer"),
+    "mistral": ("mistral", "MistralTokenizer"),
+}
 
-        # Tokenizer name ->  (tokenizer module, tokenizer class)
-        self._registry: dict[str, tuple[str, str]] = {}
+
+@dataclass
+class _TokenizerRegistry:
+    tokenizers: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def register(self, tokenizer_mode: str, module: str, class_name: str) -> None:
-        if tokenizer_mode in self._registry:
+        if tokenizer_mode in self.tokenizers:
             logger.warning(
                 "%s.%s is already registered for tokenizer_mode=%r. "
                 "It is overwritten by the new one.",
@@ -45,15 +50,15 @@ class TokenizerRegistryType:
                 tokenizer_mode,
             )
 
-        self._registry[tokenizer_mode] = (module, class_name)
+        self.tokenizers[tokenizer_mode] = (module, class_name)
 
         return None
 
     def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
-        if tokenizer_mode not in self._registry:
+        if tokenizer_mode not in self.tokenizers:
             raise ValueError(f"No tokenizer registered for {tokenizer_mode=!r}.")
 
-        module, class_name = self._registry[tokenizer_mode]
+        module, class_name = self.tokenizers[tokenizer_mode]
         logger.debug_once(f"Loading {class_name} for {tokenizer_mode=!r}")
 
         return resolve_obj_by_qualname(f"{module}.{class_name}")
@@ -63,14 +68,10 @@ class TokenizerRegistryType:
         return tokenizer_cls.from_pretrained(*args, **kwargs)
 
 
-TokenizerRegistry = TokenizerRegistryType()
-"""The global `TokenizerRegistryType` instance."""
-
-TokenizerRegistry._registry.update(
+TokenizerRegistry = _TokenizerRegistry(
     {
-        "deepseekv32": ("vllm.tokenizers.deepseekv32", "DeepseekV32Tokenizer"),
-        "hf": ("vllm.tokenizers.hf", "CachedHfTokenizer"),
-        "mistral": ("vllm.tokenizers.mistral", "MistralTokenizer"),
+        key: (f"vllm.tokenizers.{mod_relname}", cls_name)
+        for key, (mod_relname, cls_name) in _VLLM_TOKENIZERS.items()
     }
 )
 

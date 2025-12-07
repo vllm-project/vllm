@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
@@ -14,15 +15,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class RendererRegistry:
-    def __init__(self) -> None:
-        super().__init__()
+_VLLM_RENDERERS = {
+    "deepseekv32": ("deepseekv32", "DeepseekV32Renderer"),
+    "hf": ("hf", "HfRenderer"),
+    "mistral": ("mistral", "MistralRenderer"),
+    "terratorch": ("terratorch", "TerratorchRenderer"),
+}
 
-        # Renderer name ->  (renderer module, renderer class)
-        self._registry: dict[str, tuple[str, str]] = {}
+
+@dataclass
+class RendererRegistry:
+    # Renderer name ->  (renderer module, renderer class)
+    renderers: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def register(self, renderer_mode: str, module: str, class_name: str) -> None:
-        if renderer_mode in self._registry:
+        if renderer_mode in self.renderers:
             logger.warning(
                 "%s.%s is already registered for renderer_mode=%r. "
                 "It is overwritten by the new one.",
@@ -31,15 +38,15 @@ class RendererRegistry:
                 renderer_mode,
             )
 
-        self._registry[renderer_mode] = (module, class_name)
+        self.renderers[renderer_mode] = (module, class_name)
 
         return None
 
     def load_renderer_cls(self, renderer_mode: str) -> type[RendererLike]:
-        if renderer_mode not in self._registry:
+        if renderer_mode not in self.renderers:
             raise ValueError(f"No renderer registered for {renderer_mode=!r}.")
 
-        module, class_name = self._registry[renderer_mode]
+        module, class_name = self.renderers[renderer_mode]
         logger.debug_once(f"Loading {class_name} for {renderer_mode=!r}")
 
         return resolve_obj_by_qualname(f"{module}.{class_name}")
@@ -54,17 +61,13 @@ class RendererRegistry:
         return renderer_cls.from_config(config, tokenizer_kwargs)
 
 
-RENDERER_REGISTRY = RendererRegistry()
-"""The global `RendererRegistry` instance."""
-
-RENDERER_REGISTRY._registry.update(
+RENDERER_REGISTRY = RendererRegistry(
     {
-        "deepseekv32": ("vllm.renderers.deepseekv32", "DeepseekV32Renderer"),
-        "hf": ("vllm.renderers.hf", "HfRenderer"),
-        "mistral": ("vllm.renderers.mistral", "MistralRenderer"),
-        "terratorch": ("vllm.renderers.terratorch", "TerratorchRenderer"),
+        key: (f"vllm.renderers.{mod_relname}", cls_name)
+        for key, (mod_relname, cls_name) in _VLLM_RENDERERS.items()
     }
 )
+"""The global `RendererRegistry` instance."""
 
 
 def renderer_from_config(config: "ModelConfig", **kwargs):
