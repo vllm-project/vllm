@@ -816,7 +816,7 @@ class LLM:
         prompts = list[TextPrompt | TokensPrompt]()
 
         for msgs in list_of_messages:
-            # NOTE: parse_mesrender_messagessages() currently doesn't
+            # NOTE: renderer.render_messages() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
             _, prompt = renderer.render_messages(
