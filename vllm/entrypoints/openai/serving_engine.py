@@ -535,14 +535,14 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _get_renderer(self, tokenizer: TokenizerLike | None) -> BaseRenderer:
+    def _get_completion_renderer(self) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
         Uses shared async tokenizer pool for efficiency.
         """
         return CompletionRenderer(
             model_config=self.model_config,
-            tokenizer=tokenizer,
+            tokenizer=self.renderer.tokenizer,
             async_tokenizer_pool=self._async_tokenizer_pool,
         )
 

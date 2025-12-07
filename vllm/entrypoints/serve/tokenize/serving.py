@@ -94,8 +94,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                tokenizer = self.renderer.get_tokenizer()
-                renderer = self._get_renderer(tokenizer)
+                renderer = self._get_completion_renderer()
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.prompt,
                     config=self._build_render_config(request),
@@ -115,6 +114,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         token_strs = None
         if request.return_token_strs:
+            tokenizer = self.renderer.get_tokenizer()
             token_strs = tokenizer.convert_ids_to_tokens(input_ids)
 
         return TokenizeResponse(

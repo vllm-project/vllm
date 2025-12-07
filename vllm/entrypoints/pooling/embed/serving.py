@@ -95,8 +95,7 @@ class EmbeddingMixin(OpenAIServing):
                     add_special_tokens=ctx.request.add_special_tokens,
                 )
             else:
-                tokenizer = self.renderer.get_tokenizer()
-                renderer = self._get_renderer(tokenizer)
+                renderer = self._get_completion_renderer()
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=ctx.request.input,
                     config=self._build_render_config(ctx.request),

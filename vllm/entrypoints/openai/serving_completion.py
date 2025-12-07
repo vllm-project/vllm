@@ -121,10 +121,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
-
-            tokenizer = self.renderer.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
+            renderer = self._get_completion_renderer()
             engine_prompts = await renderer.render_prompt_and_embeds(
                 prompt_or_prompts=request.prompt,
                 prompt_embeds=request.prompt_embeds,
@@ -251,6 +248,8 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = request.stream and not request.use_beam_search
 
         # Streaming response
+        tokenizer = self.renderer.get_tokenizer()
+
         if stream:
             return self.completion_stream_generator(
                 request,

@@ -148,8 +148,7 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                tokenizer = self.renderer.get_tokenizer()
-                renderer = self._get_renderer(tokenizer)
+                renderer = self._get_completion_renderer()
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.input,
                     config=self._build_render_config(request),

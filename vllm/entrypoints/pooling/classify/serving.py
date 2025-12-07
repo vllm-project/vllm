@@ -104,7 +104,7 @@ class ClassificationMixin(OpenAIServing):
                     ctx.engine_prompts = []
                     return None
 
-                renderer = self._get_renderer(self.renderer.tokenizer)
+                renderer = self._get_completion_renderer()
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
