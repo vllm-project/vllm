@@ -546,9 +546,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             )
 
         if num_decodes > 0:
+            # Compute decode_query_len for spec decode (uniform due to require_uniform)
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
+
             tile_scheduler_metadata, num_splits = get_mla_metadata(
                 cache_seqlens=self.topk_tokens_tensor[:num_decodes],
-                num_q_tokens_per_head_k=num_decode_tokens * self.num_heads,
+                num_q_tokens_per_head_k=decode_query_len * self.num_heads,
                 topk=self.topk_tokens,
                 num_heads_q=self.num_heads,
                 num_heads_k=1,
@@ -564,10 +568,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             # num_splits has size [num_decodes + 1]
             num_splits_view = self.num_splits_buffer[: num_decodes + 1]
             num_splits_view.copy_(num_splits)
-
-            # Compute decode_query_len for spec decode (uniform due to require_uniform)
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
 
             fp8_metadata.decode = FP8Meta.DecodeMetadata(
                 scheduler_metadata=tile_scheduler_metadata_buffer,
