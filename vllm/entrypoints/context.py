@@ -247,8 +247,9 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
+        tokenizer = renderer.get_tokenizer()
         self.parser = get_responses_parser_for_simple_context(
-            tokenizer=renderer.get_tokenizer(),
+            tokenizer=tokenizer,
             reasoning_parser_cls=reasoning_parser_cls,
             response_messages=response_messages,
             request=request,
@@ -257,7 +258,7 @@ class ParsableContext(ConversationContext):
         self.tool_parser_cls = tool_parser_cls
         self.request = request
         self.renderer = renderer
-        self.tokenizer = renderer.get_tokenizer()
+        self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
