@@ -6,7 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -24,6 +24,7 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
+@pytest.mark.parametrize("is_gemma", [False, True])
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
@@ -33,10 +34,15 @@ def test_rms_norm(
     seed: int,
     device: str,
     strided_input: bool,
+    is_gemma: bool,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
-    layer = RMSNorm(hidden_size).to(dtype=dtype)
+    layer = (
+        GemmaRMSNorm(hidden_size).to(dtype=dtype)
+        if is_gemma
+        else RMSNorm(hidden_size).to(dtype=dtype)
+    )
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
     last_dim = 2 * hidden_size if strided_input else hidden_size
@@ -62,11 +68,12 @@ def test_rms_norm(
     if residual is not None:
         opcheck(
             torch.ops._C.fused_add_rms_norm,
-            (x, residual, layer.weight.data, layer.variance_epsilon),
+            (x, residual, layer.weight.data, layer.variance_epsilon, is_gemma),
         )
     else:
         opcheck(
-            torch.ops._C.rms_norm, (out, x, layer.weight.data, layer.variance_epsilon)
+            torch.ops._C.rms_norm,
+            (out, x, layer.weight.data, layer.variance_epsilon, is_gemma),
         )
 
 
