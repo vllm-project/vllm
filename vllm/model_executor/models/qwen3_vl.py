@@ -1100,6 +1100,7 @@ class Qwen3LLMModel(Qwen3Model):
         inputs_embeds: torch.Tensor | None = None,
         # args for deepstack
         deepstack_input_embeds: IntermediateTensors | None = None,
+        **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1137,6 +1138,13 @@ class Qwen3LLMModel(Qwen3Model):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+
+        return_pre_norm_hidden_states = kwargs.get(
+            "return_pre_norm_hidden_states", False
+        )
+        if return_pre_norm_hidden_states:
+            return hidden_states + residual
+
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
@@ -1277,6 +1285,7 @@ class Qwen3VLForConditionalGeneration(
             self.deepstack_input_embeds = None
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+        self.return_pre_norm_hidden_states = False
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
@@ -1655,6 +1664,7 @@ class Qwen3VLForConditionalGeneration(
             inputs_embeds=inputs_embeds,
             # args for deepstack
             deepstack_input_embeds=deepstack_input_embeds,
+            return_pre_norm_hidden_states=self.return_pre_norm_hidden_states,
         )
 
         if inputs_embeds is not None and get_pp_group().is_first_rank:
