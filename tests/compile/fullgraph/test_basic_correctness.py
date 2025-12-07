@@ -10,6 +10,8 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ...utils import compare_all_settings
 
+ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
+
 
 @dataclasses.dataclass
 class TestSetting:
@@ -32,7 +34,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=2,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # llama model with quantization
@@ -41,7 +43,7 @@ class TestSetting:
             model_args=["--quantization", "gptq", "--max-model-len", "2048"],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # MoE model
@@ -50,7 +52,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=1,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # embedding model
@@ -66,7 +68,7 @@ class TestSetting:
             ],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="encode",
         ),
         pytest.param(
@@ -80,7 +82,7 @@ class TestSetting:
             ),
             marks=pytest.mark.skipif(
                 current_platform.is_rocm(),
-                reason="Skipping BAAI/bge-base-en-v1.5 test for ROCm",
+                reason="Encoder self-attention is not implemented for ROCm",
             ),
         ),
         # vision language model
