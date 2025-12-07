@@ -189,7 +189,7 @@ class OpenAIServingChat(OpenAIServing):
             model_name = self.models.model_name(lora_request)
 
             renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
+            tokenizer = renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -532,7 +532,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -1303,7 +1303,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
@@ -1655,7 +1655,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
-        tokenizer: TokenizerLike,
+        tokenizer: TokenizerLike | None,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:
@@ -1673,6 +1673,11 @@ class OpenAIServingChat(OpenAIServing):
                 if should_return_as_token_id:
                     token = f"token_id:{token_id}"
                 else:
+                    if tokenizer is None:
+                        raise ValueError(
+                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
+                        )
+
                     token = tokenizer.decode(token_id)
 
                 logprobs_content.append(

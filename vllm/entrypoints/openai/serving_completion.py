@@ -248,7 +248,7 @@ class OpenAIServingCompletion(OpenAIServing):
         stream = request.stream and not request.use_beam_search
 
         # Streaming response
-        tokenizer = self.renderer.get_tokenizer()
+        tokenizer = self.renderer.tokenizer
 
         if stream:
             return self.completion_stream_generator(
