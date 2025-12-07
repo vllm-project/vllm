@@ -25,7 +25,7 @@ def test_profiling(model_id: str, max_model_len: int):
         limit_mm_per_prompt=mm_counts,
     )
 
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
     profiler = MultiModalProfiler(processor)
 
     decoder_dummy_data = profiler.get_decoder_dummy_data(

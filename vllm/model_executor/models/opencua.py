@@ -201,8 +201,6 @@ class OpenCUADummyInputsBuilder(Qwen2VLDummyInputsBuilder):
     dummy_inputs=OpenCUADummyInputsBuilder,
 )
 class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
-    multimodal_cpu_fields = {"image_grid_thw"}
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

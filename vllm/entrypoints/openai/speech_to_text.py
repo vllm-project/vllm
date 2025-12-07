@@ -91,7 +91,7 @@ class OpenAISpeechToText(OpenAIServing):
         self.task_type = task_type
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
-            self.model_config, task_type
+            self.renderer_config, task_type
         )
 
         self.enable_force_include_usage = enable_force_include_usage
@@ -101,8 +101,8 @@ class OpenAISpeechToText(OpenAIServing):
             self.tokenizer = cast(
                 PreTrainedTokenizerBase,
                 get_tokenizer(
-                    tokenizer_name=self.model_config.tokenizer,
-                    tokenizer_mode=self.model_config.tokenizer_mode,
+                    tokenizer_name=self.renderer_config.tokenizer,
+                    tokenizer_mode=self.renderer_config.tokenizer_mode,
                 ),
             )
 
@@ -154,7 +154,7 @@ class OpenAISpeechToText(OpenAIServing):
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
-                model_config=self.model_config,
+                renderer_config=self.renderer_config,
                 language=language,
                 task_type=self.task_type,
                 request_prompt=request.prompt,
@@ -428,7 +428,7 @@ class OpenAISpeechToText(OpenAIServing):
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
                         if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
+                            audio_duration_s, self.asr_config, self.renderer_config
                         ):
                             num_prompt_tokens += audio_tokens
 
