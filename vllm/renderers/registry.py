@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
-from typing import TYPE_CHECKING, Any, TypeVar
-
-from typing_extensions import assert_never
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.tokenizers.registry import tokenizer_mode_kwargs_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import RendererLike
@@ -16,21 +13,16 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_T = TypeVar("_T", bound=type[RendererLike])
-
 
 class RendererRegistry:
-    # Renderer name ->  (renderer module, renderer class)
-    REGISTRY: dict[str, tuple[str, str]] = {
-        "deepseekv32": ("vllm.renderers.deepseekv32", "DeepseekV32Renderer"),
-        "hf": ("vllm.renderers.hf", "HfRenderer"),
-        "mistral": ("vllm.renderers.mistral", "MistralRenderer"),
-        "terratorch": ("vllm.renderers.terratorch", "TerratorchRenderer"),
-    }
+    def __init__(self) -> None:
+        super().__init__()
 
-    @staticmethod
-    def register(renderer_mode: str, module: str, class_name: str) -> None:
-        if renderer_mode in RendererRegistry.REGISTRY:
+        # Renderer name ->  (renderer module, renderer class)
+        self._registry: dict[str, tuple[str, str]] = {}
+
+    def register(self, renderer_mode: str, module: str, class_name: str) -> None:
+        if renderer_mode in self._registry:
             logger.warning(
                 "%s.%s is already registered for renderer_mode=%r. "
                 "It is overwritten by the new one.",
@@ -39,73 +31,49 @@ class RendererRegistry:
                 renderer_mode,
             )
 
-        RendererRegistry.REGISTRY[renderer_mode] = (module, class_name)
+        self._registry[renderer_mode] = (module, class_name)
 
         return None
 
-    @staticmethod
+    def load_renderer_cls(self, renderer_mode: str) -> type[RendererLike]:
+        if renderer_mode not in self._registry:
+            raise ValueError(f"No renderer registered for {renderer_mode=!r}.")
+
+        module, class_name = self._registry[renderer_mode]
+        logger.debug_once(f"Loading {class_name} for {renderer_mode=!r}")
+
+        return resolve_obj_by_qualname(f"{module}.{class_name}")
+
     def init_renderer(
+        self,
         renderer_mode: str,
         config: "ModelConfig",
         tokenizer_kwargs: dict[str, Any],
     ) -> RendererLike:
-        if renderer_mode not in RendererRegistry.REGISTRY:
-            raise ValueError(f"No renderer registered for {renderer_mode=!r}.")
-
-        module, class_name = RendererRegistry.REGISTRY[renderer_mode]
-        logger.debug_once(f"Loading {class_name} for {renderer_mode=!r}")
-
-        cls_: type[RendererLike] = resolve_obj_by_qualname(f"{module}.{class_name}")
-        return cls_.from_config(config, tokenizer_kwargs)
+        renderer_cls = self.load_renderer_cls(renderer_mode)
+        return renderer_cls.from_config(config, tokenizer_kwargs)
 
 
-def renderer_from_config(config: "ModelConfig"):
-    tokenizer_name = config.tokenizer
-    tokenizer_mode = config.tokenizer_mode
-    tokenizer_revision = config.tokenizer_revision
-    trust_remote_code = config.trust_remote_code
-    tokenizer_kwargs = dict[str, Any]()
+RENDERER_REGISTRY = RendererRegistry()
+"""The global `RendererRegistry` instance."""
 
-    runner_type = config.runner_type
-    if runner_type == "generate" or runner_type == "draft":
-        tokenizer_kwargs["truncation_side"] = "left"
-    elif runner_type == "pooling":
-        tokenizer_kwargs["truncation_side"] = "right"
+RENDERER_REGISTRY._registry.update(
+    {
+        "deepseekv32": ("vllm.renderers.deepseekv32", "DeepseekV32Renderer"),
+        "hf": ("vllm.renderers.hf", "HfRenderer"),
+        "mistral": ("vllm.renderers.mistral", "MistralRenderer"),
+        "terratorch": ("vllm.renderers.terratorch", "TerratorchRenderer"),
+    }
+)
+
+
+def renderer_from_config(config: "ModelConfig", **kwargs):
+    tokenizer_mode, tokenizer_kwargs = tokenizer_mode_kwargs_from_config(config)
+    tokenizer_kwargs.update(kwargs)
+
+    if config.tokenizer_mode == "auto" and config.model_impl == "terratorch":
+        renderer_mode = "terratorch"
     else:
-        assert_never(runner_type)
+        renderer_mode = tokenizer_mode
 
-    tokenizer_mode = config.tokenizer_mode
-    if tokenizer_mode == "slow":
-        if tokenizer_kwargs.get("use_fast", False):
-            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
-
-        tokenizer_mode = "hf"
-        tokenizer_kwargs["use_fast"] = False
-
-    # Try to use official Mistral tokenizer if possible
-    if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
-        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
-        files_list = list_filtered_repo_files(
-            model_name_or_path=str(tokenizer_name),
-            allow_patterns=allow_patterns,
-            revision=tokenizer_revision,
-        )
-        if len(files_list) > 0:
-            tokenizer_mode = "mistral"
-
-    # Fallback to HF tokenizer
-    if tokenizer_mode == "auto":
-        tokenizer_mode = "hf"
-
-    tokenizer_kwargs = dict[str, Any](
-        tokenizer_name=tokenizer_name,
-        trust_remote_code=trust_remote_code,
-        revision=tokenizer_revision,
-        **tokenizer_kwargs,
-    )
-
-    return RendererRegistry.init_renderer(
-        tokenizer_mode,
-        config,
-        tokenizer_kwargs,
-    )
+    return RENDERER_REGISTRY.init_renderer(renderer_mode, config, tokenizer_kwargs)

@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import huggingface_hub
-from typing_extensions import assert_never
+from typing_extensions import assert_never, deprecated
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -16,6 +17,7 @@ from vllm.transformers_utils.gguf_utils import (
     is_remote_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
@@ -29,16 +31,14 @@ _T = TypeVar("_T", bound=TokenizerLike)
 
 
 class TokenizerRegistry:
-    # Tokenizer name ->  (tokenizer module, tokenizer class)
-    REGISTRY: dict[str, tuple[str, str]] = {
-        "deepseekv32": ("vllm.tokenizers.deepseekv32", "DeepseekV32Tokenizer"),
-        "hf": ("vllm.tokenizers.hf", "CachedHfTokenizer"),
-        "mistral": ("vllm.tokenizers.mistral", "MistralTokenizer"),
-    }
+    def __init__(self) -> None:
+        super().__init__()
 
-    @staticmethod
-    def register(tokenizer_mode: str, module: str, class_name: str) -> None:
-        if tokenizer_mode in TokenizerRegistry.REGISTRY:
+        # Tokenizer name ->  (tokenizer module, tokenizer class)
+        self._registry: dict[str, tuple[str, str]] = {}
+
+    def register(self, tokenizer_mode: str, module: str, class_name: str) -> None:
+        if tokenizer_mode in self._registry:
             logger.warning(
                 "%s.%s is already registered for tokenizer_mode=%r. "
                 "It is overwritten by the new one.",
@@ -47,20 +47,34 @@ class TokenizerRegistry:
                 tokenizer_mode,
             )
 
-        TokenizerRegistry.REGISTRY[tokenizer_mode] = (module, class_name)
+        self._registry[tokenizer_mode] = (module, class_name)
 
         return None
 
-    @staticmethod
-    def init_tokenizer(tokenizer_mode: str, *args, **kwargs) -> TokenizerLike:
-        if tokenizer_mode not in TokenizerRegistry.REGISTRY:
+    def load_tokenizer_cls(self, tokenizer_mode: str) -> type[TokenizerLike]:
+        if tokenizer_mode not in self._registry:
             raise ValueError(f"No tokenizer registered for {tokenizer_mode=!r}.")
 
-        module, class_name = TokenizerRegistry.REGISTRY[tokenizer_mode]
+        module, class_name = self._registry[tokenizer_mode]
         logger.debug_once(f"Loading {class_name} for {tokenizer_mode=!r}")
 
-        cls_: type[TokenizerLike] = resolve_obj_by_qualname(f"{module}.{class_name}")
-        return cls_.from_pretrained(*args, **kwargs)
+        return resolve_obj_by_qualname(f"{module}.{class_name}")
+
+    def init_tokenizer(self, tokenizer_mode: str, *args, **kwargs) -> TokenizerLike:
+        tokenizer_cls = self.load_tokenizer_cls(tokenizer_mode)
+        return tokenizer_cls.from_pretrained(*args, **kwargs)
+
+
+TOKENIZER_REGISTRY = TokenizerRegistry()
+"""The global `TokenizerRegistry` instance."""
+
+TOKENIZER_REGISTRY._registry.update(
+    {
+        "deepseekv32": ("vllm.tokenizers.deepseekv32", "DeepseekV32Tokenizer"),
+        "hf": ("vllm.tokenizers.hf", "CachedHfTokenizer"),
+        "mistral": ("vllm.tokenizers.mistral", "MistralTokenizer"),
+    }
+)
 
 
 def get_tokenizer(
@@ -129,29 +143,74 @@ def get_tokenizer(
     return tokenizer  # type: ignore
 
 
+def tokenizer_mode_kwargs_from_config(config: "ModelConfig"):
+    tokenizer_name = config.tokenizer
+    tokenizer_mode = config.tokenizer_mode
+    tokenizer_revision = config.tokenizer_revision
+    trust_remote_code = config.trust_remote_code
+    tokenizer_kwargs = dict[str, Any]()
+
+    runner_type = config.runner_type
+    if runner_type == "generate" or runner_type == "draft":
+        tokenizer_kwargs["truncation_side"] = "left"
+    elif runner_type == "pooling":
+        tokenizer_kwargs["truncation_side"] = "right"
+    else:
+        assert_never(runner_type)
+
+    tokenizer_mode = config.tokenizer_mode
+    if tokenizer_mode == "slow":
+        if tokenizer_kwargs.get("use_fast", False):
+            raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
+
+        tokenizer_mode = "hf"
+        tokenizer_kwargs["use_fast"] = False
+
+    # Try to use official Mistral tokenizer if possible
+    if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
+        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
+        files_list = list_filtered_repo_files(
+            model_name_or_path=str(tokenizer_name),
+            allow_patterns=allow_patterns,
+            revision=tokenizer_revision,
+        )
+        if len(files_list) > 0:
+            tokenizer_mode = "mistral"
+
+    # Fallback to HF tokenizer
+    if tokenizer_mode == "auto":
+        tokenizer_mode = "hf"
+
+    tokenizer_kwargs = {
+        "tokenizer_name": tokenizer_name,
+        "trust_remote_code": trust_remote_code,
+        "revision": tokenizer_revision,
+        **tokenizer_kwargs,
+    }
+
+    return tokenizer_mode, tokenizer_kwargs
+
+
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
-    return cached_get_tokenizer(
-        model_config.tokenizer,
-        tokenizer_mode=model_config.tokenizer_mode,
-        revision=model_config.tokenizer_revision,
-        trust_remote_code=model_config.trust_remote_code,
-        **kwargs,
-    )
-
-
-def init_tokenizer_from_config(model_config: "ModelConfig"):
     if model_config.skip_tokenizer_init:
         return None
 
-    runner_type = model_config.runner_type
-    if runner_type == "generate" or runner_type == "draft":
-        truncation_side = "left"
-    elif runner_type == "pooling":
-        truncation_side = "right"
-    else:
-        assert_never(runner_type)
+    tokenizer_mode, tokenizer_kwargs = tokenizer_mode_kwargs_from_config(model_config)
+    tokenizer_kwargs.update(kwargs)
 
-    return cached_tokenizer_from_config(model_config, truncation_side=truncation_side)
+    tokenizer_cls = TOKENIZER_REGISTRY.load_tokenizer_cls(tokenizer_mode)
+
+    return cached_get_tokenizer(
+        tokenizer_cls,  # type: ignore[arg-type]
+        **tokenizer_kwargs,
+    )
+
+
+@deprecated(
+    "Renamed to `cached_tokenizer_from_config`. The old name will be removed in v0.14."
+)
+def init_tokenizer_from_config(model_config: "ModelConfig"):
+    return cached_tokenizer_from_config(model_config)
