@@ -1889,19 +1889,16 @@ class Qwen3VLForConditionalGeneration(
                 counts = frame_token_counts_map[base_offset]
                 idx = frame_counts_idx[base_offset]
 
-                if idx < len(counts):
-                    actual_tokens = counts[idx]
-                    logger.info(
-                        f"  EVS mode: using actual_tokens={actual_tokens} (vs theoretical={llm_grid_h * llm_grid_w})"
-                    )
-                    st = offset + actual_tokens
-                    frame_counts_idx[base_offset] += 1
-                else:
-                    # Fallback to theoretical count if index out of range
-                    logger.warning(
-                        f"  EVS mode: frame index {idx} out of range, using theoretical count"
-                    )
-                    st = offset + llm_grid_h * llm_grid_w
+                assert idx < len(
+                    counts
+                ), f"EVS frame index {idx} out of range (total frames: {len(counts)})"
+
+                actual_tokens = counts[idx]
+                logger.info(
+                    f"  EVS mode: using actual_tokens={actual_tokens} (vs theoretical={llm_grid_h * llm_grid_w})"
+                )
+                st = offset + actual_tokens
+                frame_counts_idx[base_offset] += 1
             else:
                 # Non-EVS mode: use theoretical grid size
                 st = offset + llm_grid_h * llm_grid_w
