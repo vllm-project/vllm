@@ -316,7 +316,11 @@ def fused_marlin_moe(
     if global_num_experts == -1:
         global_num_experts = E
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-        topk_ids, block_size_m, global_num_experts, expert_map
+        topk_ids,
+        block_size_m,
+        global_num_experts,
+        expert_map,
+        ignore_invalid_experts=True,
     )
 
     assert activation is not None
