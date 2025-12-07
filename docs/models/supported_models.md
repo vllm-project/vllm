@@ -740,23 +740,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
-!!! warning
-    Both V0 and V1 support `Gemma3ForConditionalGeneration` for text-only inputs.
-    However, there are differences in how they handle text + image inputs:
-
-    V0 correctly implements the model's attention pattern:
-    - Uses bidirectional attention between the image tokens corresponding to the same image
-    - Uses causal attention for other tokens
-    - Implemented via (naive) PyTorch SDPA with masking tensors
-    - Note: May use significant memory for long prompts with image
-
-    V1 currently uses a simplified attention pattern:
-    - Uses causal attention for all tokens, including image tokens
-    - Generates reasonable outputs but does not match the original model's attention for text + image inputs, especially when `{"do_pan_and_scan": true}`
-    - Will be updated in the future to support the correct behavior
-
-    This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
-
 !!! note
     `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching and it depends on `timm>=1.0.17` to make use of its
     MobileNet-v5 vision backbone.
@@ -775,9 +758,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
-
-!!! warning
-    Our PaliGemma implementations have the same problem as Gemma 3 (see above) for both V0 and V1.
 
 !!! note
     For Qwen2.5-Omni and Qwen3-Omni, reading audio from video pre-processing (`--mm-processor-kwargs '{"use_audio_in_video": true}'`) is currently work in progress and not yet supported.
