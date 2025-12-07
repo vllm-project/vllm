@@ -182,8 +182,8 @@ class CudaPlatformBase(Platform):
 
             if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability(100):
-                    # Blackwell => Force CutlassMLA.
+                if cls.is_device_capability(100) and not use_sparse:
+                    # Blackwell => Force CutlassMLA (unless sparse, i.e. DSv3.2).
                     use_cutlass_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
@@ -232,6 +232,20 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
+
+        scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
+        if (
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
+        ):
+            logger.warning(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
+            )
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def get_current_memory_usage(
