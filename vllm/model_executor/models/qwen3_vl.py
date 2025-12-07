@@ -1749,33 +1749,94 @@ class Qwen3VLForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        logger.info("=" * 80)
+        logger.info("get_mrope_input_positions START")
+        logger.info(f"Total input_tokens: {len(input_tokens)}")
+        logger.info(f"Number of mm_features: {len(mm_features)}")
+
         llm_pos_ids_list = []
         st = 0
+        frame_idx = 0
+
         for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
             input_tokens, mm_features
         ):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+
+            logger.info("-" * 60)
+            logger.info(f"Frame {frame_idx}:")
+            logger.info(f"  offset={offset}, st={st}, text_len={text_len}")
+            logger.info(f"  grid=({llm_grid_h}, {llm_grid_w}), tokens={llm_grid_h * llm_grid_w}")
+            logger.info(f"  st_idx={st_idx}")
+            logger.info(f"  current llm_pos_ids_list length: {len(llm_pos_ids_list)}")
+
+            # 关键检查点
             if text_len > 0:
-                llm_pos_ids_list.append(
-                    np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-                )
+                logger.info(f"  ✓ Adding text segment: text_len={text_len}")
+                text_positions = np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+                logger.info(f"    text_positions shape: {text_positions.shape}")
+                logger.info(f"    text_positions range: [{text_positions.min()}, {text_positions.max()}]")
+                llm_pos_ids_list.append(text_positions)
                 # Update st_idx for video frame positions
                 st_idx += text_len
+                logger.info(f"    Updated st_idx to: {st_idx}")
+            else:
+                logger.warning(f"  ⚠ SKIPPED text segment: text_len={text_len} (zero or negative)")
+                logger.warning(f"    This means frame {frame_idx} starts immediately after previous frame")
+                logger.warning(f"    Possible cause: consecutive frames without text tokens between them")
 
             grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
-            llm_pos_ids_list.append(grid_indices + st_idx)
+            frame_positions = grid_indices + st_idx
+            logger.info(f"  Adding frame positions:")
+            logger.info(f"    frame_positions shape: {frame_positions.shape}")
+            logger.info(f"    frame_positions range: [{frame_positions.min()}, {frame_positions.max()}]")
+            llm_pos_ids_list.append(frame_positions)
+
             st = offset + llm_grid_h * llm_grid_w
+            logger.info(f"  Updated st to: {st}")
+            logger.info(f"  llm_pos_ids_list now has {len(llm_pos_ids_list)} segments")
+
+            frame_idx += 1
+
+        # 处理最后的文本部分
+        logger.info("-" * 60)
+        logger.info("Final text segment:")
+        logger.info(f"  st={st}, total_tokens={len(input_tokens)}")
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            llm_pos_ids_list.append(
-                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
-            )
+            logger.info(f"  ✓ Adding final text: text_len={text_len}, st_idx={st_idx}")
+            final_text_positions = np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            logger.info(f"    final_text_positions shape: {final_text_positions.shape}")
+            logger.info(f"    final_text_positions range: [{final_text_positions.min()}, {final_text_positions.max()}]")
+            llm_pos_ids_list.append(final_text_positions)
+        else:
+            logger.info(f"  ✗ No final text segment (st={st} >= len={len(input_tokens)})")
+
+        logger.info("-" * 60)
+        logger.info("Concatenating positions:")
+        logger.info(f"  Total segments: {len(llm_pos_ids_list)}")
+        for i, seg in enumerate(llm_pos_ids_list):
+            logger.info(f"    Segment {i}: shape={seg.shape}")
 
         llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        logger.info(f"  Concatenated positions shape: {llm_positions.shape}")
+        logger.info(f"  Expected shape: (3, {len(input_tokens)})")
+
+        if llm_positions.shape[1] != len(input_tokens):
+            logger.error(f"  ✗✗✗ SHAPE MISMATCH! ✗✗✗")
+            logger.error(f"  Generated {llm_positions.shape[1]} positions for {len(input_tokens)} tokens")
+            logger.error(f"  Difference: {llm_positions.shape[1] - len(input_tokens)}")
+        else:
+            logger.info(f"  ✓ Shape matches!")
+
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        logger.info(f"mrope_position_delta: {mrope_position_delta}")
+        logger.info("get_mrope_input_positions END")
+        logger.info("=" * 80)
+
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_language_model(self) -> torch.nn.Module:
