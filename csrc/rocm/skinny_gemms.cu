@@ -1534,17 +1534,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
     for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
-  #ifdef WVSPLITKRC_1KPASS
       const bool reloada = (!noreloada) &&
                            ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
                            (k1 < k_end);
       // load next chunk of A[] to LDS
       if (reloada) {
         if (k1 != k_str) kBase += kFit;
+  #ifndef WVSPLITKRC_1KPASS
         __syncthreads();
+  #endif
         constexpr int sprdN = 4;
         const uint32_t thrd = ((threadIdx.y / sprdN) * THRDS + threadIdx.x);
-    #pragma unroll
+  #pragma unroll
         for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
           unsigned int kOff = k + (thrd * A_CHUNK);
           {  // if (((unsigned int)(kBase + kOff)) < K) {
@@ -1568,7 +1569,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-  #endif
 
       // Stage loaded B[] to LDS for MFMA swizzling...
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -1709,6 +1709,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     } else {
       if (m + (threadIdx.x % 16) < M) {
         int my_cntr[N / NTILE / GrpsShrB][4];
+        scalar_t biases[N / NTILE / GrpsShrB][4];
+        if (BIAS)
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int mindx = m + (threadIdx.x % 16);
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+            }
+          }
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           for (uint32_t j = 0; j < 4; j++) {
             int adr = m + (threadIdx.x % 16) +
@@ -1719,7 +1729,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
         float vals[N / NTILE / GrpsShrB][4];
-        scalar_t biases[N / NTILE / GrpsShrB][4];
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           for (uint32_t j = 0; j < 4; j++) {
             int mindx = m + (threadIdx.x % 16);
@@ -1729,7 +1738,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             // read-back glbl[] here, can't use return from atomic above
             if (my_cntr[nt][j] + 1 == k_rnd) {
               vals[nt][j] = glbl[adr];
-              if (BIAS) biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+              // if (BIAS) biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) *
+              // M];
             }
           }
         }
