@@ -19,7 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.config import CacheConfig, RendererConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
@@ -811,7 +811,7 @@ class WhisperForConditionalGeneration(
     def get_generation_prompt(
         cls,
         audio: np.ndarray,
-        renderer_config: RendererConfig,  # not needed here
+        model_config: ModelConfig,  # not needed here
         stt_config: SpeechToTextConfig,
         language: str | None,
         task_type: Literal["transcribe", "translate"],
@@ -847,11 +847,9 @@ class WhisperForConditionalGeneration(
 
     @classmethod
     def get_speech_to_text_config(
-        cls,
-        renderer_config: RendererConfig,
-        task_type: str,
+        cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
-        processor = cached_processor_from_config(renderer_config)
+        processor = cached_processor_from_config(model_config)
 
         return SpeechToTextConfig(
             max_audio_clip_s=processor.feature_extractor.chunk_length,
@@ -863,9 +861,9 @@ class WhisperForConditionalGeneration(
         cls,
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
-        renderer_config: RendererConfig,
+        model_config: ModelConfig,
     ) -> int | None:
-        processor = cached_processor_from_config(renderer_config)
+        processor = cached_processor_from_config(model_config)
         hop_length = processor.feature_extractor.hop_length
         assert hop_length is not None
         # NOTE(NickLucche) user can't pass encoder

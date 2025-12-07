@@ -13,6 +13,7 @@ from transformers import PretrainedConfig
 from vllm.config.model import ModelConfig, ModelDType, RunnerOption
 from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal.processing import InputProcessingContext
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .. import ci_envs
 from .registry import HF_EXAMPLE_MODELS
@@ -295,18 +296,30 @@ def build_model_context(
 
     model_config_kwargs = model_config_kwargs or {}
     limit_mm_per_prompt = limit_mm_per_prompt or {}
-    renderer_config = model_info.build_renderer_config(
+    model_config = ModelConfig(
         model_id,
         runner=runner,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
+        hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
 
-    return InputProcessingContext.from_config(renderer_config)
+    return InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
 
 
 def check_embeddings_close(

@@ -40,7 +40,7 @@ def test_processor_override(
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     tokenizer = processor.info.get_tokenizer()
     hf_processor_mm_kwargs = {"fps": fps}
 
@@ -79,7 +79,7 @@ def test_video_loader_consistency(
         mm_processor_kwargs=None,
         limit_mm_per_prompt={"video": 1},
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.renderer_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
     hf_processor_mm_kwargs = {"fps": fps}
 
     # Build the image str / prompt based on the number of images we pass

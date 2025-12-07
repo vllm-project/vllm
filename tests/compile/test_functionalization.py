@@ -15,7 +15,6 @@ from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PassConfig,
-    RendererConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -220,11 +219,8 @@ def test_fix_functionalization(
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
 
-    model_config = ModelConfig(dtype=dtype)
-
     vllm_config = VllmConfig(
-        model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
+        model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
             pass_config=PassConfig(
