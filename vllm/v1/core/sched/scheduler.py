@@ -607,7 +607,6 @@ class Scheduler(SchedulerInterface):
 
                 self._update_connector_prefix_cache_stats(request)
 
-                req_index += 1
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(
