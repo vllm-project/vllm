@@ -64,9 +64,6 @@ class OpenAIServingTokenization(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer()
-            renderer = self._get_renderer(tokenizer)
-
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (
                     None
@@ -86,7 +83,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     engine_prompts,
                 ) = await self._preprocess_chat(
                     request,
-                    tokenizer,
+                    self.renderer,
                     request.messages,
                     tool_dicts=tool_dicts,
                     chat_template=request.chat_template or self.chat_template,
@@ -97,6 +94,8 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
+                tokenizer = await self.engine_client.get_tokenizer()
+                renderer = self._get_renderer(tokenizer)
                 engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=request.prompt,
                     config=self._build_render_config(request),

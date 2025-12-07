@@ -35,10 +35,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    parse_chat_messages,
-    resolve_chat_template_content_format,
 )
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
@@ -71,7 +67,7 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
@@ -787,7 +783,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TokensPrompt]:
+    ) -> list[TextPrompt | TokensPrompt]:
         """
         Generate prompt for a chat conversation. The pre-processed
         prompt can then be used as input for the other LLM methods.
@@ -808,63 +804,27 @@ class LLM:
             # messages is list[...]
             list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
-        tokenizer = self.get_tokenizer()
-        renderer_config = self.renderer_config
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tools,
-            chat_template_content_format,
-            tokenizer,
-            renderer_config=renderer_config,
-        )
+        renderer = self.llm_engine.renderer
 
-        _chat_template_kwargs: dict[str, Any] = dict(
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message,
-            tools=tools,
-        )
-        _chat_template_kwargs.update(chat_template_kwargs or {})
+        chat_template_kwargs = {
+            "chat_template": chat_template,
+            "add_generation_prompt": add_generation_prompt,
+            "continue_final_message": continue_final_message,
+            "tools": tools,
+            **(chat_template_kwargs or {}),
+        }
 
-        prompts: list[TokensPrompt] = []
+        prompts = list[TextPrompt | TokensPrompt]()
 
         for msgs in list_of_messages:
-            # NOTE: _parse_chat_message_content_parts() currently doesn't
+            # NOTE: parse_mesrender_messagessages() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            conversation, mm_data, mm_uuids = parse_chat_messages(
+            _, prompt = renderer.render_messages(
                 msgs,
-                renderer_config,
-                content_format=resolved_content_format,
+                chat_template_content_format=chat_template_content_format,
+                **chat_template_kwargs,
             )
-
-            if isinstance(tokenizer, MistralTokenizer):
-                prompt_token_ids = apply_mistral_chat_template(
-                    tokenizer,
-                    messages=msgs,
-                    **_chat_template_kwargs,
-                )
-            else:
-                prompt_str = apply_hf_chat_template(
-                    tokenizer=tokenizer,
-                    conversation=conversation,
-                    renderer_config=renderer_config,
-                    **_chat_template_kwargs,
-                )
-                # Special tokens are already included in chat templates so
-                # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(
-                    prompt_str, add_special_tokens=False
-                )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-            if mm_data is not None:
-                prompt["multi_modal_data"] = mm_data
-
-            if mm_uuids is not None:
-                prompt["multi_modal_uuids"] = mm_uuids
-
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
@@ -1293,9 +1253,6 @@ class LLM:
     ) -> list[ScoringRequestOutput]:
         renderer_config = self.renderer_config
         model_config = self.model_config
-
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError("Score API is not supported for Mistral tokenizer")
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)

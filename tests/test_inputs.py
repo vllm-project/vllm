@@ -7,7 +7,7 @@ from vllm.config import ModelConfig, RendererConfig
 from vllm.inputs import zip_enc_dec_prompts
 from vllm.inputs.parse import parse_raw_prompts
 from vllm.inputs.preprocess import InputPreprocessor
-from vllm.tokenizers import init_tokenizer_from_config
+from vllm.renderers import RendererRegistry
 
 pytestmark = pytest.mark.cpu_test
 
@@ -109,10 +109,11 @@ def test_zip_enc_dec_prompts(mm_processor_kwargs, expected_mm_kwargs):
 def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
     renderer_config = RendererConfig(model_config=model_config)
-    tokenizer = init_tokenizer_from_config(renderer_config)
-    input_preprocessor = InputPreprocessor(renderer_config, tokenizer)
+    renderer = RendererRegistry.get_renderer(renderer_config)
+    input_preprocessor = InputPreprocessor(renderer_config, renderer)
 
     # HF processor adds sep token
+    tokenizer = renderer.get_tokenizer()
     sep_token_id = tokenizer.vocab[tokenizer.sep_token]
 
     processed_inputs = input_preprocessor.preprocess(prompt)

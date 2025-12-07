@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from vllm.config import RendererConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ConversationMessage,
+    parse_chat_messages,
+    parse_chat_messages_futures,
+)
+from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
+
+from .protocol import RendererLike
+
+logger = init_logger(__name__)
+
+
+class TerratorchRenderer(RendererLike):
+    @classmethod
+    def from_config(cls, config: "RendererConfig") -> "RendererLike":
+        return cls(config)
+
+    def __init__(self, config: "RendererConfig") -> None:
+        super().__init__()
+
+        self.config = config
+
+        if not config.skip_tokenizer_init:
+            raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
+
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return None
+
+    def get_tokenizer(self) -> TokenizerLike:
+        raise ValueError("Tokenizer not available for Terratorch renderer")
+
+    def render_messages(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        **kwargs,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        renderer_config = self.config
+
+        conversation, mm_data, mm_uuids = parse_chat_messages(
+            messages,
+            renderer_config,
+            content_format="string",
+        )
+
+        prompt = TokensPrompt(prompt_token_ids=[1])
+        if mm_data is not None:
+            prompt["multi_modal_data"] = mm_data
+        if mm_uuids is not None:
+            prompt["multi_modal_uuids"] = mm_uuids
+
+        return conversation, prompt
+
+    async def render_messages_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        **kwargs,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        renderer_config = self.config
+
+        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
+            messages,
+            renderer_config,
+            content_format="string",
+        )
+
+        prompt = TokensPrompt(prompt_token_ids=[1])  # Dummy token IDs
+        if mm_data_future is not None:
+            prompt["multi_modal_data"] = await mm_data_future
+        if mm_uuids is not None:
+            prompt["multi_modal_uuids"] = mm_uuids
+
+        return conversation, prompt

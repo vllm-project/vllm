@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.renderers import RendererLike
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -46,7 +47,7 @@ class InputPreprocessor:
     def __init__(
         self,
         renderer_config: RendererConfig,
-        tokenizer: TokenizerLike | None,
+        renderer: RendererLike,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
@@ -54,19 +55,22 @@ class InputPreprocessor:
 
         self.renderer_config = renderer_config
         self.model_config = renderer_config.model_config
-        self.tokenizer = tokenizer
+        self.renderer = renderer
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
-    def get_tokenizer(self) -> TokenizerLike:
-        if self.tokenizer is None:
-            raise ValueError(
-                "You cannot pass text prompts when `skip_tokenizer_init=True`"
-            )
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.renderer.tokenizer
 
-        return self.tokenizer
+    @tokenizer.setter
+    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
+        self.renderer.tokenizer = tokenizer
+
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.renderer.get_tokenizer()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:

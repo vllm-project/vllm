@@ -18,8 +18,10 @@ from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -39,7 +41,7 @@ class InputProcessor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: TokenizerLike | None,
+        renderer: RendererLike,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
@@ -56,7 +58,7 @@ class InputProcessor:
 
         self.input_preprocessor = InputPreprocessor(
             self.renderer_config,
-            tokenizer,
+            renderer,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -68,6 +70,13 @@ class InputProcessor:
     @tokenizer.setter
     def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
         self.input_preprocessor.tokenizer = tokenizer
+
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.input_preprocessor.get_tokenizer()
+
+    @property
+    def renderer(self) -> RendererLike:
+        return self.input_preprocessor.renderer
 
     def _validate_logprobs(
         self,

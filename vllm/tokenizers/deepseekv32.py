@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
+from typing import Any
 
 from transformers import BatchEncoding
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
 from .deepseek_v32_encoding import encode_messages
-from .hf import HfTokenizer, TokenizerLike
-from .registry import TokenizerRegistry
+from .hf import CachedHfTokenizer
+from .protocol import TokenizerLike
 
 
-@TokenizerRegistry.register("deepseek_v32")
-class DeepseekV32Tokenizer(HfTokenizer):
-    def __init__(self, tokenizer: TokenizerLike):
-        self.tokenizer = tokenizer
-        self.name_or_path = (
-            tokenizer.name_or_path if hasattr(tokenizer, "name_or_path") else ""
-        )
-
+class DeepseekV32Tokenizer(CachedHfTokenizer):
     @classmethod
     def from_pretrained(
         cls,
@@ -38,7 +34,18 @@ class DeepseekV32Tokenizer(HfTokenizer):
         )
         return DeepseekV32Tokenizer(tokenizer)
 
-    def apply_chat_template(self, messages, tools=None, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike) -> None:
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.name_or_path = getattr(tokenizer, "name_or_path", "")
+
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str:
         thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
@@ -48,7 +55,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
         drop_thinking = True
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
-            messages[0]["tools"] = tools
+            messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
             drop_thinking = False
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
