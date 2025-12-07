@@ -524,7 +524,7 @@ class HfRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        chat_template_content_format: ChatTemplateContentFormat = "auto",
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         **kwargs,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
         model_config = self.config

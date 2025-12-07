@@ -1132,7 +1132,7 @@ class OpenAIServing:
             tokenizer = renderer.get_tokenizer()
             request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
-        return conversation, [engine_prompt], [engine_prompt]
+        return conversation, [engine_prompt], [engine_prompt]  # type: ignore[list-item]
 
     async def _process_inputs(
         self,

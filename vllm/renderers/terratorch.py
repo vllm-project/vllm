@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
@@ -19,7 +20,11 @@ logger = init_logger(__name__)
 
 class TerratorchRenderer(RendererLike):
     @classmethod
-    def from_config(cls, config: ModelConfig) -> "RendererLike":
+    def from_config(
+        cls,
+        config: "ModelConfig",
+        tokenizer_kwargs: dict[str, Any],
+    ) -> "RendererLike":
         return cls(config)
 
     def __init__(self, config: ModelConfig) -> None:

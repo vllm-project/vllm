@@ -1407,6 +1407,11 @@ class OpenAIServingChat(OpenAIServing):
 
             if self.reasoning_parser:
                 try:
+                    if tokenizer is None:
+                        raise ValueError(
+                            "Tokenizer not available when `skip_tokenizer_init=True`"
+                        )
+
                     reasoning_parser = self.reasoning_parser(
                         tokenizer,
                         chat_template_kwargs=request.chat_template_kwargs,  # type: ignore
