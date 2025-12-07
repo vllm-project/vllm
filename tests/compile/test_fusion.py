@@ -15,7 +15,6 @@ from vllm.config import (
     CompilationMode,
     ModelConfig,
     PassConfig,
-    RendererConfig,
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -155,11 +154,8 @@ def test_fusion_rmsnorm_quant(
         custom_ops.append("+rms_norm")
     if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
-
-    model_config = ModelConfig(dtype=dtype)
     vllm_config = VllmConfig(
-        model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
+        model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,

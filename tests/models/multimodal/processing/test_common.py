@@ -25,6 +25,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingC
 from vllm.tokenizers import (
     MistralTokenizer,
     TokenizerLike,
+    cached_tokenizer_from_config,
 )
 
 from ....multimodal.utils import random_audio, random_image, random_video
@@ -211,20 +212,31 @@ def _test_processing_correctness(
     else:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
         model_id = model_id_or_arch
-
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    renderer_config = model_info.build_renderer_config(
-        model=model_id,
+    model_config = ModelConfig(
+        model_id,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+        hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype,
     )
-    model_config = renderer_config.model_config
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = model_cls._processor_factory
-    ctx = InputProcessingContext.from_config(renderer_config)
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
     cache = MultiModalProcessorOnlyCache(model_config)
 
     processing_info = factories.info(ctx)
