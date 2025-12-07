@@ -74,7 +74,7 @@ def get_attn_backend(
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
-        attn_type=attn_type,
+        attn_type=attn_type or AttentionType.DECODER,
     )
 
     return _cached_get_attn_backend(

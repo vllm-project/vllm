@@ -321,7 +321,7 @@ class CudaPlatformBase(Platform):
         # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
-            **attn_selector_config._asdict(),
+            attn_selector_config=attn_selector_config,
         )
         reasons_str = (
             "{"
