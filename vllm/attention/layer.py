@@ -664,6 +664,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            use_sparse=use_sparse,
             **extra_impl_args,
         )
 

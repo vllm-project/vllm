@@ -1124,6 +1124,7 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         kv_b_proj: ColumnParallelLinear,
         indexer=None,
         q_pad_num_heads: int | None = None,
+        use_sparse: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -1144,6 +1145,10 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+
+        # Skip dense-only initialization for sparse backends
+        if use_sparse:
+            return
 
         if use_flashinfer_prefill():
             logger.debug_once("Using FlashInfer prefill for MLA")
@@ -1190,20 +1195,15 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
         if self.dcp_world_size == 1:
             self.dcp_rank = 0
 
-        try:
-            vllm_config = get_current_vllm_config()
-            self.chunked_prefill_workspace_size = (
-                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                    vllm_config
-                )
+        vllm_config = get_current_vllm_config()
+        self.chunked_prefill_workspace_size = (
+            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                vllm_config
             )
-            self.cp_kv_cache_interleave_size = (
-                vllm_config.parallel_config.cp_kv_cache_interleave_size
-            )
-        except ValueError:
-            # vLLM config is not set in testing
-            self.chunked_prefill_workspace_size = 0
-            self.cp_kv_cache_interleave_size = 1
+        )
+        self.cp_kv_cache_interleave_size = (
+            vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
