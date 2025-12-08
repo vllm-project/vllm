@@ -19,12 +19,12 @@ if TYPE_CHECKING:
         DeltaMessage,
         ResponsesRequest,
     )
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
 else:
     ChatCompletionRequest = Any
     DeltaMessage = Any
     ResponsesRequest = Any
-    AnyTokenizer = Any
+    TokenizerLike = Any
 
 logger = init_logger(__name__)
 
@@ -37,7 +37,7 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         self.model_tokenizer = tokenizer
 
     @cached_property
@@ -121,7 +121,7 @@ class ReasoningParser:
         self,
         original_tag: str | None,
         tool_server: ToolServer | None,
-    ) -> str:
+    ) -> str | None:
         """
         Instance method that is implemented for preparing the structured tag
         Otherwise, None is returned
@@ -160,7 +160,10 @@ class ReasoningParserManager:
         if name in cls.lazy_parsers:
             return cls._load_lazy_parser(name)
 
-        raise KeyError(f"Reasoning parser '{name}' not found.")
+        registered = ", ".join(cls.list_registered())
+        raise KeyError(
+            f"Reasoning parser '{name}' not found. Available parsers: {registered}"
+        )
 
     @classmethod
     def list_registered(cls) -> list[str]:

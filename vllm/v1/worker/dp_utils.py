@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -9,9 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
-    UBatchSlices,
     check_ubatch_thresholds,
-    create_ubatch_slices,
     is_second_ubatch_empty,
 )
 
@@ -23,12 +22,14 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     device = get_dp_group().device
     group = get_dp_group().device_group
 
-    # Transfering this tensor from GPU to CPU will introduce a GPU sync
+    # Transferring this tensor from GPU to CPU will introduce a GPU sync
     # point that could adversely affect performance of vllm with asynch
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once("Using CPU all reduce to syncronize DP padding between ranks.")
+        logger.info_once(
+            "Using CPU all reduce to synchronize DP padding between ranks."
+        )
         device = "cpu"
         group = get_dp_group().cpu_group
     return device, group
@@ -158,7 +159,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
-) -> tuple[UBatchSlices | None, torch.Tensor | None]:
+) -> tuple[bool, torch.Tensor | None]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -187,7 +188,7 @@ def coordinate_batch_across_dp(
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return None, None
+        return False, None
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -211,20 +212,4 @@ def coordinate_batch_across_dp(
         parallel_config,
     )
 
-    # Don't microbatch unless every other DP worker is also microbatching
-    if not should_ubatch:
-        return (None, num_tokens_after_padding)
-
-    # This doesn't actually pad the ubatch slices. It just initializes the
-    # split point to the padded value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_slice after attention
-    # metadata creation
-    assert num_tokens_after_padding is not None
-    token_split_point = int(num_tokens_after_padding[0].item()) // 2
-
-    assert num_scheduled_tokens_per_request is not None
-    ubatch_slices = create_ubatch_slices(
-        num_scheduled_tokens_per_request, token_split_point
-    )
-
-    return (ubatch_slices, num_tokens_after_padding)
+    return (should_ubatch, num_tokens_after_padding)

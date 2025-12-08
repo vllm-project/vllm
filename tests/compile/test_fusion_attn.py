@@ -9,15 +9,16 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import global_force_attn_backend_context_manager
+from vllm.attention.layer import Attention
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     CompilationMode,
@@ -317,18 +318,24 @@ def test_attention_quant_pattern(
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
+    model_config = ModelConfig(
+        model=model_name,
+        max_model_len=2048,
+        dtype=dtype,
+    )
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            model=model_name,
-            max_model_len=2048,
-            dtype=dtype,
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
         ),
-        scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend=backend),
     )
 
     # Create test inputs
@@ -346,7 +353,6 @@ def test_attention_quant_pattern(
     with (
         set_current_vllm_config(vllm_config_unfused),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_unfused = model_class(
             num_qo_heads=num_qo_heads,
@@ -367,12 +373,11 @@ def test_attention_quant_pattern(
 
     # Run model with attn fusion enabled
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_attn_fusion=True, enable_noop=True
+        fuse_attn_quant=True, eliminate_noops=True
     )
     with (
         set_current_vllm_config(vllm_config),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_fused = model_class(
             num_qo_heads=num_qo_heads,

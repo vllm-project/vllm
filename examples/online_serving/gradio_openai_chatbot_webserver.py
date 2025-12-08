@@ -25,25 +25,17 @@ import gradio as gr
 from openai import OpenAI
 
 
-def format_history_to_openai(history):
-    history_openai_format = [
-        {"role": "system", "content": "You are a great AI assistant."}
-    ]
-    for human, assistant in history:
-        history_openai_format.append({"role": "user", "content": human})
-        history_openai_format.append({"role": "assistant", "content": assistant})
-    return history_openai_format
-
-
 def predict(message, history, client, model_name, temp, stop_token_ids):
-    # Format history to OpenAI chat format
-    history_openai_format = format_history_to_openai(history)
-    history_openai_format.append({"role": "user", "content": message})
+    messages = [
+        {"role": "system", "content": "You are a great AI assistant."},
+        *history,
+        {"role": "user", "content": message},
+    ]
 
     # Send request to OpenAI API (vLLM server)
     stream = client.chat.completions.create(
         model=model_name,
-        messages=history_openai_format,
+        messages=messages,
         temperature=temp,
         stream=True,
         extra_body={

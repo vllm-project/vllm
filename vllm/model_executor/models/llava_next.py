@@ -223,8 +223,6 @@ class LlavaNextMultiModalProcessor(
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -460,7 +458,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         image_input: LlavaNextImageInputs,
     ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
-            return [image_input["data"]]
+            return image_input["data"]
 
         patch_embeddings = self._process_image_pixels(image_input)
 
