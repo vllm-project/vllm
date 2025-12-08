@@ -12,6 +12,7 @@ tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
+aiofiles
 openai >= 1.99.1  # For Responses API with reasoning content
 pydantic >= 2.12.0
 prometheus_client >= 0.18.0
