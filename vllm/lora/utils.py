@@ -48,6 +48,15 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_GLOBAL_LORA_ID = 0
+
+
+def get_lora_id():
+    global _GLOBAL_LORA_ID
+    _GLOBAL_LORA_ID += 1
+    return _GLOBAL_LORA_ID
+
+
 _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,

@@ -15,10 +15,10 @@ from vllm.lora.layers import (
     MergedColumnParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.models import (
+from vllm.lora.model_manager import (
     LoRAMapping,
-    LoRAModel,
     LoRAModelManager,
     LRUCacheLoRAModelManager,
 )
