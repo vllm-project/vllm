@@ -289,6 +289,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    is_trim: bool = False,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -323,11 +324,13 @@ def calculate_metrics(
                 # bundled together
                 # Note : this may inflate the output token count slightly
                 output_len = len(
-                    tokenizer(
-                        outputs[i].generated_text, add_special_tokens=False
-                    ).input_ids
-                )
+                    tokenizer(outputs[i].generated_text,
+                              add_special_tokens=False).input_ids)
+            itls += outputs[i].itl
             actual_output_lens.append(output_len)
+            if is_trim:
+                completed += 1
+                continue # NOTE: if trimmed, only itl and output_len are needed
             total_input += input_requests[i].prompt_len
             tpot = 0
             if output_len > 1:
@@ -336,7 +339,6 @@ def calculate_metrics(
                 tpots.append(tpot)
             # Note: if output_len <= 1, we regard tpot as 0 for goodput
             all_tpots.append(tpot)
-            itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
@@ -509,6 +511,8 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    warmup_time: float = 0.0,
+    cooldown_time: float = 0.0,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -873,6 +877,165 @@ async def benchmark(
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
     print("=" * 50)
+
+    if warmup_time > 0.0 or cooldown_time > 0.0:
+        """
+        Filter the information inside of each RequestFuncOutput object.
+        RequestFuncOutput:
+        * generated_text    -- Copy at first
+        * success           -- Copy at first
+        * latency           -- Accumulated at filtering process
+        * output_tokens     -- Accumulated at filtering process
+        * ttft              -- Copy at filtering process
+        * itl               -- Appended at filtering process
+        * tpot              -- It seems not used variable.
+        * prompt_len        -- Copy at filtering process
+        * error             -- Copy at first
+        * start_time        -- Copy at first
+        """
+        min_start = min(e.start_time for e in outputs)
+        max_end = max(e.start_time + e.latency for e in outputs)
+        num_counted_tokens = 0
+        effective_outputs: list[RequestFuncOutput] = []
+
+        warmup_sentinel = min_start + warmup_time
+        cooldown_sentinel = max_end - cooldown_time
+
+        for output in outputs:
+            # 1. Initialize request base info
+            new_output = RequestFuncOutput()
+            new_output.start_time = output.start_time
+            new_output.error = output.error
+            new_output.success = False
+            new_output.generated_text = output.generated_text
+            new_output.prompt_len = output.prompt_len
+
+            # 2. Initialize target info
+            new_output.output_tokens = 0
+            new_output.itl = []
+            new_output.latency = 0.0
+            new_output.ttft = -1.0  # (Later) -1 will skip the ttft collecting process
+
+            # 3. Filter by absolute time
+            current_absolute_time = output.start_time
+
+            # 3a. Check first token generation
+            current_absolute_time += output.ttft
+
+            # Check the first token is inside of time window
+            if warmup_sentinel <= current_absolute_time < cooldown_sentinel:
+                new_output.ttft = output.ttft
+                new_output.latency += output.ttft
+                new_output.output_tokens += 1
+
+            # 3b. Check the itl
+            for itl in output.itl:
+                current_absolute_time += itl
+
+                # If over the window, break
+                if current_absolute_time >= cooldown_sentinel:
+                    break
+
+                # Collect if inside of window
+                if current_absolute_time >= warmup_sentinel:
+                    new_output.itl.append(itl)
+                    new_output.latency += itl
+                    new_output.output_tokens += 1
+
+            # 4. If the output_tokens > 1, append it
+            if new_output.output_tokens > 0:
+                new_output.success = True
+                effective_outputs.append(new_output)
+                num_counted_tokens += new_output.output_tokens
+
+        # Get effective duration (t_duration)
+        t_duration = cooldown_sentinel - warmup_sentinel
+
+        t_metrics, t_actual_output_lens = calculate_metrics(
+            input_requests=input_requests,
+            outputs=effective_outputs,
+            dur_s=t_duration,
+            tokenizer=tokenizer,
+            selected_percentiles=selected_percentiles,
+            goodput_config_dict=goodput_config_dict,
+            is_trim=True,
+        )
+        print("{s:{c}^{n}}".format(s="Serving Benchmark Result after warmup before cooldown", n=50, c="="))
+        print("{:<40} {:<10}".format("Warm-up Time:", warmup_time))
+        print("{:<40} {:<10}".format("Cool-down Time:", cooldown_time))
+        print("{:<40} {:<10}".format("Total counted tokens at filtering:", num_counted_tokens))
+        print("{:<40} {:<10.2f}".format("Benchmark duration (s):", t_duration))
+        if isinstance(metrics, BenchmarkMetrics):
+            print("{:<40} {:<10}".format("Total generated tokens:", t_metrics.total_output))
+        if isinstance(metrics, BenchmarkMetrics):
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Output token throughput (tok/s):", num_counted_tokens / t_duration
+                )
+            )
+
+        result_t = {
+            "duration": t_duration,
+            "completed": t_metrics.completed,
+            "total_input_tokens": t_metrics.total_input,
+            "total_output_tokens": t_metrics.total_output,
+            "request_throughput": t_metrics.request_throughput,
+            "request_goodput": t_metrics.request_goodput if goodput_config_dict else None,
+            "output_throughput": t_metrics.output_throughput,
+            "total_token_throughput": t_metrics.total_token_throughput,
+            "input_lens": [output.prompt_len for output in outputs],
+            "output_lens": t_actual_output_lens,
+            "ttfts": [output.ttft for output in effective_outputs],
+            "itls": [output.itl for output in effective_outputs],
+            "generated_texts": [output.generated_text for output in effective_outputs],
+            "errors": [output.error for output in outputs],
+            "max_output_tokens_per_s": t_metrics.max_output_tokens_per_s,
+            "max_concurrent_requests": t_metrics.max_concurrent_requests,
+        }
+
+        def process_one_metric_trim(
+            # E.g., "ttft"
+            metric_attribute_name: str,
+            # E.g., "TTFT"
+            metric_name: str,
+            # E.g., "Time to First Token"
+            metric_header: str,
+        ):
+            # This function prints and adds statistics of the specified
+            # metric.
+            if metric_attribute_name not in selected_percentile_metrics:
+                return
+            print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
+            print(
+                "{:<40} {:<10.2f}".format(
+                    f"Mean {metric_name} (ms):",
+                    getattr(t_metrics, f"mean_{metric_attribute_name}_ms"),
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    f"Median {metric_name} (ms):",
+                    getattr(t_metrics, f"median_{metric_attribute_name}_ms"),
+                )
+            )
+            result_t[f"mean_{metric_attribute_name}_ms"] = getattr(
+                t_metrics, f"mean_{metric_attribute_name}_ms"
+            )
+            result_t[f"median_{metric_attribute_name}_ms"] = getattr(
+                t_metrics, f"median_{metric_attribute_name}_ms"
+            )
+            result_t[f"std_{metric_attribute_name}_ms"] = getattr(
+                t_metrics, f"std_{metric_attribute_name}_ms"
+            )
+            for p, value in getattr(t_metrics, f"percentiles_{metric_attribute_name}_ms"):
+                p_word = str(int(p)) if int(p) == p else str(p)
+                print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
+                result_t[f"p{p_word}_{metric_attribute_name}_ms"] = value
+
+        if task_type == TaskType.GENERATION:
+            process_one_metric_trim("itl", "ITL", "Inter-token Latency")
+
+        print("=" * 50)
 
     if profile:
         print("Stopping profiler...")
@@ -1284,7 +1447,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
         "the ready check will be skipped.",
     )
-
     parser.add_argument(
         "--extra-body",
         help="A JSON string representing extra body parameters to include "
@@ -1292,6 +1454,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         'Example: \'{"chat_template_kwargs":{"enable_thinking":false}}\'',
         type=json.loads,
         default=None,
+    )
+    parser.add_argument(
+        "--warmup-time",
+        type=float,
+        default=0.0,
+        help="Warm-up time in seconds."
+    )
+    parser.add_argument(
+        "--cooldown-time",
+        type=float,
+        default=0.0,
+        help="Cool-down time in seconds."
     )
 
 
@@ -1445,6 +1619,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        warmup_time=args.warmup_time,
+        cooldown_time=args.cooldown_time,
     )
 
     # Save config and results to json
