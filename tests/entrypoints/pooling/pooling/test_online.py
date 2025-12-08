@@ -14,6 +14,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
+    EMBED_DTYPE_TO_N_BYTES,
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
@@ -339,6 +340,68 @@ async def test_bytes_embed_dtype_and_endianness(
             metadata = json.loads(responses_bytes.headers["metadata"])
             body = responses_bytes.content
             items = [MetadataItem(**x) for x in metadata["data"]]
+
+            bytes_data = decode_pooling_output(items=items, body=body)
+            bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=bytes_data,
+                name_0="float_data",
+                name_1="bytes_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_bytes_only_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ] * 2
+    n_tokens = 15
+
+    url = server.url_for("pooling")
+    float_response = requests.post(
+        url,
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "float",
+        },
+    )
+    responses_float = PoolingResponse.model_validate(float_response.json())
+    float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
+
+    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+        for endianness in ENDIANNESS:
+            responses_bytes = requests.post(
+                url,
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "bytes_only",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            assert "metadata" not in responses_bytes.headers
+            body = responses_bytes.content
+            n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
+            items = [
+                MetadataItem(
+                    index=i,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                    start=i * n_tokens * n_bytes,
+                    end=(i + 1) * n_tokens * n_bytes,
+                    shape=(n_tokens, 1),
+                )
+                for i in range(len(input_texts))
+            ]
 
             bytes_data = decode_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]

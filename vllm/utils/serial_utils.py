@@ -4,13 +4,16 @@ import base64
 import io
 import sys
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm import PoolingRequestOutput
+if TYPE_CHECKING:
+    from vllm import PoolingRequestOutput
+else:
+    PoolingRequestOutput = Any
 
 sys_byteorder = sys.byteorder
 
@@ -25,6 +28,14 @@ EMBED_DTYPE_TO_TORCH_DTYPE = {
     # Apologize for any possible break.
     "fp8_e4m3": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
+}
+
+EMBED_DTYPE_TO_N_BYTES = {
+    "float32": 4,
+    "float16": 2,
+    "bfloat16": 2,
+    "fp8_e4m3": 1,
+    "fp8_e5m2": 1,
 }
 
 
@@ -50,7 +61,7 @@ ENDIANNESS = ["native", "big", "little"]
 
 EmbedDType = Literal["float32", "float16", "bfloat16", "fp8_e4m3", "fp8_e5m2"]
 Endianness = Literal["native", "big", "little"]
-EncodingFormat = Literal["float", "base64", "bytes"]
+EncodingFormat = Literal["float", "base64", "bytes", "bytes_only"]
 
 
 def tensor2base64(x: torch.Tensor) -> str:

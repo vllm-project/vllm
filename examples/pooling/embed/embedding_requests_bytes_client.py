@@ -13,6 +13,7 @@ import requests
 import torch
 
 from vllm.utils.serial_utils import (
+    EMBED_DTYPE_TO_N_BYTES,
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
@@ -38,6 +39,11 @@ def parse_args():
 def main(args):
     api_url = f"http://{args.host}:{args.port}/v1/embeddings"
     model_name = args.model
+    embedding_size = 0
+
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ] * 2
 
     # The OpenAI client does not support the bytes encoding_format.
     # The OpenAI client does not support the embed_dtype and endianness parameters.
@@ -45,7 +51,7 @@ def main(args):
         for endianness in ENDIANNESS:
             prompt = {
                 "model": model_name,
-                "input": "vLLM is great!",
+                "input": input_texts,
                 "encoding_format": "bytes",
                 "embed_dtype": embed_dtype,
                 "endianness": endianness,
@@ -57,7 +63,40 @@ def main(args):
 
             embedding = decode_pooling_output(items=items, body=body)
             embedding = [x.to(torch.float32) for x in embedding]
-            embedding = torch.cat(embedding)
+            embedding = torch.stack(embedding)
+            embedding_size = embedding.shape[-1]
+            print(embed_dtype, endianness, embedding.shape)
+
+    # The vllm server always sorts the returned embeddings in the order of input. So
+    # returning metadata is not necessary. You can set encoding_format to bytes_only
+    # to let the server not return metadata.
+    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+        for endianness in ENDIANNESS:
+            prompt = {
+                "model": model_name,
+                "input": input_texts,
+                "encoding_format": "bytes",
+                "embed_dtype": embed_dtype,
+                "endianness": endianness,
+            }
+            response = post_http_request(prompt=prompt, api_url=api_url)
+            body = response.content
+            n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
+            items = [
+                MetadataItem(
+                    index=i,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                    start=i * embedding_size * n_bytes,
+                    end=(i + 1) * embedding_size * n_bytes,
+                    shape=(embedding_size,),
+                )
+                for i in range(len(input_texts))
+            ]
+
+            embedding = decode_pooling_output(items=items, body=body)
+            embedding = [x.to(torch.float32) for x in embedding]
+            embedding = torch.stack(embedding)
             print(embed_dtype, endianness, embedding.shape)
 
 
