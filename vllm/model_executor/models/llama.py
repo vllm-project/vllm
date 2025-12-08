@@ -36,6 +36,7 @@ from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -359,11 +360,16 @@ class LlamaModel(nn.Module):
             )
         else:
             self.embed_tokens = PPMissingLayer()
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
+
+        if has_ec_transfer() and get_ec_transfer().is_producer:
+            self.layers = None
+        else:
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.num_hidden_layers,
+                lambda prefix: layer_type(vllm_config=vllm_config,
+                                          prefix=prefix),
+                prefix=f"{prefix}.layers",
+            )
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
