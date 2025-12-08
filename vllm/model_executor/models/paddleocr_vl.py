@@ -52,7 +52,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
-    apply_rotary_emb_torch,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -581,7 +580,7 @@ class SiglipAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self.apply_rotary_emb = ApplyRotaryEmb(default=apply_rotary_emb_torch)
+        self.apply_rotary_emb = ApplyRotaryEmb()
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
