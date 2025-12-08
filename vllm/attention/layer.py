@@ -230,6 +230,10 @@ class Attention(nn.Module, AttentionLayerBase):
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
+        # NOTE: model_config may be None during certain tests
+        model_config = vllm_config.model_config
+        self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
@@ -241,6 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
+                use_mm_prefix=self.use_mm_prefix,
                 attn_type=attn_type,
             )
         else:
@@ -303,7 +308,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input()
+            and self.impl.supports_quant_query_input
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -338,7 +343,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input():
+            if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
