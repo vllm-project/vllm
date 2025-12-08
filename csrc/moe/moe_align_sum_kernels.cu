@@ -370,7 +370,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         // calc needed amount of shared mem for `cumsum` tensors
-        bool no_permute_mode = (topk_ids.numel() * 4 <= num_experts);
+        bool no_permute_mode = (topk_ids.numel() * 4 <= num_experts) && !has_expert_map;
         bool small_batch_expert_mode =
             (topk_ids.numel() < 1024) && (num_experts <= 64);
 
