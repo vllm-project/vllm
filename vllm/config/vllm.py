@@ -870,7 +870,7 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-        if self.parallel_config.enable_dbo:
+        if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in [
                 "deepep_low_latency",

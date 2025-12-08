@@ -23,7 +23,7 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
-
+from typing import Any
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
@@ -63,7 +63,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # The dispatch function returns a handle that the combine function
         # requires. Under DBO microbatching we must track one handle per
         # micro-batch to avoid races between threads.
-        self.handles = []
+        self.handles: list[Any | None] = []
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]

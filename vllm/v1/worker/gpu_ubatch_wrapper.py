@@ -105,7 +105,7 @@ class UBatchWrapper:
         self.comm_stream = torch.cuda.Stream(device=device)
         # Ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(
-            self.vllm_config.parallel_config.num_of_microbatches + 1
+            self.vllm_config.parallel_config.num_of_ubatches + 1
         )
 
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
