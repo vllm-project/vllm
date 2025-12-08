@@ -1367,10 +1367,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "'--dataset-path' if required."
         )
 
-    # when using random datasets, default to ignoring EOS
+    # For random and sharegpt datasets, default to ignoring EOS
     # so generation runs to the requested length
     if (
-        args.dataset_name in ("random", "random-mm")
+        args.dataset_name in ("random", "random-mm", "sharegpt")
         and args.backend in OPENAI_COMPATIBLE_BACKENDS
     ):
         args.ignore_eos = True
