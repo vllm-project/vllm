@@ -304,6 +304,251 @@ def _benchmark_single_config(
     return float(timer.median) * 1e3
 
 
+def _tune_fused_moe_lora_ops(
+    ctx_list: list[BenchmarkContext],
+    args: argparse.Namespace,
+    search_space: list[Dict[str, Any]],
+    dtype: torch.dtype,
+    fieldnames: list[str],
+) -> None:
+    fused_ops = [
+        OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+        OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+        OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+        OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+    ]
+
+    block_m_values = sorted({cfg["block_m"] for cfg in search_space})
+
+    # Write CSV rows to os.devnull so no CSV file is created.
+    with open(os.devnull, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for ctx in ctx_list:
+            m_val = ctx.batch_size * ctx.seq_length
+            print(
+                f"Tuning fused_moe_lora M={m_val} over "
+                f"{len(block_m_values)} BLOCK_SIZE_M values "
+                f"and {len(search_space)} kernel configs"
+            )
+
+            best_joint_time_ms: float = float("inf")
+            best_cfg_per_op: Dict[OpType, Dict[str, Any]] = {}
+
+            for block_m in block_m_values:
+                block_cfgs = [
+                    cfg for cfg in search_space if cfg.get("block_m") == block_m
+                ]
+                if not block_cfgs:
+                    continue
+
+                per_op_best_cfg: Dict[OpType, Dict[str, Any]] = {}
+                per_op_best_time_ms: Dict[OpType, float] = {}
+                valid_for_all_ops = True
+
+                total_block_cfgs = len(block_cfgs)
+                log_interval = max(1, total_block_cfgs // 10)
+
+                for op in fused_ops:
+                    best_time_ms: float = float("inf")
+                    best_cfg: Optional[Dict[str, Any]] = None
+
+                    for idx, cfg in enumerate(block_cfgs, start=1):
+                        median_time_ms = _benchmark_single_config(
+                            cfg=cfg,
+                            ctx=ctx,
+                            op_type=op,
+                            arg_pool_size=args.arg_pool_size,
+                            cuda_graph_nops=args.cuda_graph_nops,
+                            expand_fn_add_inputs=None,
+                            test_correctness=args.test_correctness,
+                        )
+
+                        status = (
+                            "ok" if median_time_ms is not None else "out_of_resources"
+                        )
+
+                        row: Dict[str, Any] = {
+                            "op_type": op.name,
+                            "dtype": dtype_to_str(dtype),
+                            "batch_size": ctx.batch_size,
+                            "seq_length": ctx.seq_length,
+                            "hidden_size": ctx.hidden_size,
+                            "lora_rank": ctx.lora_rank,
+                            "num_loras": ctx.num_loras,
+                            "num_active_loras": ctx.num_active_loras,
+                            "num_slices": ctx.num_slices,
+                            "median_time_ms": (
+                                median_time_ms if median_time_ms is not None else ""
+                            ),
+                            "status": status,
+                        }
+                        for key in (
+                            "block_m",
+                            "block_n",
+                            "block_k",
+                            "num_warps",
+                            "num_stages",
+                            "num_ctas",
+                            "split_k",
+                            "group_size_m",
+                            "max_nreg",
+                        ):
+                            row[key] = cfg.get(key)
+                        writer.writerow(row)
+
+                        if (
+                            median_time_ms is not None
+                            and median_time_ms < best_time_ms
+                        ):
+                            best_time_ms = median_time_ms
+                            best_cfg = dict(cfg)
+
+                        if idx % log_interval == 0 or idx == total_block_cfgs:
+                            if best_cfg is not None and best_time_ms != float("inf"):
+                                print(
+                                    f"[M={m_val}] BLOCK_M={block_m} "
+                                    f"{op.name} [{idx}/{total_block_cfgs}] "
+                                    f"current best median_time_ms={best_time_ms:.3f}"
+                                )
+                            else:
+                                print(
+                                    f"[M={m_val}] BLOCK_M={block_m} "
+                                    f"{op.name} [{idx}/{total_block_cfgs}] benchmarking..."
+                                )
+
+                    if best_cfg is None:
+                        valid_for_all_ops = False
+                        break
+
+                    per_op_best_cfg[op] = best_cfg
+                    per_op_best_time_ms[op] = best_time_ms
+
+                if not valid_for_all_ops:
+                    continue
+
+                joint_time_ms = sum(per_op_best_time_ms.values())
+                if joint_time_ms < best_joint_time_ms:
+                    best_joint_time_ms = joint_time_ms
+                    best_cfg_per_op = {
+                        op: dict(cfg) for op, cfg in per_op_best_cfg.items()
+                    }
+
+                print(
+                    f"[M={m_val}] BLOCK_M={block_m} "
+                    f"joint_time_ms={joint_time_ms:.3f}, "
+                    f"best_joint_time_ms={best_joint_time_ms:.3f}"
+                )
+
+            if not best_cfg_per_op:
+                print(
+                    f"No valid fused_moe_lora configs found for M={m_val}; "
+                    "skipping JSON output for this context."
+                )
+                continue
+
+            if not args.save_json_dir:
+                continue
+
+            save_dir = Path(args.save_json_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            gpu_name = torch.cuda.get_device_name()
+            gpu_name = gpu_name.replace(" ", "_").replace("-", "_")
+
+            for op, best_cfg in best_cfg_per_op.items():
+                if op in (
+                    OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+                    OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+                ):
+                    op_name = (
+                        "fused_moe_lora_w13_shrink"
+                        if op.is_fused_moe_lora_shrink_fn()
+                        else "fused_moe_lora_w13_expand"
+                    )
+                elif op in (
+                    OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+                    OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+                ):
+                    op_name = (
+                        "fused_moe_lora_w2_shrink"
+                        if op.is_fused_moe_lora_shrink_fn()
+                        else "fused_moe_lora_w2_expand"
+                    )
+                else:
+                    # Should not happen for fused_moe tuning.
+                    continue
+
+                json_name = f"{gpu_name}_{op_name.upper()}.json"
+                json_path = save_dir / json_name
+
+                if json_path.exists() and not args.json_overwrite:
+                    base = json_name[:-5] if json_name.endswith(".json") else json_name
+                    idx = 1
+                    while True:
+                        candidate = save_dir / f"{base}_tuned_{idx}.json"
+                        if not candidate.exists():
+                            json_path = candidate
+                            break
+                        idx += 1
+                    print(
+                        f"JSON file {json_name} exists and --json-overwrite is not set; "
+                        f"writing tuned config to {json_path.name} instead."
+                    )
+                    config_data: Dict[str, Any] = {}
+                else:
+                    if json_path.exists():
+                        with json_path.open("r") as jf:
+                            config_data = json.load(jf)
+                    else:
+                        config_data = {}
+
+                max_loras_key = str(ctx.num_loras)
+                num_slices_key = str(ctx.num_slices)
+
+                # m, k, n follow the same convention as get_lora_op_configs.
+                m_val = ctx.batch_size * ctx.seq_length
+                is_shrink = op.is_shrink_fn()
+                if is_shrink:
+                    k_val = ctx.hidden_size
+                    n_val = ctx.lora_rank
+                else:
+                    k_val = ctx.lora_rank
+                    n_val = ctx.hidden_size
+
+                m_key = str(m_val)
+                k_key = str(k_val)
+                n_key = str(n_val)
+
+                config_data.setdefault(max_loras_key, {})
+                config_data[max_loras_key].setdefault(num_slices_key, {})
+                config_data[max_loras_key][num_slices_key].setdefault(m_key, {})
+                config_data[max_loras_key][num_slices_key][m_key].setdefault(
+                    k_key, {}
+                )
+
+                if (
+                    hasattr(args, "moe_intermediate_size")
+                    and args.moe_intermediate_size is not None
+                ):
+                    i_key = str(args.moe_intermediate_size)
+                    config_data[max_loras_key][num_slices_key][m_key][k_key].setdefault(
+                        n_key, {}
+                    )
+                    config_data[max_loras_key][num_slices_key][m_key][k_key][n_key][
+                        i_key
+                    ] = best_cfg
+                else:
+                    config_data[max_loras_key][num_slices_key][m_key][k_key][
+                        n_key
+                    ] = best_cfg
+
+                with json_path.open("w") as jf:
+                    json.dump(config_data, jf)
+                print(f"Tuned JSON config saved to {json_path}")
+
+
 def main(args: argparse.Namespace) -> None:
     if not HAS_TRITON:
         raise RuntimeError("Triton is not available; LoRA Triton kernels cannot run.")
@@ -312,28 +557,36 @@ def main(args: argparse.Namespace) -> None:
 
     _ensure_patched()
 
-    op_type = OpType.from_str(args.op_type)
-    if op_type not in (
-        OpType.LORA_SHRINK,
-        OpType.LORA_EXPAND,
-        OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
-        OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
-        OpType.FUSED_MOE_LORA_DOWN_SHRINK,
-        OpType.FUSED_MOE_LORA_DOWN_EXPAND,
-    ):
-        raise ValueError("Unsupported op_type for tuning.")
+    raw_op_type = args.op_type
+
+    # User-level fused MoE entry point: "fused_moe_lora" triggers joint tuning
+    # of all four fused MoE LoRA kernels (gate_up/down × shrink/expand).
+    if raw_op_type == "fused_moe_lora":
+        op_type: Optional[OpType] = None
+        is_fused_moe = True
+    else:
+        op_type = OpType.from_str(raw_op_type)
+        if op_type not in (
+            OpType.LORA_SHRINK,
+            OpType.LORA_EXPAND,
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        ):
+            raise ValueError("Unsupported op_type for tuning.")
+
+        is_fused_moe = op_type in (
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        )
 
     dtype = _to_torch_dtype(args.dtype)
 
     num_active_loras = (
         args.num_active_loras if args.num_active_loras is not None else args.num_loras
-    )
-
-    is_fused_moe = op_type in (
-        OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
-        OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
-        OpType.FUSED_MOE_LORA_DOWN_SHRINK,
-        OpType.FUSED_MOE_LORA_DOWN_EXPAND,
     )
 
     _maybe_auto_infer_dims(args, is_fused_moe)
@@ -398,7 +651,11 @@ def main(args: argparse.Namespace) -> None:
 
     expand_fn_add_inputs: Optional[bool]
     # For shrink or any fused_moe_lora op, benchmark_lora expects add_inputs to be None.
-    if op_type.is_shrink_fn() or op_type.is_fused_moe_lora_fn():
+    # When using the user-level "fused_moe_lora" op_type, op_type is None and
+    # is_fused_moe is True, so we also force expand_fn_add_inputs=None.
+    if op_type is None:
+        expand_fn_add_inputs = None
+    elif op_type.is_shrink_fn() or op_type.is_fused_moe_lora_fn():
         expand_fn_add_inputs = None
     else:
         expand_fn_add_inputs = bool(args.expand_add_inputs)
@@ -429,6 +686,14 @@ def main(args: argparse.Namespace) -> None:
         "median_time_ms",
         "status",
     ]
+
+    # For fused MoE LoRA ops, tune the four kernels jointly so that they share
+    # the same BLOCK_SIZE_M, using the sum of their median times as the joint
+    # objective. This also guarantees BLOCK_SIZE_M matches the value used in
+    # moe_lora_align_block_size.
+    if is_fused_moe:
+        _tune_fused_moe_lora_ops(ctx_list, args, search_space, dtype, fieldnames)
+        return
 
     # Write CSV rows to os.devnull so no CSV file is created.
     with open(os.devnull, "w", newline="") as f:
@@ -628,6 +893,7 @@ if __name__ == "__main__":
         choices=[
             "lora_shrink",
             "lora_expand",
+            "fused_moe_lora",
             "fused_moe_lora_gate_up_shrink",
             "fused_moe_lora_gate_up_expand",
             "fused_moe_lora_down_shrink",

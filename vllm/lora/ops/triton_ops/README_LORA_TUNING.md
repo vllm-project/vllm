@@ -96,11 +96,20 @@ The only persisted outputs are the tuned JSON configs.
   ```text
   lora_shrink
   lora_expand
+  fused_moe_lora
   fused_moe_lora_gate_up_shrink
   fused_moe_lora_gate_up_expand
   fused_moe_lora_down_shrink
   fused_moe_lora_down_expand
   ```
+
+  For fused MoE LoRA, `fused_moe_lora` is a **user-level shorthand** that
+  triggers **joint tuning** of all four fused MoE kernels:
+  `fused_moe_lora_gate_up_shrink`, `fused_moe_lora_gate_up_expand`,
+  `fused_moe_lora_down_shrink`, and `fused_moe_lora_down_expand`. The tuner
+  chooses a shared `BLOCK_SIZE_M` for these four kernels (per workload) based
+  on the sum of their median times, and writes configs to the corresponding
+  JSON files (`*_FUSED_MOE_LORA_W13_*.json` / `*_FUSED_MOE_LORA_W2_*.json`).
 
 - `--dtype`  
   Data type string, e.g.:
@@ -212,6 +221,32 @@ These are relevant when `--op-type` is one of the fused MoE LoRA ops:
   To generate usable fused MoE LoRA JSON for runtime, you must provide the
   correct intermediate size of your model’s MoE FFN (often equal to
   `intermediate_size` or `moe_intermediate_size` in the model config).
+
+#### Why fused MoE kernels are tuned jointly
+
+Internally, fused MoE LoRA uses a helper (`moe_lora_align_block_size`) to
+pre-align tokens and experts into `BLOCK_SIZE_M`-sized chunks before launching
+the Triton kernels. If the four fused MoE kernels (gate_up/down × shrink/expand)
+were tuned completely independently and ended up with different `BLOCK_SIZE_M`
+values for the same `(max_loras, num_slices, m, k, n, i)` workload, the
+alignment step and the actual kernel launches would disagree on how the M
+dimension is partitioned. This can lead to:
+
+- Illegal memory access (reading/writing past allocated buffers),
+- Silent misalignment between padded tokens and output slices,
+- Inconsistent performance characteristics across the four kernels.
+
+To avoid this class of issues, `benchmark_lora_tuning.py` **always tunes the
+four fused MoE LoRA kernels jointly per workload**:
+
+- A single `BLOCK_SIZE_M` is chosen for all four kernels, based on the **sum**
+  of their median times (joint objective).
+- The remaining kernel parameters (`block_n`, `block_k`, `num_warps`,
+  `num_stages`, `split_k`, etc.) are still tuned per-kernel.
+- Whether you pass `--op-type fused_moe_lora` or one of the lower-level
+  fused MoE op types, the tuner will internally run the same joint procedure
+  and populate the corresponding JSON files for
+  `fused_moe_lora_w13_shrink/expand` and `fused_moe_lora_w2_shrink/expand`.
 
 ### 3.5 Multi-M tuning
 
