@@ -94,9 +94,6 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-    assert expert_mask is None or torch.all((expert_mask == 0) | (expert_mask == 1)), (
-        "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
-    )
     return fused_moe(
         hidden_states,
         w1,

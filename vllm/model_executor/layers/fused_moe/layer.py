@@ -521,27 +521,9 @@ class FusedMoE(CustomOp):
             vllm_config=vllm_config, dp_size=dp_size_
         )
         if self.use_ep and self.rocm_aiter_fmoe_enabled:
-            # Aiter requires mask to be in binary format.
-            expert_mask = torch.ones(
-                (self.global_num_experts + self.num_fused_shared_experts + 1,),
-                dtype=torch.int32,
-            )
-            expert_mask[-1] = 0
-            expert_mask[: self.global_num_experts] = self.expert_map > -1
-            self.expert_mask = expert_mask
-            self.expert_map = torch.cat(
-                (
-                    self.expert_map,
-                    torch.tensor(
-                        [
-                            self.local_num_experts + i
-                            for i in range(self.num_fused_shared_experts)
-                        ],
-                        dtype=torch.int32,
-                    ),
-                ),
-                dim=0,
-            )
+            assert self.expert_mask is None or torch.all(
+                (expert_mask == 0) | (expert_mask == 1)
+            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
