@@ -25,8 +25,8 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.utils import CompileFactors, Range, hash_factors
 from vllm.config.compilation import DynamicShapesType
+from vllm.config.utils import CompileFactors, Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
