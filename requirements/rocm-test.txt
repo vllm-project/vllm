@@ -49,6 +49,7 @@ blobfile==3.0.0
     # Multi-Modal Models Test
 decord==0.6.0
     # video processing, required by entrypoints/openai/test_video.py
+rapidfuzz==3.12.1
 
 # OpenAI compatibility and testing
 gpt-oss==0.0.8
@@ -58,9 +59,13 @@ schemathesis==3.39.15
 
 # Evaluation and benchmarking
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
+jiwer==4.0.0
 
 # Required for multiprocessed tests that use spawn method, Datasets and Evaluate Test
 multiprocess==0.70.16
+
+# Required for v1/metrics/test_engine_logger_apis.py
+ray[cgraph,default]>=2.48.0
 
 # Plugins test
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
@@ -70,8 +75,8 @@ torchgeo==0.7.0
 mteb==2.1.2
 
 # Data processing
-xgrammar @ git+https://github.com/mlc-ai/xgrammar.git@eafd4db51b78acc64b3f0764ef27dfd206c28628
-    # Test async scheduling
+xgrammar==0.1.27
+# Test async scheduling
 
 # Utilities
 num2words==0.5.14

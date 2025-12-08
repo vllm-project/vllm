@@ -15,6 +15,7 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.compilation import CompilationMode
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -51,7 +52,6 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -59,6 +59,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
 class Worker(WorkerBase):
@@ -259,7 +260,11 @@ class Worker(WorkerBase):
                 self.vllm_config, self.device
             )
         else:
-            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
+            from vllm.v1.worker.gpu_model_runner import (
+                GPUModelRunner as GPUModelRunnerV1,
+            )
+
+            self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -403,15 +408,31 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
-        # warm up sizes that are not in cudagraph capture sizes,
-        # but users still want to compile for better performance,
-        # e.g. for the max-num-batched token size in chunked prefill.
-        compile_sizes = self.vllm_config.compilation_config.compile_sizes
-        warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
-        if not self.model_config.enforce_eager:
-            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            if capture_sizes is not None:
-                warmup_sizes = [x for x in warmup_sizes if x not in capture_sizes]
+        warmup_sizes = []
+
+        if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
+            # warm up sizes that are not in cudagraph capture sizes,
+            # but users still want to compile for better performance,
+            # e.g. for the max-num-batched token size in chunked prefill.
+            compile_sizes = self.vllm_config.compilation_config.compile_sizes
+            warmup_sizes = compile_sizes.copy() if compile_sizes is not None else []
+            cg_capture_sizes: list[int] = []
+
+            if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                cg_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+                cg_capture_sizes = [] if cg_sizes is None else cg_sizes
+                warmup_sizes = [x for x in warmup_sizes if x not in cg_capture_sizes]
+
+            compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
+            # For each compile_range, if none of the batch sizes
+            # in warmup_sizes or cudagraph_capture_sizes are in the range,
+            # add the end of the range to ensure compilation/warmup.
+            all_sizes = set(cg_capture_sizes)
+            all_sizes.update([x for x in warmup_sizes if isinstance(x, int)])
+            for compile_range in compile_ranges:
+                if not any(x in compile_range for x in all_sizes):
+                    warmup_sizes.append(compile_range.end)
+
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
@@ -552,11 +573,11 @@ class Worker(WorkerBase):
 
         if (
             parallel_config.pipeline_parallel_size > 1
-            and compilation_config.pass_config.enable_sequence_parallelism
+            and compilation_config.pass_config.enable_sp
             and forward_pass
         ):
             # currently only supported by V1 GPUModelRunner
-            assert isinstance(self.model_runner, GPUModelRunner)
+            assert not self.use_v2_model_runner
             num_scheduled_tokens_np = np.array(
                 list(scheduler_output.num_scheduled_tokens.values()),
                 dtype=np.int32,
@@ -564,7 +585,7 @@ class Worker(WorkerBase):
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
             # in `execute_model`) but this requires a larger refactor of PP.
-            _, batch_desc, _, _ = (
+            _, batch_desc, _, _, _ = (
                 self.model_runner._determine_batch_execution_and_padding(
                     num_tokens=num_scheduled_tokens,
                     num_reqs=len(num_scheduled_tokens_np),

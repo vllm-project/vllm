@@ -1918,7 +1918,11 @@ def fused_experts_impl(
 
         if not use_unpermute:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-                curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+                curr_topk_ids,
+            config["BLOCK_SIZE_M"],
+            global_num_experts,
+            expert_map,
+            ignore_invalid_experts=True,
             )
         else:
             max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
@@ -1985,6 +1989,9 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        if expert_map is not None:
+            intermediate_cache3.zero_()
 
         invoke_fused_moe_kernel(
             qintermediate_cache2,
