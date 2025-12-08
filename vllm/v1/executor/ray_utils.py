@@ -401,6 +401,7 @@ def initialize_ray_cluster(
     else:
         logger.info("No current placement group found. Creating a new placement group.")
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+        logger.info(f"the device is {num_devices_in_cluster}.")
         # Log a warning message and delay resource allocation failure response.
         # Avoid immediate rejection to allow user-initiated placement group
         # created and wait cluster to be ready

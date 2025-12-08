@@ -91,10 +91,7 @@ class RayTrainingActor:
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
             p.data.zero_()
-        if current_platform.is_xpu():
-            torch.xpu.synchronize()
-        else:
-            torch.cuda.synchronize()
+        current_platform.synchronize()
         # The argument for `get_device_uuid` is the index of the GPU in the
         # list of visible devices.
         #from vllm.platforms import current_platform
@@ -157,10 +154,7 @@ class RayTrainingActor:
                     p.data.view(-1).view(dtype=torch.uint8), non_blocking=True
                 )
                 offset += get_size(p)
-            if current_platform.is_xpu():
-                torch.xpu.synchronize()
-            else:
-                torch.cuda.synchronize()
+            current_platform.synchronize()
             s.send_pyobj(named_tensors)
             s.recv()
         s.send_pyobj(None)
@@ -168,10 +162,7 @@ class RayTrainingActor:
         s.close()
         del buffer
         gc.collect()
-        if current_platform.is_xpu():
-            torch.xpu.empty_cache()
-        else:
-            torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
 
 # Ray manages four GPUs.

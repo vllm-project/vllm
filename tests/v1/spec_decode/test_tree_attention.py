@@ -16,6 +16,10 @@ from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.platforms import current_platform
+
+DEVICE = current_platform.device_type
+
 
 if not is_flash_attn_varlen_func_available():
     pytest.skip(
@@ -24,10 +28,12 @@ if not is_flash_attn_varlen_func_available():
     )
 
 
+
+
 class MockAttentionLayer(torch.nn.Module):
-    _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _k_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
-    _v_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+    _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
+    _k_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
+    _v_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE)
 
     def __init__(self):
         super().__init__()
@@ -142,9 +148,9 @@ def forward_attention(
 
 def test_tree_attn_correctness() -> None:
     torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    current_platform.manual_seed_all(42)
 
-    device = "cuda"
+    device = DEVICE
     tree_attn_masks = {
         # Chain.
         "[(0,), (0, 0), (0, 0, 0)]": torch.tensor(
