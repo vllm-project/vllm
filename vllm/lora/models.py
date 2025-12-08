@@ -700,6 +700,7 @@ class LoRAModelManager:
         ]
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
+        lora_device = torch.device("cpu")
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: list[LoRALayerWeights | None] = []
             replaced_module: set[str] = set()
@@ -708,6 +709,7 @@ class LoRAModelManager:
                 lora = self._get_lora_layer_weights(lora_model, r)
                 replacement_loras.append(lora)
                 if lora:
+                    lora_device = lora.lora_a.device
                     has_replacement = True
                     replaced_module.add(r)
             if not has_replacement:
@@ -735,25 +737,20 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
-            
-        lora = next(iter(lora_model.loras.values()), None)
-        assert lora is not None
-        device = (
-            lora.lora_a[0].device
-            if isinstance(lora.lora_a, list)
-            else lora.lora_a.device
-        )
-        # Execute pin_memory after LoRA weight merging, mainly because: 
-        # 1. Some MoE models have a large number of LoRA weights. If we 
-        # perform # pin_memory immediately after loading weights, the 
-        # overhead is significant. 
-        # 2. The weight packing above (e.g., pack_moe) may invalidate the 
+
+        # Execute pin_memory after LoRA weight merging, mainly because:
+        # 1. Some MoE models have a large number of LoRA weights. If we
+        # perform # pin_memory immediately after loading weights, the
+        # overhead is significant.
+        # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
         if pin_memory:
             for lora in lora_model.loras.values():
                 if isinstance(lora.lora_a, list):
                     for index in range(len(lora.lora_a)):
+                        if lora.lora_a[index] is None:
+                            continue
                         lora.lora_a[index] = lora.lora_a[index].pin_memory()
                         lora.lora_b[index] = lora.lora_b[index].pin_memory()
                 else:
