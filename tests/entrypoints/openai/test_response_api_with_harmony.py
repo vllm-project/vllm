@@ -726,7 +726,7 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
-    from vllm.entrypoints.harmony_utils import get_system_message
+    from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
     # Test with custom tools enabled - commentary channel should be available
     sys_msg = get_system_message(with_custom_tools=True)

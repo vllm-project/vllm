@@ -189,7 +189,7 @@ def compute_nixl_compatibility_hash(
     }
 
     compat_hash = hash_factors(factors)
-    logger.info(
+    logger.debug(
         "NIXL compatibility hash: %s (model=%s, dtype=%s, num_kv_heads=%d, "
         "cache_dtype=%s, attn_backend=%s)",
         compat_hash,

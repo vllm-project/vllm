@@ -969,7 +969,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -2050,14 +2049,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
-        model = cast(SupportsMultiModal, self.model)
         return next(
             grouped_mm_kwargs
             for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 
