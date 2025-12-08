@@ -327,8 +327,8 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 5: If model is Encoder-only self-attention type
-            if attn_type is not None and attn_type in (AttentionType.ENCODER_ONLY):
-                logger.info("Using FlexAttention backend  on V1 engine.")
+            if attn_type is not None and attn_type == AttentionType.ENCODER_ONLY:
+                logger.info("Using FlexAttention backend on V1 engine.")
                 return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
