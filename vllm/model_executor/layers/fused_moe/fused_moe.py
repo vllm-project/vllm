@@ -1168,9 +1168,20 @@ def grouped_topk(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
+    num_fused_shared_experts: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    use_fused_moe_grouped_topk = envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
+    enable_fused_shared_experts = num_fused_shared_experts > 0
+    if enable_fused_shared_experts and use_fused_moe_grouped_topk:
+        logger.info(
+            "Fused MoE grouped topk is enabled with fused shared experts.",
+            "Only one of these options can be used at a time",
+            "Fused MoE grouped topk is disabled.",
+        )
+        use_fused_moe_grouped_topk = False
+
     if (
-        envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
+        use_fused_moe_grouped_topk
         and current_platform.is_cuda()
         and num_expert_group <= 32
         and topk <= 32
@@ -1198,6 +1209,7 @@ def grouped_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     num_token = scores.size(0)
+    num_experts = scores.size(1)
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
         # scores for expert selection but original scores for routing weights
@@ -1226,18 +1238,45 @@ def grouped_topk(
     tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=use_sorted)[1]
+        topk_ids = torch.topk(
+            tmp_scores,
+            k=topk,
+            dim=-1,
+            sorted=(use_sorted or enable_fused_shared_experts),
+        )[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
         topk_weights, topk_ids = torch.topk(
-            tmp_scores, k=topk, dim=-1, sorted=use_sorted
+            tmp_scores,
+            k=topk,
+            dim=-1,
+            sorted=(use_sorted or enable_fused_shared_experts),
         )
 
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if enable_fused_shared_experts:
+        assert routed_scaling_factor is not None, "With num_fused_shared_experts>0"
+        ", routed_scaling_factor need to be provided"
+        topk_ids[:, -1] = torch.randint(
+            low=num_experts,
+            high=num_experts + num_fused_shared_experts,
+            size=(topk_ids.size(0),),
+            dtype=topk_ids.dtype,
+            device=topk_ids.device,
+        )
+        if routed_scaling_factor != 1.0:
+            topk_weights[:, -1] = (
+                topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
+            )
 
-    if routed_scaling_factor != 1.0:
+    if renormalize:
+        if not enable_fused_shared_experts:
+            topk_weights_sum = topk_weights.sum(dim=-1, keepdim=True)
+        else:
+            topk_weights_sum = topk_weights[:, :-1].sum(dim=-1, keepdim=True)
+        topk_weights = topk_weights / topk_weights_sum
+
+    if not enable_fused_shared_experts and routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 

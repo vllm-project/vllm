@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
-from functools import partial
 from typing import Literal, cast, get_args, overload
 
 import torch
@@ -57,6 +57,8 @@ from vllm.utils.torch_utils import (
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
+    from vllm._custom_ops import moe_fused_gate
+
     from .fused_moe import eplb_map_to_physical_and_record, fused_experts
 else:
     fused_experts = None  # type: ignore
@@ -94,6 +96,10 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 )
 
 logger = init_logger(__name__)
+
+
+def is_power_of_two(n):
+    return n > 0 and math.log2(n).is_integer()
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -410,6 +416,11 @@ class FusedMoE(CustomOp):
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
+        enable_fused_shared_experts = envs.VLLM_USE_CUDA_FUSION_SHARED_EXPERTS
+        if enable_fused_shared_experts:
+            assert n_shared_experts is not None
+            num_experts += n_shared_experts
+            top_k += n_shared_experts
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
@@ -443,7 +454,7 @@ class FusedMoE(CustomOp):
             vllm_config.parallel_config.expert_placement_strategy
         )
 
-        # ROCm aiter shared experts fusion
+        # ROCm aiter and CUDA shared experts fusion
         self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.aiter_fmoe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -451,16 +462,19 @@ class FusedMoE(CustomOp):
 
         self.num_fused_shared_experts = (
             n_shared_experts
-            if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
+            if n_shared_experts is not None
+            and (self.aiter_fmoe_shared_expert_enabled or enable_fused_shared_experts)
             else 0
         )
         if (
             not self.aiter_fmoe_shared_expert_enabled
+            and not enable_fused_shared_experts
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
                 "n_shared_experts is only supported on ROCm aiter when "
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+                "and on CUDA when VLLM_USE_CUDA_FUSION_SHARED_EXPERTS is enabled"
             )
 
         # Determine expert maps
@@ -508,6 +522,15 @@ class FusedMoE(CustomOp):
                 self.global_num_experts,
                 get_compressed_expert_map(self.expert_map),
             )
+            if self.num_fused_shared_experts > 0:
+                logger.warning(
+                    "With EP enabled and share expert fusion enabled"
+                    ", share expert replica should be same as ep_size"
+                    "got share expert replica = %d"
+                    "and ep_size = %d",
+                    self.num_fused_shared_experts,
+                    self.ep_size,
+                )
         else:
             self.local_num_experts, self.expert_map, self.expert_mask = (
                 self.global_num_experts,
@@ -516,10 +539,10 @@ class FusedMoE(CustomOp):
             )
 
         self.top_k = top_k
-
-        self._init_aiter_shared_experts_topK_buffer(
-            vllm_config=vllm_config, dp_size=dp_size_
-        )
+        if self.aiter_fmoe_shared_expert_enabled:
+            self._init_aiter_shared_experts_topK_buffer(
+                vllm_config=vllm_config, dp_size=dp_size_
+            )
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -1579,24 +1602,40 @@ class FusedMoE(CustomOp):
             if rocm_aiter_ops.is_fused_moe_enabled():
                 if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                     assert self.num_fused_shared_experts == 0
-                grouped_topk_impl = partial(
-                    rocm_aiter_grouped_topk,
-                    num_fused_shared_experts=self.num_fused_shared_experts,
-                )
+                grouped_topk_impl = rocm_aiter_grouped_topk
             else:
                 grouped_topk_impl = grouped_topk
 
-            topk_weights, topk_ids = grouped_topk_impl(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                num_expert_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-            )
+            if (
+                envs.VLLM_USE_FUSED_MOE_ROUTER
+                and self.e_score_correction_bias is not None
+                and is_power_of_two(self.e_score_correction_bias.shape[0])
+            ):
+                topk_weights, topk_ids = moe_fused_gate(
+                    input_tensor=router_logits.to(dtype=torch.float32),
+                    bias=self.e_score_correction_bias.data.to(dtype=torch.float32),
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    topk=self.top_k,
+                    num_fused_shared_experts=self.num_fused_shared_experts,
+                    routed_scaling_factor=self.routed_scaling_factor
+                    if self.routed_scaling_factor is not None
+                    else 1.0,
+                    apply_routed_scaling_factor_on_output=False,
+                )
+            else:
+                topk_weights, topk_ids = grouped_topk_impl(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                    e_score_correction_bias=self.e_score_correction_bias,
+                    num_fused_shared_experts=self.num_fused_shared_experts,
+                )
         elif self.e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
