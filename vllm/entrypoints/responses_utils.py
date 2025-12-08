@@ -136,7 +136,7 @@ def _maybe_combine_reasoning_and_tool_call(
 def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
 ) -> list[ChatCompletionMessageParam]:
-    """This function wraps construct_chat_message_with_tool_call
+    """This function wraps _construct_single_message_from_response_item
     Because some chatMessages come from multiple response items
     for example a reasoning item and a MCP tool call are two response items
     but are one chat message
@@ -147,12 +147,12 @@ def construct_chat_messages_with_tool_call(
         if maybe_combined_message is not None:
             messages[-1] = maybe_combined_message
         else:
-            messages.append(construct_chat_message_with_tool_call(item))
+            messages.append(_construct_single_message_from_response_item(item))
 
     return messages
 
 
-def construct_chat_message_with_tool_call(
+def _construct_single_message_from_response_item(
     item: ResponseInputOutputItem,
 ) -> ChatCompletionMessageParam:
     if isinstance(item, ResponseFunctionToolCall):
