@@ -577,9 +577,8 @@ def invoke_fused_moe_kernel(
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
-    if not use_unpermute:
+    if sorted_token_ids is not None:
         assert sorted_token_ids.stride(0) == 1
-
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None or triton.cdiv(
@@ -598,7 +597,7 @@ def invoke_fused_moe_kernel(
 
     M = A.size(0)
     num_tokens = M * top_k
-    if not use_unpermute:
+    if sorted_token_ids is not None:
         EM = sorted_token_ids.size(0)
         if A.size(0) < config["BLOCK_SIZE_M"]:
             # optimize for small batch_size.
@@ -1919,10 +1918,10 @@ def fused_experts_impl(
         if not use_unpermute:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
                 curr_topk_ids,
-            config["BLOCK_SIZE_M"],
-            global_num_experts,
-            expert_map,
-            ignore_invalid_experts=True,
+                config["BLOCK_SIZE_M"],
+                global_num_experts,
+                expert_map,
+                ignore_invalid_experts=True,
             )
         else:
             max_num_tokens_padded = topk_ids.numel() * config["BLOCK_SIZE_M"]
