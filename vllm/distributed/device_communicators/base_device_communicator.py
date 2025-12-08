@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from weakref import WeakValueDictionary
-
 from typing import Any
+from weakref import WeakValueDictionary
 
 import torch
 import torch.distributed as dist
