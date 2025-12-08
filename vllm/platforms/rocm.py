@@ -234,7 +234,7 @@ class RocmPlatform(Platform):
             assert block_size == 1, (
                 "Sparse MLA backend on ROCm only supports block size 1 for now."
             )
-            logger.info_once("Using Sparse MLA backend on V1 engine.")
+            logger.info_once("Using Sparse MLA backend.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
         if use_mla:
@@ -246,17 +246,17 @@ class RocmPlatform(Platform):
                 )
             if selected_backend == AttentionBackendEnum.TRITON_MLA:
                 if block_size != 1:
-                    logger.info_once("Using Triton MLA backend on V1 engine.")
+                    logger.info_once("Using Triton MLA backend.")
                     return AttentionBackendEnum.TRITON_MLA.get_path()
                 raise ValueError(
                     f" The selected backend, {selected_backend.name},"
                     f"does not support block size {block_size}."
                 )
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
-                logger.info("Using AITER MLA backend on V1 engine.")
+                logger.info("Using AITER MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
             if selected_backend == AttentionBackendEnum.ROCM_AITER_TRITON_MLA:
-                logger.info("Using AITER TRITON MLA backend on V1 engine.")
+                logger.info("Using AITER TRITON MLA backend.")
                 return AttentionBackendEnum.ROCM_AITER_TRITON_MLA.get_path()
 
             raise ValueError(
@@ -273,20 +273,20 @@ class RocmPlatform(Platform):
             selected_backend = AttentionBackendEnum[attn_backend_override]
 
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
-            logger.info("Using FlexAttention backend on V1 engine.")
+            logger.info("Using FlexAttention backend.")
             return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
-            logger.info("Using Triton Attention backend on V1 engine.")
+            logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         if selected_backend == AttentionBackendEnum.ROCM_ATTN:
-            logger.info("Using Rocm Attention backend on V1 engine.")
+            logger.info("Using Rocm Attention backend.")
             return AttentionBackendEnum.ROCM_ATTN.get_path()
 
         if selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
             if on_gfx9():
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
             else:
                 raise ValueError(
@@ -295,25 +295,25 @@ class RocmPlatform(Platform):
                 )
 
         if selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            logger.info("Using Aiter Unified Attention backend on V1 engine.")
+            logger.info("Using Aiter Unified Attention backend.")
             return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
         # Handle automatic backend selection based on environment variables
         if selected_backend is None:
             # Priority 1: Check for AITER Unified Attention (must check before MHA)
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-                logger.info("Using Aiter Unified Attention backend on V1 engine.")
+                logger.info("Using Aiter Unified Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
             # Priority 2: Check for AITER MHA (Flash Attention)
             # Only use if explicitly enabled (not just VLLM_ROCM_USE_AITER=1)
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
             if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
-                logger.info("Using Rocm Attention backend on V1 engine.")
+                logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
             # Priority 4: Check for AITER enabled without specific flags
@@ -323,16 +323,16 @@ class RocmPlatform(Platform):
                 and on_gfx9()
                 and envs.VLLM_ROCM_USE_AITER_MHA is not False
             ):
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 5: If model is Encoder-only self-attention type
             if attn_type is not None and attn_type == AttentionType.ENCODER_ONLY:
-                logger.info("Using FlexAttention backend on V1 engine.")
+                logger.info("Using FlexAttention backend.")
                 return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
             # Default: Triton Unified Attention
-            logger.info("Using Triton Attention backend on V1 engine.")
+            logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         raise RuntimeError(
