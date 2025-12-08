@@ -8,6 +8,7 @@ as an alternative to the pull-based Prometheus metrics.
 """
 
 import os
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -17,6 +18,9 @@ from vllm.v1.metrics.stats import (
     MultiModalCacheStats,
     SchedulerStats,
 )
+
+if TYPE_CHECKING:
+    from vllm.config import SupportsMetricsInfo
 
 logger = init_logger(__name__)
 
@@ -164,6 +168,28 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             callbacks=[self._observe_kv_cache_usage],
         )
 
+        # Engine sleep state
+        self.gauge_engine_sleep_state = self.meter.create_observable_gauge(
+            name="vllm.engine_sleep_state",
+            description=(
+                "Engine sleep state (awake=1, weights_offloaded=1, discard_all=1)"
+            ),
+            callbacks=[self._observe_sleep_state],
+        )
+
+        # LoRA metrics
+        self.gauge_lora_info = None
+        self.max_lora = None
+        if self.vllm_config.lora_config is not None:
+            if len(self.engine_indexes) > 1:
+                raise NotImplementedError("LoRA in DP mode is not supported yet.")
+            self.max_lora = self.vllm_config.lora_config.max_loras
+            self.gauge_lora_info = self.meter.create_observable_gauge(
+                name="vllm.lora_requests_info",
+                description="Running stats on LoRA requests",
+                callbacks=[self._observe_lora_info],
+            )
+
         # Counters for tokens and requests
         self.counter_prompt_tokens = self.meter.create_counter(
             name="vllm.prompt_tokens",
@@ -202,6 +228,46 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             unit="tokens",
         )
 
+        # External - KV connector prefix cache
+        self.counter_connector_prefix_cache_queries = self.meter.create_counter(
+            name="vllm.external_prefix_cache_queries",
+            description=(
+                "External prefix cache queries from KV connector (queried tokens)"
+            ),
+            unit="tokens",
+        )
+
+        self.counter_connector_prefix_cache_hits = self.meter.create_counter(
+            name="vllm.external_prefix_cache_hits",
+            description=(
+                "External prefix cache hits from KV connector (cached tokens)"
+            ),
+            unit="tokens",
+        )
+
+        # Multi-modal cache
+        self.counter_mm_cache_queries = self.meter.create_counter(
+            name="vllm.mm_cache_queries",
+            description="Multi-modal cache queries (number of queried items)",
+            unit="items",
+        )
+
+        self.counter_mm_cache_hits = self.meter.create_counter(
+            name="vllm.mm_cache_hits",
+            description="Multi-modal cache hits (number of cached items)",
+            unit="items",
+        )
+
+        # Corrupted requests counter (conditional on env var)
+        import vllm.envs as envs
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            self.counter_corrupted_requests = self.meter.create_counter(
+                name="vllm.corrupted_requests",
+                description="Corrupted requests with NaNs in logits",
+                unit="requests",
+            )
+
         # Histograms for latencies
         self.histogram_time_to_first_token = self.meter.create_histogram(
             name="vllm.time_to_first_token_seconds",
@@ -233,8 +299,85 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             unit="s",
         )
 
+        self.histogram_prefill_time_request = self.meter.create_histogram(
+            name="vllm.request_prefill_time_seconds",
+            description="Time spent in PREFILL phase",
+            unit="s",
+        )
+
+        self.histogram_decode_time_request = self.meter.create_histogram(
+            name="vllm.request_decode_time_seconds",
+            description="Time spent in DECODE phase",
+            unit="s",
+        )
+
+        # Histograms of counts
+        self.histogram_num_prompt_tokens_request = self.meter.create_histogram(
+            name="vllm.request_prompt_tokens",
+            description="Number of prefill tokens per request",
+            unit="tokens",
+        )
+
+        self.histogram_num_generation_tokens_request = self.meter.create_histogram(
+            name="vllm.request_generation_tokens",
+            description="Number of generation tokens per request",
+            unit="tokens",
+        )
+
+        self.histogram_iteration_tokens = self.meter.create_histogram(
+            name="vllm.iteration_tokens_total",
+            description="Number of tokens per engine_step",
+            unit="tokens",
+        )
+
+        self.histogram_max_num_generation_tokens_request = self.meter.create_histogram(
+            name="vllm.request_max_num_generation_tokens",
+            description="Maximum number of requested generation tokens",
+            unit="tokens",
+        )
+
+        self.histogram_n_request = self.meter.create_histogram(
+            name="vllm.request_params_n",
+            description="The n request parameter",
+            unit="1",
+        )
+
+        self.histogram_max_tokens_request = self.meter.create_histogram(
+            name="vllm.request_params_max_tokens",
+            description="The max_tokens request parameter",
+            unit="tokens",
+        )
+
+        self.histogram_request_time_per_output_token = self.meter.create_histogram(
+            name="vllm.request_time_per_output_token_seconds",
+            description="Time per output token per request",
+            unit="s",
+        )
+
         # Store latest scheduler stats for observable gauges
         self._latest_scheduler_stats: dict[int, SchedulerStats] = {}
+
+        # Store latest sleep state for observable gauge
+        self._sleep_state: dict[int, dict[str, int]] = {}
+        for engine_idx in self.engine_indexes:
+            self._sleep_state[engine_idx] = {
+                "awake": 1,
+                "weights_offloaded": 0,
+                "discard_all": 0,
+            }
+
+        # Store LoRA adapter state for observable gauge
+        self._lora_state: dict[int, dict[str, str]] = {}
+        if self.gauge_lora_info is not None:
+            for engine_idx in self.engine_indexes:
+                self._lora_state[engine_idx] = {
+                    "waiting_lora_adapters": "",
+                    "running_lora_adapters": "",
+                }
+
+        # Store cache config info for observable gauge
+        self._cache_config_info: dict[int, dict[str, str]] = {}
+        self.gauge_cache_config_info: metrics.ObservableGauge | None = None
 
     def record(
         self,
@@ -249,15 +392,47 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
         if scheduler_stats is not None:
             self._latest_scheduler_stats[engine_idx] = scheduler_stats
 
+            attrs = {**self.common_attributes, "engine": str(engine_idx)}
+
             # Record prefix cache metrics
             self.counter_prefix_cache_queries.add(
                 scheduler_stats.prefix_cache_stats.queries,
-                attributes={**self.common_attributes, "engine": str(engine_idx)},
+                attributes=attrs,
             )
             self.counter_prefix_cache_hits.add(
                 scheduler_stats.prefix_cache_stats.hits,
-                attributes={**self.common_attributes, "engine": str(engine_idx)},
+                attributes=attrs,
             )
+
+            # Record connector prefix cache metrics
+            if scheduler_stats.connector_prefix_cache_stats is not None:
+                self.counter_connector_prefix_cache_queries.add(
+                    scheduler_stats.connector_prefix_cache_stats.queries,
+                    attributes=attrs,
+                )
+                self.counter_connector_prefix_cache_hits.add(
+                    scheduler_stats.connector_prefix_cache_stats.hits,
+                    attributes=attrs,
+                )
+
+            # Update LoRA adapter state
+            if self.gauge_lora_info is not None:
+                running_lora_adapters = ",".join(
+                    scheduler_stats.running_lora_adapters.keys()
+                )
+                waiting_lora_adapters = ",".join(
+                    scheduler_stats.waiting_lora_adapters.keys()
+                )
+                self._lora_state[engine_idx] = {
+                    "running_lora_adapters": running_lora_adapters,
+                    "waiting_lora_adapters": waiting_lora_adapters,
+                }
+
+        # Record multimodal cache metrics
+        if mm_cache_stats is not None:
+            attrs = {**self.common_attributes, "engine": str(engine_idx)}
+            self.counter_mm_cache_queries.add(mm_cache_stats.queries, attributes=attrs)
+            self.counter_mm_cache_hits.add(mm_cache_stats.hits, attributes=attrs)
 
         if iteration_stats is None:
             return
@@ -277,6 +452,29 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             iteration_stats.num_preempted_reqs, attributes=attrs
         )
 
+        # Record corrupted requests counter
+        import vllm.envs as envs
+
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            self.counter_corrupted_requests.add(
+                iteration_stats.num_corrupted_reqs, attributes=attrs
+            )
+
+        # Record iteration tokens histogram
+        self.histogram_iteration_tokens.record(
+            iteration_stats.num_prompt_tokens + iteration_stats.num_generation_tokens,
+            attributes=attrs,
+        )
+
+        # Record per-iteration histograms
+        for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
+            self.histogram_max_num_generation_tokens_request.record(
+                max_gen_tokens, attributes=attrs
+            )
+
+        for n_param in iteration_stats.n_params_iter:
+            self.histogram_n_request.record(n_param, attributes=attrs)
+
         # Record latency histograms
         for ttft in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token.record(ttft, attributes=attrs)
@@ -292,6 +490,8 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             }
 
             self.counter_request_success.add(1, attributes=finish_attrs)
+
+            # Latency histograms
             self.histogram_e2e_time_request.record(
                 finished_request.e2e_latency, attributes=attrs
             )
@@ -301,6 +501,31 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             self.histogram_inference_time_request.record(
                 finished_request.inference_time, attributes=attrs
             )
+            self.histogram_prefill_time_request.record(
+                finished_request.prefill_time, attributes=attrs
+            )
+            self.histogram_decode_time_request.record(
+                finished_request.decode_time, attributes=attrs
+            )
+
+            # Token count histograms
+            self.histogram_num_prompt_tokens_request.record(
+                finished_request.num_prompt_tokens, attributes=attrs
+            )
+            self.histogram_num_generation_tokens_request.record(
+                finished_request.num_generation_tokens, attributes=attrs
+            )
+
+            # Time per output token histogram
+            self.histogram_request_time_per_output_token.record(
+                finished_request.mean_time_per_output_token, attributes=attrs
+            )
+
+            # Max tokens param histogram (if provided)
+            if finished_request.max_tokens_param:
+                self.histogram_max_tokens_request.record(
+                    finished_request.max_tokens_param, attributes=attrs
+                )
 
     def _observe_running_requests(
         self, options: "metrics.CallbackOptions"
@@ -338,9 +563,114 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
             )
         return observations
 
+    def _observe_sleep_state(
+        self, options: "metrics.CallbackOptions"
+    ) -> list["metrics.Observation"]:
+        """Callback for engine sleep state gauge."""
+        observations = []
+        for engine_idx, states in self._sleep_state.items():
+            for state_name, state_value in states.items():
+                attrs = {
+                    **self.common_attributes,
+                    "engine": str(engine_idx),
+                    "sleep_state": state_name,
+                }
+                observations.append(metrics.Observation(state_value, attributes=attrs))
+        return observations
+
+    def _observe_lora_info(
+        self, options: "metrics.CallbackOptions"
+    ) -> list["metrics.Observation"]:
+        """Callback for LoRA requests info gauge."""
+        observations = []
+        if self.gauge_lora_info is not None:
+            for engine_idx, lora_info in self._lora_state.items():
+                attrs = {
+                    **self.common_attributes,
+                    "engine": str(engine_idx),
+                    "max_lora": str(self.max_lora),
+                    "waiting_lora_adapters": (lora_info["waiting_lora_adapters"]),
+                    "running_lora_adapters": (lora_info["running_lora_adapters"]),
+                }
+                # Use current timestamp as value
+                # (similar to Prometheus set_to_current_time)
+                import time
+
+                observations.append(metrics.Observation(time.time(), attributes=attrs))
+        return observations
+
+    def record_sleep_state(self, is_awake: int = 1, level: int = 0):
+        """Record engine sleep state.
+
+        Args:
+            is_awake: 0 if sleeping, 1 if awake
+            level: Sleep level (0=awake, 1=weights_offloaded, 2=discard_all)
+        """
+        for engine_idx in self.engine_indexes:
+            if is_awake == 1:
+                self._sleep_state[engine_idx]["awake"] = 1
+                self._sleep_state[engine_idx]["weights_offloaded"] = 0
+                self._sleep_state[engine_idx]["discard_all"] = 0
+            else:
+                self._sleep_state[engine_idx]["awake"] = 0
+                if level == 1:
+                    self._sleep_state[engine_idx]["weights_offloaded"] = 1
+                    self._sleep_state[engine_idx]["discard_all"] = 0
+                elif level == 2:
+                    self._sleep_state[engine_idx]["weights_offloaded"] = 0
+                    self._sleep_state[engine_idx]["discard_all"] = 1
+                else:
+                    self._sleep_state[engine_idx]["weights_offloaded"] = 0
+                    self._sleep_state[engine_idx]["discard_all"] = 0
+
+    def log_metrics_info(self, type: str, config_obj: "SupportsMetricsInfo"):
+        """Log metrics info from config objects.
+
+        Args:
+            type: Type of config (e.g., "cache_config")
+            config_obj: Config object that supports metrics_info()
+        """
+        from vllm.config import SupportsMetricsInfo
+
+        if not isinstance(config_obj, SupportsMetricsInfo):
+            return
+
+        # Create the observable gauge if not already created
+        if self.gauge_cache_config_info is None:
+            if type == "cache_config":
+                self.gauge_cache_config_info = self.meter.create_observable_gauge(
+                    name="vllm.cache_config_info",
+                    description="Information of the LLMEngine CacheConfig",
+                    callbacks=[self._observe_cache_config_info],
+                )
+            else:
+                logger.warning("Unknown metrics info type: %s", type)
+                return
+
+        # Store the cache config info for each engine
+        for engine_index in self.engine_indexes:
+            metrics_info = config_obj.metrics_info()
+            # Convert all values to strings for OTEL attributes
+            metrics_info_str = {k: str(v) for k, v in metrics_info.items()}
+            metrics_info_str["engine"] = str(engine_index)
+            self._cache_config_info[engine_index] = metrics_info_str
+
+    def _observe_cache_config_info(
+        self, options: "metrics.CallbackOptions"
+    ) -> list["metrics.Observation"]:
+        """Callback for cache config info gauge."""
+        observations = []
+        for engine_idx, config_info in self._cache_config_info.items():
+            attrs = {**self.common_attributes, **config_info}
+            # Info gauges are always set to 1
+            observations.append(metrics.Observation(1, attributes=attrs))
+        return observations
+
     def log_engine_initialized(self):
         """Log that the engine has been initialized."""
         logger.info(
             "OpenTelemetry metrics logger: Engine initialized with %d GPU blocks",
             self.vllm_config.cache_config.num_gpu_blocks or 0,
         )
+        # Log cache config info
+        self.log_metrics_info("cache_config", self.vllm_config.cache_config)
