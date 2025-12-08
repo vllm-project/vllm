@@ -1324,7 +1324,7 @@ class FusedMoE(CustomOp):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.tp_rank,
-                    load_full_w2=getattr(param, "load_full_w2", False),
+                    load_full_w2=getattr(param, "load_full_w2", True), # TODO: this is hack only for nemotron, should be removed later
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(

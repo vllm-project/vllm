@@ -784,7 +784,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 torch.ones(
                     num_experts,
                     hidden_size,
-                    intermediate_size_per_partition // 32,
+                    get_tensor_model_parallel_world_size()*intermediate_size_per_partition // 32,
                     dtype=torch.float32,
                 ),
                 requires_grad=False,
@@ -1048,7 +1048,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 
                 weight = layer.w2_weight
                 weight_scale = layer.w2_weight_scale
-                dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale).contiguous()
+                import math
+                dq_weight = dequant_mxfp8_to_bf16(weight, weight_scale[..., (layer.ep_rank) * math.ceil(weight.shape[-1] / 32) : (layer.ep_rank + 1) * math.ceil(weight.shape[-1] / 32) ]).contiguous()
                 layer.w2_weight = Parameter(dq_weight.data, requires_grad=False)
                 return
             

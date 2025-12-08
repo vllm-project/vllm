@@ -79,9 +79,10 @@ def mxfp8_e4m3_quantize(x: torch.Tensor, is_sf_swizzled_layout: bool=False) -> t
             "MX-FP8 quantization. Please install it with"
             "`pip install flashinfer`"
         ) from err
-
+    if x.shape[-1] % 32 != 0:
+        x = torch.nn.functional.pad(x, (0, 32 - (x.shape[-1] % 32)), mode='constant', value=0)
     x_q, x_scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=is_sf_swizzled_layout)
-    
+    x_q = x_q[..., :x.shape[-1]]
     if is_sf_swizzled_layout:
         padded_row, padded_col = compute_swizzled_layout_sf_size(x.shape[0], x.shape[1] // 32, 128)
         x_scales = x_scales.view(padded_row, padded_col)
@@ -124,7 +125,7 @@ def dequant_mxfp8_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor
     scales_expanded = scales_bf16.reshape(*x.shape[:-1], -1).repeat_interleave(
         32, dim=-1
     )
-    return x.to(torch.bfloat16) * scales_expanded
+    return x.to(torch.bfloat16) * scales_expanded[..., : x.shape[-1]]
 
 
 def _matmul_launch_metadata(grid, kernel, args):
