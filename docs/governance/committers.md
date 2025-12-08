@@ -2,16 +2,7 @@
 
 This document lists the current committers of the vLLM project and the core areas they maintain.
 Committers have write access to the vLLM repository and are responsible for reviewing and merging PRs.
-You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers.
-
-## Core Committers
-
-These committers are responsible for the overall governance of the vLLM project with administrative permissions.
-
-- [@WoosukKwon](https://github.com/WoosukKwon)
-- [@zhuohan123](https://github.com/zhuohan123)
-- [@simon-mo](https://github.com/simon-mo)
-- [@youkaichao](https://github.com/youkaichao)
+You can also refer to the [CODEOWNERS](https://github.com/vllm-project/vllm/blob/main/.github/CODEOWNERS) file for concrete file-level ownership and reviewers. Both this documents and the CODEOWNERS file are living documents and they complement each other.
 
 ## Active Committers
 
@@ -27,6 +18,7 @@ Sorted alphabetically by GitHub handle:
 - [@bigPYJ1151](https://github.com/bigPYJ1151): Intel CPU/XPU integration
 - [@chaunceyjiang](https://github.com/chaunceyjiang): Tool use and reasoning parser
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
+- [@esmeetu](https://github.com/esmeetu): developer marketing, community
 - [@gshtras](https://github.com/gshtras): AMD integration
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
@@ -38,22 +30,30 @@ Sorted alphabetically by GitHub handle:
 - [@KuntaiDu](https://github.com/KuntaiDu): KV Connector
 - [@LucasWilkinson](https://github.com/LucasWilkinson): Kernels and performance
 - [@luccafong](https://github.com/luccafong): Llama models, speculative decoding, distributed
+- [@markmc](https://github.com/markmc): Observability
 - [@mgoin](https://github.com/mgoin): Quantization and performance
 - [@NickLucche](https://github.com/NickLucche): KV connector
 - [@njhill](https://github.com/njhill): Distributed, API server, engine core
+- [@noooop](https://github.com/noooop): Pooling models
 - [@patrickvonplaten](https://github.com/patrickvonplaten): Mistral models, new model support
+- [@pavanimajety](https://github.com/pavanimajety): NVIDIA GPU integration
 - [@ProExpertProg](https://github.com/ProExpertProg): Compilation, startup UX
 - [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat): Core, distributed, disagg
 - [@ruisearch42](https://github.com/ruisearch42): Pipeline parallelism, Ray Support
 - [@russellb](https://github.com/russellb): Structured output, engine core, security
 - [@sighingnow](https://github.com/sighingnow): Qwen models, new model support
+- [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
 - [@tdoublep](https://github.com/tdoublep): State space models
-- [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance
+- [@tjtanaa](https://github.com/tjtanaa): AMD GPU integration
+- [@tlrmchlsmth](https://github.com/tlrmchlsmth): Kernels and performance, distributed, disagg
+- [@WoosukKwon](https://github.com/WoosukKwon): Project lead, engine core
 - [@yaochengji](https://github.com/yaochengji): TPU integration
-- [@yewentao256](https://github.com/yewentao256): Kernels and performance
 - [@yeqcharlotte](https://github.com/yeqcharlotte): Benchmark, Llama models
+- [@yewentao256](https://github.com/yewentao256): Kernels and performance
 - [@Yikun](https://github.com/Yikun): Pluggable hardware interface
+- [@youkaichao](https://github.com/youkaichao): Project lead, distributed, compile, community
 - [@ywang96](https://github.com/ywang96): Multimodality, benchmarks
+- [@zhuohan123](https://github.com/zhuohan123): Project lead, RL integration, numerics
 - [@zou3519](https://github.com/zou3519): Compilation
 
 ### Emeritus Committers
@@ -63,9 +63,8 @@ Committers who have contributed to vLLM significantly in the past (thank you!) b
 - [@andoorve](https://github.com/andoorve): Pipeline parallelism
 - [@cadedaniel](https://github.com/cadedaniel): Speculative decoding
 - [@comaniac](https://github.com/comaniac): KV cache management, pipeline parallelism
-- [@esmeetu](https://github.com/esmeetu)
 - [@LiuXiaoxuanPKU](https://github.com/LiuXiaoxuanPKU): Speculative decoding
-- [@pcmoritz](https://github.com/pcmoritz)
+- [@pcmoritz](https://github.com/pcmoritz): MoE
 - [@rkooo567](https://github.com/rkooo567): Chunked prefill
 - [@sroy745](https://github.com/sroy745): Speculative decoding
 - [@Yard1](https://github.com/Yard1): kernels and performance
@@ -74,7 +73,7 @@ Committers who have contributed to vLLM significantly in the past (thank you!) b
 ## Area Owners
 
 This section breaks down the active committers by vLLM components and lists the area owners.
-If you have PRs touching the area, please ping the area owner for review.
+If you have PRs touching the area, please feel free to ping the area owner for review.
 
 ### Engine Core
 
@@ -85,7 +84,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - AsyncLLM: the zmq based protocol hosting engine core and making it accessible for entrypoints
     - @robertgshaw2-redhat, @njhill, @russellb
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
-    - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson
+    - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson, @ProExpertProg
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
     - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche, @ApostaC
 - Distributed, Parallelism, Process Management: Process launchers managing each worker, and assign them to the right DP/TP/PP/EP ranks
@@ -109,9 +108,11 @@ If you have PRs touching the area, please ping the area owner for review.
     - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
     - @mgoin, @Isotr0py, @yewentao256 
+- Custom quantized GEMM kernels (cutlass_scaled_mm, marlin, machete)
+    - @tlrmchlsmth, @LucasWilkinson 
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
     - @DarkLight1337, @ywang96, @Isotr0py
-- torch compile: The torch compile integration for vLLM
+- torch compile: The torch.compile integration in vLLM, custom passes & transformations
     - @ProExpertProg, @zou3519, @youkaichao
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
@@ -137,7 +138,7 @@ If you have PRs touching the area, please ping the area owner for review.
     - @youkaichao, @zhuohan123, @22quinn
 - LoRA: @jeejeelee
 - Observability: Metrics and Logging
-    - @robertgshaw2-redhat, @simon-mo
+    - @markmc, @robertgshaw2-redhat, @simon-mo
 
 ### Code Base
 
@@ -148,7 +149,7 @@ If you have PRs touching the area, please ping the area owner for review.
 - CI, Build, Release Process: @khluu, @njhill, @simon-mo
 - Security: @russellb
 
-### Kernels
+### External Kernels Integration
 
 - FlashAttention: @LucasWilkinson
 - FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon
@@ -171,10 +172,12 @@ If you have PRs touching the area, please ping the area owner for review.
 ### Hardware
 
 - Plugin Interface: @youkaichao, @Yikun
-- AMD GPU: @gshtras
+- NVIDIA GPU: @pavanimajety
+- AMD GPU: @gshtras, @tjtanaa
 - Intel CPU/GPU: @jikunshang, @bigPYJ1151
 - Google TPU: @yaochengji
 
 ### Ecosystem Projects
 
 - Ascend NPU: [@wangxiyuan](https://github.com/wangxiyuan) and [see more details](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html#maintainers)
+- Intel Gaudi HPU [@xuechendi](https://github.com/xuechendi) and [@kzawora-intel](https://github.com/kzawora-intel)

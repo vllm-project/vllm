@@ -25,32 +25,34 @@ Maintainers form a hierarchy based on sustained, high-quality contributions and 
 
 ### Core Maintainers
 
-The core maintainers make final decisions. A committee of @WoosukKwon, @zhuohan123, @simon-mo, and @youkaichao currently shares this role with divided responsibilities.
+Core Maintainers function like a project planning and decision making committee. In other convention, they might be called a Technical Steering Committee (TSC). In vLLM vocabulary, they are often known as "Project Leads". They meet weekly to coordinate roadmap priorities and allocate engineering resources. Current active leads: @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, @robertshaw2-redhat, @tlrmchlsmth, @mgoin, @njhill, @ywang96, @houseroad, @yeqcharlotte, @ApostaC
 
 The responsibilities of the core maintainers are:
-
-* Making decisions where consensus among maintainers cannot be reached.
-* Approving or removing committers.
-* Adopting changes to the project's technical governance.
-* Making major changes to the technical direction or scope of vLLM itself.
-* Managing the scope of the vLLM project – e.g., the addition or removal of new sub-projects in the GitHub org.
+* Author quarterly roadmap and responsible for each development effort.
+* Making major changes to the technical direction or scope of vLLM and vLLM projects.
 * Defining the project's release strategy.
+* Work with model providers, hardware vendors, and key users of vLLM to ensure the project is on the right track.
 
-Core maintainers serve until they step down. Core maintainers will choose successors. We prefer natural succession with mentoring over sudden votes.
+### Lead Maintainers
 
-### Project Leads
+While Core maintainers assume the day-to-day responsibilities of the project, Lead maintainers are responsible for the overall direction and strategy of the project. A committee of @WoosukKwon, @zhuohan123, @simon-mo, and @youkaichao currently shares this role with divided responsibilities.
 
-Projects leads function like a project planning committee. They meet weekly to coordinate roadmap priorities and allocate engineering resources. Current leads: @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, @robertshaw2-redhat, @tlrmchlsmth, @mgoin, @njhill, @ywang96, @houseroad, @yeqcharlotte, @comaniac, @ApostaC
+The responsibilities of the lead maintainers are:
 
-The leads actively work with model providers, hardware vendors, and key users of vLLM to ensure the project is on the right track.
+* Making decisions where consensus among core maintainers cannot be reached.
+* Adopting changes to the project's technical governance.
+* Organizing the voting process for new committers.
 
 ### Committers and Area Owners
 
 Committers have write access and merge rights. They typically have deep expertise in specific areas and help the community.
 
-Area owners run subsystems. They review PRs, refactor code, monitor tests, and ensure compatibility.
+The responsibilities of the committers are:
+* Reviewing PRs and providing feedback.
+* Addressing issues and questions from the community.
+* Own specific areas of the codebase and development efforts: reviewing PRs, addressing issues, answering questions, improving documentation.
 
-All area owners are committers with deep expertise in that area, but not all committers own areas. Committers maintain their areas and help across the project: reviewing PRs, addressing issues, answering questions, improving documentation.
+Specially, committers are almost all area owners. They author subsystems, review PRs, refactor code, monitor tests, and ensure compatibility with other areas. All area owners are committers with deep expertise in that area, but not all committers own areas. 
 
 For a full list of committers and their respective areas, see the [committers](./committers.md) page.
 
@@ -58,22 +60,27 @@ For a full list of committers and their respective areas, see the [committers](.
 
 Any committer can nominate candidates via our private mailing list:
 
-1. **Nominate**: Cite accomplishments and area expertise.
-2. **Vote**: Group voices support or concerns. Concerns can stop the process. The vote typically last 3 working days. For concerns, committers group discuss the clear criteria for such person to be nominated again. The lead maintainers will make the final decision.
+1. **Nominate**: Any committer may nominate a candidate by email to the private maintainers’ list, citing evidence mapped to the pre‑existing standards with links to PRs, reviews, RFCs, issues, benchmarks, and adoption evidence.
+2. **Vote**: The lead maintainers will group voices support or concerns. Shared concerns can stop the process. The vote typically last 3 working days. For concerns, committers group discuss the clear criteria for such person to be nominated again. The lead maintainers will make the final decision.
 3. **Confirm**: The lead maintainers send invitation, update CODEOWNERS, assign permissions, add to communications channels (mailing list and Slack).
 
-Committership requires:
+Committership is highly selective and merit based. The selection criteria requires:
 
-* **Area expertise**: Deep involvement in design, implementation, and maintenance.
-* **Community**: Support users, shepherd PRs, enhance project direction.
-* **Vision and mentorship**: Good design taste, clean code, teaching ability.
+* **Area expertise**: leading design/implementation of core subsystems, material performance or reliability improvements adopted project‑wide, or accepted RFCs that shape technical direction.
+* **Sustained contributions**: high‑quality merged contributions and reviews across releases, responsiveness to feedback, and stewardship of code health.
+* **Community leadership**: mentoring contributors, triaging issues, improving docs, and elevating project standards.
+
+To further illustrate, a committer typically satisfies at least two of the following accomplishment patterns:
+* Author of an accepted RFC or design that materially shaped project direction
+* Measurable, widely adopted performance or reliability improvement in core paths
+* Long‑term ownership of a subsystem with demonstrable quality and stability gains
+* Significant cross‑project compatibility or ecosystem enablement work (models, hardware, tooling)
 
 While there isn't a quantitative bar, past committers have:
-
-* Submitted 30+ PRs
-* Provided high-quality reviews of 10+ contributor PRs
+* Submitted approximately 30+ PRs of substantial quality and scope
+* Provided high-quality reviews of approximately 10+ substantial external contributor PRs
 * Addressed multiple issues and questions from the community in issues/forums/Slack
-* Led concentrated efforts on RFCs and their implementation
+* Led concentrated efforts on RFCs and their implementation, or significant performance or reliability improvements adopted project‑wide
 
 ### Working Groups
 
@@ -103,7 +110,7 @@ In case where CI didn't pass due to the failure is not related to the PR, the PR
 
 ### Slack
 
-Contributors are encouraged to join #pr-reviews and #contributors channels.
+Contributors are encouraged to join `#pr-reviews` and `#contributors` channels.
 
 There are `#sig-` and `#feat-` channels for discussion and coordination around specific topics.
 
