@@ -14,11 +14,11 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_N_BYTES,
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
     binary2tensor,
+    build_metadata_items,
     decode_pooling_output,
 )
 
@@ -390,19 +390,12 @@ async def test_bytes_only_embed_dtype_and_endianness(
 
             assert "metadata" not in responses_bytes.headers
             body = responses_bytes.content
-            n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
-            items = [
-                MetadataItem(
-                    index=i,
-                    embed_dtype=embed_dtype,
-                    endianness=endianness,
-                    start=i * n_tokens * n_bytes,
-                    end=(i + 1) * n_tokens * n_bytes,
-                    shape=(n_tokens, 1),
-                )
-                for i in range(len(input_texts))
-            ]
-
+            items = build_metadata_items(
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+                shape=(n_tokens, 1),
+                n_request=len(input_texts),
+            )
             bytes_data = decode_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
 

@@ -13,10 +13,10 @@ import requests
 import torch
 
 from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_N_BYTES,
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
+    build_metadata_items,
     decode_pooling_output,
 )
 
@@ -81,19 +81,13 @@ def main(args):
             }
             response = post_http_request(prompt=prompt, api_url=api_url)
             body = response.content
-            n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
-            items = [
-                MetadataItem(
-                    index=i,
-                    embed_dtype=embed_dtype,
-                    endianness=endianness,
-                    start=i * embedding_size * n_bytes,
-                    end=(i + 1) * embedding_size * n_bytes,
-                    shape=(embedding_size,),
-                )
-                for i in range(len(input_texts))
-            ]
 
+            items = build_metadata_items(
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+                shape=(embedding_size,),
+                n_request=len(input_texts),
+            )
             embedding = decode_pooling_output(items=items, body=body)
             embedding = [x.to(torch.float32) for x in embedding]
             embedding = torch.stack(embedding)

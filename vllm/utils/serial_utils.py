@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
 import io
+import math
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -125,7 +126,7 @@ def encode_pooling_output(
     elif encoding_format == "base64":
         embedding_bytes = tensor2binary(output.outputs.data, embed_dtype, endianness)
         return base64.b64encode(embedding_bytes).decode("utf-8")
-    elif encoding_format == "bytes":
+    elif encoding_format == "bytes" or encoding_format == "bytes_only":
         return tensor2binary(output.outputs.data, embed_dtype, endianness)
     assert_never(encoding_format)
 
@@ -138,6 +139,29 @@ class MetadataItem:
     start: int
     end: int
     shape: tuple[int, ...]
+
+
+def build_metadata_items(
+    embed_dtype: EmbedDType,
+    endianness: Endianness,
+    shape: tuple[int, ...],
+    n_request: int,
+):
+    n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
+    size = math.prod(shape)
+    items = [
+        MetadataItem(
+            index=i,
+            embed_dtype=embed_dtype,
+            endianness=endianness,
+            start=i * size * n_bytes,
+            end=(i + 1) * size * n_bytes,
+            shape=shape,
+        )
+        for i in range(n_request)
+    ]
+
+    return items
 
 
 def encode_pooling_bytes(

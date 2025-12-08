@@ -20,11 +20,11 @@ from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_N_BYTES,
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
     binary2tensor,
+    build_metadata_items,
     decode_pooling_output,
 )
 
@@ -375,18 +375,12 @@ async def test_bytes_only_embed_dtype_and_endianness(
 
             assert "metadata" not in responses_bytes.headers
             body = responses_bytes.content
-            n_bytes = EMBED_DTYPE_TO_N_BYTES[embed_dtype]
-            items = [
-                MetadataItem(
-                    index=i,
-                    embed_dtype=embed_dtype,
-                    endianness=endianness,
-                    start=i * embedding_size * n_bytes,
-                    end=(i + 1) * embedding_size * n_bytes,
-                    shape=(embedding_size,),
-                )
-                for i in range(len(input_texts))
-            ]
+            items = build_metadata_items(
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+                shape=(embedding_size,),
+                n_request=len(input_texts),
+            )
 
             bytes_data = decode_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).tolist() for x in bytes_data]
