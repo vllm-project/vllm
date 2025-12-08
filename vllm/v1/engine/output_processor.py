@@ -445,11 +445,6 @@ class OutputProcessor:
     def _update_streaming_request_state(
         self, request: EngineCoreRequest, prompt: str | None
     ) -> None:
-        if not request.resumable:
-            raise ValueError(
-                f"Existing session {request.request_id} has to be updated with a \
-                streaming request with `resumable=True`"
-            )
         req_state = self.request_states[request.request_id]
         if req_state.prompt and prompt:
             req_state.prompt += prompt
