@@ -272,7 +272,7 @@ class W8A8BlockFp8LinearOp:
         q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
             input_2d,
             group_size=self.act_quant_group_shape.col,
-            use_ue8m0=True,
+            use_ue8m0=self.use_deep_gemm_e8m0,
         )
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
