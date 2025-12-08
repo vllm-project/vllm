@@ -42,6 +42,19 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
+
+# For FP8 sparse attention we have two impelementations:
+# 1. Mixed batch mode: use the FP8 decode kernel for both prefill and decode this is
+#    done by treating all tokens as single batch.
+# 2. Separate prefill and decode mode: use the BF16 prefill kernel for prefill
+#    (upconverting the FP8 cache to BF16 then calling the prefill kernel) and using
+#    the FP8 decode kernel for decode.
+# Currently we use #1 when the number of heads per rank is low (i.e. TP) since the BF16
+# prefill kernel requires padding the numer of heads to 128 while the decode does not
+# so when the per ranke head count is below MIN_HEADS_FOR_BF16_PREFILL we use the mixed
+# batch mode (#2).
+MIN_HEADS_FOR_BF16_PREFILL = 32
+
 """
 NOTE: FlashMLA Sparse uses an fp8 cache with the following format
 
@@ -178,6 +191,8 @@ class FlashMLASparseMetadata(FlashMLASparseMetadataBF16):
 
         decode: DecodeMetadata | None = None
         prefill: PrefillMetadata | None = None
+        # True when using mixed batch mode (all tokens as one batch)
+        use_mixed_batch: bool = False
 
     fp8_extra_metadata: FP8KernelMetadata | None = None
 
@@ -432,6 +447,14 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
     ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
         num_tokens = common_attn_metadata.num_actual_tokens
 
+        # Use mixed batch mode when num_heads is small (high TP case)
+        # to avoid head padding overhead in the BF16 prefill kernel.
+        use_mixed_batch_mode = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+
+        if use_mixed_batch_mode:
+            # Mixed batch mode: treat all tokens as one batch (like main branch)
+            return self._build_fp8_mixed_decode_prefill(common_attn_metadata)
+
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 common_attn_metadata,
@@ -577,6 +600,55 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 dummy_block_table=self.dummy_block_table[:num_decodes],
                 decode_query_len=decode_query_len,
             )
+
+        return fp8_metadata
+
+    def _build_fp8_mixed_decode_prefill(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> "FlashMLASparseMetadata.FP8KernelMetadata":
+        """Build FP8 metadata treating all tokens as one mixed batch.
+
+        This matches main branch's approach and avoids the BF16 prefill kernel
+        which has head padding overhead when num_heads is small (high TP case).
+        """
+        num_tokens = common_attn_metadata.num_actual_tokens
+
+        # Treat ALL tokens as a mixed batch (no separate prefill processing)
+        FP8Meta = FlashMLASparseMetadata.FP8KernelMetadata
+        fp8_metadata = FP8Meta(
+            num_decodes=0,  # Not used in mixed batch mode
+            num_prefills=0,
+            num_decode_tokens=num_tokens,  # All tokens treated as decode
+            num_prefill_tokens=0,
+        )
+
+        # Build metadata for all tokens as a single batch
+        tile_scheduler_metadata, num_splits = get_mla_metadata(
+            cache_seqlens=self.topk_tokens_tensor[:1],  # Single batch
+            num_q_tokens_per_head_k=num_tokens * self.num_heads,
+            topk=self.topk_tokens,
+            num_heads_q=self.num_heads,
+            num_heads_k=1,
+            is_fp8_kvcache=True,
+        )
+
+        num_sm_parts = tile_scheduler_metadata.size(0)
+        tile_scheduler_metadata_buffer = self.tile_scheduler_metadata_buffer[
+            :num_sm_parts
+        ]
+        tile_scheduler_metadata_buffer.copy_(tile_scheduler_metadata)
+        num_splits_view = self.num_splits_buffer[:2]
+        num_splits_view.copy_(num_splits)
+
+        fp8_metadata.decode = FP8Meta.DecodeMetadata(
+            scheduler_metadata=tile_scheduler_metadata_buffer,
+            num_splits=num_splits_view,
+            cache_lens=self.max_model_len_tensor[:1],
+            dummy_block_table=self.dummy_block_table[:1],
+            decode_query_len=1,  # Not used in mixed batch mode
+        )
+        fp8_metadata.use_mixed_batch = True
 
         return fp8_metadata
 
@@ -736,6 +808,34 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         #              -> (num_decode_tokens, num_heads, head_dim_v)
         return reshape_attn_output_for_spec_decode(_attn_out)
 
+    def _forward_fp8_kv_mixed_batch(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        metadata: FlashMLASparseMetadata.FP8KernelMetadata.DecodeMetadata,
+    ) -> torch.Tensor:
+        """Mixed batch FP8 forward path that treats all tokens as one batch.
+
+        This is equivalent to main branch's approach and avoids the BF16
+        prefill kernel which has head padding overhead when num_heads is small.
+        Used when use_mixed_batch is True.
+        """
+        _attn_out, _ = flash_mla_with_kvcache(
+            q=q.unsqueeze(0),  # unsqueeze to add batch_dim: (T, H, D) -> (1, T, H, D)
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            block_table=metadata.dummy_block_table,
+            head_dim_v=512,
+            cache_seqlens=metadata.cache_lens,
+            tile_scheduler_metadata=metadata.scheduler_metadata,
+            num_splits=metadata.num_splits,
+            is_fp8_kvcache=True,
+            indices=topk_indices.unsqueeze(0),  # (T, topk) -> (1, T, topk)
+            softmax_scale=self.softmax_scale,
+        )
+        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
+        return _attn_out.squeeze(0)
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -831,9 +931,16 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             )
         else:
             assert fp8_metadata is not None
-            num_prefill_tokens = fp8_metadata.num_prefill_tokens
-            # Pure decode case: direct call without allocation
-            if num_prefill_tokens == 0:
+
+            # Mixed batch mode: treat all tokens as one batch
+            # This avoids head padding overhead in BF16 prefill kernel
+            if fp8_metadata.use_mixed_batch:
+                assert fp8_metadata.decode is not None
+                attn_out = self._forward_fp8_kv_mixed_batch(
+                    q, kv_cache, topk_indices_global, fp8_metadata.decode
+                )
+            elif fp8_metadata.num_prefill_tokens == 0:
+                # Pure decode case: direct call without allocation
                 assert fp8_metadata.decode is not None
                 attn_out = self._forward_fp8_kv_decode(
                     q, kv_cache, topk_indices_global, fp8_metadata.decode
