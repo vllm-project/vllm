@@ -309,6 +309,38 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
   }
 }
 
+template <typename scalar_t>
+__global__ void moe_align_block_size_no_permute(
+    const scalar_t* __restrict__ topk_ids,
+    int32_t* __restrict__ sorted_token_ids, 
+    int32_t* __restrict__ expert_ids,
+    int32_t* __restrict__ total_tokens_post_pad, 
+    int32_t num_experts,
+    int32_t block_size,
+    size_t numel, 
+    int32_t max_num_tokens_padded) {
+
+  const size_t tid = threadIdx.x;
+  const size_t stride = blockDim.x;
+
+  for (size_t it = tid; it < max_num_tokens_padded; it += stride) {
+    sorted_token_ids[it] = numel;
+  }
+  
+  if (tid == 0) {
+    *total_tokens_post_pad = numel * block_size;
+  }
+
+  for (size_t i = tid; i < numel; i += stride) {
+    int32_t expert_id = topk_ids[i];
+    if (expert_id >= num_experts) {
+      continue;
+    }
+    sorted_token_ids[i * block_size] = i;
+    expert_ids[i] = expert_id;
+  }
+}
+
 }  // namespace moe
 }  // namespace vllm
 
@@ -343,10 +375,23 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         // calc needed amount of shared mem for `cumsum` tensors
+        bool no_permute_mode = (topk_ids.numel() * 4 <= num_experts);
         bool small_batch_expert_mode =
             (topk_ids.numel() < 1024) && (num_experts <= 64);
 
-        if (small_batch_expert_mode) {
+        if (no_permute_mode) {
+          const int32_t threads = 256;
+          auto no_permute_kernel = vllm::moe::moe_align_block_size_no_permute<scalar_t>;
+          no_permute_kernel<<<1, threads, 0, stream>>>(
+              topk_ids.data_ptr<scalar_t>(),
+              sorted_token_ids.data_ptr<int32_t>(),
+              experts_ids.data_ptr<int32_t>(),
+              num_tokens_post_pad.data_ptr<int32_t>(), 
+              num_experts,
+              block_size,
+              topk_ids.numel(),
+              sorted_token_ids.size(0));
+        } else if (small_batch_expert_mode) {
           const int32_t threads = max((int32_t)num_experts, WARP_SIZE);
           const int32_t shared_mem_size =
               ((threads + 1) * num_experts + (num_experts + 1)) *
