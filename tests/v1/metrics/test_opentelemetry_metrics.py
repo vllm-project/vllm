@@ -42,6 +42,9 @@ def mock_vllm_config():
 
     cache_config = Mock(spec=CacheConfig)
     cache_config.num_gpu_blocks = 1000
+    cache_config.metrics_info = Mock(
+        return_value={"num_gpu_blocks": 1000, "block_size": 16}
+    )
 
     scheduler_config = Mock(spec=SchedulerConfig)
 
@@ -52,6 +55,7 @@ def mock_vllm_config():
     config.cache_config = cache_config
     config.scheduler_config = scheduler_config
     config.observability_config = observability_config
+    config.lora_config = None
 
     return config
 
@@ -84,7 +88,7 @@ def mock_otel_imports():
         ),
         patch("vllm.v1.metrics.opentelemetry_metrics.metrics.set_meter_provider"),
         patch(
-            "vllm.v1.metrics.opentelemetry_metrics.OTLPMetricExporter",
+            "opentelemetry.exporter.otlp.proto.grpc.metric_exporter.OTLPMetricExporter",
             return_value=mock_exporter,
         ),
         patch(

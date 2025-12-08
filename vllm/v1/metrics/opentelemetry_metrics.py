@@ -29,9 +29,6 @@ otel_import_error_traceback: str | None = None
 
 try:
     from opentelemetry import metrics
-    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
-        OTLPMetricExporter,
-    )
     from opentelemetry.sdk.metrics import MeterProvider
     from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
     from opentelemetry.sdk.resources import Resource
@@ -74,7 +71,7 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
         if not is_otel_metrics_available():
             raise ValueError(
                 "OpenTelemetry Metrics SDK is not available. "
-                "Install with: pip install opentelemetry-exporter-otlp-proto-grpc\n"
+                "Install with: pip install opentelemetry-sdk\n"
                 f"Original error:\n{otel_import_error_traceback}"
             )
 
@@ -104,13 +101,31 @@ class OpenTelemetryMetricsLogger(AggregateStatLoggerBase):
 
         # Create OTLP exporter
         if protocol == "grpc":
-            exporter = OTLPMetricExporter(endpoint=endpoint)
-        elif protocol == "http/protobuf":
-            from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
-                OTLPMetricExporter as HTTPMetricExporter,
-            )
+            try:
+                from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+                    OTLPMetricExporter,
+                )
 
-            exporter = HTTPMetricExporter(endpoint=endpoint)
+                exporter = OTLPMetricExporter(endpoint=endpoint)
+            except ImportError as e:
+                raise ImportError(
+                    "OpenTelemetry gRPC exporter for metrics is not installed. "
+                    "Please install it with: "
+                    "pip install opentelemetry-exporter-otlp-proto-grpc"
+                ) from e
+        elif protocol == "http/protobuf":
+            try:
+                from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+                    OTLPMetricExporter as HTTPMetricExporter,
+                )
+
+                exporter = HTTPMetricExporter(endpoint=endpoint)
+            except ImportError as e:
+                raise ImportError(
+                    "OpenTelemetry HTTP exporter for metrics is not installed. "
+                    "Please install it with: "
+                    "pip install opentelemetry-exporter-otlp-proto-http"
+                ) from e
         else:
             raise ValueError(f"Unsupported OTLP protocol: {protocol}")
 

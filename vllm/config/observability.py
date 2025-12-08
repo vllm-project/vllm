@@ -154,7 +154,7 @@ class ObservabilityConfig:
                 raise ValueError(
                     "OpenTelemetry Metrics SDK is not available. Unable to enable "
                     "'enable_otel_metrics'. Install with: "
-                    "pip install opentelemetry-exporter-otlp-proto-grpc\n"
+                    "pip install opentelemetry-sdk\n"
                     f"Original error:\n{otel_import_error_traceback}"
                 )
         return value
