@@ -95,9 +95,7 @@ def mock_otel_imports():
             "vllm.v1.metrics.opentelemetry_metrics.MeterProvider",
             return_value=mock_meter_provider,
         ),
-        patch(
-            "vllm.v1.metrics.opentelemetry_metrics.Resource", create=mock_resource
-        ),
+        patch("vllm.v1.metrics.opentelemetry_metrics.Resource", create=mock_resource),
         patch(
             "vllm.v1.metrics.opentelemetry_metrics.is_otel_metrics_available",
             return_value=True,

@@ -32,10 +32,10 @@ class TestObservabilityConfig:
             },
         ):
             # Force reload to pick up the mocked imports
-            import vllm.v1.metrics.opentelemetry_metrics
-
             # Reload the module to simulate missing imports
             import importlib
+
+            import vllm.v1.metrics.opentelemetry_metrics
 
             importlib.reload(vllm.v1.metrics.opentelemetry_metrics)
 
