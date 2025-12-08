@@ -278,12 +278,14 @@ class ParsableContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a MCP tool call"""
         last_message = self.parser.response_messages[-1]
-        # TODO: figure out which tools are MCP tools
-        if (  # noqa: SIM103
-            last_message.type == "function_call"
-            and last_message.name in ("code_interpreter", "python")
-        ):
-            return True
+        # TODO(qandrew): figure out which tools are MCP tools
+        if last_message.type == "function_call":  # noqa: SIM102
+            if last_message.name in (
+                "code_interpreter",
+                "python",
+                "web_search_preview",
+            ) or last_message.name.startswith("container"):
+                return True
 
         return False
 
@@ -310,12 +312,87 @@ class ParsableContext(ConversationContext):
 
         return [message]
 
+    async def call_search_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: FunctionCall
+    ) -> list[ResponseInputOutputItem]:
+        self.called_tools.add("browser")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result_parsable_context(self)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
+        result = await tool_session.call_tool("search", args)
+        result_str = result.content[0].text
+
+        message = ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=f"call_{random_uuid()}",
+            output=result_str,
+            status="completed",
+        )
+
+        return [message]
+
+    async def call_container_tool(
+        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+    ) -> list[Message]:
+        """
+        Call container tool. Expect this to be run in a stateful docker
+        with command line terminal.
+        The official container tool would at least
+        expect the following format:
+        - for tool name: exec
+            - args:
+                {
+                    "cmd":List[str] "command to execute",
+                    "workdir":optional[str] "current working directory",
+                    "env":optional[object/dict] "environment variables",
+                    "session_name":optional[str] "session name",
+                    "timeout":optional[int] "timeout in seconds",
+                    "user":optional[str] "user name",
+                }
+        """
+        self.called_tools.add("container")
+        if isinstance(tool_session, Tool):
+            return await tool_session.get_result_parsable_context(self)
+        # tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.arguments)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.arguments)
+        result = await tool_session.call_tool("exec", args)
+        result_str = result.content[0].text
+
+        message = ResponseFunctionToolCallOutputItem(
+            id=f"fco_{random_uuid()}",
+            type="function_call_output",
+            call_id=f"call_{random_uuid()}",
+            output=result_str,
+            status="completed",
+        )
+
+        return [message]
+
     async def call_tool(self) -> list[ResponseInputOutputItem]:
         if not self.parser.response_messages:
             return []
         last_msg = self.parser.response_messages[-1]
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
+        elif last_msg.name == "web_search_preview":
+            return await self.call_search_tool(self._tool_sessions["browser"], last_msg)
+        elif last_msg.name.startswith("container"):
+            return await self.call_container_tool(
+                self._tool_sessions["container"], last_msg
+            )
         return []
 
     def render_for_completion(self):
