@@ -5,8 +5,6 @@ steps:
     depends_on: []
     commands:
     - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $CACHE_FROM $CACHE_TO
-    env:
-      DOCKER_BUILDKIT: "1"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost

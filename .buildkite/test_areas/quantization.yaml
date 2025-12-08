@@ -36,3 +36,11 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
+
+- label: Quantized Models Test
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/models/quantization
+  commands:
+    - pytest -v -s models/quantization
