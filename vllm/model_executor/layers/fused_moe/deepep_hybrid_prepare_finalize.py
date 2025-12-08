@@ -165,6 +165,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
+        print(f"GOT HERE 1")
+
         (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
             hidden=a1q,
             scaling_factor=a1q_scale,
@@ -176,6 +178,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_dispatched_tokens=None,
             num_of_experts=num_experts,
         )
+
+        print(f"GOT HERE 2")
 
         self.handle = handle
         self.expert_probs = expert_probs
@@ -234,11 +238,15 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
+        print("GOT HERE 3")
+
         combined_x, combined_probs = self.buffer.combine(
             hidden=fused_expert_output,
             probs=probs,
             handle=self.handle,
         )
+
+        print("GOT HERE 4")
 
         weight_and_reduce_impl.apply(
             output=output,

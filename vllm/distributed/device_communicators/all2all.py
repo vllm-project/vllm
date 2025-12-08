@@ -332,6 +332,7 @@ class DeepEPHybridAll2AllManager(DeepEPAll2AllManagerBase):
     def _make_all2all_kwargs(self, **kwargs) -> dict[Any, Any]:
         extra_kwargs = dict(
             group=self.cpu_group,
+            num_of_hybrid_ep_ranks_per_nvlink_domain=2,  # XXXX
         )
         return {**kwargs, **extra_kwargs}
 
