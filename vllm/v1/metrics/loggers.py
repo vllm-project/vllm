@@ -952,7 +952,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
-                raise NotImplementedError("LoRA in DP mode is not supported yet.")
+                logger.warning(
+                    "vllm:lora_requests_info prometheus metrics may be "
+                    "incorrect/misleading with data parallel deployments."
+                )
             self.labelname_max_lora = "max_lora"
             self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
             self.labelname_running_lora_adapters = "running_lora_adapters"
