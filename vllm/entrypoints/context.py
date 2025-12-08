@@ -19,6 +19,7 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -385,8 +386,8 @@ class ParsableContext(ConversationContext):
         if not self.parser.response_messages:
             return []
         last_msg = self.parser.response_messages[-1]
-        # HACK: change this to a mcp_ function call
-        last_msg.id = f"mcp_{random_uuid()}"
+        # change this to a mcp_ function call
+        last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
         self.parser.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)

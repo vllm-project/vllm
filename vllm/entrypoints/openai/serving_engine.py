@@ -1150,8 +1150,6 @@ class OpenAIServing:
             )
 
         mm_data = await mm_data_future
-        # TODO: can strip out the </think>\n\n[e~[\n]~b]ai\n\n<minimax:tool_call>
-        # to become </think>\n\n\n<minimax:tool_call>
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser

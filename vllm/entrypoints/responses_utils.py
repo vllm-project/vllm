@@ -22,6 +22,7 @@ from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
 
 from vllm import envs
+from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
@@ -44,13 +45,13 @@ def make_response_output_items_from_parsable_context(
                 )
             if isinstance(output_messages[-1], ResponseFunctionToolCall):
                 mcp_message = McpCall(
-                    id=f"mcp_{random_uuid()}",
+                    id=f"{MCP_PREFIX}{random_uuid()}",
                     arguments=output_messages[-1].arguments,
                     name=output_messages[-1].name,
                     server_label=output_messages[
                         -1
                     ].name,  # TODO: store the server label
-                    type="mcp_call",
+                    type=f"{MCP_PREFIX}call",
                     status="completed",
                     output=message.output,
                     # TODO: support error output
@@ -109,7 +110,9 @@ def _maybe_combine_reasoning_and_tool_call(
     """Many models treat MCP calls and reasoning as a single message.
     This function checks if the last message is a reasoning message and
     the current message is a tool call"""
-    if not (isinstance(item, ResponseFunctionToolCall) and item.id.startswith("mcp_")):
+    if not (
+        isinstance(item, ResponseFunctionToolCall) and item.id.startswith(MCP_PREFIX)
+    ):
         return None
     if len(messages) == 0:
         return None
