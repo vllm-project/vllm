@@ -507,6 +507,7 @@ async def make_async_error_request_output(
 
 
 async def run_request(
+    semaphore: asyncio.Semaphore,
     serving_engine_func: Callable,
     request: BatchRequestInput,
     index: int,
@@ -515,7 +516,8 @@ async def run_request(
 ) -> None:
     """Run a request and stream the result to the writer."""
     try:
-        response = await serving_engine_func(request.body)
+        async with semaphore:
+            response = await serving_engine_func(request.body)
 
         if isinstance(
             response,
@@ -650,6 +652,8 @@ async def run_batch(
     async with OrderedStreamingWriter(args.output_file) as writer:
         tasks: set[asyncio.Task] = set()
 
+        semaphore = asyncio.Semaphore(10_000)
+
         with tracker.pbar():
             index = 0
             async for request_json in stream_file_lines(args.input_file):
@@ -657,6 +661,7 @@ async def run_batch(
 
                 # Create task for this request
                 task = await create_request_task(
+                    semaphore=semaphore,
                     request=request,
                     index=index,
                     tracker=tracker,
@@ -687,6 +692,7 @@ async def run_batch(
 
 
 async def create_request_task(
+    semaphore: asyncio.Semaphore,
     request: BatchRequestInput,
     index: int,
     tracker: StreamingBatchProgressTracker,
@@ -709,6 +715,7 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
+                semaphore,
                 openai_serving_chat.create_chat_completion,
                 request,
                 index,
