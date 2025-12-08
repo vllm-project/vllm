@@ -450,9 +450,12 @@ class OutputProcessor:
             req_state.prompt += prompt
         if req_state.prompt_token_ids is not None and request.prompt_token_ids:
             req_state.prompt_token_ids.extend(request.prompt_token_ids)
-        req_state.prompt_embeds = torch.cat(
-            [req_state.prompt_embeds, request.prompt_embeds]
-        )
+        if req_state.prompt_embeds is not None and request.prompt_embeds is not None:
+            req_state.prompt_embeds = torch.cat(
+                [req_state.prompt_embeds, request.prompt_embeds]
+            )
+        elif request.prompt_embeds is not None:
+            req_state.prompt_embeds = request.prompt_embeds
         if req_state.stats is not None:
             req_state.stats.arrival_time = request.arrival_time
         req_state.is_prefilling = True
