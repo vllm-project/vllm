@@ -226,22 +226,6 @@ class RocmPlatform(Platform):
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        logger.info(
-            "ROCm get_attn_backend_cls parameters:\n"
-            "    selected_backend: %s,\n"
-            "    is_gfx9: %s,\n"
-            "    use_mla: %s,\n"
-            "    use_sparse: %s,\n"
-            "    block_size: %s,\n"
-            "    attn_type: %s",
-            selected_backend,
-            on_gfx9(),
-            use_mla,
-            use_sparse,
-            block_size,
-            attn_type,
-        )
-
         if use_sparse:
             if kv_cache_dtype.startswith("fp8"):
                 raise ValueError(
@@ -279,6 +263,14 @@ class RocmPlatform(Platform):
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
             )
+
+        attn_backend_override = os.environ.get("VLLM_ATTENTION_BACKEND")
+        if selected_backend is None and attn_backend_override is not None:
+            logger.info(
+                "Detected VLLM_ATTENTION_BACKEND=%s (set by model architecture).",
+                attn_backend_override,
+            )
+            selected_backend = AttentionBackendEnum[attn_backend_override]
 
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info("Using FlexAttention backend on V1 engine.")
