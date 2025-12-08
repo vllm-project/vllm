@@ -73,6 +73,10 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
+        self.sla_tier_enabled = self.scheduler_config.sla_tier_enabled
+        self.max_interactive_batch_tokens = (
+            self.scheduler_config.max_interactive_batch_tokens
+        )
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
@@ -145,8 +149,12 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting = create_request_queue(
+            self.policy, use_sla=self.sla_tier_enabled
+        )
         self.running: list[Request] = []
+        self.last_preempted_tier_counts: dict[str, int] = {}
+        self.last_interactive_limit_hits: int = 0
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -223,6 +231,11 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        interactive_token_budget = (
+            self.max_interactive_batch_tokens if self.sla_tier_enabled else None
+        )
+        interactive_tokens_scheduled = 0
+        interactive_limit_hits = 0
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -318,10 +331,16 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
+                        def _preempt_key(r: Request):
+                            if self.sla_tier_enabled:
+                                return (
+                                    r.priority,
+                                    self._sla_preemption_rank(r),
+                                    r.arrival_time,
+                                )
+                            return (r.priority, r.arrival_time)
+
+                        preempted_req = max(self.running, key=_preempt_key)
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             scheduled_running_reqs.remove(preempted_req)
@@ -363,6 +382,11 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request.request_id] = new_blocks
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if (
+                interactive_token_budget is not None
+                and getattr(request, "sla_tier", None) == "interactive"
+            ):
+                interactive_tokens_scheduled += num_new_tokens
             req_index += 1
 
             # Speculative decode related.
@@ -410,7 +434,9 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_request_queue(self.policy)
+        skipped_waiting_requests = create_request_queue(
+            self.policy, use_sla=self.sla_tier_enabled
+        )
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -531,6 +557,19 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
+                if (
+                    interactive_token_budget is not None
+                    and getattr(request, "sla_tier", None) == "interactive"
+                    and interactive_tokens_scheduled + num_new_tokens
+                    > interactive_token_budget
+                ):
+                    # Defer interactive requests that would exceed the interactive
+                    # token budget; continue scheduling other tiers.
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    interactive_limit_hits += 1
+                    continue
+
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (
@@ -626,6 +665,11 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                if (
+                    interactive_token_budget is not None
+                    and getattr(request, "sla_tier", None) == "interactive"
+                ):
+                    interactive_tokens_scheduled += num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
@@ -724,6 +768,10 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
+
+        # Record per-step SLA metrics.
+        self.last_preempted_tier_counts = self._count_tiers(preempted_reqs)
+        self.last_interactive_limit_hits = interactive_limit_hits
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1299,6 +1347,26 @@ class Scheduler(SchedulerInterface):
             else:
                 request.spec_token_ids = spec_token_ids
 
+    def _sla_preemption_rank(self, request: Request) -> int:
+        tier = getattr(request, "sla_tier", None)
+        if tier == "background":
+            return 2
+        if tier == "batch":
+            return 1
+        return 0
+
+    def _tier_name(self, request: Request) -> str:
+        tier = getattr(request, "sla_tier", None)
+        if tier in ("interactive", "batch", "background"):
+            return tier
+        return "batch"
+
+    def _count_tiers(self, requests: Iterable[Request]) -> dict[str, int]:
+        counts: dict[str, int] = {"interactive": 0, "batch": 0, "background": 0}
+        for req in requests:
+            counts[self._tier_name(req)] = counts.get(self._tier_name(req), 0) + 1
+        return counts
+
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
@@ -1459,6 +1527,9 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+        waiting_tier_counts = (
+            self._count_tiers(self.waiting) if self.sla_tier_enabled else {}
+        )
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -1469,6 +1540,9 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
+            waiting_requests_per_tier=waiting_tier_counts,
+            preempted_requests_per_tier=self.last_preempted_tier_counts,
+            scheduler_interactive_batch_token_limit_hits=self.last_interactive_limit_hits,
         )
 
     def make_spec_decoding_stats(
