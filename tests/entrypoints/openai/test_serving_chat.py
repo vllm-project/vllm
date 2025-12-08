@@ -401,6 +401,7 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     io_processor: MagicMock = field(default_factory=MagicMock)
+    renderer: MagicMock = field(default_factory=MagicMock)
 
 
 async def _async_serving_chat_init():
@@ -431,6 +432,7 @@ async def test_serving_chat_returns_correct_model_name():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
     messages = [{"role": "user", "content": "what is 1+1?"}]
@@ -461,6 +463,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -494,6 +497,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -539,6 +543,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -585,6 +590,7 @@ async def test_serving_chat_could_load_correct_generation_config():
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     # Initialize the serving chat
     serving_chat = _build_serving_chat(mock_engine)
@@ -631,6 +637,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.model_config = mock_model_config
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
 
@@ -664,6 +671,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
 
     # Mock the generate method to return an async generator
     async def mock_generate(*args, **kwargs):

@@ -25,6 +25,7 @@ def serving() -> OpenAIServing:
     models.model_config = model_config
     models.input_processor = Mock()
     models.io_processor = Mock()
+    models.renderer = Mock()
 
     serving = OpenAIServing(
         engine_client=engine_client,

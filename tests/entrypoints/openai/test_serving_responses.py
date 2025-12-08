@@ -130,6 +130,7 @@ class TestInitializeToolSessions:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -216,6 +217,7 @@ class TestValidateGeneratorInput:
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
