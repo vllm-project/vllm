@@ -81,30 +81,30 @@ def _cached_get_attn_backend(
             "remove it from your plugin code."
         )
         attention_cls = current_platform.get_attn_backend_cls(
-            backend,
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            True,  # use_v1
-            use_mla,
-            has_sink,
-            use_sparse,
-            use_mm_prefix,
-            attn_type,
+            selected_backend=backend,
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_v1=True,  # use_v1
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            attn_type=attn_type,
         )
     else:
         attention_cls = current_platform.get_attn_backend_cls(
-            backend,
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            block_size,
-            use_mla,
-            has_sink,
-            use_sparse,
-            use_mm_prefix,
-            attn_type,
+            selected_backend=backend,
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            attn_type=attn_type,
         )
     if not attention_cls:
         raise ValueError(
