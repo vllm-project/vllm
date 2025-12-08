@@ -127,12 +127,13 @@ def resolve_tokenizer_args(
             )
             tokenizer_kwargs["gguf_file"] = gguf_file
 
-    if runner_type == "generate" or runner_type == "draft":
-        tokenizer_kwargs["truncation_side"] = "left"
-    elif runner_type == "pooling":
-        tokenizer_kwargs["truncation_side"] = "right"
-    else:
-        assert_never(runner_type)
+    if "truncation_side" not in tokenizer_kwargs:
+        if runner_type == "generate" or runner_type == "draft":
+            tokenizer_kwargs["truncation_side"] = "left"
+        elif runner_type == "pooling":
+            tokenizer_kwargs["truncation_side"] = "right"
+        else:
+            assert_never(runner_type)
 
     if tokenizer_mode == "slow":
         if tokenizer_kwargs.get("use_fast", False):
@@ -156,14 +157,14 @@ def resolve_tokenizer_args(
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
-    tokenizer_args = (tokenizer_name, *args)
+    tokenizer_args = args
     tokenizer_kwargs = {
         "trust_remote_code": trust_remote_code,
         "revision": revision,
         **tokenizer_kwargs,
     }
 
-    return tokenizer_mode, tokenizer_args, tokenizer_kwargs
+    return tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs
 
 
 cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
@@ -193,13 +194,15 @@ def get_tokenizer(
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
-    tokenizer_mode, tokenizer_args, tokenizer_kwargs = cached_resolve_tokenizer_args(
-        tokenizer_name,
-        *args,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        download_dir=download_dir,
-        **kwargs,
+    tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs = (
+        cached_resolve_tokenizer_args(
+            tokenizer_name,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            download_dir=download_dir,
+            **kwargs,
+        )
     )
 
     if tokenizer_cls == TokenizerLike:
@@ -207,7 +210,9 @@ def get_tokenizer(
     else:
         tokenizer_cls_ = tokenizer_cls
 
-    tokenizer = tokenizer_cls_.from_pretrained(*tokenizer_args, **tokenizer_kwargs)
+    tokenizer = tokenizer_cls_.from_pretrained(
+        tokenizer_name, *tokenizer_args, **tokenizer_kwargs
+    )
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "

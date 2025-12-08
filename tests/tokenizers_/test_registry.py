@@ -2,7 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from pathlib import Path
 
-from vllm.tokenizers import TokenizerLike, TokenizerRegistry, get_tokenizer
+import pytest
+
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.registry import (
+    TokenizerRegistry,
+    get_tokenizer,
+    resolve_tokenizer_args,
+)
 
 
 class TestTokenizer(TokenizerLike):
@@ -38,6 +45,29 @@ class TestTokenizer(TokenizerLike):
     @property
     def is_fast(self) -> bool:
         return True
+
+
+@pytest.mark.parametrize("runner_type", ["generate", "pooling"])
+def test_resolve_tokenizer_args_idempotent(runner_type):
+    tokenizer_name = "facebook/opt-125m"
+
+    tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs = (
+        resolve_tokenizer_args(
+            tokenizer_name,
+            runner_type=runner_type,
+        )
+    )
+
+    assert (
+        tokenizer_mode,
+        tokenizer_name,
+        tokenizer_args,
+        tokenizer_kwargs,
+    ) == resolve_tokenizer_args(
+        tokenizer_name,
+        *tokenizer_args,
+        **tokenizer_kwargs,
+    )
 
 
 def test_customized_tokenizer():

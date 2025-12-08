@@ -71,10 +71,10 @@ RENDERER_REGISTRY = RendererRegistry(
 
 
 def renderer_from_config(config: "ModelConfig", **kwargs):
-    tokenizer_mode, tokenizer_args, tokenizer_kwargs = tokenizer_args_from_config(
-        config, **kwargs
+    tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs = (
+        tokenizer_args_from_config(config, **kwargs)
     )
-    tokenizer_kwargs["tokenizer_name"] = tokenizer_args[0]
+    tokenizer_kwargs["tokenizer_name"] = tokenizer_name
 
     if config.tokenizer_mode == "auto" and config.model_impl == "terratorch":
         renderer_mode = "terratorch"
