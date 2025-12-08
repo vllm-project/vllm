@@ -232,13 +232,13 @@ class StreamingBatchProgressTracker:
 
     def completed(self):
         self._completed += 1
-        if self._pbar:
+        if self._pbar is not None:
             self._pbar.update()
 
     def finalize_total(self):
         """Called when all requests have been submitted"""
         self._finalized = True
-        if self._pbar:
+        if self._pbar is not None:
             self._pbar.total = self._submitted
             self._pbar.refresh()
 
@@ -260,20 +260,19 @@ class StreamingBatchProgressTracker:
 async def stream_file_lines(path_or_url: str) -> AsyncIterator[str]:
     """Stream lines from a local file or URL without loading everything into memory."""
     if path_or_url.startswith(("http://", "https://")):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(path_or_url) as resp:
-                buffer = ""
-                async for chunk in resp.content.iter_any():
-                    buffer += chunk.decode("utf-8")
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        line = line.strip()
-                        if line:
-                            yield line
+        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
+            buffer = ""
+            async for chunk in resp.content.iter_any():
+                buffer += chunk.decode("utf-8")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        yield line
 
-                # Don't forget the last line if no trailing newline
-                if buffer.strip():
-                    yield buffer.strip()
+            # Don't forget the last line if no trailing newline
+            if buffer.strip():
+                yield buffer.strip()
     else:
         async with aiofiles.open(path_or_url, encoding="utf-8") as f:
             async for line in f:
