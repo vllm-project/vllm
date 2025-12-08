@@ -699,7 +699,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 self.impl.forward(
                     self,
-                    (q_nope, q_pe),
+                    q_nope,
+                    q_pe,
                     kv_c_normed,
                     k_pe,
                     self_kv_cache,
@@ -710,7 +711,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 return self.impl.forward(
                     self,
-                    (q_nope, q_pe),
+                    q_nope,
+                    q_pe,
                     kv_c_normed,
                     k_pe,
                     self_kv_cache,
@@ -962,7 +964,7 @@ def unified_mla_attention(
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(
-        self, (q_nope, q_pe), kv_c_normed, k_pe, kv_cache, attn_metadata
+        self, q_nope, q_pe, kv_c_normed, k_pe, kv_cache, attn_metadata
     )
 
     return output
@@ -1007,7 +1009,8 @@ def unified_mla_attention_with_output(
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
         self,
-        (q_nope, q_pe),
+        q_nope,
+        q_pe,
         kv_c_normed,
         k_pe,
         kv_cache,

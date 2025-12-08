@@ -421,9 +421,10 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     def forward(
         self,
         layer: AttentionLayer,
-        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        key: torch.Tensor,
-        value: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: torch.Tensor | None = None,
