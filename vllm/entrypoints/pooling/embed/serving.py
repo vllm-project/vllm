@@ -385,11 +385,16 @@ class EmbeddingMixin(OpenAIServing):
 
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 # Check if this specific prompt needs chunked processing
-                if "prompt_token_ids" in engine_prompt:  # noqa: SIM102
-                    if len(engine_prompt["prompt_token_ids"]) > max_pos_embeddings:
+                if "prompt_token_ids" in engine_prompt:
+                    prompt_token_ids = engine_prompt["prompt_token_ids"]
+                    if len(prompt_token_ids) > max_pos_embeddings:
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
-                            ctx, engine_prompt, pooling_params, trace_headers, i
+                            ctx,
+                            prompt_token_ids,
+                            pooling_params,
+                            trace_headers,
+                            i,
                         )
                         generators.extend(chunk_generators)
                         continue

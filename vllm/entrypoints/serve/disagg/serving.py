@@ -115,7 +115,7 @@ class ServingTokens(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                request.token_ids,
+                TokensPrompt(prompt_token_ids=request.token_ids),
                 params=sampling_params,
                 lora_request=lora_request,
             )

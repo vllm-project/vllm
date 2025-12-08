@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -135,7 +136,10 @@ class OpenAIServingTokenization(OpenAIServing):
         tokenizer = self.renderer.get_tokenizer()
 
         self._log_inputs(
-            request_id, request.tokens, params=None, lora_request=lora_request
+            request_id,
+            TokensPrompt(prompt_token_ids=request.tokens),
+            params=None,
+            lora_request=lora_request,
         )
 
         prompt_input = await self._tokenize_prompt_input_async(
