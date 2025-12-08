@@ -1583,7 +1583,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def _is_envs_cache_enabled() -> None:
+def _is_envs_cache_enabled() -> bool:
     """Checked if __getattr__ is wrapped with functools.cache"""
     global __getattr__
     return hasattr(__getattr__, "cache_clear")
