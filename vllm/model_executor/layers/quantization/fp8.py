@@ -1218,9 +1218,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 assert (
                     not layer.renormalize and layer.custom_routing_function is not None
                 )
-                assert layer.routing_method_type == RoutingMethodType.Llama4, (
-                    "FusedMoE flashinfer kernels are only supported for Llama4"
-                )
                 result = apply_flashinfer_per_tensor_scale_fp8(
                     layer=layer,
                     hidden_states=x,
