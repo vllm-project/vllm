@@ -1589,7 +1589,7 @@ def scaled_fp4_quant(
     rounded_m = round_up(m, 128)
     scale_n = n // block_size
     rounded_n = round_up(scale_n, 4)
-    output_scale = torch.empty(
+    output_scale = torch.zeros(
         (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
     )
 
@@ -1642,7 +1642,7 @@ def scaled_fp4_experts_quant(
     output = torch.empty(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
-    output_scales = torch.empty(
+    output_scales = torch.zeros(
         MAX_TOKENS_PER_EXPERT * topk,
         padded_k,
         dtype=torch.int32,

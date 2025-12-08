@@ -1133,14 +1133,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 f"out_padded={out_padded}, weight_shape={weight.shape}"
             )
             
-            # Zero out any pre-padded rows from checkpoint (rows beyond out_orig)
-            # This ensures garbage values don't contaminate the computation
-            if weight_current_rows > out_orig:
-                logger.info(
-                    f"[FP4 Weight Prep] Zeroing pre-padded rows: [{out_orig}:{weight_current_rows}] "
-                    f"in weight of shape {weight.shape}"
-                )
-                weight[out_orig:weight_current_rows, :] = 0
             
             # Pad weight to match swizzled scale dimensions
             if out_padded != weight_current_rows:
@@ -1240,6 +1232,18 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
             
             x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
+
+            # Fix x_blockscale if it's too small for the padded input
+            k_elements = x_fp4.shape[1] * 2 # 2 fp4 items are packed in the input dimension --> we pad x_fp4 so maybe we need to add block into x_block scale
+            required_scale_cols = k_elements // 16 # 16 is the block size
+            # Align to 4 to be safe with int32 packing assumptions in kernels
+            if required_scale_cols % 4 != 0:
+                required_scale_cols += (4 - (required_scale_cols % 4))
+            
+            if x_blockscale.shape[1] < required_scale_cols:
+                pad_scales = required_scale_cols - x_blockscale.shape[1]
+                logger.info(f"[FP4 Linear] Padding x_blockscale: {x_blockscale.shape} -> (..., {x_blockscale.shape[1] + pad_scales})")
+                x_blockscale = torch.nn.functional.pad(x_blockscale, (0, pad_scales), value=0.0).contiguous()
 
             mm_args = (
                 x_fp4,
