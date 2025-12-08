@@ -330,9 +330,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     """
     KV cache coordinator for hybrid models with multiple KV cache types, and
     thus multiple kv cache groups.
-    To simplify `find_longest_cache_hit`, it only supports the combination of
-    two types of KV cache groups, and one of them must be full attention.
-    May extend to more general cases in the future.
+    To simplify `find_longest_cache_hit`,
+    one of the types of KV cache groups must be full attention.
     """
 
     def __init__(
@@ -373,70 +372,54 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
-        Verifies that the model has exactly two types of KV cache groups, and
-        one of them is full attention. Then, split the kv cache groups into full
-        attention groups and other groups.
+        Verifies that one type is full attention and collects all other spec types.
+        Groups are organized by spec type for efficient cache hit processing.
         """
         full_attention_spec: FullAttentionSpec | None = None
-        other_spec: KVCacheSpec | None = None
         self.full_attention_group_ids: list[int] = []
-        self.other_group_ids: list[int] = []
+
+        other_specs_map: dict[KVCacheSpec, tuple[list[int], type]] = {}
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
             if isinstance(g.kv_cache_spec, FullAttentionSpec):
                 if full_attention_spec is None:
                     full_attention_spec = g.kv_cache_spec
+                if full_attention_spec == g.kv_cache_spec:
+                    self.full_attention_group_ids.append(i)
                 else:
-                    assert full_attention_spec == g.kv_cache_spec, (
-                        "HybridKVCacheCoordinator assumes exactly one type of "
-                        "full attention groups now."
-                    )
-                self.full_attention_group_ids.append(i)
+                    if g.kv_cache_spec not in other_specs_map:
+                        manager_cls = self.single_type_managers[i].__class__
+                        other_specs_map[g.kv_cache_spec] = ([], manager_cls)
+                    other_specs_map[g.kv_cache_spec][0].append(i)
             else:
-                if other_spec is None:
-                    other_spec = g.kv_cache_spec
-                else:
-                    assert other_spec == g.kv_cache_spec, (
-                        "HybridKVCacheCoordinator assumes "
-                        "exactly one other type of groups now."
-                    )
-                self.other_group_ids.append(i)
+                if g.kv_cache_spec not in other_specs_map:
+                    manager_cls = self.single_type_managers[i].__class__
+                    other_specs_map[g.kv_cache_spec] = ([], manager_cls)
+                other_specs_map[g.kv_cache_spec][0].append(i)
 
         assert full_attention_spec is not None, (
-            "HybridKVCacheCoordinator assumes exactly one type of full "
-            "attention groups now."
+            "HybridKVCacheCoordinator requires at least one full attention group."
         )
-        assert other_spec is not None, (
-            "HybridKVCacheCoordinator assumes exactly one type of other groups now."
+        assert len(other_specs_map) >= 1, (
+            "HybridKVCacheCoordinator requires at least one non-full-attention group."
         )
 
         self.full_attention_manager_cls = FullAttentionManager
-        self.other_attention_cls = self.single_type_managers[
-            self.other_group_ids[0]
-        ].__class__
         self.full_attention_spec = full_attention_spec
-        self.other_spec = other_spec
         self.full_attention_block_size = self.full_attention_spec.block_size
-        self.other_block_size = self.other_spec.block_size
-        # The LCM of the block sizes of full attention and other attention.
+
+        self.other_specs_data = [
+            (spec, group_ids, manager_cls)
+            for spec, (group_ids, manager_cls) in other_specs_map.items()
+        ]
+        # The LCM of the block sizes of full attention and other attentions.
         # The cache hit length must be a multiple of the LCM of the block sizes
         # to make sure the cache hit length is a multiple of the block size of
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
-        self.lcm_block_size = lcm(self.full_attention_block_size, self.other_block_size)
-
-        if max(self.full_attention_group_ids) < min(self.other_group_ids):
-            self.full_attn_first = True
-        elif max(self.other_group_ids) < min(self.full_attention_group_ids):
-            self.full_attn_first = False
-        else:
-            raise ValueError(
-                "HybridKVCacheCoordinator assumes the full "
-                "attention group ids and other attention group ids "
-                "do not interleave, either full attention group ids "
-                "are before other attention group ids or vice versa."
-                "This is for simplifying merging hit_blocks_full_attn and "
-                "hit_blocks_other_attn to hit_blocks."
-            )
+        self.lcm_block_size = lcm(
+            self.full_attention_block_size,
+            *[spec.block_size for spec, _, _ in self.other_specs_data],
+        )
 
     def find_longest_cache_hit(
         self,
@@ -478,28 +461,26 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         hit_length = len(hit_blocks_full_attn[0]) * self.full_attention_block_size
 
-        # Next, find the cache hit for the other attention WITHIN
-        # the cache hit of full attention.
-        if self.other_spec.block_size == self.hash_block_size:
-            # Common case.
-            other_block_hashes: BlockHashList = block_hashes
-        else:
-            # Similar to the full attention case, here we need to recalculate
-            # block_hashes at the granularity of block_size, using the original
-            # block_hashes (at the granularity of hash_block_size).
-            other_block_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.other_spec.block_size
+        other_hit_blocks: list[tuple[list[KVCacheBlock], ...]] = []
+        for other_spec, group_ids, manager_cls in self.other_specs_data:
+            if other_spec.block_size == self.hash_block_size:
+                other_block_hashes: BlockHashList = block_hashes
+            else:
+                other_block_hashes = BlockHashListWithBlockSize(
+                    block_hashes, self.hash_block_size, other_spec.block_size
+                )
+            hit_blocks_other_attn = manager_cls.find_longest_cache_hit(
+                block_hashes=other_block_hashes,
+                max_length=hit_length,
+                kv_cache_group_ids=group_ids,
+                block_pool=self.block_pool,
+                kv_cache_spec=other_spec,
+                use_eagle=self.use_eagle,
+                alignment_tokens=self.lcm_block_size,
             )
-        hit_blocks_other_attn = self.other_attention_cls.find_longest_cache_hit(
-            block_hashes=other_block_hashes,
-            max_length=hit_length,
-            kv_cache_group_ids=self.other_group_ids,
-            block_pool=self.block_pool,
-            kv_cache_spec=self.other_spec,
-            use_eagle=self.use_eagle,
-            alignment_tokens=self.lcm_block_size,
-        )
-        hit_length = len(hit_blocks_other_attn[0]) * self.other_block_size
+            other_hit_length = len(hit_blocks_other_attn[0]) * other_spec.block_size
+            hit_length = min(hit_length, other_hit_length)
+            other_hit_blocks.append(hit_blocks_other_attn)
 
         # NOTE: the prefix cache hit length must be a multiple of block_size as
         # we don't support partial block cache hit yet. The cache hit length
@@ -510,16 +491,34 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # `verify_and_split_kv_cache_groups`).
         assert hit_length % self.full_attention_block_size == 0
 
-        # Truncate the full attention cache hit to the length of the
-        # cache hit of the other attention.
+        # Truncate cache hits to the length of the longest cache hit.
+        num_full_attention_blocks = hit_length // self.full_attention_block_size
         for group_hit_blocks in hit_blocks_full_attn:
-            del group_hit_blocks[hit_length // self.full_attention_block_size :]
+            del group_hit_blocks[num_full_attention_blocks:]
 
-        # Merge the hit blocks of full attention and other attention.
-        if self.full_attn_first:
-            hit_blocks = hit_blocks_full_attn + hit_blocks_other_attn
-        else:
-            hit_blocks = hit_blocks_other_attn + hit_blocks_full_attn
+        for (other_spec, _, _), hit_blocks_other in zip(
+            self.other_specs_data, other_hit_blocks
+        ):
+            num_other_blocks = hit_length // other_spec.block_size
+            for group_hit_blocks in hit_blocks_other:
+                del group_hit_blocks[num_other_blocks:]
+
+        group_ids_to_hit_blocks: dict[int, list[KVCacheBlock]] = {}
+        for group_id, hit_blocks in zip(
+            self.full_attention_group_ids, hit_blocks_full_attn
+        ):
+            group_ids_to_hit_blocks[group_id] = hit_blocks
+        for (_, group_ids, _), hit_blocks_other in zip(
+            self.other_specs_data, other_hit_blocks
+        ):
+            for group_id, hit_blocks in zip(group_ids, hit_blocks_other):
+                group_ids_to_hit_blocks[group_id] = hit_blocks
+
+        hit_blocks = tuple(
+            group_ids_to_hit_blocks[group_id]
+            for group_id in range(len(self.kv_cache_config.kv_cache_groups))
+        )
+
         return hit_blocks, hit_length
 
 
