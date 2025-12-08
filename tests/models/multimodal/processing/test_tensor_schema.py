@@ -11,7 +11,7 @@ import pytest
 import torch.nn as nn
 from PIL import Image
 
-from vllm.config import ModelConfig, RendererConfig, VllmConfig, set_current_vllm_config
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -31,6 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.platforms import current_platform
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -149,10 +150,7 @@ def initialize_dummy_model(
         backend="nccl",
     )
     initialize_model_parallel(tensor_model_parallel_size=1)
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        renderer_config=RendererConfig(model_config=model_config),
-    )
+    vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
         with set_default_torch_dtype(model_config.dtype):
             model = model_cls(vllm_config=vllm_config)
@@ -184,12 +182,19 @@ def test_model_tensor_schema(model_id: str):
     else:
         dtype = model_info.dtype
 
-    renderer_config = model_info.build_renderer_config(
+    model_config = ModelConfig(
         model_id,
+        tokenizer=model_info.tokenizer or model_id,
+        tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
+        enforce_eager=model_info.enforce_eager,
         dtype=dtype,
     )
-    model_config = renderer_config.model_config
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     assert supports_multimodal(model_cls)
@@ -207,7 +212,10 @@ def test_model_tensor_schema(model_id: str):
     if not any(inputs_parse_methods):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
-    ctx = InputProcessingContext.from_config(renderer_config)
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
     limit_mm_per_prompt = {

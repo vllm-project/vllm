@@ -143,7 +143,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         original_parallel_config: ParallelConfig | None = None,
     ):
         self.vllm_config = vllm_config
-        self.renderer_config = vllm_config.renderer_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -223,7 +222,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            self.renderer_config
+            model_config
         )
         # TODO: Support M-RoPE (e.g, Qwen2-VL)
         assert not self.uses_mrope, "TPU does not support M-RoPE yet."
@@ -354,7 +353,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.mm_budget = (
             MultiModalBudget(
-                self.renderer_config,
+                self.model_config,
                 self.scheduler_config,
                 self.mm_registry,
             )
@@ -2039,7 +2038,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.mm_budget is not None
 
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
-            renderer_config=self.renderer_config,
+            model_config=self.model_config,
             seq_len=self.max_model_len,
             mm_counts={modality: 1},
             cache=self.mm_budget.cache,
