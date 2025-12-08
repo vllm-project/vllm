@@ -1935,7 +1935,6 @@ class FusedMoE(CustomOp):
 
         with sp_ctx:
             extra_tensors = None
-            hidden_states_to_dispatch = hidden_states
             if do_naive_dispatch_combine:
                 # Avoid circular import
                 from vllm.model_executor.layers.quantization.modelopt import (
@@ -1950,19 +1949,11 @@ class FusedMoE(CustomOp):
                     and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
                 )
                 if post_quant_allgather:
-                    import flashinfer
-
-                    a1_gscale = self.w13_input_scale_quant
-                    (
-                        hidden_states_fp4,
-                        hidden_states_sf,
-                    ) = flashinfer.fp4_quantize(
-                        hidden_states,
-                        a1_gscale,
-                        is_sf_swizzled_layout=False,
+                    hidden_states_to_dispatch, extra_tensors = (
+                        self.quant_method.prepare_dp_allgather_tensor(
+                            self, hidden_states, router_logits
+                        )
                     )
-                    extra_tensors = [hidden_states_sf]
-                    hidden_states_to_dispatch = hidden_states_fp4
 
                 dispatch_res = get_ep_group().dispatch(
                     hidden_states_to_dispatch,
