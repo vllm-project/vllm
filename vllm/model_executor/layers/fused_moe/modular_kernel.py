@@ -724,7 +724,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.shared_experts = shared_experts
         self.shared_experts_stream = shared_experts_stream
 
-        # cache whether this worker is using DP+EP
+        # NOTE:
+        # - Callers that have access to a VllmConfig (e.g. MoE layers / quant methods)
+        #   should prefer to pass an explicit ParallelConfig.
+        # - The None fallback to get_current_vllm_config().parallel_config is intended
+        #   for low-level tests and helpers that run under set_current_vllm_config().
         if parallel_config is None:
             parallel_config = get_current_vllm_config().parallel_config
         self.is_dp_ep = (
