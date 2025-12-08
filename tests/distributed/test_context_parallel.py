@@ -132,9 +132,8 @@ CP_TEXT_GENERATION_MODELS = {
             cp_kv_cache_interleave_size=64,
             attn_backend="FLASHMLA",
         ),
-        CPTestSettings.detailed(
-            tp_base=1, pcp_base=2, cp_kv_cache_interleave_size=64,
-        ),
+        CPTestSettings.detailed(tp_base=1, pcp_base=4, cp_kv_cache_interleave_size=64),
+        CPTestSettings.detailed(tp_base=2, pcp_base=2, cp_kv_cache_interleave_size=64),
     ],
     "Qwen/Qwen2.5-1.5B-Instruct": [
         CPTestSettings.detailed(
