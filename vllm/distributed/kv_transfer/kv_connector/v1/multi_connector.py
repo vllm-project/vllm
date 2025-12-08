@@ -85,7 +85,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
         vllm_config: "VllmConfig",
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
         prom_metrics: dict[str, KVConnectorPromMetrics],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
@@ -434,7 +434,7 @@ class MultiConnector(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
@@ -452,3 +452,7 @@ class MultiConnector(KVConnectorBase_V1):
             per_engine_labelvalues,
             prom_metrics,
         )
+
+    def reset_cache(self) -> bool:
+        results = [c.reset_cache() is not False for c in self._connectors]
+        return all(results)

@@ -438,19 +438,25 @@ A = TypeVar("A")
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
-        not envs.VLLM_DISABLE_FLASHINFER_PREFILL
+        not vllm_config.attention_config.disable_flashinfer_prefill
         and flashinfer_available
-        and not envs.VLLM_USE_CUDNN_PREFILL
-        and not envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and not vllm_config.attention_config.use_cudnn_prefill
+        and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability(100)
     )
 
 
 def use_cudnn_prefill() -> bool:
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
         flashinfer_available
-        and envs.VLLM_USE_CUDNN_PREFILL
+        and vllm_config.attention_config.use_cudnn_prefill
         and current_platform.is_device_capability(100)
         and has_nvidia_artifactory()
     )
@@ -458,9 +464,12 @@ def use_cudnn_prefill() -> bool:
 
 def use_trtllm_ragged_deepseek_prefill() -> bool:
     """Check if TRT-LLM ragged DeepSeek prefill should be used."""
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
         flashinfer_available
-        and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability(100)
     )
 
@@ -2057,7 +2066,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             # correct dcp attn_out with lse.
             if self.dcp_world_size > 1:
-                attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
+                attn_out = cp_lse_ag_out_rs(
+                    attn_out,
+                    lse,
+                    get_dcp_group(),
+                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                )
 
             # v_up projection
             self._v_up_proj(attn_out, out=output[:num_decode_tokens])

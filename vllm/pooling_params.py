@@ -220,6 +220,7 @@ class PoolingParams(
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

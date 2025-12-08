@@ -215,6 +215,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
            &rms_norm_dynamic_per_token_quant);
 
+  // Fused Layernorm + Block quant kernels
+  ops.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
+  ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -298,9 +306,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
-      "Tensor? b_bias_or_none,"
-      "Tensor b_scales, Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
-      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
+      "Tensor? b_bias_or_none,Tensor b_scales, "
+      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registration is in source file
@@ -308,13 +317,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin repack from GPTQ.
   ops.def(
       "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
-      "SymInt size_k, SymInt size_n, int num_bits) -> Tensor");
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // awq_marlin repack from AWQ.
   ops.def(
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits) -> Tensor");
+      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // preprocess W-int4A-fp8 weight for marlin kernel
+  ops.def(
+      "marlin_int4_fp8_preprocess(Tensor qweight, "
+      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // CUTLASS w4a8 GEMM
@@ -609,6 +624,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "scale_ue8m0) -> ()");
   ops.impl("per_token_group_fp8_quant", torch::kCUDA,
            &per_token_group_quant_fp8);
+
+  // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
+  // TMA-aligned scales for DeepGEMM.
+  ops.def(
+      "per_token_group_fp8_quant_packed(Tensor input, Tensor! output_q, "
+      "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
+      "float fp8_max) -> ()");
+  ops.impl("per_token_group_fp8_quant_packed", torch::kCUDA,
+           &per_token_group_quant_8bit_packed);
 
   // Compute per-token-group INT8 quantized tensor and scaling factor.
   ops.def(
