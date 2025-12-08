@@ -126,14 +126,14 @@ The only persisted outputs are the tuned JSON configs.
 - `--hidden-size`  
   Hidden size of the model:
 
-  - For `lora_shrink`: `K = hidden_size`, `N = lora_rank`.
-  - For `lora_expand` and fused MoE: `K = lora_rank`, `N = hidden_size`.
-  - Required unless it can be **auto-inferred** from `--model-path`
+    - For `lora_shrink`: `K = hidden_size`, `N = lora_rank`.
+    - For `lora_expand` and fused MoE: `K = lora_rank`, `N = hidden_size`.
+    - Required unless it can be **auto-inferred** from `--model-path`
     (see section 3.6).
 
 - `--lora-rank`  
   LoRA rank (N dimension in shrink).
-  - Required unless it can be **auto-inferred** from `--lora-path`
+    - Required unless it can be **auto-inferred** from `--lora-path`
     (see section 3.6).
 
 - `--num-loras` / `--num-active-loras`  
@@ -180,19 +180,19 @@ The only persisted outputs are the tuned JSON configs.
 
   Files are named as:
 
-  - `"{gpu_name}_SHRINK.json"` for `lora_shrink`
-  - `"{gpu_name}_EXPAND_{add_inputs}.json"` for `lora_expand`
-  - `"{gpu_name}_FUSED_MOE_LORA_W13_SHRINK.json"` / `EXPAND.json`
-  - `"{gpu_name}_FUSED_MOE_LORA_W2_SHRINK.json"` / `EXPAND.json`
+    - `"{gpu_name}_SHRINK.json"` for `lora_shrink`
+    - `"{gpu_name}_EXPAND_{add_inputs}.json"` for `lora_expand`
+    - `"{gpu_name}_FUSED_MOE_LORA_W13_SHRINK.json"` / `EXPAND.json`
+    - `"{gpu_name}_FUSED_MOE_LORA_W2_SHRINK.json"` / `EXPAND.json`
 
   The script automatically normalizes `gpu_name` (spaces and `-` replaced by `_`).
 
 - `--json-overwrite`  
   When the target JSON file already exists:
 
-  - If `--json-overwrite` **is not** set, the script will create a new file
+    - If `--json-overwrite` **is not** set, the script will create a new file
     with a `_tuned_{idx}.json` suffix.
-  - If `--json-overwrite` **is** set, the existing file is overwritten.
+    - If `--json-overwrite` **is** set, the existing file is overwritten.
 
 - `--output-csv`  
   Path to an output CSV file (kept for CLI compatibility). Internally, the
@@ -270,12 +270,12 @@ of requiring every value on the command line:
   A base model path or Hugging Face repo id. When tuning fused MoE LoRA ops
   and `transformers` is installed, the script will try to infer:
 
-  - `hidden_size` (e.g. from `hidden_size`, `n_embd`, or `d_model`),
-  - `num_experts` (e.g. `num_experts`, `moe_num_experts`, `num_local_experts`,
+    - `hidden_size` (e.g. from `hidden_size`, `n_embd`, or `d_model`),
+    - `num_experts` (e.g. `num_experts`, `moe_num_experts`, `num_local_experts`,
     `n_routed_experts`),
-  - `moe_intermediate_size` (e.g. `moe_intermediate_size`,
+    - `moe_intermediate_size` (e.g. `moe_intermediate_size`,
     `ffn_hidden_size`, `intermediate_size`),
-  - `top_k_num` (e.g. `num_experts_per_tok`, `num_experts_per_token`,
+    - `top_k_num` (e.g. `num_experts_per_tok`, `num_experts_per_token`,
     `moe_top_k`, `top_k`),
 
   filling in any of these that you did not explicitly set.
@@ -284,8 +284,8 @@ of requiring every value on the command line:
   Directory containing LoRA adapter weights. The script looks for common
   config and weight files such as:
 
-  - `adapter_config.json`, `adapter_config.bin`, `config.json`, and
-  - `*.safetensors` (preferring keys that contain `lora_`).
+    - `adapter_config.json`, `adapter_config.bin`, `config.json`, and
+    - `*.safetensors` (preferring keys that contain `lora_`).
 
   If a valid rank can be inferred from these files, `lora_rank` is filled
   automatically when you omit `--lora-rank`.
@@ -459,9 +459,9 @@ By using `benchmark_lora_tuning.py` to populate the JSON files under
   multiple modes (`list_bench`, `range_bench`, `model_bench`) and support for
   saving raw `torch.utils.benchmark.Measurement` data to pickle/CSV.
 - `benchmark_lora_tuning.py` is a **focused tuner**:
-  - Uses a fixed search space.
-  - Integrates directly with runtime `get_lora_op_configs`.
-  - Writes only the final tuned configs (JSON) needed for production use.
+    - Uses a fixed search space.
+    - Integrates directly with runtime `get_lora_op_configs`.
+    - Writes only the final tuned configs (JSON) needed for production use.
 
 In a typical workflow, you:
 
