@@ -91,7 +91,7 @@ from vllm.entrypoints.responses_utils import (
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import PromptType, TextPrompt, TokensPrompt
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
@@ -1056,10 +1056,15 @@ class OpenAIServing:
             **(chat_template_kwargs or {}),
         }
 
-        engine_prompt: TokensPrompt | TextPrompt
+        # For now, use the async tokenizer for chat template tokenization if possible
+        # Later we can move the async tokenizer into the renderer so we can return both
+        # text and token IDs from render_messages_async.
+        from vllm.tokenizers.mistral import MistralTokenizer
+
         conversation, engine_prompt = await renderer.render_messages_async(
             messages,
             chat_template_content_format=chat_template_content_format,
+            tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
             **chat_template_kwargs,
         )
 
