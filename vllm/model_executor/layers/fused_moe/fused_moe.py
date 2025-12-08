@@ -872,8 +872,10 @@ def get_moe_configs(
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info(
-                    "Using configuration from %s for MoE layer.", config_file_path
+                logger.info_once(
+                    "Using configuration from %s for MoE layer.",
+                    config_file_path,
+                    scope="global",
                 )
                 # If a configuration has been found, return it
                 tuned_config = json.load(f)
@@ -1246,7 +1248,6 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1260,7 +1261,6 @@ def eplb_map_to_physical_and_record(
         expert_load_view: The expert load view.
         logical_to_physical_map: The logical to physical map.
         logical_replica_count: The logical replica count.
-        indices_type: The indices type.
 
     Returns:
         The physical expert ids.
@@ -1310,9 +1310,6 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-
-    if indices_type is not None:
-        topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
 
 
@@ -1890,7 +1887,11 @@ def fused_experts_impl(
         )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            curr_topk_ids,
+            config["BLOCK_SIZE_M"],
+            global_num_experts,
+            expert_map,
+            ignore_invalid_experts=True,
         )
 
         invoke_fused_moe_kernel(
@@ -1948,6 +1949,9 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        if expert_map is not None:
+            intermediate_cache3.zero_()
 
         invoke_fused_moe_kernel(
             qintermediate_cache2,

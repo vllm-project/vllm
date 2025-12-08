@@ -338,6 +338,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
+        mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -575,8 +576,6 @@ class Idefics3Model(nn.Module):
     dummy_inputs=Idefics3DummyInputsBuilder,
 )
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

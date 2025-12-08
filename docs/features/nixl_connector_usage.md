@@ -158,7 +158,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 
 ## Experimental Feature
 
-### Heterogenuous KV Layout support
+### Heterogeneous KV Layout support
 
 Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
 
