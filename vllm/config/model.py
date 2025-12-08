@@ -516,8 +516,10 @@ class ModelConfig:
             if task == "classify":
                 return "classify"
             if task == "reward":
-                logger.warning("Pooling models now default support all pooling; "
-                               "you can use it without any settings.")
+                logger.warning(
+                    "Pooling models now default support all pooling; "
+                    "you can use it without any settings."
+                )
                 return "embed"
             if task == "score":
                 new_task = self._get_default_pooling_task(architectures)
