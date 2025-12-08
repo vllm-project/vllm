@@ -258,7 +258,9 @@ def test_attention_metrics_scaling():
     double_layers_vllm_config = create_mock_vllm_config(double_layers_hf_config)
     double_layers_metrics = AttentionMetrics.from_vllm_config(double_layers_vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # FLOPS should double when layers double
     base_flops = base_metrics.get_num_flops(ctx)
@@ -296,7 +298,9 @@ def test_attention_metrics_grouped_query():
     mha_metrics = AttentionMetrics.from_vllm_config(mha_config)
     gqa_metrics = AttentionMetrics.from_vllm_config(gqa_config)
 
-    ctx = ExecutionContext(num_tokens=1, context_len=1024, is_prefill=False)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=1024, is_prefill=False
+    )
 
     # GQA should have less KV cache reads since fewer KV heads
     mha_read = mha_metrics.get_read_bytes(ctx)
@@ -323,7 +327,9 @@ def test_ffn_metrics_scaling():
     larger_ffn_vllm_config = create_mock_vllm_config(larger_ffn_hf_config)
     larger_ffn_metrics = FfnMetrics.from_vllm_config(larger_ffn_vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # FLOPS should double when intermediate size doubles
     base_flops = base_metrics.get_num_flops(ctx)
@@ -354,7 +360,9 @@ def test_moe_metrics_vs_dense():
     dense_metrics = FfnMetrics.from_vllm_config(dense_config)
     moe_metrics = FfnMetrics.from_vllm_config(moe_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # MoE should have different compute/memory characteristics
     dense_flops = dense_metrics.get_num_flops(ctx)
@@ -381,7 +389,9 @@ def test_unembed_metrics_scaling():
     small_vocab_metrics = UnembedMetrics.from_vllm_config(small_vocab_config)
     large_vocab_metrics = UnembedMetrics.from_vllm_config(large_vocab_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # FLOPS should double when vocab size doubles
     small_flops = small_vocab_metrics.get_num_flops(ctx)
@@ -401,8 +411,12 @@ def test_prefill_vs_decode_differences():
 
     metrics = AttentionMetrics.from_vllm_config(config)
 
-    prefill_ctx = ExecutionContext(num_tokens=512, context_len=512, is_prefill=True)
-    decode_ctx = ExecutionContext(num_tokens=1, context_len=512, is_prefill=False)
+    prefill_ctx = ExecutionContext.from_single_request(
+        num_tokens=512, context_len=512, is_prefill=True
+    )
+    decode_ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=512, is_prefill=False
+    )
 
     prefill_read = metrics.get_read_bytes(prefill_ctx)
     decode_read = metrics.get_read_bytes(decode_ctx)
@@ -422,7 +436,9 @@ def test_model_metrics_aggregation():
     config = create_mock_vllm_config(hf_config)
 
     model_metrics = ModelMetrics(config)
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Should have metrics for attention, ffn, and unembed
     total_flops = model_metrics.get_num_flops(ctx)
@@ -472,7 +488,9 @@ def test_moe_expert_activation_proportional_scaling():
     double_metrics = FfnMetrics.from_vllm_config(double_vllm_config)
     triple_metrics = FfnMetrics.from_vllm_config(triple_vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Get total metrics - the key insight is that differences should be proportional
     base_flops = base_metrics.get_num_flops(ctx)
@@ -560,7 +578,9 @@ def test_attention_per_gpu_with_tensor_parallelism():
     vllm_config = create_mock_vllm_config(hf_config, tensor_parallel_size=4)
     metrics = AttentionMetrics.from_vllm_config(vllm_config)
 
-    ctx = ExecutionContext(num_tokens=128, context_len=1024, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=128, context_len=1024, is_prefill=True
+    )
 
     # Get global and per-gpu metrics
     global_flops = metrics.get_num_flops(ctx, per_gpu=False)
@@ -592,7 +612,9 @@ def test_attention_per_gpu_with_pipeline_parallelism():
     vllm_config = create_mock_vllm_config(hf_config, pipeline_parallel_size=4)
     metrics = AttentionMetrics.from_vllm_config(vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=False)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=False
+    )
 
     # Get global and per-gpu metrics
     global_flops = metrics.get_num_flops(ctx, per_gpu=False)
@@ -625,7 +647,9 @@ def test_ffn_per_gpu_with_tensor_parallelism():
     # ffn_tp_size should be dp_size * tp_size = 8 (when EP not enabled)
     assert metrics.ffn_tp_size == 8
 
-    ctx = ExecutionContext(num_tokens=128, context_len=2048, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=128, context_len=2048, is_prefill=True
+    )
 
     # Get global and per-gpu metrics
     global_flops = metrics.get_num_flops(ctx, per_gpu=False)
@@ -647,7 +671,9 @@ def test_ffn_per_gpu_with_pipeline_parallelism():
     vllm_config = create_mock_vllm_config(hf_config, pipeline_parallel_size=6)
     metrics = FfnMetrics.from_vllm_config(vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Get global and per-gpu metrics
     global_flops = metrics.get_num_flops(ctx, per_gpu=False)
@@ -684,7 +710,9 @@ def test_moe_per_gpu_with_expert_parallelism():
     assert metrics.ffn_ep_size == 8
     assert metrics.ffn_tp_size == 1
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Get per-gpu metrics
     per_gpu_read_breakdown = metrics.get_read_bytes_breakdown(ctx, per_gpu=True)
@@ -739,14 +767,18 @@ def test_moe_per_gpu_expert_activation_accounting():
     # Each GPU: T*E = 10*1 = 10 activations
     # Experts per GPU: 64/8 = 8
     # So num_activated_experts should be min(10, 8) = 8
-    small_ctx = ExecutionContext(num_tokens=10, context_len=512, is_prefill=True)
+    small_ctx = ExecutionContext.from_single_request(
+        num_tokens=10, context_len=512, is_prefill=True
+    )
     small_read = metrics.get_read_bytes_breakdown(small_ctx, per_gpu=True)
 
     # Large batch: T=1000, E_per_gpu=1
     # Each GPU: T*E = 1000*1 = 1000 activations
     # Experts per GPU: 8
     # So num_activated_experts should be min(1000, 8) = 8 (all experts activated)
-    large_ctx = ExecutionContext(num_tokens=1000, context_len=512, is_prefill=True)
+    large_ctx = ExecutionContext.from_single_request(
+        num_tokens=1000, context_len=512, is_prefill=True
+    )
     large_read = metrics.get_read_bytes_breakdown(large_ctx, per_gpu=True)
 
     # Weight reads should be similar (both activate all 8 experts per GPU)
@@ -775,7 +807,9 @@ def test_unembed_per_gpu_with_tensor_parallelism():
     vllm_config = create_mock_vllm_config(hf_config, tensor_parallel_size=8)
     metrics = UnembedMetrics.from_vllm_config(vllm_config)
 
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Get global and per-gpu metrics
     global_flops = metrics.get_num_flops(ctx, per_gpu=False)
@@ -813,7 +847,9 @@ def test_model_metrics_per_gpu_aggregation():
     )
 
     model_metrics = ModelMetrics(vllm_config)
-    ctx = ExecutionContext(num_tokens=100, context_len=512, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=100, context_len=512, is_prefill=True
+    )
 
     # Get breakdowns for both modes
     per_gpu_breakdown = model_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
@@ -847,7 +883,9 @@ def test_attention_per_gpu_heads_not_evenly_divisible():
     vllm_config = create_mock_vllm_config(hf_config, tensor_parallel_size=4)
     metrics = AttentionMetrics.from_vllm_config(vllm_config)
 
-    ctx = ExecutionContext(num_tokens=64, context_len=256, is_prefill=True)
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=64, context_len=256, is_prefill=True
+    )
 
     # Should not crash and should handle max(1, ...) correctly
     per_gpu_flops = metrics.get_num_flops(ctx, per_gpu=True)

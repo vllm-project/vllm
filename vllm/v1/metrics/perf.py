@@ -6,6 +6,7 @@ Analytic flops/memory estimation module for transformer components,
 to help derive MFU (Model Flops Utilization) stats for a running model.
 """
 
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from vllm.utils.torch_utils import (
     get_dtype_size,
     get_kv_cache_torch_dtype,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -38,25 +40,77 @@ class InvalidComponent(Exception):
 #### Basic Data Types ####
 
 
-@dataclass(frozen=True)
+@dataclass
+class PerfStats:
+    num_flops_per_gpu: int = 0
+    num_read_bytes_per_gpu: int = 0
+    num_write_bytes_per_gpu: int = 0
+    # time it took to calculate these stats in seconds (used to measure overhead)
+    calc_duration: float = 0.0
+
+    def __add__(self, other: "PerfStats") -> "PerfStats":
+        return PerfStats(
+            self.num_flops_per_gpu + other.num_flops_per_gpu,
+            self.num_read_bytes_per_gpu + other.num_read_bytes_per_gpu,
+            self.num_write_bytes_per_gpu + other.num_write_bytes_per_gpu,
+        )
+
+
+@dataclass
 class ExecutionContext:
     """
-    Represents an execution context for a single request.
+    Represents an execution context for a batch of requests.
 
-    FIXME: Might need to extend to batched context later.
+    This class aggregates statistics across multiple requests in a batch,
+    separately tracking prefill and decode phases.
 
     Example)
-    - full prefill with 2048 tokens
-      -> ExecutionContext(2048, 2048, True)
-    - partial prefill with 1024 tokens 2048 context
-      -> ExecutionContext(1024, 2048, True)
-    - decode with 8192 context
-      -> ExecutionContext(1, 8192, False)
+    - Batch with one full prefill (2048 tokens) and one decode (1 token, 8192 context):
+      ctx = ExecutionContext()
+      ctx.add(2048, 2048, is_prefill=True)
+      ctx.add(1, 8192, is_prefill=False)
     """
 
-    num_tokens: int
-    context_len: int
-    is_prefill: bool
+    # Prefill phase statistics
+    prefill_num_tokens: int = 0  # sum of num_tokens for prefill requests
+    prefill_context_len: int = 0  # sum of context_len for prefill requests
+    prefill_token_context_product: int = 0  # sum of (num_tokens * context_len)
+
+    # Decode phase statistics
+    decode_num_tokens: int = 0  # sum of num_tokens for decode requests
+    decode_context_len: int = 0  # sum of context_len for decode requests
+    decode_token_context_product: int = 0  # sum of (num_tokens * context_len)
+
+    def add(self, num_tokens: int, context_len: int, is_prefill: bool) -> None:
+        """Add a single request's statistics to this batch context."""
+        if is_prefill:
+            self.prefill_num_tokens += num_tokens
+            self.prefill_context_len += context_len
+            self.prefill_token_context_product += num_tokens * context_len
+        else:
+            self.decode_num_tokens += num_tokens
+            self.decode_context_len += context_len
+            self.decode_token_context_product += num_tokens * context_len
+
+    def total_num_tokens(self) -> int:
+        """Total number of tokens across all requests in the batch."""
+        return self.prefill_num_tokens + self.decode_num_tokens
+
+    def total_token_context_product(self) -> int:
+        """Total sum of (num_tokens * context_len) across all requests."""
+        return self.prefill_token_context_product + self.decode_token_context_product
+
+    @classmethod
+    def from_single_request(
+        cls, num_tokens: int, context_len: int, is_prefill: bool
+    ) -> "ExecutionContext":
+        """Create an ExecutionContext from a single request.
+
+        This is a convenience method primarily for testing.
+        """
+        ctx = cls()
+        ctx.add(num_tokens, context_len, is_prefill)
+        return ctx
 
 
 class ParsedArgs(BaseModel):
@@ -71,8 +125,6 @@ class ParsedArgs(BaseModel):
     """
 
     model_config = ConfigDict(extra="allow")
-
-
 
 
 #### Abstract ####
@@ -126,7 +178,16 @@ class ComponentMetrics(BaseModel, ABC):
 
     @classmethod
     @abstractmethod
-    def get_parser(cls) -> ParserChain: ...
+    def get_parser(cls) -> ParserChain:
+        """
+        Return a ParserChain that provides values for all required fields.
+        The returned parser chain must populate ParsedArgs with values for every
+        field defined on this ComponentMetrics class. Missing fields will cause
+        a ValidationError when from_vllm_config() is called.
+        See individual Parser docstrings for which args they provide, and field
+        comments on ComponentMetrics subclasses for which parser provides each field.
+        """
+        ...
 
     def __init_subclass__(cls):
         _COMPONENT_METRICS_REGISTRY[cls.component_type()] = cls
@@ -178,6 +239,12 @@ class ComponentMetrics(BaseModel, ABC):
 
 
 class BaseConfigParser(Parser):
+    """
+    Parses base model configuration.
+    Provides: vocab_size, hidden_size, num_attention_heads, num_hidden_layers,
+    weight_byte_size, activation_byte_size, dp_size, tp_size, pp_size, enable_ep
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         model_config = vllm_config.model_config
 
@@ -224,6 +291,11 @@ class BaseConfigParser(Parser):
 
 
 class BaseAttentionConfigParser(Parser):
+    """
+    Parses attention-specific configuration.
+    Provides: num_key_value_heads, head_dim, cache_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         model_config = vllm_config.model_config
 
@@ -240,6 +312,11 @@ class BaseAttentionConfigParser(Parser):
 
 
 class AttentionQuantizationConfigParser(Parser):
+    """
+    Parses quantization configuration for attention layers.
+    Overrides: weight_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.quant_config
 
@@ -252,6 +329,9 @@ class AttentionQuantizationConfigParser(Parser):
             # FIXME: These configs also have concept of "ignored layers" and we
             # need to solve the same problem as above.
             args.weight_byte_size = 1
+        elif quant_method == "mxfp4":
+            # FIXME: Also has "ignored layers" issue above
+            args.weight_byte_size = 0.5
         else:
             # FIXME: Add more parsing logic for different quant methods.
             raise InvalidComponent
@@ -260,17 +340,21 @@ class AttentionQuantizationConfigParser(Parser):
 
 
 class AttentionMetrics(ComponentMetrics):
+    # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
     hidden_size: int = Field(..., gt=0)
     num_attention_heads: int = Field(..., gt=0)
-    num_key_value_heads: int = Field(..., gt=0)
-    head_dim: int = Field(..., gt=0)
-    weight_byte_size: int = Field(..., gt=0)
     activation_byte_size: int = Field(..., gt=0)
-    cache_byte_size: int = Field(..., gt=0)
-
     tp_size: int = Field(..., gt=0)
     pp_size: int = Field(..., gt=0)
+
+    # From BaseAttentionConfigParser
+    num_key_value_heads: int = Field(..., gt=0)
+    head_dim: int = Field(..., gt=0)
+    cache_byte_size: int = Field(..., gt=0)
+
+    # From BaseConfig Parser, overridden by AttentionQuantizationConfigParser
+    weight_byte_size: int | float = Field(..., gt=0)
 
     # TODO: discern cases where we have mixture of different attention layer types
     # such as SWA, MLA, etc.
@@ -297,7 +381,8 @@ class AttentionMetrics(ComponentMetrics):
             self.num_key_value_heads,
             self.head_dim,
         )
-        T, C = ctx.num_tokens, ctx.context_len
+        T = ctx.total_num_tokens()
+        TC = ctx.total_token_context_product()
 
         if per_gpu:
             L //= self.pp_size
@@ -307,8 +392,8 @@ class AttentionMetrics(ComponentMetrics):
 
         return {
             "qkv_proj": 2 * T * D * (q + 2 * kv) * d * L,
-            "attn_qk": 2 * q * T * C * d * L,
-            "attn_av": 2 * q * T * C * d * L,
+            "attn_qk": 2 * q * TC * d * L,
+            "attn_av": 2 * q * TC * d * L,
             "out_proj": 2 * T * D * q * d * L,
         }
 
@@ -322,7 +407,7 @@ class AttentionMetrics(ComponentMetrics):
             self.num_key_value_heads,
             self.head_dim,
         )
-        T, C = ctx.num_tokens, ctx.context_len
+        T = ctx.total_num_tokens()
 
         if per_gpu:
             L //= self.pp_size
@@ -333,20 +418,27 @@ class AttentionMetrics(ComponentMetrics):
         read_bytes = {}
 
         read_bytes["qkv_input"] = T * D * self.activation_byte_size * L
-        read_bytes["qkv_weight"] = D * (q + 2 * kv) * d * self.weight_byte_size * L
+        read_bytes["qkv_weight"] = int(D * (q + 2 * kv) * d * self.weight_byte_size * L)
 
-        if ctx.is_prefill:
+        # Attention input reads differ between prefill and decode
+        # Prefill: read Q, K, V activations (all in activation_byte_size)
+        if ctx.prefill_num_tokens > 0:
             read_bytes["attn_input"] = (
-                (T * q + 2 * C * kv) * d * self.activation_byte_size * L
+                (ctx.prefill_num_tokens * q + 2 * ctx.prefill_context_len * kv)
+                * d
+                * self.activation_byte_size
+                * L
             )
-        else:
-            read_bytes["attn_input"] = (
-                T * q * d * self.activation_byte_size * L
-                + 2 * C * kv * d * self.cache_byte_size * L
+
+        # Decode: read Q activations + read K, V from cache (in cache_byte_size)
+        if ctx.decode_num_tokens > 0:
+            read_bytes["attn_input"] = read_bytes.get("attn_input", 0) + (
+                ctx.decode_num_tokens * q * d * self.activation_byte_size * L
+                + 2 * ctx.decode_context_len * kv * d * self.cache_byte_size * L
             )
 
         read_bytes["out_input"] = T * q * d * self.activation_byte_size * L
-        read_bytes["out_weight"] = q * d * D * self.weight_byte_size * L
+        read_bytes["out_weight"] = int(q * d * D * self.weight_byte_size * L)
 
         return read_bytes
 
@@ -361,7 +453,7 @@ class AttentionMetrics(ComponentMetrics):
             self.num_key_value_heads,
             self.head_dim,
         )
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         if per_gpu:
             L //= self.pp_size
@@ -380,6 +472,12 @@ class AttentionMetrics(ComponentMetrics):
 
 
 class BaseFfnConfigParser(Parser):
+    """
+    Parses FFN and MoE configuration.
+    Provides: intermediate_size, num_experts, num_experts_per_tok,
+    moe_intermediate_size, num_shared_experts, num_moe_layers
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.model_config.hf_config
         if hasattr(cfg, "text_config") and cfg.text_config is not None:
@@ -407,6 +505,12 @@ class BaseFfnConfigParser(Parser):
 
 
 class FfnParallelParser(Parser):
+    """
+    Parses FFN parallelism configuration.
+
+    Provides: ffn_tp_size, ffn_ep_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         # NOTE: ffn tp_size does not equal the tp_size parameter directly.
         # e.g.) If we use DP2TP4, ffn will use TP8 (or EP8 if EP is enabled.)
@@ -423,8 +527,9 @@ class FfnParallelParser(Parser):
 
 class InterleaveMoeLayerStepParser(Parser):
     """
-    Additionally parse interleave_moe_layer_step field (used in models like Llama4)
-    to adjust num_moe_layers.
+    Parses interleave_moe_layer_step field for models like Llama4.
+
+    Overrides: num_moe_layers
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
@@ -449,8 +554,9 @@ class InterleaveMoeLayerStepParser(Parser):
 
 class MoeLayerFreqParser(Parser):
     """
-    Additionally parse moe_layer_freq field (and first_k_dense_replace field optionally)
-    (used in models like Deepseek) to adjust num_moe_layers.
+    Parses moe_layer_freq and first_k_dense_replace fields for models like Deepseek.
+
+    Overrides: num_moe_layers
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
@@ -472,6 +578,12 @@ class MoeLayerFreqParser(Parser):
 
 
 class FfnQuantizationConfigParser(Parser):
+    """
+    Parses quantization configuration for FFN layers.
+
+    Overrides: weight_byte_size
+    """
+
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
         cfg = vllm_config.quant_config
 
@@ -497,25 +609,34 @@ class FfnQuantizationConfigParser(Parser):
 
 
 class FfnMetrics(ComponentMetrics):
+    # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
     hidden_size: int = Field(..., gt=0)
+    activation_byte_size: int = Field(..., gt=0)
+    pp_size: int = Field(..., gt=0)
+
+    # From FfnParallelParser
+    ffn_tp_size: int = Field(..., gt=0)
+    ffn_ep_size: int = Field(..., gt=0)
+
+    # From BaseFfnConfigParser
     intermediate_size: int = Field(..., gt=0)
-    num_moe_layers: int = Field(..., ge=0)
     num_experts: int = Field(0)
     num_experts_per_tok: int = Field(1)
     moe_intermediate_size: int = Field(0)
     num_shared_experts: int = Field(0)
+
+    # From BaseConfigParser, can be overridden InterleaveMoeLayerStep or MoeLayerFreq
+    num_moe_layers: int = Field(..., ge=0)
+
     # FIXME: might have to make this more granular
     # (i.e. dense_weight_byte_size, moe_routed_weight_byte_size,
     # moe_shared_weight_byte_size)
     # since it can differ from byte size of other components (e.g. attn)
     # and can differ even from each other.
-    weight_byte_size: int | float = Field(..., gt=0)
-    activation_byte_size: int = Field(..., gt=0)
 
-    ffn_tp_size: int = Field(..., gt=0)
-    ffn_ep_size: int = Field(..., gt=0)
-    pp_size: int = Field(..., gt=0)
+    # From BaseConfigParser, can be overridden by FfnQuantizationConfigParser
+    weight_byte_size: int | float = Field(..., gt=0)
 
     @model_validator(mode="after")
     def validate_moe_fields(self) -> Self:
@@ -552,7 +673,7 @@ class FfnMetrics(ComponentMetrics):
             self.moe_intermediate_size,
             self.num_shared_experts,
         )
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         Ld = L - Lm
 
@@ -595,7 +716,7 @@ class FfnMetrics(ComponentMetrics):
             self.moe_intermediate_size,
             self.num_shared_experts,
         )
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
         num_experts = self.num_experts
 
         Ld = L - Lm
@@ -616,15 +737,20 @@ class FfnMetrics(ComponentMetrics):
 
         read_bytes = {}
 
-        # NOTE: Ignore SiLU for now. Just consider GEMMs.
-
-        # Dense FFN layers (3 GEMMs: up, gate, down projections)
+        # Dense FFN layers (3 GEMMs: up, gate, down projections + SiLU activation)
         if Ld:
-            read_bytes["dense_up_gate_input"] = int(T * D * self.activation_byte_size * Ld)
+            read_bytes["dense_up_gate_input"] = int(
+                T * D * self.activation_byte_size * Ld
+            )
             read_bytes["dense_up_gate_weights"] = int(
                 2 * D * DI * self.weight_byte_size * Ld
             )
-            read_bytes["dense_down_input"] = int(T * DI * self.activation_byte_size * Ld)
+            read_bytes["dense_silu_input"] = int(
+                2 * T * DI * self.activation_byte_size * Ld
+            )
+            read_bytes["dense_down_input"] = int(
+                T * DI * self.activation_byte_size * Ld
+            )
             read_bytes["dense_down_weights"] = int(D * DI * self.weight_byte_size * Ld)
 
         if Lm:
@@ -639,7 +765,9 @@ class FfnMetrics(ComponentMetrics):
                 read_bytes["routed_up_gate_weights"] = int(
                     2 * D * MI * num_activated_experts * self.weight_byte_size * Lm
                 )
-
+                read_bytes["routed_silu_input"] = int(
+                    2 * num_activated_tokens * MI * self.activation_byte_size * Lm
+                )
                 read_bytes["routed_down_input"] = int(
                     num_activated_tokens * MI * self.activation_byte_size * Lm
                 )
@@ -655,7 +783,9 @@ class FfnMetrics(ComponentMetrics):
                 read_bytes["shared_up_gate_weights"] = int(
                     2 * D * MI * S * self.weight_byte_size * Lm
                 )
-
+                read_bytes["shared_silu_input"] = int(
+                    2 * T * MI * S * self.activation_byte_size * Lm
+                )
                 read_bytes["shared_down_input"] = int(
                     T * MI * self.activation_byte_size * Lm
                 )
@@ -676,7 +806,7 @@ class FfnMetrics(ComponentMetrics):
             self.moe_intermediate_size,
             self.num_shared_experts,
         )
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         Ld = L - Lm
 
@@ -694,14 +824,17 @@ class FfnMetrics(ComponentMetrics):
 
         write_bytes = {}
 
-        # NOTE: Ignore SiLU for now. Just consider GEMMs.
-
         # Dense FFN layers
         if Ld:
             write_bytes["dense_up_gate_output"] = int(
                 2 * T * DI * self.activation_byte_size * Ld
             )
-            write_bytes["dense_down_output"] = int(T * D * self.activation_byte_size * Ld)
+            write_bytes["dense_silu_output"] = int(
+                T * DI * self.activation_byte_size * Ld
+            )
+            write_bytes["dense_down_output"] = int(
+                T * D * self.activation_byte_size * Ld
+            )
 
         # MoE outputs
         if Lm:
@@ -709,12 +842,18 @@ class FfnMetrics(ComponentMetrics):
                 write_bytes["routed_up_gate_output"] = int(
                     2 * num_activated_tokens * MI * self.activation_byte_size * Lm
                 )
+                write_bytes["routed_silu_output"] = int(
+                    num_activated_tokens * MI * self.activation_byte_size * Lm
+                )
                 write_bytes["routed_down_output"] = int(
                     num_activated_tokens * D * self.activation_byte_size * Lm
                 )
             if S:
                 write_bytes["shared_up_gate_output"] = int(
                     2 * T * S * MI * self.activation_byte_size * Lm
+                )
+                write_bytes["shared_silu_output"] = int(
+                    T * S * MI * self.activation_byte_size * Lm
                 )
                 write_bytes["shared_down_output"] = int(
                     T * S * D * self.activation_byte_size * Lm
@@ -727,6 +866,7 @@ class FfnMetrics(ComponentMetrics):
 
 
 class UnembedMetrics(ComponentMetrics):
+    # From BaseConfigParser
     hidden_size: int = Field(..., gt=0)
     vocab_size: int = Field(..., gt=0)
     weight_byte_size: int = Field(..., gt=0)
@@ -749,7 +889,7 @@ class UnembedMetrics(ComponentMetrics):
     ) -> dict[str, int]:
         """Calculate flops breakdown for unembedding layer."""
         D, V = self.hidden_size, self.vocab_size
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         if per_gpu:
             V //= self.tp_size
@@ -763,7 +903,7 @@ class UnembedMetrics(ComponentMetrics):
     ) -> dict[str, int]:
         """Calculate read memory traffic for unembedding layer."""
         D, V = self.hidden_size, self.vocab_size
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         if per_gpu:
             V //= self.tp_size
@@ -778,7 +918,7 @@ class UnembedMetrics(ComponentMetrics):
     ) -> dict[str, int]:
         """Calculate write memory traffic for unembedding layer."""
         V = self.vocab_size
-        T = ctx.num_tokens
+        T = ctx.total_num_tokens()
 
         if per_gpu:
             V //= self.tp_size
@@ -816,13 +956,13 @@ class ModelMetrics:
         return len(self.metrics) > 0
 
     def get_num_flops(self, ctx: ExecutionContext, per_gpu: bool = True) -> int:
-        return sum(self.get_num_flops_breakdown(ctx, per_gpu).values())
+        return sum(metric.get_num_flops(ctx, per_gpu) for metric in self.metrics)
 
     def get_read_bytes(self, ctx: ExecutionContext, per_gpu: bool = True) -> int:
-        return sum(self.get_read_bytes_breakdown(ctx, per_gpu).values())
+        return sum(metric.get_read_bytes(ctx, per_gpu) for metric in self.metrics)
 
     def get_write_bytes(self, ctx: ExecutionContext, per_gpu: bool = True) -> int:
-        return sum(self.get_write_bytes_breakdown(ctx, per_gpu).values())
+        return sum(metric.get_write_bytes(ctx, per_gpu) for metric in self.metrics)
 
     def get_num_flops_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
@@ -831,9 +971,7 @@ class ModelMetrics:
         for metric in self.metrics:
             breakdown = metric.get_num_flops_breakdown(ctx, per_gpu)
             component = metric.component_type()
-            prefixed = {
-                f"{component}.{key}": val for key, val in breakdown.items()
-            }
+            prefixed = {f"{component}.{key}": val for key, val in breakdown.items()}
             total.update(prefixed)
         return total
 
@@ -844,9 +982,7 @@ class ModelMetrics:
         for metric in self.metrics:
             breakdown = metric.get_read_bytes_breakdown(ctx, per_gpu)
             component = metric.component_type()
-            prefixed = {
-                f"{component}.{key}": val for key, val in breakdown.items()
-            }
+            prefixed = {f"{component}.{key}": val for key, val in breakdown.items()}
             total.update(prefixed)
         return total
 
@@ -857,11 +993,114 @@ class ModelMetrics:
         for metric in self.metrics:
             breakdown = metric.get_write_bytes_breakdown(ctx, per_gpu)
             component = metric.component_type()
-            prefixed = {
-                f"{component}.{key}": val for key, val in breakdown.items()
-            }
+            prefixed = {f"{component}.{key}": val for key, val in breakdown.items()}
             total.update(prefixed)
         return total
+
+    def get_perf_stats_per_gpu(self, ctx: ExecutionContext) -> PerfStats:
+        return PerfStats(
+            self.get_num_flops(ctx, True),
+            self.get_read_bytes(ctx, True),
+            self.get_write_bytes(ctx, True),
+        )
+
+    def get_step_perf_stats_per_gpu(
+        self, scheduler_output: SchedulerOutput
+    ) -> PerfStats:
+        """
+        Calculate perf stats for the current step based on scheduled tokens.
+        """
+
+        t0 = time.monotonic()
+
+        # Build a single batch context
+        ctx = ExecutionContext()
+
+        # Process new requests (these are in prefill phase)
+        for new_req in scheduler_output.scheduled_new_reqs:
+            req_id = new_req.req_id
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if num_tokens == 0:
+                continue
+
+            # For new requests, context_len = num_computed_tokens + num_tokens
+            # num_computed_tokens represents previously computed tokens in the sequence
+            context_len = new_req.num_computed_tokens + num_tokens
+            ctx.add(num_tokens, context_len, is_prefill=True)
+
+        # Process cached requests (continuing requests)
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            if num_tokens == 0:
+                continue
+
+            # For cached requests, we have the current num_computed_tokens
+            num_computed_tokens = cached_reqs.num_computed_tokens[i]
+            context_len = num_computed_tokens + num_tokens
+
+            # Cached requests are typically in decode phase (num_tokens == 1)
+            # unless they're doing chunked prefill (num_tokens > 1)
+            is_prefill = num_tokens > 1
+            ctx.add(num_tokens, context_len, is_prefill)
+
+        # Compute metrics once for the entire batch
+        perf_stats = self.get_perf_stats_per_gpu(ctx)
+        perf_stats.calc_duration = time.monotonic() - t0
+
+        return perf_stats
+
+
+#### Logging ####
+
+
+class PerfMetricsLogging:
+    def __init__(self, vllm_config: VllmConfig):
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.reset()
+
+    def reset(self):
+        self.total_num_flops_per_gpu: int = 0
+        self.total_read_bytes_per_gpu: int = 0
+        self.total_write_bytes_per_gpu: int = 0
+        self.total_calc_duration: float = 0.0
+        self.last_log_time = time.monotonic()
+
+    def observe(self, perf_stats: PerfStats) -> None:
+        self.total_num_flops_per_gpu += perf_stats.num_flops_per_gpu
+        self.total_read_bytes_per_gpu += perf_stats.num_read_bytes_per_gpu
+        self.total_write_bytes_per_gpu += perf_stats.num_write_bytes_per_gpu
+        self.total_calc_duration += perf_stats.calc_duration
+
+    def log(self, log_parts: list[str], log_args: list[int | float]):
+        if not (
+            self.total_num_flops_per_gpu
+            or self.total_read_bytes_per_gpu
+            or self.total_write_bytes_per_gpu
+        ):
+            return
+
+        now = time.monotonic()
+        delta_time = now - self.last_log_time
+        delta_time_per_gpu = delta_time / self.pp_size
+
+        avg_tflops_per_gpu = self.total_num_flops_per_gpu / delta_time_per_gpu / 1e12
+        avg_gbps_per_gpu = (
+            (self.total_read_bytes_per_gpu + self.total_write_bytes_per_gpu)
+            / delta_time_per_gpu
+            / 1e9
+        )
+
+        log_parts.append("MFU: %.1f TF/s/GPU %.1f GB/s/GPU (mfu calc overhead %.1f%%)")
+        log_args.extend(
+            [
+                avg_tflops_per_gpu,
+                avg_gbps_per_gpu,
+                self.total_calc_duration / delta_time * 100,
+            ]
+        )
+
+        self.reset()
 
 
 ## util functions
