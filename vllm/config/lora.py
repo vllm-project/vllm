@@ -8,7 +8,7 @@ from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-from vllm.config.utils import CompileFactors, config, normalize_value
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -44,6 +44,10 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
+    lora_extra_vocab_size: int = 0
+    """Extra vocab size reserved for LoRA adapters."""
+    lora_vocab_padding_size: int = 0
+    """Padding size applied to LoRA vocab."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -67,16 +71,12 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = [
-            self.max_lora_rank,
-            self.max_loras,
-            self.fully_sharded_loras,
-            self.lora_dtype,
-            self.lora_extra_vocab_size,
-            self.lora_vocab_padding_size,
-        ]
-        normalized = normalize_value(factors)
-        return {"factors": normalized} if normalized else {}
+        ignored_factors = {
+            # Runtime/placement only; does not affect compiled graph
+            "max_cpu_loras",
+            "default_mm_loras",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:

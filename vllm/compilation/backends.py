@@ -11,7 +11,6 @@ import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +25,7 @@ from vllm.compilation.partition_rules import (
     should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
-from vllm.config.utils import Range, CompileFactors, hash_factors
+from vllm.config.utils import CompileFactors, Range, hash_factors
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -638,11 +637,6 @@ class VllmBackend:
 
         # Persist and log only hash-relevant factors together.
         try:
-            logger.debug(
-                "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                lazy(partial(pprint.pformat, env_factors, width=120)),
-                config_hash,
-            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
                 with open(meta_path, "w") as f:
@@ -660,6 +654,17 @@ class VllmBackend:
                         indent=2,
                         sort_keys=True,
                     )
+            logger.debug(
+                (
+                    "Persisted compile cache factors to %s "
+                    "(env_keys=%d config_keys=%d compiler_keys=%d code_entries=%d)"
+                ),
+                meta_path,
+                len(env_factors),
+                len(config_factors),
+                len(compiler_factors),
+                len(code_factors),
+            )
         except Exception:
             # Best-effort only; metadata write failures are non-fatal.
             logger.warning(

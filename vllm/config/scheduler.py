@@ -185,8 +185,12 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # This config does not affect the compiled graph.
-        return {}
+        # Only surface scheduler knobs that influence compiled shapes.
+        return {
+            "max_num_batched_tokens": self.max_num_batched_tokens,
+            "max_num_seqs": self.max_num_seqs,
+            "max_num_partial_prefills": self.max_num_partial_prefills,
+        }
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

@@ -13,7 +13,14 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import (
+    CompileFactors,
+    Range,
+    config,
+    get_compile_factors,
+    handle_deprecated,
+    hash_factors,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -200,15 +207,15 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
 
-        ignored_fields = [
+        ignored_fields: set[str] = {
             "enable_fusion",
             "enable_attn_fusion",
             "enable_noop",
             "enable_sequence_parallelism",
             "enable_async_tp",
             "enable_fi_allreduce_fusion",
-        ]
-        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
+        }
+        return get_compile_factors(self, ignored_fields)
 
     @field_validator(
         "fuse_norm_quant",
@@ -345,9 +352,7 @@ class DynamicShapesConfig:
         Provide a hash for DynamicShapesConfig
         """
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, {})
+        factors = get_compile_factors(self, set())
         return hash_factors(factors)
 
 
@@ -697,8 +702,7 @@ class CompilationConfig:
             "static_forward_context",
         }
 
-        factors = get_compile_factors(self, ignored_factors)
-        return factors or {}
+        return get_compile_factors(self, ignored_factors)
 
     def __repr__(self) -> str:
         exclude = {

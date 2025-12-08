@@ -41,7 +41,7 @@ def get_code_factors(forward_code_files: list[Path]) -> list[dict[str, str]]:
                 content = f.read()
                 entry["hash"] = hash_factors({"content": content})
         except Exception:
-            logger.warning("Failed to read file %s", path_str)        
+            logger.warning("Failed to read file %s", path_str)
         code_factors.append(entry)
     return code_factors
 

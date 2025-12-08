@@ -274,9 +274,7 @@ def normalize_value(x):
     )
 
 
-def get_compile_factors(
-    config: ConfigT, ignored_factors: set[str]
-) -> CompileFactors:
+def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFactors:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
     - Uses .compile_factors() for nested dataclasses that support it

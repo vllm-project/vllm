@@ -273,8 +273,6 @@ class VllmConfig:
             "lora": _compile(self.lora_config),
         }
 
-        factors["max_num_batched_tokens"] = self.scheduler_config.max_num_batched_tokens
-
         if self.additional_config:
             additional_config = self.additional_config
             if isinstance(additional_config, dict):
