@@ -109,13 +109,21 @@ main() {
     decoder_pid=$!
     PIDS+=($decoder_pid)
 
+    LMCACHE_VERSION=$(pip list | grep lmcache | awk '{print $2}' | sed 's/\.post/post/')
+    wget https://raw.githubusercontent.com/LMCache/LMCache/refs/tags/v${LMCACHE_VERSION}/examples/disagg_prefill/disagg_proxy_server.py
     python3 disagg_proxy_server.py \
         --host localhost \
         --port 9000 \
         --prefiller-host localhost \
-        --prefiller-port 8100 \
+		--prefiller-port 8100 \
+		--num-prefillers 1 \
         --decoder-host localhost \
         --decoder-port 8200  \
+		--num-decoders 1 \
+		--decoder-init-port 7300 \
+		--decoder-alloc-port 7400 \
+		--proxy-host localhost \
+		--proxy-port 7500 \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
     PIDS+=($proxy_pid)
@@ -131,7 +139,7 @@ main() {
     vllm bench serve --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
-        --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
+        --num-prompts 30 --max-concurrency 10 --request-rate 1 | tee benchmark.log
 
     echo "Benchmarking done. Cleaning up..."
 
