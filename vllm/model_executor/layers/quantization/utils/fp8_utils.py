@@ -249,8 +249,14 @@ class W8A8BlockFp8LinearOp:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
 
+        # Check if DeepGEMM can be used, including input K dimension alignment
+        # This is important for tensor parallelism scenarios where
+        # input_size_per_partition might not be aligned to DeepGEMM requirements
         if should_use_deepgemm_for_fp8_linear(
-            output_dtype, weight, self.is_deep_gemm_supported
+            output_dtype,
+            weight,
+            self.is_deep_gemm_supported,
+            input_k_dim=input_2d.shape[-1],
         ):
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:

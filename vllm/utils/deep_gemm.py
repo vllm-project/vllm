@@ -363,7 +363,22 @@ def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
     weight: torch.Tensor,
     supports_deep_gemm: bool | None = None,
+    input_k_dim: int | None = None,
 ):
+    """Check if DeepGEMM can be used for FP8 linear operation.
+    
+    Args:
+        output_dtype: Output data type.
+        weight: Weight tensor with shape [N, K].
+        supports_deep_gemm: Whether DeepGEMM is supported (auto-detected if None).
+        input_k_dim: Optional input K dimension to check alignment. If provided,
+            checks that input K dimension is aligned. This is important for
+            tensor parallelism scenarios where input_size_per_partition might
+            not be aligned.
+    
+    Returns:
+        True if DeepGEMM can be used, False otherwise.
+    """
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
 
@@ -373,11 +388,24 @@ def should_use_deepgemm_for_fp8_linear(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
+    # Check weight alignment
+    weight_valid = (
+        weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
+    )
+    
+    # Check input K dimension alignment if provided
+    # This is critical for tensor parallelism where input_size_per_partition
+    # might not be divisible by K_MULTIPLE
+    input_valid = True
+    if input_k_dim is not None:
+        input_valid = input_k_dim % K_MULTIPLE == 0
+
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_valid
+        and input_valid
     )
 
 
