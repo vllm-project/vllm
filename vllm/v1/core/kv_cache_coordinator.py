@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     FullAttentionManager,
+    SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -378,7 +379,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         full_attention_spec: FullAttentionSpec | None = None
         self.full_attention_group_ids: list[int] = []
 
-        other_specs_map: dict[KVCacheSpec, tuple[list[int], type]] = {}
+        other_specs_map: dict[
+            KVCacheSpec, tuple[list[int], type[SingleTypeKVCacheManager]]
+        ] = {}
         for i, g in enumerate(self.kv_cache_config.kv_cache_groups):
             if isinstance(g.kv_cache_spec, FullAttentionSpec):
                 if full_attention_spec is None:

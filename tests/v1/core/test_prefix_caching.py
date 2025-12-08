@@ -444,9 +444,7 @@ def test_prefill_hybrid_model():
     )
 
 
-@pytest.mark.parametrize(
-    "second_spec_type", ["sliding_window", "full_attention"]
-)
+@pytest.mark.parametrize("second_spec_type", ["sliding_window", "full_attention"])
 def test_prefill_hybrid_model_parametrized(second_spec_type: str):
     """
     Test prefix caching with hybrid model where second spec can be:
