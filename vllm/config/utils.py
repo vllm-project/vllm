@@ -163,6 +163,7 @@ class SupportsHash(Protocol):
     def compute_hash(self) -> str: ...
 
 
+@runtime_checkable
 class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
