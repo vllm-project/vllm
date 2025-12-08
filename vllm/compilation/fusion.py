@@ -523,11 +523,11 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     def uuid(self) -> Any:
         return self.hash_source(
             self,
-            RMSNormGroupQuantPattern,
+            # RMSNormGroupQuantPattern,
+            # FusedAddRMSNormGroupQuantPattern,
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,
             RMSNormDynamicQuantPattern,
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
-            FusedAddRMSNormGroupQuantPattern,
         )
