@@ -364,7 +364,7 @@ def should_use_deepgemm_for_fp8_linear(
     weight: torch.Tensor,
     supports_deep_gemm: bool | None = None,
     input_k_dim: int | None = None,
-):
+) -> bool:
     """Check if DeepGEMM can be used for FP8 linear operation.
 
     Args:
