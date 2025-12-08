@@ -1150,6 +1150,8 @@ class OpenAIServing:
             )
 
         mm_data = await mm_data_future
+        # TODO: can strip out the </think>\n\n[e~[\n]~b]ai\n\n<minimax:tool_call>
+        # to become </think>\n\n\n<minimax:tool_call>
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1339,6 +1341,7 @@ class OpenAIServing:
                 )
                 engine_prompt = engine_prompts[0]
                 request_prompt = request_prompts[0]
+                prompt_text, _, _ = self._get_prompt_components(request_prompt)
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(

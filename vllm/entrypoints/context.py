@@ -303,7 +303,7 @@ class ParsableContext(ConversationContext):
         result_str = result.content[0].text
 
         message = ResponseFunctionToolCallOutputItem(
-            id=f"fco_{random_uuid()}",
+            id=f"mcpo_{random_uuid()}",
             type="function_call_output",
             call_id=f"call_{random_uuid()}",
             output=result_str,
@@ -385,6 +385,9 @@ class ParsableContext(ConversationContext):
         if not self.parser.response_messages:
             return []
         last_msg = self.parser.response_messages[-1]
+        # HACK: change this to a mcp_ function call
+        last_msg.id = f"mcp_{random_uuid()}"
+        self.parser.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":

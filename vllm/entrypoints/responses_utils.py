@@ -98,8 +98,57 @@ def construct_input_messages(
     if isinstance(request_input, str):
         messages.append({"role": "user", "content": request_input})
     else:
-        for item in request_input:
+        input_messages = construct_chat_messages_with_tool_call(request_input)
+        messages.extend(input_messages)
+    return messages
+
+
+def _maybe_combine_reasoning_and_tool_call(
+    item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
+) -> ChatCompletionMessageParam | None:
+    """Many models treat MCP calls and reasoning as a single message.
+    This function checks if the last message is a reasoning message and
+    the current message is a tool call"""
+    if not (isinstance(item, ResponseFunctionToolCall) and item.id.startswith("mcp_")):
+        return None
+    if len(messages) == 0:
+        return None
+    last_message = messages[-1]
+    if not (
+        last_message.get("role") == "assistant"
+        and last_message.get("reasoning") is not None
+    ):
+        return None
+
+    last_message["tool_calls"] = [
+        ChatCompletionMessageToolCallParam(
+            id=item.call_id,
+            function=FunctionCallTool(
+                name=item.name,
+                arguments=item.arguments,
+            ),
+            type="function",
+        )
+    ]
+    return last_message
+
+
+def construct_chat_messages_with_tool_call(
+    input_messages: list[ResponseInputOutputItem],
+) -> list[ChatCompletionMessageParam]:
+    """This function wraps construct_chat_message_with_tool_call
+    Because some chatMessages come from multiple response items
+    for example a reasoning item and a MCP tool call are two response items
+    but are one chat message
+    """
+    messages: list[ChatCompletionMessageParam] = []
+    for item in input_messages:
+        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
+        if maybe_combined_message is not None:
+            messages[-1] = maybe_combined_message
+        else:
             messages.append(construct_chat_message_with_tool_call(item))
+
     return messages
 
 
