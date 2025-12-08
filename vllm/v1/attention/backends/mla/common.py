@@ -495,10 +495,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
 
+        # If model_config is None, use a conservative default
+        # based on scheduler and cache config
+        model_max_len = 0 if model_config is None else model_config.max_model_len
+
         chunked_prefill_workspace_size = min(
             # Try for 8 full length request or at least 4 pages per-request
             max(
-                8 * model_config.max_model_len,
+                8 * model_max_len if model_max_len > 0 else 0,
                 4 * scheduler_config.max_num_seqs * cache_config.block_size,
             ),
             # For long-context models try not to over-allocate limiting
@@ -1427,6 +1431,31 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
+
+    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+        # Convert from (B, N, L) to (N, B, L)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            out = out.view(-1, self.num_heads, self.v_head_dim)
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            x = rocm_aiter_ops.triton_fp8_bmm(
+                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            )
+        else:
+            # Convert from (B, N * V) to (N, B, V)
+            out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
+
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
+
+            # Convert from (N, B, V) to (B, N * V)
+            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+
+            # Adjust output buffer shape back to the original (B, N * V)
+            N, B, V = out.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)  # Copy result
 
     def forward(
         self,
