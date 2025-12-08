@@ -86,11 +86,10 @@ SPEC_DECODE_CONFIGS = [
 
 
 @pytest.mark.parametrize(
-    "model,spec_model,method,num_spec_tokens,backend_env",
+    "model,spec_model,method,num_spec_tokens",
     SPEC_DECODE_CONFIGS,
 )
 def test_no_sync_with_spec_decode(
-    monkeypatch: pytest.MonkeyPatch,
     sync_tracker,
     model: str,
     spec_model: str,
