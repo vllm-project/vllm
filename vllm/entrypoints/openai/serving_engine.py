@@ -5,7 +5,7 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
@@ -15,7 +15,6 @@ import torch
 from fastapi import Request
 from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
-from typing_extensions import TypeIs
 
 from vllm.entrypoints.context import (
     HarmonyContext,
@@ -93,9 +92,7 @@ from vllm.entrypoints.responses_utils import (
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import PromptType, SingletonPrompt
-from vllm.inputs.data import TextPrompt as EngineTextPrompt
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
@@ -174,25 +171,6 @@ class EmbedsPrompt(TypedDict):
     prompt_embeds: torch.Tensor
 
 
-RequestPrompt: TypeAlias = list[int] | TextTokensPrompt | EmbedsPrompt | SingletonPrompt
-
-
-def is_text_tokens_prompt(prompt: RequestPrompt) -> TypeIs[TextTokensPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" in prompt
-        and "prompt_embeds" not in prompt
-    )
-
-
-def is_embeds_prompt(prompt: RequestPrompt) -> TypeIs[EmbedsPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" not in prompt
-        and "prompt_embeds" in prompt
-    )
-
-
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
@@ -203,8 +181,7 @@ class RequestProcessingMixin:
     handling prompt preparation and engine input.
     """
 
-    request_prompts: Sequence[RequestPrompt] | None = field(default_factory=list)
-    engine_prompts: list[EngineTokensPrompt] | None = field(default_factory=list)
+    engine_prompts: list[TokensPrompt] | None = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -398,7 +375,7 @@ class OpenAIServing:
             prompts_batch, lora_req_batch = zip(
                 *[
                     (
-                        EngineTokensPrompt(
+                        TokensPrompt(
                             prompt_token_ids=beam.tokens,
                             multi_modal_data=beam.multi_modal_data,
                             mm_processor_kwargs=beam.mm_processor_kwargs,
@@ -1079,11 +1056,7 @@ class OpenAIServing:
         chat_template_kwargs: dict[str, Any] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
-    ) -> tuple[
-        list[ConversationMessage],
-        Sequence[RequestPrompt],
-        list[EngineTokensPrompt],
-    ]:
+    ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
         chat_template_kwargs = {
             "chat_template": chat_template,
             "add_generation_prompt": add_generation_prompt,
@@ -1093,7 +1066,7 @@ class OpenAIServing:
             **(chat_template_kwargs or {}),
         }
 
-        engine_prompt: EngineTokensPrompt | EngineTextPrompt
+        engine_prompt: TokensPrompt | TextPrompt
         conversation, engine_prompt = await renderer.render_messages_async(
             messages,
             chat_template_content_format=chat_template_content_format,
@@ -1107,7 +1080,7 @@ class OpenAIServing:
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
-            engine_prompt = EngineTokensPrompt(**tokenized_prompt)
+            engine_prompt = TokensPrompt(**tokenized_prompt)
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
@@ -1132,7 +1105,7 @@ class OpenAIServing:
             tokenizer = renderer.get_tokenizer()
             request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
-        return conversation, [engine_prompt], [engine_prompt]  # type: ignore[list-item]
+        return conversation, [engine_prompt]  # type: ignore[list-item]
 
     async def _process_inputs(
         self,
@@ -1175,7 +1148,7 @@ class OpenAIServing:
             request_input=messages,
         )
 
-        _, request_prompts, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await self._preprocess_chat(
             request,
             renderer,
             new_messages,
@@ -1184,20 +1157,20 @@ class OpenAIServing:
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
         )
-        return request_prompts, engine_prompts
+        return engine_prompts
 
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        request_prompt: RequestPrompt,
-        engine_prompt: EngineTokensPrompt,
+        engine_prompt: TokensPrompt,
         sampling_params: SamplingParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         **kwargs,
     ):
-        prompt_text, _, _ = self._get_prompt_components(request_prompt)
+        prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+
         orig_priority = priority
         sub_request = 0
         while True:
@@ -1205,7 +1178,7 @@ class OpenAIServing:
             sub_request_id = f"{request_id}_{sub_request}"
             self._log_inputs(
                 sub_request_id,
-                request_prompt,
+                engine_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -1250,10 +1223,9 @@ class OpenAIServing:
             # Render the next prompt token ids.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 prompt_token_ids = context.render_for_completion()
-                engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
-                request_prompt = prompt_token_ids
+                engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
             elif isinstance(context, ParsableContext):
-                request_prompts, engine_prompts = await self._render_next_turn(
+                engine_prompts = await self._render_next_turn(
                     context.request,
                     context.renderer,
                     context.parser.response_messages,
@@ -1263,7 +1235,6 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                request_prompt = request_prompts[0]
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(
@@ -1273,19 +1244,13 @@ class OpenAIServing:
             priority = orig_priority - 1
             sub_request += 1
 
-    def _get_prompt_components(
-        self,
-        prompt: RequestPrompt | PromptType,
-    ) -> PromptComponents:
-        if isinstance(prompt, list):
-            return PromptComponents(token_ids=prompt)
-
-        return get_prompt_components(prompt)  # type: ignore[arg-type]
+    def _get_prompt_components(self, prompt: PromptType) -> PromptComponents:
+        return get_prompt_components(prompt)
 
     def _log_inputs(
         self,
         request_id: str,
-        inputs: RequestPrompt | PromptType,
+        inputs: PromptType,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
