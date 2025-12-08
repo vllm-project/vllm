@@ -11,7 +11,7 @@ Once you submit the RFC, please post it in the #contributors channel in vLLM Sla
 For high-interest features, the committers nominate a person to help with the RFC process and PR review. This makes sure someone is guiding you through the process. It is reflected as the "assignee" field in the RFC issue.
 If the assignee and lead maintainers find the feature to be contentious, the maintainer team aims to make decisions quickly after learning the details from everyone. This involves assigning a committer as the DRI (Directly Responsible Individual) to make the decision and shepherd the code contribution process.
 
-For features that you intend to maintain, please feel free to add yourself in `[mergify.yml](https://github.com/vllm-project/vllm/blob/main/.github/mergify.yml)` to receive notifications and auto-assignment when the PRs touching the feature you are maintaining. Over time, the ownership will be evaluated and updated through the committers nomination and voting process.
+For features that you intend to maintain, please feel free to add yourself in [`mergify.yml`](https://github.com/vllm-project/vllm/blob/main/.github/mergify.yml) to receive notifications and auto-assignment when the PRs touching the feature you are maintaining. Over time, the ownership will be evaluated and updated through the committers nomination and voting process.
 
 ## Adding New Models
 
