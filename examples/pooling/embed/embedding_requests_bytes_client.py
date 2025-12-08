@@ -75,7 +75,7 @@ def main(args):
             prompt = {
                 "model": model_name,
                 "input": input_texts,
-                "encoding_format": "bytes",
+                "encoding_format": "bytes_only",
                 "embed_dtype": embed_dtype,
                 "endianness": endianness,
             }
