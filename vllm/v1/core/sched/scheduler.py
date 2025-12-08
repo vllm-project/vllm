@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import torch
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -449,7 +451,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming: skip request if still waiting for next streaming req.
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
                     if request.streaming_queue:
-                        self._update_session(request)
+                        # Updates the request status to WAITING.
+                        self._update_request_as_session(request)
                     else:
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
@@ -812,7 +815,7 @@ class Scheduler(SchedulerInterface):
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
 
-    def _update_session(self, session: Request) -> None:
+    def _update_request_as_session(self, session: Request) -> None:
         """
         Updates the waiting session with the next streaming request.
 
@@ -846,10 +849,12 @@ class Scheduler(SchedulerInterface):
         if session.prompt_token_ids is None:
             session.prompt_token_ids = []
         session.prompt_token_ids.extend(request.prompt_token_ids or [])
-        session.prompt_embeds = request.prompt_embeds
+        session.prompt_embeds = torch.cat(
+            [session.prompt_embeds, request.prompt_embeds]
+        )
         session.max_tokens = session.num_output_tokens + request.max_tokens
         session.arrival_time = request.arrival_time
-        session.priority = request.priority
+        assert session.priority == request.priority
         session.sampling_params = request.sampling_params
         session.status = RequestStatus.WAITING
 
@@ -877,7 +882,7 @@ class Scheduler(SchedulerInterface):
         updated while decoding if we don't make a copy.
         """
         req_data = NewRequestData.from_request(request, block_ids, prefill_token_ids)
-        if request.continue_session:
+        if request.streaming_queue is not None:
             req_data.prompt_token_ids = request._all_token_ids.copy()
         return req_data
 

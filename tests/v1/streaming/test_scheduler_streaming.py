@@ -100,7 +100,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert next_request.status == RequestStatus.WAITING
         assert len(scheduler.requests["test_request"].streaming_queue) == 1
 
-    def test_update_session_max_token(self):
+    def test_update_request_as_session_max_token(self):
         scheduler = create_scheduler()
 
         session = DummyRequest(
@@ -119,7 +119,7 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
         session.streaming_queue.append(new_request)
-        scheduler._update_session(session)
+        scheduler._update_request_as_session(session)
 
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 20  # 10 + 10
@@ -135,12 +135,12 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
         session.streaming_queue.append(new_request2)
-        scheduler._update_session(session)
+        scheduler._update_request_as_session(session)
 
         assert session.sampling_params.max_tokens == 10
         assert session.max_tokens == 25  # 15 + 10
 
-    def test_update_session(self):
+    def test_update_request_as_session(self):
         scheduler = create_scheduler()
 
         session = DummyRequest(
@@ -156,14 +156,14 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
         session.streaming_queue.append(new_request)
-        scheduler._update_session(session)
+        scheduler._update_request_as_session(session)
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
         assert session.status == RequestStatus.WAITING
 
-    def test_update_session_with_multimodal(self):
+    def test_update_request_as_session_with_multimodal(self):
         scheduler = create_scheduler()
 
         mm_feature = MultiModalFeatureSpec(
@@ -191,7 +191,7 @@ class TestStreamingScheduler(unittest.TestCase):
             mm_features=[mm_feature],
         )
         session.streaming_queue.append(new_request)
-        scheduler._update_session(session)
+        scheduler._update_request_as_session(session)
 
         assert len(session.mm_features) == 2
         assert session.mm_features[0].mm_position.offset == 1
@@ -261,7 +261,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.status == RequestStatus.RUNNING
         assert session.prompt_token_ids == [1, 2, 3, 4, 5]
 
-    def test_update_session_with_output_tokens(self):
+    def test_update_request_as_session_with_output_tokens(self):
         scheduler = create_scheduler()
 
         session = DummyRequest(
@@ -281,7 +281,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         session.streaming_queue.append(new_request)
-        scheduler._update_session(session)
+        scheduler._update_request_as_session(session)
 
         # Verify the last output token (11) was removed, and new prompt tokens added
         assert session._all_token_ids == [1, 2, 3, 10, 4, 5]

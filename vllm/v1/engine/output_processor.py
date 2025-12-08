@@ -445,7 +445,7 @@ class OutputProcessor:
     def _update_streaming_request_state(
         self, request: EngineCoreRequest, prompt: str | None
     ) -> None:
-        if not EngineCoreRequest.continue_session:
+        if not request.continue_session:
             raise ValueError(
                 f"Existing session {request.request_id} has to be updated with a \
                 streaming request with `continue_session=True`"
@@ -455,7 +455,9 @@ class OutputProcessor:
             req_state.prompt += prompt
         if req_state.prompt_token_ids is not None and request.prompt_token_ids:
             req_state.prompt_token_ids.extend(request.prompt_token_ids)
-        req_state.prompt_embeds = request.prompt_embeds
+        req_state.prompt_embeds = torch.cat(
+            [req_state.prompt_embeds, request.prompt_embeds]
+        )
         if req_state.stats is not None:
             req_state.stats.arrival_time = request.arrival_time
         req_state.is_prefilling = True
