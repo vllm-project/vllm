@@ -1240,13 +1240,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         # Convert from (B, N, L) to (N, B, L)
         if self.is_aiter_triton_fp4_bmm_enabled:
             from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-            
-            #print(f'>>> x pre (up_proj) {x.shape}')
             out = out.view(-1, self.num_heads, self.v_head_dim)
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             x = x.transpose(0, 1)
 
-            #print(f'>>> x {x.shape}, attn_bmm_output {attn_bmm_output.shape}, self.W_V {self.W_V.shape}')
             out = batched_gemm_a16wfp4(
                 x,
                 self.W_V,
@@ -1256,7 +1253,6 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 prequant=True,
                 y_scale=None,
             )
-            #print(f'>>> x before transpose {x.shape}')
             out = out.view(-1, self.num_heads * self.v_head_dim)
             x = out
         else:
@@ -2024,7 +2020,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
-                        # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
             if self.q_pad_num_heads is not None:
@@ -2036,12 +2031,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-                
-                #x = x.view(-1, self.num_heads, self.kv_lora_rank)
                 x = decode_q_nope.transpose(0, 1)
                 decode_ql_nope = None
-                #print(f'>>> x {x.shape}, q_nope_out {q_nope_out.shape}, self.W_K {self.W_K.shape}')
-
                 decode_ql_nope = batched_gemm_a16wfp4(
                     x,
                     self.W_K,

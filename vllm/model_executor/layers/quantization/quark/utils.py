@@ -111,7 +111,6 @@ def b_dynamic_mxfp4_quant(x):
     h, b, d = x.shape
     x, x_scales = dynamic_mxfp4_quant(x.reshape(-1, d))
     return x.view(h, b, d // 2), x_scales.view(h, b, d // 32)
-    #return x.view(h, b, d // 2), x_scales.view(h, b, d // 32)
 
 
 def mxfp4_to_f32(x, is_threed):
