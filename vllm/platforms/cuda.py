@@ -197,6 +197,13 @@ class CudaPlatformBase(Platform):
                     # Blackwell with sparse attention => Don't force any backend.
                     # Let automatic selection choose a sparse-compatible backend.
                     # This prevents forcing CUTLASS_MLA which doesn't support sparse.
+                    # Also set block size to 64 for FLASHMLA_SPARSE compatibility.
+                    if cache_config.block_size != 64:
+                        cache_config.block_size = 64
+                        logger.info(
+                            "Forcing kv cache block size to 64 for sparse attention "
+                            "on Blackwell GPU."
+                        )
                     logger.info(
                         "Sparse attention detected on Blackwell GPU. "
                         "Using automatic backend selection to choose a "
