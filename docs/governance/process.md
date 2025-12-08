@@ -52,7 +52,7 @@ The responsibilities of the committers are:
 * Addressing issues and questions from the community.
 * Own specific areas of the codebase and development efforts: reviewing PRs, addressing issues, answering questions, improving documentation.
 
-Specially, committers are almost all area owners. They author subsystems, review PRs, refactor code, monitor tests, and ensure compatibility with other areas. All area owners are committers with deep expertise in that area, but not all committers own areas. 
+Specially, committers are almost all area owners. They author subsystems, review PRs, refactor code, monitor tests, and ensure compatibility with other areas. All area owners are committers with deep expertise in that area, but not all committers own areas.
 
 For a full list of committers and their respective areas, see the [committers](./committers.md) page.
 

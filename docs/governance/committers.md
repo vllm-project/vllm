@@ -107,9 +107,9 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - FusedMoE: FusedMoE kernel, Modular kernel framework, EPLB
     - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
-    - @mgoin, @Isotr0py, @yewentao256 
+    - @mgoin, @Isotr0py, @yewentao256
 - Custom quantized GEMM kernels (cutlass_scaled_mm, marlin, machete)
-    - @tlrmchlsmth, @LucasWilkinson 
+    - @tlrmchlsmth, @LucasWilkinson
 - Multi-modal Input Processing: Components that load and process image/video/audio data into feature tensors
     - @DarkLight1337, @ywang96, @Isotr0py
 - torch compile: The torch.compile integration in vLLM, custom passes & transformations
@@ -153,7 +153,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 - FlashAttention: @LucasWilkinson
 - FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon
-- Blackwell Kernels: @mgoin, @yewentao256 
+- Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM/pplx: @mgoin, @yewentao256
 
 ### Integrations
