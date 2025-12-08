@@ -912,22 +912,24 @@ def _ensure_block_size_k_divisible(
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
     """
     # Fast path: already valid
-    if size_k % block_size_k == 0:
+    if size_k % block_size_k == 0 and block_size_k % group_size == 0:
         return block_size_k
 
-    # Find largest divisor <= block_size_k, stepping by group_size
-    # Round down to nearest group_size multiple
-    start = (min(block_size_k, 512) // group_size) * group_size
-    for candidate in range(start, 0, -group_size):
+    # Find the largest value that:
+    # 1. Divides size_k (size_k % candidate == 0)
+    # 2. Is divisible by group_size (candidate % group_size == 0)
+    # 3. Is <= block_size_k (prefer smaller values close to block_size_k)
+    #
+    # Strategy: Search from min(block_size_k, size_k) down to group_size,
+    # stepping by group_size to ensure divisibility by group_size
+    max_search = min(block_size_k, size_k)
+    start = (max_search // group_size) * group_size
+    for candidate in range(start, group_size - 1, -group_size):
         if size_k % candidate == 0:
             return candidate
 
-    # Fallback: search from 512 down to group_size
-    for candidate in range(512, group_size - 1, -group_size):
-        if size_k % candidate == 0:
-            return candidate
-
-    # Last resort: use group_size if it divides size_k
+    # Fallback: if group_size divides size_k, use it
+    # This should always be true with correct group_size configuration
     if size_k % group_size == 0:
         return group_size
 
