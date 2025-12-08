@@ -9,6 +9,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
+from vllm._aiter_ops import rocm_aiter_ops
 
 @dataclass
 class MLAModules:
@@ -105,53 +106,92 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             indexer=self.indexer,
             rotary_emb = self.rotary_emb if current_platform.is_rocm() else None
         )
+        self.use_aiter_triton = rocm_aiter_ops.is_enabled()
+        self.use_triton_qkv_a_proj_layernrom_fp8 = rocm_aiter_ops.is_enabled() and quant_config.get_name() == 'fp8'
+        self.use_triton_qkv_a_proj_layernrom_fp4 = rocm_aiter_ops.is_enabled() and quant_config.get_name() == 'quark'
 
         self.prefix = prefix
 
     def forward_native(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
 
-        if self.q_lora_rank is not None:
-            assert self.fused_qkv_a_proj is not None, (
-                "fused_qkv_a_proj is required when q_lora_rank is not None"
-            )
-            assert self.q_a_layernorm is not None, (
-                "q_a_layernorm is required when q_lora_rank is not None"
-            )
-            assert self.q_b_proj is not None, (
-                "q_b_proj is required when q_lora_rank is not None"
-            )
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_lora = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            q_c = self.q_a_layernorm(q_c)
-            q = self.q_b_proj(q_c)[0]
+        if self.use_triton_qkv_a_proj_layernrom_fp8:
+            assert self.q_lora_rank is not None
+            assert isinstance(hidden_states, tuple)
+            hidden_states, hidden_states_scales = hidden_states
+            q_c, q_c_scale, kv_c_normed, k_pe = torch.ops.vllm.rocm_aiter_triton_qkv_a_proj_layernorm_fp8(
+                                                hidden_states_quant=hidden_states,
+                                                hidden_states_quant_scale=hidden_states_scales,
+                                                weight_qkv_a_proj=self.fused_qkv_a_proj.weight,
+                                                weight_scale_qkv_a_proj=self.fused_qkv_a_proj.weight_scale,
+                                                q_a_layernorm_weight=self.q_a_layernorm.weight,
+                                                q_a_layernorm_variance_epsilon=self.q_a_layernorm.variance_epsilon,
+                                                kv_a_layernorm_weight=self.kv_a_layernorm.weight,
+                                                kv_a_layernorm_variance_epsilon=self.kv_a_layernorm.variance_epsilon,
+                                                q_lora_rank=self.q_lora_rank,
+                                                kv_lora_rank=self.kv_lora_rank,
+                                                qk_rope_head_dim=self.qk_rope_head_dim)
+            q = torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(q_c, self.q_b_proj.weight, q_c_scale, self.q_b_proj.weight_scale, output_dtype=torch.bfloat16)
+        if self.use_triton_qkv_a_proj_layernrom_fp4:
+            assert self.q_lora_rank is not None
+            assert isinstance(hidden_states, tuple)
+            hidden_states, hidden_states_scales = hidden_states
+            q_c, q_c_scale, kv_c_normed, k_pe = torch.ops.vllm.rocm_aiter_triton_qkv_a_proj_layernorm_fp4(
+                                                hidden_states_quant=hidden_states,
+                                                hidden_states_quant_scale=hidden_states_scales,
+                                                weight_qkv_a_proj=self.fused_qkv_a_proj.weight,
+                                                weight_scale_qkv_a_proj=self.fused_qkv_a_proj.weight_scale,
+                                                q_a_layernorm_weight=self.q_a_layernorm.weight,
+                                                q_a_layernorm_variance_epsilon=self.q_a_layernorm.variance_epsilon,
+                                                kv_a_layernorm_weight=self.kv_a_layernorm.weight,
+                                                kv_a_layernorm_variance_epsilon=self.kv_a_layernorm.variance_epsilon,
+                                                q_lora_rank=self.q_lora_rank,
+                                                kv_lora_rank=self.kv_lora_rank,
+                                                qk_rope_head_dim=self.qk_rope_head_dim)
+            q = torch.ops.vllm.rocm_aiter_triton_gemm_afp4wfp4(q_c, self.q_b_proj.weight, q_c_scale, self.q_b_proj.weight_scale, output_dtype=torch.bfloat16)
         else:
-            assert self.kv_a_proj_with_mqa is not None, (
-                "kv_a_proj_with_mqa is required when q_lora_rank is None"
-            )
-            assert self.q_proj is not None, (
-                "q_proj is required when q_lora_rank is None"
-            )
-            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-            q = self.q_proj(hidden_states)[0]
+            assert isinstance(hidden_states, torch.Tensor)
+            if self.q_lora_rank is not None:
+                assert self.fused_qkv_a_proj is not None, (
+                    "fused_qkv_a_proj is required when q_lora_rank is not None"
+                )
+                assert self.q_a_layernorm is not None, (
+                    "q_a_layernorm is required when q_lora_rank is not None"
+                )
+                assert self.q_b_proj is not None, (
+                    "q_b_proj is required when q_lora_rank is not None"
+                )
+                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+                q_c, kv_lora = qkv_lora.split(
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1,
+                )
+                q_c = self.q_a_layernorm(q_c)
+                q = self.q_b_proj(q_c)[0]
+            else:
+                assert self.kv_a_proj_with_mqa is not None, (
+                    "kv_a_proj_with_mqa is required when q_lora_rank is None"
+                )
+                assert self.q_proj is not None, (
+                    "q_proj is required when q_lora_rank is None"
+                )
+                kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+                q = self.q_proj(hidden_states)[0]
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+            kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None and not current_platform.is_rocm():
+        if self.rotary_emb is not None and not self.use_aiter_triton:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
@@ -164,7 +204,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         if llama_4_scaling is not None:
             q *= llama_4_scaling
 
-        positions_rocm = None if not current_platform.is_rocm() else positions
+        positions_rocm = None if not self.use_aiter_triton else positions
         attn_out = self.mla_attn(
             q,
             kv_c_normed,

@@ -445,15 +445,14 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             if self.is_aiter_triton_fp4_bmm_enabled:
                 #x = x.view(-1, self.num_heads, self.kv_lora_rank)
                 decode_ql_nope = decode_q_cat[... , :self.W_K.shape[1]] if (kv_cache.numel() > 0 and positions is not None) else None
-                # decode_ql_nope = batched_gemm_a16wfp4(
-                #     decode_q_nope,
-                #     self.W_K,
-                #     self.W_K_scale,
-                #     y=decode_ql_nope,
-                #     transpose_bm=True,
-                #     prequant=True,
-                #     y_scale=layer._q_scale if fp8_attention else None,
-                # )
+                decode_ql_nope = rocm_aiter_ops.triton_fp4_bmm(
+                    decode_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    YQ=decode_ql_nope,
+                    transpose_bm=True,
+                    y_scale=layer._q_scale if fp8_attention else None,
+                )
                 # decode_ql_nope = decode_ql_nope.transpose(0, 1)
             elif self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)

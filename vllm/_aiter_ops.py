@@ -421,6 +421,54 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
+def _rocm_aiter_triton_gemm_afp4wfp4_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+
+    return gemm_afp4wfp4(A, B, As, Bs.T, dtype=output_dtype)
+
+
+def _rocm_aiter_triton_gemm_afp4wfp4_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
+def _rocm_aiter_triton_gemm_a16w8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a16w8_blockscale import gemm_a16w8_blockscale
+
+    return gemm_a16w8_blockscale(A, B, Bs, dtype=output_dtype)
+
+
+def _rocm_aiter_triton_gemm_a16w8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
 def _rocm_aiter_rms_norm_impl(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
@@ -799,7 +847,126 @@ def _rocm_aiter_triton_fused_down_proj_mul_add_fp4_fake(
 ) -> torch.Tensor:
     out = torch.empty_like(final_hidden_states)
     return out
+
+def _rocm_aiter_triton_qkv_a_proj_layernorm_fp8_impl(
+    hidden_states_quant: torch.Tensor,
+    hidden_states_quant_scale: torch.Tensor,
+    weight_qkv_a_proj: torch.Tensor,
+    weight_scale_qkv_a_proj: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_reduce_rms_fp8_group_quant
+    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    import aiter as rocm_aiter
+    qkv_lora = gemm_a8w8_blockscale(hidden_states_quant, weight_qkv_a_proj, hidden_states_quant_scale, weight_scale_qkv_a_proj, skip_reduce=True)
+    q_c, kv_c, k_pe = qkv_lora.split([q_lora_rank, kv_lora_rank, qk_rope_head_dim],
+                                        dim=-1,
+                                    )
+    k_pe_reduced = None
+    k_pe_reduced_out = None
+    if k_pe.dim() == 3:
+        M = hidden_states_quant.shape[0]
+        device = hidden_states_quant.device
+        k_pe_reduced = k_pe
+        k_pe_reduced_out = torch.empty((M, q_lora_rank + kv_lora_rank + qk_rope_head_dim), dtype=torch.bfloat16, device=device)[..., :qk_rope_head_dim]
+    (q_c, q_c_scale), _, kv_c_normed, _, k_pe_reduced_out = fused_reduce_rms_fp8_group_quant(q_c, q_a_layernorm_weight, q_a_layernorm_variance_epsilon, 
+                                            kv_c, kv_a_layernorm_weight, kv_a_layernorm_variance_epsilon, k_pe_reduced,
+                                            group_size=128,
+                                            dtype_quant=AITER_FP8_DTYPE, 
+                                            dtype=torch.bfloat16,
+                                            res1=None,
+                                            out3=k_pe_reduced_out)
+    if k_pe_reduced_out is not None:
+        k_pe = k_pe_reduced_out
+    return q_c, q_c_scale, kv_c_normed, k_pe
+
+def _rocm_aiter_triton_qkv_a_proj_layernorm_fp8_fake(
+    hidden_states_quant: torch.Tensor,
+    hidden_states_quant_scale: torch.Tensor,
+    weight_qkv_a_proj: torch.Tensor,
+    weight_scale_qkv_a_proj: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    M = hidden_states_quant.shape[0]
+    device = hidden_states_quant.device
+    q_c = torch.empty((M, q_lora_rank), dtype=AITER_FP8_DTYPE, device=device)
+    q_c_scale = torch.empty((M, (q_lora_rank + 128 - 1) // 128), dtype=torch.float32, device=device)
+    kv_c_normed = torch.empty((M, kv_lora_rank), dtype=torch.bfloat16, device=device)
+    k_pe = torch.empty((M, q_lora_rank + kv_lora_rank + qk_rope_head_dim), dtype=torch.bfloat16, device=device)[..., :qk_rope_head_dim]
+    return q_c, q_c_scale, kv_c_normed, k_pe
+
+def _rocm_aiter_triton_qkv_a_proj_layernorm_fp4_impl(
+    hidden_states_quant: torch.Tensor,
+    hidden_states_quant_scale: torch.Tensor,
+    weight_qkv_a_proj: torch.Tensor,
+    weight_scale_qkv_a_proj: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.fused_mxfp4_quant import fused_reduce_rms_mxfp4_quant
+        
+    qkv_lora = gemm_afp4wfp4(hidden_states_quant, weight_qkv_a_proj, hidden_states_quant_scale, weight_scale_qkv_a_proj.T, skip_reduce=True)
+    q_c, kv_c, k_pe = qkv_lora.split([q_lora_rank, kv_lora_rank, qk_rope_head_dim],
+                                        dim=-1,
+                                    )
+    k_pe_reduced = None
+    k_pe_reduced_out = None
+    if k_pe.dim() == 3:
+        M = hidden_states_quant.shape[0]
+        device = hidden_states_quant.device
+        k_pe_reduced = k_pe
+        k_pe_reduced_out = torch.empty((M, q_lora_rank + kv_lora_rank + qk_rope_head_dim), dtype=torch.bfloat16, device=device)[..., :qk_rope_head_dim]
+    (q_c, q_c_scale), _, kv_c_normed, _, k_pe_reduced_out = fused_reduce_rms_mxfp4_quant(q_c, q_a_layernorm_weight, q_a_layernorm_variance_epsilon, 
+                                            kv_c, kv_a_layernorm_weight, kv_a_layernorm_variance_epsilon, k_pe_reduced,
+                                            res1=None,
+                                            shuffle=False,
+                                            scale_shuffle_padding=False,
+                                            dtype=torch.bfloat16,
+                                            out3=k_pe_reduced_out)
     
+    if k_pe_reduced_out is not None:
+        k_pe = k_pe_reduced_out
+    return q_c, q_c_scale, kv_c_normed, k_pe
+
+def _rocm_aiter_triton_qkv_a_proj_layernorm_fp4_fake(
+    hidden_states_quant: torch.Tensor,
+    hidden_states_quant_scale: torch.Tensor,
+    weight_qkv_a_proj: torch.Tensor,
+    weight_scale_qkv_a_proj: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    M = hidden_states_quant.shape[0]
+    device = hidden_states_quant.device
+    q_c = torch.empty((M, q_lora_rank // 2), dtype=torch.uint8, device=device)
+    q_c_scale = torch.empty((M, (q_lora_rank + 32 - 1) // 32), dtype=torch.float32, device=device)
+    kv_c_normed = torch.empty((M, kv_lora_rank), dtype=torch.bfloat16, device=device)
+    k_pe = torch.empty((M, q_lora_rank + kv_lora_rank + qk_rope_head_dim), dtype=torch.bfloat16, device=device)[..., :qk_rope_head_dim]
+    return q_c, q_c_scale, kv_c_normed, k_pe
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -893,7 +1060,8 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
+        """ "Verifies device specs and availability of env variable."""
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and current_platform.supports_mx()
 
     @classmethod
     @if_aiter_supported
@@ -989,6 +1157,18 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
             )
+            
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_afp4wfp4",
+                op_func=_rocm_aiter_triton_gemm_afp4wfp4_impl,
+                fake_impl=_rocm_aiter_triton_gemm_afp4wfp4_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_a16w8_blockscale",
+                op_func=_rocm_aiter_triton_gemm_a16w8_blockscale_impl,
+                fake_impl=_rocm_aiter_triton_gemm_a16w8_blockscale_fake,
+            )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rms_norm",
@@ -1067,6 +1247,21 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_qkv_a_proj_layernorm_fp8",
+                op_func=_rocm_aiter_triton_qkv_a_proj_layernorm_fp8_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_qkv_a_proj_layernorm_fp8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_qkv_a_proj_layernorm_fp4",
+                op_func=_rocm_aiter_triton_qkv_a_proj_layernorm_fp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_qkv_a_proj_layernorm_fp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1322,6 +1517,34 @@ class rocm_aiter_ops:
         key = key.view(key_shape)
 
     @staticmethod
+    def triton_fp4_bmm(
+        X: torch.Tensor,
+        WQ: torch.Tensor,
+        w_scale: torch.Tensor,
+        dtype: torch.dtype | None = torch.bfloat16,
+        YQ: torch.Tensor | None = None,
+        transpose_bm: bool | None = False,
+        config: dict | None = None,
+        y_scale: dict | None = None,
+    ) -> torch.Tensor:
+        # ruff: noqa: E501 # isort: skip
+        from aiter.ops.triton.batched_gemm_a16wfp4 import (
+            batched_gemm_a16wfp4 as aiter_triton_fp4_bmm,
+        )
+
+        return aiter_triton_fp4_bmm(
+            X,
+            WQ,
+            w_scale,
+            dtype=dtype,
+            y=YQ,
+            config=config,
+            transpose_bm=transpose_bm,
+            prequant=True,
+            y_scale=y_scale,
+        )
+    
+    @staticmethod
     def triton_fp8_bmm(
         X: torch.Tensor,
         WQ: torch.Tensor,
@@ -1363,6 +1586,17 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
+        )
+    
+    @staticmethod
+    def triton_gemm_a16w8_blockscale(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        Bs: torch.Tensor,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a16w8_blockscale(
+            A, B, Bs, output_dtype
         )
 
     @staticmethod

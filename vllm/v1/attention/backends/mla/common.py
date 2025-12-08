@@ -1139,6 +1139,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+        self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_fp4bmm_enabled()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1167,7 +1168,23 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj)
+
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from vllm.model_executor.layers.quantization.quark.utils import quark_post_load_weights
+            
+            self.W_K, self.W_K_scale, W_V, self.W_V_scale = (
+                quark_post_load_weights(self, kv_b_proj_weight, "mxfp4"))
+            self.W_V = W_V.contiguous().transpose(1, 2)
+
+            self.W_K = self.W_K.transpose(-2, -1).contiguous()
+            self.W_K_scale = self.W_K_scale.transpose(-2, -1).contiguous()
+            self.W_V = self.W_V.transpose(-2, -1).contiguous()
+            self.W_V_scale = self.W_V_scale.transpose(-2, -1).contiguous()    
+            return    
+        
+        kv_b_proj_weight = kv_b_proj_weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -1236,16 +1253,39 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
-        # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
 
-        if self.is_aiter_triton_fp8_bmm_enabled:
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            #print(f'>>> x pre (up_proj) {x.shape}')
+            out = out.view(-1, self.num_heads, self.v_head_dim)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank)
+            x = x.transpose(0, 1)
+
+            #print(f'>>> x {x.shape}, attn_bmm_output {attn_bmm_output.shape}, self.W_V {self.W_V.shape}')
+            out = rocm_aiter_ops.triton_fp4_bmm(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                YQ=out,
+                transpose_bm=True,
+                y_scale=None,
+            )
+            #print(f'>>> x before transpose {x.shape}')
+            out = out.view(-1, self.num_heads * self.v_head_dim)
+            # x = out
+
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            # Convert from (B, N, L) to (N, B, L)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
             out = out.view(-1, self.num_heads, self.v_head_dim)
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
+            # Convert from (B, N, L) to (N, B, L)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+
             # Convert from (B, N * V) to (N, B, V)
             out = out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1)
 
@@ -1577,7 +1617,23 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj)
+
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from vllm.model_executor.layers.quantization.quark.utils import quark_post_load_weights
+            
+            self.W_K, self.W_K_scale, W_V, self.W_V_scale = (
+                quark_post_load_weights(self, kv_b_proj_weight, "mxfp4"))
+            self.W_V = W_V.contiguous().transpose(1, 2)
+
+            self.W_K = self.W_K.transpose(-2, -1).contiguous()
+            self.W_K_scale = self.W_K_scale.transpose(-2, -1).contiguous()
+            self.W_V = self.W_V.transpose(-2, -1).contiguous()
+            self.W_V_scale = self.W_V_scale.transpose(-2, -1).contiguous()
+            return
+        
+        kv_b_proj_weight = kv_b_proj_weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),

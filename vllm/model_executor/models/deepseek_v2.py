@@ -388,7 +388,6 @@ class DeepseekV2MoE(nn.Module):
                 n_shared_experts=config.n_shared_experts
                 if self.is_fusion_moe_shared_experts_enabled
                 else None,
-                skip_shared_experts = self.is_fusion_triton_shared_experts_enabled,
         )
 
     def forward(self, hidden_states: tuple | torch.Tensor) -> torch.Tensor:
@@ -1226,7 +1225,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.is_fusion_triton_shared_experts_enabled = rocm_aiter_ops.is_fusion_triton_shared_experts_enabled()
         self.use_triton_fused_rmsnorm_fp8_quant = False
         self.use_triton_fused_rmsnorm_fp4_quant = False
-        if self.is_fusion_triton_shared_experts_enabled:
+        if rocm_aiter_ops.is_enabled():
             if quant_config.get_name() == 'fp8':
                 self.use_triton_fused_rmsnorm_fp8_quant = True
             elif quant_config.get_name() == 'quark':
@@ -1302,11 +1301,51 @@ class DeepseekV2DecoderLayer(nn.Module):
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
-        if residual is None:
-            residual = hidden_states.clone()
-            hidden_states = self.input_layernorm(hidden_states)
+        if self.use_triton_fused_rmsnorm_fp8_quant:
+            weight = self.input_layernorm.weight
+            eps = self.input_layernorm.variance_epsilon
+            from vllm._aiter_ops import AITER_FP8_DTYPE
+            from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+            if residual is None:
+                residual = hidden_states
+                (hidden_states_quant, hidden_states_quant_scales), _, _, _ = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            group_size=128,
+                                                            dtype_quant=AITER_FP8_DTYPE, 
+                                                            res1=None)
+            else:
+                (hidden_states_quant, hidden_states_quant_scales), _, _, residual = fused_rms_fp8_group_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            group_size=128,
+                                                            dtype_quant=AITER_FP8_DTYPE, 
+                                                            res1=residual)
+            hidden_states = (hidden_states_quant, hidden_states_quant_scales)
+        elif self.use_triton_fused_rmsnorm_fp4_quant:
+            weight = self.input_layernorm.weight
+            eps = self.input_layernorm.variance_epsilon
+            from aiter.ops.triton.fused_mxfp4_quant import fused_rms_mxfp4_quant
+            if residual is None:
+                residual = hidden_states
+                (hidden_states_quant, hidden_states_quant_scales), _, _, _ = fused_rms_mxfp4_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            res1=None,
+                                                            shuffle=False,
+                                                            scale_shuffle_padding=False,
+                                                            output_unquantized_inp1=False)
+            else:
+                (hidden_states_quant, hidden_states_quant_scales), _, _, residual = fused_rms_mxfp4_quant(hidden_states, weight, eps, 
+                                                            None, None, eps, 
+                                                            res1=residual,
+                                                            shuffle=False,
+                                                            scale_shuffle_padding=False,
+                                                            output_unquantized_inp1=False)
+            hidden_states = (hidden_states_quant, hidden_states_quant_scales)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            if residual is None:
+                residual = hidden_states.clone()
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         attn_kwargs = {
             "positions": positions,

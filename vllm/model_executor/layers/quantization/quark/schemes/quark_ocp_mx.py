@@ -54,6 +54,7 @@ try:
         gemm_afp4wfp4,
         gemm_afp4wfp4_preshuffled_weight_scales,
     )
+    from aiter.ops.triton.gemm_a16wfp4 import gemm_a16wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.utils.torch_utils import direct_register_custom_op
@@ -123,6 +124,13 @@ try:
             return y[:M]
         else:
             if x_scales is None:
+                if M <= 256 and weight.shape[0] == 7168 and x.shape[-1] == 2048:
+                    y = torch.empty(M,
+                            weight.shape[0],
+                            device=x.device,
+                            dtype=out_dtype)
+                    gemm_a16wfp4(x, weight, weight_scale.T, dtype=out_dtype, y=y)
+                    return y
                 x_q, x_s = dynamic_mxfp4_quant(x)
             else:
                 x_q = x
