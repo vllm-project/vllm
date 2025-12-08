@@ -28,6 +28,7 @@ Maintainers form a hierarchy based on sustained, high-quality contributions and 
 Core Maintainers function like a project planning and decision making committee. In other convention, they might be called a Technical Steering Committee (TSC). In vLLM vocabulary, they are often known as "Project Leads". They meet weekly to coordinate roadmap priorities and allocate engineering resources. Current active leads: @WoosukKwon, @zhuohan123, @simon-mo, @youkaichao, @robertshaw2-redhat, @tlrmchlsmth, @mgoin, @njhill, @ywang96, @houseroad, @yeqcharlotte, @ApostaC
 
 The responsibilities of the core maintainers are:
+
 * Author quarterly roadmap and responsible for each development effort.
 * Making major changes to the technical direction or scope of vLLM and vLLM projects.
 * Defining the project's release strategy.
