@@ -346,44 +346,6 @@ def as_seq_cls_model(cls: _T) -> _T:
     return ModelForSequenceClassification  # type: ignore
 
 
-def as_reward_model(cls: _T) -> _T:
-    """
-    Subclass an existing vLLM model to support reward modeling.
-
-    By default, we return the hidden states of each token directly.
-
-    Note:
-        We assume that no extra layers are added to the original model;
-        please implement your own model if this is not the case.
-    """
-    # Avoid modifying existing reward models
-    if is_pooling_model(cls):
-        return cls
-
-    # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
-
-    from .interfaces_base import default_pooling_type
-
-    @default_pooling_type("ALL")
-    class ModelForReward(_create_pooling_model_cls(cls)):
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self.pooler = DispatchPooler(
-                {
-                    "token_classify": Pooler.for_token_classify(
-                        pooler_config=pooler_config
-                    )
-                }
-            )
-
-    ModelForReward.__name__ = _get_pooling_model_name(cls.__name__, "ForReward")
-
-    return ModelForReward  # type: ignore
-
-
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -415,7 +377,7 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    renderer_config = model.vllm_config.renderer_config
+    model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
 
@@ -447,10 +409,10 @@ def load_weights_using_from_2_way_softmax(
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
-        renderer_config.tokenizer,
-        revision=renderer_config.tokenizer_revision,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        trust_remote_code=renderer_config.trust_remote_code,
+        model_config.tokenizer,
+        revision=model_config.tokenizer_revision,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
     )
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
@@ -473,7 +435,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    renderer_config = model.vllm_config.renderer_config
+    model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
     text_config = model.config.get_text_config()
 
@@ -501,10 +463,10 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
-        renderer_config.tokenizer,
-        revision=renderer_config.tokenizer_revision,
-        tokenizer_mode=renderer_config.tokenizer_mode,
-        trust_remote_code=renderer_config.trust_remote_code,
+        model_config.tokenizer,
+        revision=model_config.tokenizer_revision,
+        tokenizer_mode=model_config.tokenizer_mode,
+        trust_remote_code=model_config.trust_remote_code,
     )
 
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]

@@ -19,7 +19,7 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import RendererConfig, SpeechToTextConfig
+from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -887,7 +887,7 @@ class SupportsTranscription(Protocol):
         cls,
         audio: np.ndarray,
         stt_config: SpeechToTextConfig,
-        renderer_config: RendererConfig,
+        model_config: ModelConfig,
         language: str | None,
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
@@ -930,9 +930,7 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def get_speech_to_text_config(
-        cls,
-        renderer_config: RendererConfig,
-        task_type: Literal["transcribe", "translate"],
+        cls, model_config: ModelConfig, task_type: Literal["transcribe", "translate"]
     ) -> SpeechToTextConfig:
         """Get the speech to text config for the ASR model."""
         ...
@@ -942,7 +940,7 @@ class SupportsTranscription(Protocol):
         cls,
         audio_duration_s: float,
         stt_config: SpeechToTextConfig,
-        renderer_config: RendererConfig,
+        model_config: ModelConfig,
     ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
