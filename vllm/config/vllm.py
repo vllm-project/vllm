@@ -66,7 +66,7 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise
     cudagraphs"""
     O2 = 2
     """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
