@@ -1809,7 +1809,7 @@ class NixlConnectorWorker:
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
-                    meta.local_block_ids
+                    meta.local_physical_block_ids
                 )
         for (
             block_size_ratio,
