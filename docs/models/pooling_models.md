@@ -319,7 +319,7 @@ We are going to remove `softmax` and `activation` from `PoolingParams`. Instead,
 
 ### as_reward_model
 
-Pooling models now default support all pooling, you can use it without any settings. 
+Pooling models now default support all pooling, you can use it without any settings.
 
-- Extracting hidden states prefers using `token_embed` task. 
+- Extracting hidden states prefers using `token_embed` task.
 - Reward models prefers using `token_classify` task.
