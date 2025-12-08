@@ -288,7 +288,7 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   }
 
 // To avoid LLVM silently upcasting to double
-__device__ inline int min__(int a, int b) { return min(a, b); }
+__device__ inline unsigned int min__(int a, int b) { return min(a, b); }
 
 #if defined(__HIP__GFX9__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
@@ -1457,7 +1457,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t kBase = 0;
   if (k_str >= K) return;
 
-  bool noreloada = false;
   constexpr bool FAST_UNSAFE_RDC_INIT = false;
 
   #ifdef WVSPLITKRC_1KPASS
@@ -1494,11 +1493,11 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   }
   if (m < Mmod) {
   #else
+  bool noreloada = false;
   while (m < Mmod) {
   #endif
 
   #ifndef WVSPLITKRC_1KPASS
-    constexpr bool FAST_UNSAFE_RDC_INIT = false;
     if constexpr (FAST_UNSAFE_RDC_INIT) {
       if (m + (threadIdx.x % 16) < M)
         if (doRdc)
@@ -1532,245 +1531,254 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
   #endif
 
+  #ifndef WVSPLITKRC_1KPASS
     for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
+  #else
+    uint32_t k1 = k_str;
+    {
+  #endif
+  #ifndef WVSPLITKRC_1KPASS
       const bool reloada = (!noreloada) &&
                            ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
                            (k1 < k_end);
       // load next chunk of A[] to LDS
       if (reloada) {
         if (k1 != k_str) kBase += kFit;
-  #ifndef WVSPLITKRC_1KPASS
         __syncthreads();
+  #else
+      const bool reloada = true;
+      if (reloada) {
   #endif
         constexpr int sprdN = 4;
         const uint32_t thrd = ((threadIdx.y / sprdN) * THRDS + threadIdx.x);
-  #pragma unroll
+
+  #ifndef WVSPLITKRC_1KPASS
+    #pragma unroll
         for (int k = 0; k < kFit; k += THRDS * (WvPrGrp / sprdN) * A_CHUNK) {
+  #else
+        int k = 0;
+        {
+  #endif
+
           unsigned int kOff = k + (thrd * A_CHUNK);
-          {  // if (((unsigned int)(kBase + kOff)) < K) {
-            constexpr int unrl = 8;
-            for (int nt = 0; nt < N / sprdN; nt += NTILE) {
-              for (int n8 = 0; n8 < NTILE / unrl; n8++) {
-                const unsigned int k_in =
-                    k_str + kBase + kOff +
-                    (n8 * unrl + nt + (N / sprdN) * (threadIdx.y % sprdN)) * K;
-                const unsigned int k_ot =
-                    kOff +
-                    (n8 * unrl + nt + (N / sprdN) * (threadIdx.y % sprdN)) *
-                        kFitPdd;
-                bigType tmp[unrl];
-                for (unsigned int n = 0; n < unrl; n++)
-                  tmp[n].h8 = *((scalar8*)(&A[k_in + n * K]));
-                for (unsigned int n = 0; n < unrl; n++)
-                  *((scalar8*)(&s[k_ot + n * kFitPdd])) = tmp[n].h8;
-              }
-            }
-          }
+          unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
+          constexpr int unrl = N / sprdN;
+          bigType tmp[unrl];
+          const unsigned int k_in = kOffcp + (unrl * (threadIdx.y % sprdN)) * K;
+          for (unsigned int n = 0; n < unrl; n++)
+            tmp[n].h8 = *((scalar8*)(&A[k_in + n * K]));
+
+          const unsigned int k_ot =
+              kOff + (unrl * (threadIdx.y % sprdN)) * kFitPdd;
+          for (unsigned int n = 0; n < unrl; n++)
+            *((scalar8*)(&s[k_ot + n * kFitPdd])) = tmp[n].h8;
         }
       }
+    }
 
-      // Stage loaded B[] to LDS for MFMA swizzling...
+    // Stage loaded B[] to LDS for MFMA swizzling...
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+      uint32_t k_ = k + threadIdx.x * A_CHUNK;
+      const bool oob_k = (k_ >= K);
+      for (uint32_t d = 0; d < 2; d++)
+        for (uint32_t j = 0; j < 2; j++)
+          for (uint32_t y = 0; y < YTILE / GrpsShrB; y++) {
+            uint32_t idx = (threadIdx.x * YTILE + y * GrpsShrB + bLoader) * 8 +
+                           (d * 2 + j) * 2;
+            idx += ((uint32_t)(idx / BSTRD)) * BPAD;
+            // zero out if oob
+            myStg[idx / 2] = (oob_k || (y * GrpsShrB + bLoader + m >= M))
+                                 ? 0
+                                 : bigB_[y][k2].i[d * 2 + j];
+          }
+    }
+
+  #ifndef WVSPLITKRC_1KPASS
+    // Fire load of next B[] chunk...
+    if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
+        (k1 + THRDS * A_CHUNK * UNRL < K))
+    #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+        uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        const bool oob_k = (k_ >= K);
-        for (uint32_t d = 0; d < 2; d++)
-          for (uint32_t j = 0; j < 2; j++)
-            for (uint32_t y = 0; y < YTILE / GrpsShrB; y++) {
-              uint32_t idx =
-                  (threadIdx.x * YTILE + y * GrpsShrB + bLoader) * 8 +
-                  (d * 2 + j) * 2;
-              idx += ((uint32_t)(idx / BSTRD)) * BPAD;
-              // zero out if oob
-              myStg[idx / 2] = (oob_k || (y * GrpsShrB + bLoader + m >= M))
-                                   ? 0
-                                   : bigB_[y][k2].i[d * 2 + j];
-            }
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
+          bigB_[y][k2].h8 = (loadnt(
+              (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
       }
+  #endif
 
-      // Fire load of next B[] chunk...
-      if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
-          (k1 + THRDS * A_CHUNK * UNRL < K))
-  #pragma unroll
-        for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-          uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
-          uint32_t k_ = k + threadIdx.x * A_CHUNK;
-          const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
-  #pragma unroll
-          for (uint32_t y = 0; y < YTILE / GrpsShrB; y++)
-            bigB_[y][k2].h8 = (loadnt(
-                (scalar8*)(&B_[min__(y * GrpsShrB + bLoader + m, M - 1) * K])));
-        }
+    // B[] staging is cooperative across GrpsShrB, so sync here before reading
+    // back
+    __syncthreads();
 
-      // B[] staging is cooperative across GrpsShrB, so sync here before reading
-      // back
-      __syncthreads();
-
-      // read back B[] swizzled for MFMA...
-      bigType bigB[YTILE][UNRL];
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        for (uint32_t d = 0; d < 2; d++)
-          for (uint32_t j = 0; j < 2; j++)
-            for (uint32_t y = 0; y < YTILE; y++) {
-              uint32_t idx = (threadIdx.x + 64 * y) * 8 + (d * 2 + j) * 2;
-              idx += ((uint32_t)(idx / BSTRD)) * BPAD;
-              bigB[y][k2].i[d * 2 + j] = myStg[idx / 2];
-            }
-      }
-
-      // rReadback A[] swizzled for MFMA...
-      bigType bigA[N / GrpsShrB][UNRL];
-  #pragma unroll
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
-  #pragma unroll
-        for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
-  #pragma unroll
-          for (uint32_t n = 0; n < NTILE; n++) {
-            uint32_t idxa = (nt + (threadIdx.x % NTILE) +
-                             (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) *
-                                kFitPdd +
-                            A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
-            bigA[nt + n][k2] = *((const bigType*)(&(s[idxa])));
+    // read back B[] swizzled for MFMA...
+    bigType bigB[YTILE][UNRL];
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      for (uint32_t d = 0; d < 2; d++)
+        for (uint32_t j = 0; j < 2; j++)
+          for (uint32_t y = 0; y < YTILE; y++) {
+            uint32_t idx = (threadIdx.x + 64 * y) * 8 + (d * 2 + j) * 2;
+            idx += ((uint32_t)(idx / BSTRD)) * BPAD;
+            bigB[y][k2].i[d * 2 + j] = myStg[idx / 2];
           }
-      }
+    }
 
-      // Do the MFMAs
+    // rReadback A[] swizzled for MFMA...
+    bigType bigA[N / GrpsShrB][UNRL];
   #pragma unroll
-      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
   #pragma unroll
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+  #pragma unroll
+        for (uint32_t n = 0; n < NTILE; n++) {
+          uint32_t idxa = (nt + (threadIdx.x % NTILE) +
+                           (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) *
+                              kFitPdd +
+                          A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
+          bigA[nt + n][k2] = *((const bigType*)(&(s[idxa])));
+        }
+    }
+
+    // Do the MFMAs
+  #pragma unroll
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+  #pragma unroll
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        if constexpr (std::is_same_v<scalar_t, half>) {
+          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+              bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
+              (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
+              bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0,
+              0, 0);
+        } else {  // bf16
+          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+              bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
+              (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+          sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
+              bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0], 0,
+              0, 0);
+        }
+  #pragma unroll
+        for (uint32_t j = 1; j < YTILE; j++) {
           if constexpr (std::is_same_v<scalar_t, half>) {
             sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
-                (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+                bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0],
+                0, 0, 0);
             sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0],
+                bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0],
                 0, 0, 0);
           } else {  // bf16
             sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                bigA[nt * NTILE + 0][k2].h4[0], bigB[0][k2].h4[0],
-                (k1 == k_str) ? ((scalar8){0}) : sum4[nt][0], 0, 0, 0);
+                bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0], sum4[nt][0],
+                0, 0, 0);
             sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                bigA[nt * NTILE + 0][k2].h4[1], bigB[0][k2].h4[1], sum4[nt][0],
+                bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1], sum4[nt][0],
                 0, 0, 0);
           }
-  #pragma unroll
-          for (uint32_t j = 1; j < YTILE; j++) {
-            if constexpr (std::is_same_v<scalar_t, half>) {
-              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                  bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0],
-                  sum4[nt][0], 0, 0, 0);
-              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16f16(
-                  bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1],
-                  sum4[nt][0], 0, 0, 0);
-            } else {  // bf16
-              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                  bigA[nt * NTILE + j][k2].h4[0], bigB[j][k2].h4[0],
-                  sum4[nt][0], 0, 0, 0);
-              sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(
-                  bigA[nt * NTILE + j][k2].h4[1], bigB[j][k2].h4[1],
-                  sum4[nt][0], 0, 0, 0);
-            }
-          }
         }
       }
     }
-
-    if (!doRdc) {
-      if (m + (threadIdx.x % 16) < M) {
-        scalar_t biases[N / NTILE / GrpsShrB][4] = {};
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int mindx = m + (threadIdx.x % 16);
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-            }
-          }
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-          for (uint32_t j = 0; j < 4; j++) {
-            int mindx = m + (threadIdx.x % 16);
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            int adr = mindx + M * nindx;
-            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-              if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
-              C[adr] = __float2bfloat16(sum4[nt][0][j]);
-            } else {
-              if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
-              C[adr] = __float2half(sum4[nt][0][j]);
-            }
-          }
-        }
-      }
-    } else {
-      if (m + (threadIdx.x % 16) < M) {
-        int my_cntr[N / NTILE / GrpsShrB][4];
-        scalar_t biases[N / NTILE / GrpsShrB][4];
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int mindx = m + (threadIdx.x % 16);
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
-            }
-          }
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-          for (uint32_t j = 0; j < 4; j++) {
-            int adr = m + (threadIdx.x % 16) +
-                      (j + (threadIdx.x / 16) * 4) * M + nt * NTILE * M +
-                      (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
-            atomicAdd(&glbl[adr], sum4[nt][0][j]);
-            my_cntr[nt][j] = atomicAdd(&cntr[adr], 1);
-          }
-        }
-        float vals[N / NTILE / GrpsShrB][4];
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-          for (uint32_t j = 0; j < 4; j++) {
-            int mindx = m + (threadIdx.x % 16);
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            int adr = mindx + M * nindx;
-            // read-back glbl[] here, can't use return from atomic above
-            if (my_cntr[nt][j] + 1 == k_rnd) {
-              vals[nt][j] = glbl[adr];
-              // if (BIAS) biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) *
-              // M];
-            }
-          }
-        }
-        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-          for (uint32_t j = 0; j < 4; j++) {
-            int mindx = m + (threadIdx.x % 16);
-            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-            int adr = mindx + M * nindx;
-            if (my_cntr[nt][j] + 1 == k_rnd) {
-              if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-                if (BIAS) vals[nt][j] += __bfloat162float(biases[nt][j]);
-                C[adr] = __float2bfloat16(vals[nt][j]);
-              } else {
-                if (BIAS) vals[nt][j] += __half2float(biases[nt][j]);
-                C[adr] = __float2half(vals[nt][j]);
-              }
-            }
-          }
-        }
-      }
-    }
-
-    m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
-    m = (m0 + m1) % Mmod;
-    k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
-    k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
-  #ifndef WVSPLITKRC_1KPASS
-    if (k_str >= K) break;
-  #endif
-    kBase = 0;
   }
+
+  if (!doRdc) {
+    if (m + (threadIdx.x % 16) < M) {
+      scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+      if (BIAS)
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+          }
+        }
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr = mindx + M * nindx;
+          if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+            if (BIAS) sum4[nt][0][j] += __bfloat162float(biases[nt][j]);
+            C[adr] = __float2bfloat16(sum4[nt][0][j]);
+          } else {
+            if (BIAS) sum4[nt][0][j] += __half2float(biases[nt][j]);
+            C[adr] = __float2half(sum4[nt][0][j]);
+          }
+        }
+      }
+    }
+  } else {
+    if (m + (threadIdx.x % 16) < M) {
+      int my_cntr[N / NTILE / GrpsShrB][4];
+      scalar_t biases[N / NTILE / GrpsShrB][4];
+      if (BIAS)
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * M];
+          }
+        }
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int adr = m + (threadIdx.x % 16) + (j + (threadIdx.x / 16) * 4) * M +
+                    nt * NTILE * M +
+                    (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
+          atomicAdd(&glbl[adr], sum4[nt][0][j]);
+          my_cntr[nt][j] = atomicAdd(&cntr[adr], 1);
+        }
+      }
+      float vals[N / NTILE / GrpsShrB][4];
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr = mindx + M * nindx;
+          // read-back glbl[] here, can't use return from atomic above
+          if (my_cntr[nt][j] + 1 == k_rnd) {
+            vals[nt][j] = glbl[adr];
+            // if (BIAS) biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) *
+            // M];
+          }
+        }
+      }
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr = mindx + M * nindx;
+          if (my_cntr[nt][j] + 1 == k_rnd) {
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              if (BIAS) vals[nt][j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(vals[nt][j]);
+            } else {
+              if (BIAS) vals[nt][j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(vals[nt][j]);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
+  m = (m0 + m1) % Mmod;
+  k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+  k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  #ifndef WVSPLITKRC_1KPASS
+  if (k_str >= K) break;
+  #endif
+  kBase = 0;
+}
 }
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
