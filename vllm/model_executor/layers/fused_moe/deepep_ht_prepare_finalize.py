@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import Any
 
 import deep_ep
 import torch
@@ -23,7 +24,7 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
-from typing import Any
+
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """

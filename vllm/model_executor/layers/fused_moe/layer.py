@@ -1502,7 +1502,11 @@ class FusedMoE(CustomOp):
         if self.vllm_config.parallel_config.use_ubatching:
             num_of_ubatches = self.vllm_config.parallel_config.num_of_ubatches
             states_shape = (num_of_ubatches, moe.max_num_tokens, self.hidden_size)
-            logits_shape = (num_of_ubatches, moe.max_num_tokens, self.logical_num_experts)
+            logits_shape = (
+                num_of_ubatches,
+                moe.max_num_tokens,
+                self.logical_num_experts,
+            )
         else:
             states_shape = (moe.max_num_tokens, self.hidden_size)
             logits_shape = (moe.max_num_tokens, self.logical_num_experts)

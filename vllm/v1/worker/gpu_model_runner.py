@@ -3717,7 +3717,10 @@ class GPUModelRunner(
         # wrap the model with full cudagraph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-        if cudagraph_mode.has_full_cudagraphs() and not self.parallel_config.use_ubatching:
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and not self.parallel_config.use_ubatching
+        ):
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )

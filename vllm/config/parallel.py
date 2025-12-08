@@ -326,11 +326,11 @@ class ParallelConfig:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
         including data parallelism."""
         return self.world_size * self.data_parallel_size
-    
+
     @property
     def use_ubatching(self) -> bool:
         return self.enable_dbo or self.ubatch_size > 1
-    
+
     @property
     def num_of_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
