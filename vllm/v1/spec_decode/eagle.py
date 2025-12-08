@@ -444,7 +444,7 @@ class EagleProposer:
             # sequence length to 1 to minimize their overheads in attention.
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
 
-            # Also update the CPU-side shadow; not this is hacky and should be
+            # Also update the CPU-side shadow; NOTE: this is hacky and should be
             # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
             if common_attn_metadata._seq_lens_cpu is not None:
                 common_attn_metadata._seq_lens_cpu += 1
