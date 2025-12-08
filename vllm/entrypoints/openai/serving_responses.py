@@ -100,7 +100,6 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -651,10 +650,7 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            response_messages = context.parser.response_messages[
-                context.parser.num_init_messages :
-            ]
-            output = make_response_output_items_from_parsable_context(response_messages)
+            output = context.parser.make_response_output_items_from_parsable_context()
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
