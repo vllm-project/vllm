@@ -32,6 +32,11 @@ class IdentityReasoningParser(ReasoningParser):
         # Always return True, since we never treat reasoning specially
         return True
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        return True
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # Identity: return all tokens as content
         return input_ids
