@@ -37,49 +37,6 @@ TRITON_GROUP_FP8_QUANT_OP = torch.ops.vllm.triton_per_token_group_quant_fp8.defa
 FUSED_SILU_MUL_QUANT_OP = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
 
 SPLIT_WITH_SIZES_OP = torch.ops.aten.split_with_sizes.default
-
-
-class AiterRMSFp8GroupQuantPattern:
-    """
-    This pattern fuses aiter rms_norm & group fp8 quant custom
-    ops into an aiter rms_norm_group_fp8_quant op.
-    """
-
-    def __init__(self, epsilon: float, quant_dtype: torch.dtype, quant_op: OpOverload):
-        self.epsilon = epsilon
-        self.quant_dtype = quant_dtype
-        self.quant_op = quant_op
-
-    def register(self, pm_pass: PatternMatcherPass):
-        def pattern(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-        ):
-            at1 = AITER_RMS_OP(x=input, weight=weight, variance_epsilon=self.epsilon)
-
-            at2 = self.quant_op(at1, 128)
-
-            return at2[0], at2[1]
-
-        def replacement(
-            input: torch.Tensor,
-            weight: torch.Tensor,
-        ):
-            at = AITER_RMS_GROUP_QUANT_OP(
-                x=input,
-                weight=weight,
-                variance_epsilon=self.epsilon,
-                group_size=128,
-            )
-
-            return at[0], at[1]
-
-        inputs = [
-            empty_bf16(5, 4),  # input
-            empty_bf16(1, 5),  # weight
-        ]
-
-        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
         
 class AiterRMSFp8GroupQuantPattern:
     """

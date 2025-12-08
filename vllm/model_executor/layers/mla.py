@@ -121,23 +121,6 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         q_c = None
         kv_lora = None
 
-        if self.use_triton_qkv_a_proj_layernrom_fp8:
-            assert self.q_lora_rank is not None
-            assert isinstance(hidden_states, tuple)
-            hidden_states, hidden_states_scales = hidden_states
-            q_c, q_c_scale, kv_c_normed, k_pe = torch.ops.vllm.rocm_aiter_triton_qkv_a_proj_layernorm_fp8(
-                                                hidden_states_quant=hidden_states,
-                                                hidden_states_quant_scale=hidden_states_scales,
-                                                weight_qkv_a_proj=self.fused_qkv_a_proj.weight,
-                                                weight_scale_qkv_a_proj=self.fused_qkv_a_proj.weight_scale,
-                                                q_a_layernorm_weight=self.q_a_layernorm.weight,
-                                                q_a_layernorm_variance_epsilon=self.q_a_layernorm.variance_epsilon,
-                                                kv_a_layernorm_weight=self.kv_a_layernorm.weight,
-                                                kv_a_layernorm_variance_epsilon=self.kv_a_layernorm.variance_epsilon,
-                                                q_lora_rank=self.q_lora_rank,
-                                                kv_lora_rank=self.kv_lora_rank,
-                                                qk_rope_head_dim=self.qk_rope_head_dim)
-            q = torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(q_c, self.q_b_proj.weight, q_c_scale, self.q_b_proj.weight_scale, output_dtype=torch.bfloat16)
         if self.use_triton_qkv_a_proj_layernrom_fp4:
             assert self.q_lora_rank is not None
             assert isinstance(hidden_states, tuple)
@@ -155,6 +138,23 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
                                                 kv_lora_rank=self.kv_lora_rank,
                                                 qk_rope_head_dim=self.qk_rope_head_dim)
             q = torch.ops.vllm.rocm_aiter_triton_gemm_afp4wfp4(q_c, self.q_b_proj.weight, q_c_scale, self.q_b_proj.weight_scale, output_dtype=torch.bfloat16)
+        elif self.use_triton_qkv_a_proj_layernrom_fp8:
+            assert self.q_lora_rank is not None
+            assert isinstance(hidden_states, tuple)
+            hidden_states, hidden_states_scales = hidden_states
+            q_c, q_c_scale, kv_c_normed, k_pe = torch.ops.vllm.rocm_aiter_triton_qkv_a_proj_layernorm_fp8(
+                                                hidden_states_quant=hidden_states,
+                                                hidden_states_quant_scale=hidden_states_scales,
+                                                weight_qkv_a_proj=self.fused_qkv_a_proj.weight,
+                                                weight_scale_qkv_a_proj=self.fused_qkv_a_proj.weight_scale,
+                                                q_a_layernorm_weight=self.q_a_layernorm.weight,
+                                                q_a_layernorm_variance_epsilon=self.q_a_layernorm.variance_epsilon,
+                                                kv_a_layernorm_weight=self.kv_a_layernorm.weight,
+                                                kv_a_layernorm_variance_epsilon=self.kv_a_layernorm.variance_epsilon,
+                                                q_lora_rank=self.q_lora_rank,
+                                                kv_lora_rank=self.kv_lora_rank,
+                                                qk_rope_head_dim=self.qk_rope_head_dim)
+            q = torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(q_c, self.q_b_proj.weight, q_c_scale, self.q_b_proj.weight_scale, output_dtype=torch.bfloat16)
         else:
             assert isinstance(hidden_states, torch.Tensor)
             if self.q_lora_rank is not None:

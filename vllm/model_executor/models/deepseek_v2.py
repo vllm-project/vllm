@@ -1231,7 +1231,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             elif quant_config.get_name() == 'quark':
                 self.use_triton_fused_rmsnorm_fp4_quant = True
             else:
-                raise NotImplementedError(f"{quant_config.get_name()=} which is not supported for VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS")
+                raise NotImplementedError(f"{quant_config.get_name()=} which is not supported with the current version of AITER")
             logger.info(f"[Aiter] {self.__class__.__name__} has {quant_config.get_name()=}")
 
         # verify MLA attention specific fields
