@@ -5,7 +5,7 @@ import copy
 from pathlib import Path
 from typing import TypeAlias
 
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
@@ -75,8 +75,6 @@ class CachedHfTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> HfTokenizer:
-        from transformers import AutoTokenizer
-
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
