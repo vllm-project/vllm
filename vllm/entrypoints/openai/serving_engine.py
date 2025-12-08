@@ -1070,12 +1070,15 @@ class OpenAIServing:
         )
 
         if "prompt_token_ids" not in engine_prompt:
+            extra_data = engine_prompt
             engine_prompt = await self._tokenize_prompt_input_async(
                 request,
                 renderer.get_tokenizer(),
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
+            for k in extra_data:
+                engine_prompt[k] = extra_data[k]
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
