@@ -238,7 +238,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
 def flashinfer_trtllm_fp4_moe(
     layer: torch.nn.Module,
-    x: torch.Tensor,
+    x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
     global_num_experts: int,
