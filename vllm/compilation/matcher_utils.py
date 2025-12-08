@@ -20,8 +20,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_block_fp8_supported,
+)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_e8m0_used,
+    should_use_deepgemm_for_fp8_linear,
+)
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -234,16 +241,12 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         quant_key: QuantKey,
         enabled: bool | None = None,
-        use_col_major_scales: bool = False,
-        use_e8m0: bool = False,
     ):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
         super().__init__(enabled)
         self.quant_key = quant_key
-        self.use_col_major_scales = use_col_major_scales
-        self.use_e8m0 = use_e8m0
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
@@ -257,14 +260,24 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
+        weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         result = torch.empty(
             input.shape, device=input.device, dtype=self.quant_key.dtype
         )
 
         if self.quant_key.scale.group_shape.is_per_group():
+            # use col major scales if deepgemm and cutlass
+            assert weight is not None
+            using_deepgemm = should_use_deepgemm_for_fp8_linear(
+                self.model_dtype,
+                weight,
+            )
+            use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
+            use_e8m0 = is_deep_gemm_e8m0_used() if using_deepgemm else False
+
             assert scale is None
-            scale = self.make_scale(input, transposed=self.use_col_major_scales)
+            scale = self.make_scale(input, transposed=use_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -279,7 +292,7 @@ class MatcherQuantFP8(MatcherCustomOp):
                 eps=1e-10,
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
-                scale_ue8m0=self.use_e8m0,
+                scale_ue8m0=use_e8m0,
             )
             return result, scale
 
@@ -301,6 +314,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
+        weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)
 
