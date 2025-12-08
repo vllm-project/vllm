@@ -38,6 +38,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -67,17 +68,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
-
-class ReLUSquaredActivation(nn.Module):
-    """
-    Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
-    """
-
-    def forward(self, input):
-        relu_applied = nn.functional.relu(input)
-        squared = torch.square(relu_applied)
-        return squared
 
 
 class Jais2MLP(nn.Module):
@@ -457,15 +447,6 @@ class Jais2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
-    # LoRA specific attributes
-    supported_lora_modules = [
-        "qkv_proj",
-        "o_proj",
-        "up_proj",
-        "down_proj",
-        "embed_tokens",
-        "lm_head",
-    ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
