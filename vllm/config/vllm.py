@@ -586,6 +586,15 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
+        if (
+            self.scheduler_config.async_scheduling
+            and not self.parallel_config.disable_nccl_for_dp_synchronization
+        ):
+            logger.info(
+                "Disabling NCCL for DP synchronization when using async scheduling."
+            )
+            self.parallel_config.disable_nccl_for_dp_synchronization = True
+
         from vllm.platforms import current_platform
 
         if (
@@ -804,7 +813,10 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=self.parallel_config.all2all_backend,
+            data_parallel_size=self.parallel_config.data_parallel_size,
+        )
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,

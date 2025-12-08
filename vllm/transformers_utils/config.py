@@ -320,6 +320,8 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
+    from vllm.config.utils import getattr_iter
+
     rope_theta_names = ("rope_theta", "rotary_emb_base")
     rope_theta = getattr_iter(config, rope_theta_names, None)
     if Version(version("transformers")) < Version("5.0.0.dev0"):
