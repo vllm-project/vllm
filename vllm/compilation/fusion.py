@@ -477,24 +477,25 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             # TODO: uncomment after fixing group quant rms fusion for VL models
             # https://github.com/vllm-project/vllm/pull/27883#issuecomment-3624301595
-            # FusedAddRMSNormGroupQuantPattern(
-            #     epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
-            # ).register(self.patterns)
+            # Only register group quant patterns on CUDA where the C++ op exists
+            # if current_platform.is_cuda():
+            #     FusedAddRMSNormGroupQuantPattern(
+            #         epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            #     ).register(self.patterns)
 
-            # Fuse rms_norm + fp8 group quant
-            RMSNormGroupQuantPattern(
-                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
-            ).register(self.patterns)
+            #     # Fuse rms_norm + fp8 group quant
+            #     RMSNormGroupQuantPattern(
+            #         epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            #     ).register(self.patterns)
 
-            # TODO: uncomment after fixing group quant rms fusion for VL models
-            # FusedAddRMSNormGroupQuantPattern(
-            #     epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
-            # ).register(self.patterns)
+            #     FusedAddRMSNormGroupQuantPattern(
+            #         epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
+            #     ).register(self.patterns)
 
-            # Fuse rms_norm + fp8 group quant
-            RMSNormGroupQuantPattern(
-                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
-            ).register(self.patterns)
+            #     # Fuse rms_norm + fp8 group quant
+            #     RMSNormGroupQuantPattern(
+            #         epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
+            #     ).register(self.patterns)
 
             # Fuse fused_add_rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
