@@ -18,14 +18,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 if TYPE_CHECKING:
     from ..gptq import GPTQConfig
     from ..gptq_marlin import GPTQMarlinConfig
+    from ..ipex_quant import IPEXConfig
 else:
     GPTQConfig = object
     GPTQMarlinConfig = object
+    IPEXConfig = object
 
 
 # Match dynamic rules with module name (prefix) and override quantize
 # config if module (prefix) matches a rule
-def override_config(config: GPTQConfig | GPTQMarlinConfig, prefix: str):
+def override_config(config: GPTQConfig | GPTQMarlinConfig | IPEXConfig, prefix: str):
     weight_bits = get_dynamic_override(config, prefix, "bits", config.weight_bits)
     if isinstance(weight_bits, int):
         config.weight_bits = weight_bits
@@ -60,7 +62,7 @@ def override_config(config: GPTQConfig | GPTQMarlinConfig, prefix: str):
 
 
 def get_dynamic_override(
-    config: GPTQConfig | GPTQMarlinConfig,
+    config: GPTQConfig | GPTQMarlinConfig | IPEXConfig,
     layer_name: str,
     key: str | None = None,
     default_value: int | bool | None = None,
@@ -126,7 +128,7 @@ def is_layer_gptq_quantized(
 
 
 def get_linear_quant_method(
-    config: GPTQConfig | GPTQMarlinConfig,
+    config: GPTQConfig | GPTQMarlinConfig | IPEXConfig,
     layer: torch.nn.Module,
     prefix: str,
     linear_method_cls: type,

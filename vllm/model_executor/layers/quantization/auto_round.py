@@ -419,12 +419,22 @@ class AutoRoundConfig(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if "awq" in self.packing_format:
                 config = IPEXConfig(
-                    method="awq", weight_bits=weight_bits, group_size=group_size
+                    method="awq",
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    is_qweight_sym=sym,
+                    dynamic={},
+                    full_config={},
                 )
                 return IPEXAWQLinearMethod(config)
             elif "gptq" in self.packing_format:
                 config = IPEXConfig(
-                    method="gptq", weight_bits=weight_bits, group_size=group_size
+                    method="gptq",
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    is_qweight_sym=sym,
+                    dynamic={},
+                    full_config={},
                 )
                 return IPEXGPTQLinearMethod(config)
             else:
