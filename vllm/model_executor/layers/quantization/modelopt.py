@@ -997,7 +997,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 "NVFP4 quantization was selected, "
                 " dynamic quantization is not supported."
             )
-        # [1024, 1024, 256, 256, 16] is the output_partition_sizes for the modeland sum(output_partition_sizes) is 2576
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
         layer.logical_widths = output_partition_sizes
@@ -1108,68 +1107,53 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             # Swizzle block scales and then pad the packed NVFP4 weights so that
             # both N (rows) and K (columns) satisfy the alignment constraints
             # implied by the FlashInfer / Cutlass kernels.
-            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)  # [2576, 168] -> [2688, 168]
+            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
             weight = layer.weight.data
 
-            # Zero-pad weights in N dim if swizzled block scales have more rows
-            # than the original weights (e.g. to satisfy 32-row tile alignment).
-            
-            # Use the layer's original output_size_per_partition (set in __init__)
-            # This is the correct unpadded size based on the model architecture
-            if not hasattr(layer, 'output_size_per_partition'):
-                raise ValueError(
-                    f"Layer {type(layer).__name__} does not have output_size_per_partition set. "
-                    "This should be set in the layer's __init__ method."
-                )
-            
-            out_orig = layer.output_size_per_partition
             weight_current_rows = weight.shape[0]
-            out_padded = swizzled_weight_scale.shape[0]
-            
-            logger.info(
-                f"[FP4 Weight Prep] N-dim: out_orig={out_orig}, "
-                f"weight_current_rows={weight_current_rows}, "
-                f"out_padded={out_padded}, weight_shape={weight.shape}"
-            )
-            
-            
-            # Pad weight to match swizzled scale dimensions
-            if out_padded != weight_current_rows:
-                pad_rows = out_padded - weight_current_rows
-                assert pad_rows >= 0, f"out_padded ({out_padded}) < weight_current_rows ({weight_current_rows})"
-                if pad_rows > 0:
-                    logger.info(
-                        f"[FP4 Weight Prep] Padding N-dim: {weight.shape[0]} -> "
-                        f"{weight.shape[0] + pad_rows}, pad_rows={pad_rows}"
-                    )
-                    weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows)).contiguous()
-                    logger.info(
-                        f"[FP4 Weight Prep] After N-dim padding: weight={weight.shape}, "
-                        f"output_size_per_partition={layer.output_size_per_partition}"
-                    )
+            weight_scale_rows_padded = swizzled_weight_scale.shape[0]
 
+            # Pad weight to match swizzled scale dimensions
+            if weight_scale_rows_padded != weight_current_rows:
+                pad_rows = weight_scale_rows_padded - weight_current_rows
+                assert pad_rows >= 0, (
+                    f"Weight scale rows ({weight_scale_rows_padded}) < "
+                    f"weight rows ({weight_current_rows})."
+                )
+                if pad_rows > 0:
+                    weight = torch.nn.functional.pad(
+                        weight, (0, 0, 0, pad_rows)
+                    ).contiguous()
+
+            # Calculate the number of k blocks padded to satisfy alignment
+            # constraints for the weight
             layer.execution_padding_k_bytes = 0
             group_size = self.quant_config.group_size
-            # 512 (weight shape in k column) needs to divide by group size and mul by 2 since its nvfp4
-            num_k_blocks_padded = swizzled_weight_scale.shape[1] 
+            num_k_blocks_padded = swizzled_weight_scale.shape[1]
             k_bytes_padded = (num_k_blocks_padded * group_size) // 2
-
             k_bytes_orig = weight.shape[1]
-            
+
             logger.info(
-                f"[FP4 Weight Prep] K-dim: k_bytes_orig={k_bytes_orig}, "
-                f"k_bytes_padded={k_bytes_padded}, group_size={group_size}"
+                "[FP4 Weight Prep] K-dim alignment: original_bytes=%d, "
+                "padded_bytes=%d, group_size=%d",
+                k_bytes_orig,
+                k_bytes_padded,
+                group_size,
             )
 
             if k_bytes_padded != k_bytes_orig:
                 pad_bytes = k_bytes_padded - k_bytes_orig
                 assert pad_bytes > 0
                 logger.info(
-                    f"[FP4 Weight Prep] Padding K-dim: {weight.shape[1]} -> "
-                    f"{weight.shape[1] + pad_bytes}, pad_bytes={pad_bytes}"
+                    "[FP4 Weight Prep] Padding K-dim: %d -> %d (pad_bytes=%d)",
+                    weight.shape[1],
+                    weight.shape[1] + pad_bytes,
+                    pad_bytes,
                 )
-                weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
+                weight = torch.nn.functional.pad(
+                    weight, (0, pad_bytes, 0, 0)
+                ).contiguous()
                 layer.execution_padding_k_bytes = pad_bytes
 
             layer.weight = Parameter(weight, requires_grad=False)
@@ -1214,21 +1198,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             # Match packed-K bytes between activations and weights using
             # pre-calculated padding
             pad_k_bytes = getattr(layer, "execution_padding_k_bytes", 0)
-            output_shape = [x.shape[0], layer.output_size_per_partition]  # needs to preform slicing if we pad 
-
-            
+            output_shape = [x.shape[0], layer.output_size_per_partition]
             x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
 
-            # we pad x_fp4 so we need to add block into x_block scale 
-            k_elements = x_fp4.shape[1] * 2 # 2 fp4 items are packed in the input dimension
-            required_scale_cols = k_elements // 16 # 16 is the block size # todo more general? 
+            # If we pad x_fp4 so we maybe need to add pad x_block scale as well
+            original_scale_blocks = x_blockscale.shape[1]
+            k_elements = (
+                x_fp4.shape[1] * 2
+            )  # 2 fp4 items are packed in the input dimension
+            required_scale_blocks = k_elements // layer.quant_config.group_size
+
             # Align to 4 to be safe with int32 packing assumptions in kernels
-            if required_scale_cols % 4 != 0:
-                required_scale_cols += (4 - (required_scale_cols % 4))
-            
-            if x_blockscale.shape[1] < required_scale_cols:
-                pad_scales = required_scale_cols - x_blockscale.shape[1]
-                x_blockscale = torch.nn.functional.pad(x_blockscale, (0, pad_scales), value=0.0).contiguous()
+            if required_scale_blocks % 4 != 0:
+                required_scale_blocks += 4 - (required_scale_blocks % 4)
+
+            if original_scale_blocks < required_scale_blocks:
+                pad_scales = required_scale_blocks - original_scale_blocks
+                x_blockscale = torch.nn.functional.pad(
+                    x_blockscale, (0, pad_scales), value=0.0
+                ).contiguous()
 
             mm_args = (
                 x_fp4,
@@ -1239,10 +1227,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 output_dtype,
             )
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
-            
+
             # Slice output to remove padding if weight was padded in N dimension
             if out.shape[1] != output_shape[1]:
-                out = out[:, :output_shape[1]].contiguous()
+                out = out[:, : output_shape[1]].contiguous()
         else:
             assert self.backend == "cutlass"
             mm_args = (
