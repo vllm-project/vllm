@@ -51,6 +51,18 @@ if current_platform.is_cuda():
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
 
+def is_using_col_major_or_e8m0(
+    model_dtype: torch.dtype, weight: torch.Tensor
+) -> tuple[bool, bool]:
+    using_deepgemm = weight.shape.numel() == 2 and should_use_deepgemm_for_fp8_linear(
+        model_dtype,
+        weight,
+    )
+    use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
+    use_e8m0 = is_deep_gemm_e8m0_used() if using_deepgemm else False
+    return use_col_major_scales, use_e8m0
+
+
 class MatcherCustomOp(ABC):
     def __init__(self, enabled: bool):
         config = get_current_vllm_config()
@@ -269,12 +281,9 @@ class MatcherQuantFP8(MatcherCustomOp):
         if self.quant_key.scale.group_shape.is_per_group():
             # use col major scales if deepgemm and cutlass
             assert weight is not None
-            using_deepgemm = should_use_deepgemm_for_fp8_linear(
-                self.model_dtype,
-                weight,
+            use_col_major_scales, use_e8m0 = is_using_col_major_or_e8m0(
+                self.model_dtype, weight
             )
-            use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
-            use_e8m0 = is_deep_gemm_e8m0_used() if using_deepgemm else False
 
             assert scale is None
             scale = self.make_scale(input, transposed=use_col_major_scales)

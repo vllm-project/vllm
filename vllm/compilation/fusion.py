@@ -23,14 +23,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Quant,
     kStaticTensorScale,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
-)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import should_use_deepgemm_for_fp8_linear
 
 from .inductor_pass import enable_fake_mode
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
+from .matcher_utils import (
+    MatcherFusedAddRMSNorm,
+    MatcherQuantFP8,
+    MatcherRMSNorm,
+    is_using_col_major_or_e8m0,
+)
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
@@ -264,11 +265,9 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ):
-            using_deepgemm = should_use_deepgemm_for_fp8_linear(
-                self.model_dtype,
-                weight,
+            use_col_major_scales, _ = is_using_col_major_or_e8m0(
+                self.model_dtype, weight
             )
-            use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
 
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
@@ -328,11 +327,9 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
 
-            using_deepgemm = should_use_deepgemm_for_fp8_linear(
-                self.model_dtype,
-                weight,
+            use_col_major_scales, _ = is_using_col_major_or_e8m0(
+                self.model_dtype, weight
             )
-            use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(
