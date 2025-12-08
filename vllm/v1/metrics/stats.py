@@ -186,6 +186,10 @@ class SchedulerStats:
 
     cudagraph_stats: CUDAGraphStat | None = None
 
+    waiting_requests_per_tier: dict[str, int] = field(default_factory=dict)
+    preempted_requests_per_tier: dict[str, int] = field(default_factory=dict)
+    scheduler_interactive_batch_token_limit_hits: int = 0
+
 
 @dataclass
 class RequestStateStats:
