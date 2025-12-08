@@ -163,29 +163,35 @@ class EmbeddingMixin(OpenAIServing):
                 usage=usage,
             )
 
-        def encode_bytes():
-            body, items, usage = encode_pooling_bytes(
+        def encode_bytes(bytes_only: bool) -> EmbeddingBytesResponse:
+            content, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch_checked,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
             )
 
-            metadata = {
-                "id": ctx.request_id,
-                "created": ctx.created_time,
-                "model": ctx.model_name,
-                "data": items,
-                "usage": usage,
-            }
-            return EmbeddingBytesResponse(
-                body=body,
-                metadata=json.dumps(metadata),
+            headers = (
+                None
+                if bytes_only
+                else {
+                    "metadata": json.dumps(
+                        {
+                            "id": ctx.request_id,
+                            "created": ctx.created_time,
+                            "model": ctx.model_name,
+                            "data": items,
+                            "usage": usage,
+                        }
+                    )
+                }
             )
+
+            return EmbeddingBytesResponse(content=content, headers=headers)
 
         if encoding_format == "float" or encoding_format == "base64":
             return encode_float_base64()
-        elif encoding_format == "bytes":
-            return encode_bytes()
+        elif encoding_format == "bytes" or encoding_format == "bytes_only":
+            return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
 

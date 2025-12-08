@@ -55,8 +55,8 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, PoolingBytesResponse):
         return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
+            content=generator.content,
+            headers=generator.headers,
             media_type=generator.media_type,
         )
 

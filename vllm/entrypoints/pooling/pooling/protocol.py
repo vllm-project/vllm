@@ -143,6 +143,6 @@ class PoolingResponse(OpenAIBaseModel):
 
 
 class PoolingBytesResponse(OpenAIBaseModel):
-    body: list[bytes]
-    metadata: str
+    content: list[bytes]
+    headers: dict[str, str] | None = None
     media_type: str = "application/octet-stream"
