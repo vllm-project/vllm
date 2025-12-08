@@ -278,6 +278,14 @@ class LMCacheMPWorkerAdapter:
     ) -> tuple[set[str] | None, set[str] | None]:
         finished_stores = set()
         finished_retrieves = set()
+        
+        logger.info(
+            "[LMCacheMPWorkerAdapter] get_finished called. "
+            "store_futures size: %d, retrieve_futures size: %d",
+            len(self.store_futures),
+            len(self.retrieve_futures),
+        )
+        
         for request_id, (future, other_reqs) in self.store_futures.items():
             if not future.query():
                 continue
@@ -296,9 +304,21 @@ class LMCacheMPWorkerAdapter:
 
         for request_id, (future, other_reqs) in self.retrieve_futures.items():
             if not future.query():
+                logger.info(
+                    "[LMCacheMPWorkerAdapter] Retrieve future for request_id=%s "
+                    "is not ready yet",
+                    request_id,
+                )
                 continue
 
             result = future.result()
+            logger.info(
+                "[LMCacheMPWorkerAdapter] Retrieve future completed for "
+                "request_id=%s, other_reqs=%s, result=%s",
+                request_id,
+                other_reqs,
+                result,
+            )
             finished_retrieves.add(request_id)
             finished_retrieves.update(other_reqs)
 
@@ -310,6 +330,18 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                     result,
                 )
+        
+        if finished_retrieves:
+            logger.info(
+                "[LMCacheMPWorkerAdapter] Returning finished_retrieves: %s",
+                finished_retrieves,
+            )
+        else:
+            logger.info(
+                "[LMCacheMPWorkerAdapter] No finished retrieves. "
+                "retrieve_futures keys: %s",
+                list(self.retrieve_futures.keys()),
+            )
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:

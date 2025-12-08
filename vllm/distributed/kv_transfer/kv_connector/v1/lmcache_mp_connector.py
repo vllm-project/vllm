@@ -395,6 +395,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 server_url, zmq_context, vllm_config
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            self._no_retrieve_needed_req_ids: set[str] = set()
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
                 server_url, zmq_context, vllm_config
@@ -469,8 +470,19 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             ops.append(meta.op)
 
         if len(request_ids) > 0:
+            logger.info(
+                "[LMCacheMPConnector] Submitting retrieve requests for %d requests: %s",
+                len(request_ids),
+                request_ids,
+            )
             self.worker_adapter.batched_submit_retrieve_requests(
                 request_ids, ops, event
+            )
+        else:
+            logger.info(
+                "[LMCacheMPConnector] No retrieve requests to submit. "
+                "Total metadata requests: %d",
+                len(metadata.requests),
             )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -654,7 +666,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         tracker.num_lmcache_hit_blocks = num_lmcache_blocks
 
         need_to_load = max(0, ret - num_computed_tokens)
-        logger.debug(
+        logger.info(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
@@ -709,13 +721,58 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         metadata = LMCacheMPConnectorMetadata()
+        
+        # Log all trackers and their states before processing
+        ready_trackers = [
+            (req_id, tracker.state) 
+            for req_id, tracker in self.request_trackers.items() 
+            if tracker.state == LMCacheMPRequestState.READY
+        ]
+        waiting_for_load_trackers = [
+            (req_id, tracker.state) 
+            for req_id, tracker in self.request_trackers.items() 
+            if tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD
+        ]
+        
+        logger.info(
+            "[LMCacheMPConnector] build_connector_meta called. "
+            "Total trackers: %d, scheduled_new_reqs: %d, scheduled_cached_reqs: %d. "
+            "READY trackers: %d %s, WAITING_FOR_LOAD trackers: %d %s",
+            len(self.request_trackers),
+            len(scheduler_output.scheduled_new_reqs),
+            len(scheduler_output.scheduled_cached_reqs.req_ids) if scheduler_output.scheduled_cached_reqs else 0,
+            len(ready_trackers),
+            ready_trackers,
+            len(waiting_for_load_trackers),
+            waiting_for_load_trackers,
+        )
 
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
 
+        # Log trackers that are READY but might still be in WAITING_FOR_REMOTE_KVS
+        final_ready_trackers = [
+            (req_id, tracker.state) 
+            for req_id, tracker in self.request_trackers.items() 
+            if tracker.state == LMCacheMPRequestState.READY
+        ]
+        
+        logger.info(
+            "[LMCacheMPConnector] build_connector_meta completed. "
+            "Total metadata requests: %d, retrieve requests: %d, "
+            "_no_retrieve_needed_req_ids size: %d, contents: %s. "
+            "Final READY trackers: %d %s",
+            len(metadata.requests),
+            sum(1 for r in metadata.requests if r.direction == "RETRIEVE"),
+            len(self._no_retrieve_needed_req_ids),
+            list(self._no_retrieve_needed_req_ids) if hasattr(self, '_no_retrieve_needed_req_ids') else [],
+            len(final_ready_trackers),
+            final_ready_trackers,
+        )
+        
         if len(metadata) > 0:
-            logger.debug("Final connector metadata: %s", metadata)
+            logger.info("Final connector metadata: %s", metadata)
 
         return metadata
 
@@ -727,6 +784,126 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
+        _no_retrieve_needed_size = (
+            len(self._no_retrieve_needed_req_ids)
+            if hasattr(self, '_no_retrieve_needed_req_ids') and self._no_retrieve_needed_req_ids
+            else 0
+        )
+        _no_retrieve_needed_contents = (
+            self._no_retrieve_needed_req_ids
+            if hasattr(self, '_no_retrieve_needed_req_ids') and self._no_retrieve_needed_req_ids
+            else set()
+        )
+        finished_recving_size = (
+            len(connector_output.finished_recving)
+            if connector_output.finished_recving is not None
+            else 0
+        )
+        
+        logger.info(
+            "[LMCacheMPConnector] update_connector_output called. "
+            "_no_retrieve_needed_req_ids size: %d, contents: %s, "
+            "connector_output.finished_recving: %s (size: %d)",
+            _no_retrieve_needed_size,
+            _no_retrieve_needed_contents,
+            connector_output.finished_recving,
+            finished_recving_size,
+        )
+        
+        # Ensure finished_recving is initialized
+        # IMPORTANT: Preserve any existing finished_recving requests from worker side
+        if connector_output.finished_recving is None:
+            logger.info(
+                "[LMCacheMPConnector] connector_output.finished_recving is None, "
+                "initializing to empty set"
+            )
+            connector_output.finished_recving = set()
+        else:
+            logger.info(
+                "[LMCacheMPConnector] connector_output.finished_recving before update: %s (size: %d)",
+                connector_output.finished_recving,
+                len(connector_output.finished_recving),
+            )
+        
+        # Preserve existing finished_recving requests (from worker-side retrieve completions)
+        # These should not be lost even if _no_retrieve_needed_req_ids is empty
+        preserved_finished_recving = set(connector_output.finished_recving) if connector_output.finished_recving else set()
+        
+        # Handle requests that don't need retrieve but are in WAITING_FOR_REMOTE_KVS state
+        if hasattr(self, '_no_retrieve_needed_req_ids') and self._no_retrieve_needed_req_ids:
+            logger.info(
+                "[LMCacheMPConnector] Marking %d requests as finished receiving "
+                "(no retrieve needed): %s. "
+                "Current finished_recving before update: %s (size: %d)",
+                len(self._no_retrieve_needed_req_ids),
+                self._no_retrieve_needed_req_ids,
+                connector_output.finished_recving,
+                len(connector_output.finished_recving),
+            )
+            # Mark these requests as finished receiving (even though no retrieve was needed)
+            preserved_finished_recving.update(self._no_retrieve_needed_req_ids)
+            logger.info(
+                "[LMCacheMPConnector] Updated finished_recving. New size: %d, "
+                "contents: %s. Added requests: %s",
+                len(preserved_finished_recving),
+                preserved_finished_recving,
+                self._no_retrieve_needed_req_ids,
+            )
+            # Clear the set after processing
+            self._no_retrieve_needed_req_ids.clear()
+            logger.info(
+                "[LMCacheMPConnector] Cleared _no_retrieve_needed_req_ids. "
+                "New size: %d",
+                len(self._no_retrieve_needed_req_ids) if hasattr(self, '_no_retrieve_needed_req_ids') else 0,
+            )
+        else:
+            logger.info(
+                "[LMCacheMPConnector] No requests in _no_retrieve_needed_req_ids. "
+                "Preserving existing finished_recving: %s (size: %d)",
+                preserved_finished_recving,
+                len(preserved_finished_recving),
+            )
+        
+        # Always preserve the finished_recving requests (both from worker and no-retrieve-needed)
+        connector_output.finished_recving = preserved_finished_recving
+        
+        # Log any READY trackers that are not in finished_recving
+        ready_trackers_not_finished = []
+        if hasattr(self, 'request_trackers'):
+            for req_id, tracker in self.request_trackers.items():
+                if (tracker.state == LMCacheMPRequestState.READY and 
+                    req_id not in preserved_finished_recving):
+                    ready_trackers_not_finished.append(req_id)
+        
+        if ready_trackers_not_finished:
+            logger.warning(
+                "[LMCacheMPConnector] Found %d READY trackers NOT in finished_recving: %s. "
+                "These requests might hang in WAITING_FOR_REMOTE_KVS state. "
+                "Adding them to _no_retrieve_needed_req_ids for next update.",
+                len(ready_trackers_not_finished),
+                ready_trackers_not_finished,
+            )
+            # Add these to _no_retrieve_needed_req_ids so they'll be processed next time
+            if not hasattr(self, '_no_retrieve_needed_req_ids'):
+                self._no_retrieve_needed_req_ids = set()
+            self._no_retrieve_needed_req_ids.update(ready_trackers_not_finished)
+            # Also add them to finished_recving immediately
+            preserved_finished_recving.update(ready_trackers_not_finished)
+            connector_output.finished_recving = preserved_finished_recving
+            logger.info(
+                "[LMCacheMPConnector] Added %d READY trackers to finished_recving: %s",
+                len(ready_trackers_not_finished),
+                ready_trackers_not_finished,
+            )
+        
+        logger.info(
+            "[LMCacheMPConnector] update_connector_output completed. "
+            "final finished_recving size: %d, contents: %s. "
+            "READY trackers not finished: %d",
+            len(connector_output.finished_recving),
+            connector_output.finished_recving,
+            len(ready_trackers_not_finished),
+        )
         return
 
     def request_finished(
@@ -825,14 +1002,94 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         for request_tracker in self.request_trackers.values():
+            logger.info(
+                "[LMCacheMPConnector] Checking tracker for request_id=%s, state=%s, "
+                "num_vllm_hit_blocks=%d, num_lmcache_hit_blocks=%d, needs_retrieve=%s, "
+                "is_ready_for_retrieving=%s",
+                request_tracker.request_id,
+                request_tracker.state,
+                request_tracker.num_vllm_hit_blocks,
+                request_tracker.num_lmcache_hit_blocks,
+                request_tracker.needs_retrieve(),
+                request_tracker.is_ready_for_retrieving(),
+            )
+            
+            # Check if tracker is already READY but might still be in WAITING_FOR_REMOTE_KVS
+            if request_tracker.state == LMCacheMPRequestState.READY:
+                logger.warning(
+                    "[LMCacheMPConnector] Tracker for request_id=%s is already READY. "
+                    "This might indicate a request that completed retrieve but is still "
+                    "in WAITING_FOR_REMOTE_KVS state. Checking if it should be in "
+                    "_no_retrieve_needed_req_ids.",
+                    request_tracker.request_id,
+                )
+                # If tracker is READY but not in _no_retrieve_needed_req_ids, 
+                # it might have completed retrieve but wasn't properly marked
+                if (hasattr(self, '_no_retrieve_needed_req_ids') and 
+                    request_tracker.request_id not in self._no_retrieve_needed_req_ids):
+                    logger.warning(
+                        "[LMCacheMPConnector] READY tracker request_id=%s is NOT in "
+                        "_no_retrieve_needed_req_ids. This might cause the request to hang. "
+                        "Adding it to _no_retrieve_needed_req_ids to ensure it's marked as finished.",
+                        request_tracker.request_id,
+                    )
+                    self._no_retrieve_needed_req_ids.add(request_tracker.request_id)
+                continue
+            
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
+                
+            logger.info(
+                "[LMCacheMPConnector] Processing retrieve request for request_id=%s",
+                request_tracker.request_id,
+            )
+            
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
                 request_tracker, blocks_per_chunk
             )
             if r_metadata is not None:
+                logger.info(
+                    "[LMCacheMPConnector] Created retrieve metadata for request_id=%s, "
+                    "num_blocks=%d",
+                    request_tracker.request_id,
+                    len(r_metadata.op.block_ids),
+                )
                 metadata.add_request_metadata(r_metadata)
-            request_tracker.state = LMCacheMPRequestState.READY
+                request_tracker.state = LMCacheMPRequestState.READY
+                logger.info(
+                    "[LMCacheMPConnector] Set tracker state to READY for request_id=%s "
+                    "after creating retrieve metadata",
+                    request_tracker.request_id,
+                )
+            else:
+                # GetRetrieveMetadata returned None, which means no retrieve is needed.
+                # This can happen when:
+                # 1. All blocks are already in local cache (end <= start)
+                # 2. is_ready_for_retrieving() returned False
+                # In this case, we should mark the request as ready and notify
+                # the scheduler that the "retrieve" is complete (even though no
+                # actual retrieve was needed).
+                logger.warning(
+                    "[LMCacheMPConnector] GetRetrieveMetadata returned None for "
+                    "request_id=%s. State=%s, is_ready_for_retrieving=%s, "
+                    "num_vllm_hit_blocks=%d, num_lmcache_hit_blocks=%d. "
+                    "Marking as no retrieve needed.",
+                    request_tracker.request_id,
+                    request_tracker.state,
+                    request_tracker.is_ready_for_retrieving(),
+                    request_tracker.num_vllm_hit_blocks,
+                    request_tracker.num_lmcache_hit_blocks,
+                )
+                request_tracker.state = LMCacheMPRequestState.READY
+                # Store the request ID so we can mark it as finished in update_connector_output
+                self._no_retrieve_needed_req_ids.add(request_tracker.request_id)
+                logger.info(
+                    "[LMCacheMPConnector] Added request_id=%s to _no_retrieve_needed_req_ids. "
+                    "Current set size: %d, contents: %s",
+                    request_tracker.request_id,
+                    len(self._no_retrieve_needed_req_ids),
+                    list(self._no_retrieve_needed_req_ids),
+                )
 
     def _process_new_requests(
         self,
