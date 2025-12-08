@@ -1500,6 +1500,16 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 )
 
+        # Update context.last_output with accumulated text and token_ids
+        # so that responses_full_generator can build the correct final response
+        if (
+            isinstance(context, SimpleContext)
+            and context.last_output is not None
+            and context.last_output.outputs
+        ):
+            context.last_output.outputs[0].text = previous_text
+            context.last_output.outputs[0].token_ids = tuple(previous_token_ids)
+
     async def _process_harmony_streaming_events(
         self,
         request: ResponsesRequest,
