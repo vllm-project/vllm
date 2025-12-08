@@ -511,6 +511,8 @@ class EngineArgs:
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
     )
+    disable_prometheus_metrics: bool = ObservabilityConfig.disable_prometheus_metrics
+    enable_otel_metrics: bool = ObservabilityConfig.enable_otel_metrics
     otlp_traces_endpoint: str | None = ObservabilityConfig.otlp_traces_endpoint
     collect_detailed_traces: list[DetailedTraceModules] | None = (
         ObservabilityConfig.collect_detailed_traces
@@ -1047,6 +1049,13 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
+        )
+        observability_group.add_argument(
+            "--disable-prometheus-metrics",
+            **observability_kwargs["disable_prometheus_metrics"],
+        )
+        observability_group.add_argument(
+            "--enable-otel-metrics", **observability_kwargs["enable_otel_metrics"]
         )
 
         # Scheduler arguments
@@ -1727,7 +1736,13 @@ class EngineArgs:
             )
 
         observability_config = ObservabilityConfig(
+<<<<<<< HEAD
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
+=======
+            show_hidden_metrics_for_version=(self.show_hidden_metrics_for_version),
+            disable_prometheus_metrics=self.disable_prometheus_metrics,
+            enable_otel_metrics=self.enable_otel_metrics,
+>>>>>>> 3143cebda (implement otel metrics)
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
             kv_cache_metrics=self.kv_cache_metrics,

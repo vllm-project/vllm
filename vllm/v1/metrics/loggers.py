@@ -1250,10 +1250,32 @@ class StatLoggerManager:
                     per_engine_stat_logger_factory=stat_logger_factory,  # type: ignore[arg-type]
                 )
             self.stat_loggers.append(global_stat_logger)
-        if not custom_prometheus_logger:
+
+        # Add Prometheus logger if not disabled and not already added
+        if (
+            not custom_prometheus_logger
+            and not vllm_config.observability_config.disable_prometheus_metrics
+        ):
             self.stat_loggers.append(
                 PrometheusStatLogger(vllm_config, self.engine_indexes)
             )
+
+        # Add OpenTelemetry logger if enabled
+        if vllm_config.observability_config.enable_otel_metrics:
+            from vllm.v1.metrics.opentelemetry_metrics import (
+                OpenTelemetryMetricsLogger,
+            )
+
+            try:
+                otel_logger = OpenTelemetryMetricsLogger(
+                    vllm_config=vllm_config,
+                    engine_indexes=self.engine_indexes,
+                )
+                self.stat_loggers.append(otel_logger)
+                logger.info("OpenTelemetry metrics logger enabled")
+            except Exception as e:
+                logger.error("Failed to initialize OpenTelemetry metrics logger: %s", e)
+                raise
 
     def record(
         self,

@@ -35,6 +35,16 @@ class ObservabilityConfig:
             return False
         return version._prev_minor_version_was(self.show_hidden_metrics_for_version)
 
+    disable_prometheus_metrics: bool = False
+    """Disable Prometheus metrics collection. This is useful when using
+    alternative metrics backends like OpenTelemetry. By default, Prometheus
+    metrics are always enabled."""
+
+    enable_otel_metrics: bool = False
+    """Enable OpenTelemetry push-based metrics export. When enabled, metrics
+    will be pushed to an OTLP endpoint configured via environment variables.
+    This can be used alongside or instead of Prometheus metrics."""
+
     otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
@@ -131,10 +141,34 @@ class ObservabilityConfig:
             value = cast(list[DetailedTraceModules], value[0].split(","))
         return value
 
+    @field_validator("enable_otel_metrics")
+    @classmethod
+    def _validate_enable_otel_metrics(cls, value: bool) -> bool:
+        if value:
+            from vllm.v1.metrics.opentelemetry_metrics import (
+                is_otel_metrics_available,
+                otel_import_error_traceback,
+            )
+
+            if not is_otel_metrics_available():
+                raise ValueError(
+                    "OpenTelemetry Metrics SDK is not available. Unable to enable "
+                    "'enable_otel_metrics'. Install with: "
+                    "pip install opentelemetry-exporter-otlp-proto-grpc\n"
+                    f"Original error:\n{otel_import_error_traceback}"
+                )
+        return value
+
     @model_validator(mode="after")
     def _validate_tracing_config(self):
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+            )
+        if self.disable_prometheus_metrics and not self.enable_otel_metrics:
+            raise ValueError(
+                "Cannot disable Prometheus metrics without enabling an alternative "
+                "metrics backend. Use --enable-otel-metrics to enable OpenTelemetry "
+                "metrics, or remove --disable-prometheus-metrics."
             )
         return self
