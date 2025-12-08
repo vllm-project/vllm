@@ -27,6 +27,7 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
@@ -632,7 +633,7 @@ class MessageQueue:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
         """
-        local_size = torch.cuda.device_count()
+        local_size = current_platform.device_count()
         rank = dist.get_rank()
         same_node = rank // local_size == reader_rank // local_size
         buffer_io = MessageQueue(
