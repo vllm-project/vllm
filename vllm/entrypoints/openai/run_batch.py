@@ -736,6 +736,7 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
+                semaphore,
                 openai_serving_embedding.create_embedding,
                 request,
                 index,
@@ -756,6 +757,7 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
+                semaphore,
                 openai_serving_scores.create_score,
                 request,
                 index,
@@ -776,6 +778,7 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
+                semaphore,
                 openai_serving_scores.do_rerank,
                 request,
                 index,
