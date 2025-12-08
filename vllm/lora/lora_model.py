@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TypeVar
 
 import safetensors.torch
 import torch
@@ -11,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
+    get_lora_id,
     is_base_embeddding_weights,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
@@ -20,16 +20,6 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-T = TypeVar("T")
-
-_GLOBAL_LORA_ID = 0
-
-
-def get_lora_id():
-    global _GLOBAL_LORA_ID
-    _GLOBAL_LORA_ID += 1
-    return _GLOBAL_LORA_ID
 
 
 class LoRAModel:

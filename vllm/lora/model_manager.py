@@ -47,15 +47,6 @@ class AdapterLRUCache(LRUCache[int, T]):
         return super()._on_remove(key, value)
 
 
-_GLOBAL_LORA_ID = 0
-
-
-def get_lora_id():
-    global _GLOBAL_LORA_ID
-    _GLOBAL_LORA_ID += 1
-    return _GLOBAL_LORA_ID
-
-
 class LoRAModelManager:
     """A manager that manages multiple LoRA-fine-tuned models."""
 
