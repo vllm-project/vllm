@@ -178,20 +178,6 @@ class HelionCustomOp(CustomOp):
         except ImportError:
             return False
 
-    @property
-    @abstractmethod
-    def helion_kernels(self):
-        """
-        The Helion kernel functions for this custom operation.
-
-        Subclasses should override this to return a list of their specific Helion kernel functions
-        (those decorated with @helion.kernel). For single-kernel operations, return a list with one element.
-
-        Returns:
-            List[HelionKernelWrapper]: List of Helion kernel wrappers, or empty list if not available
-        """
-        raise NotImplementedError
-
     # Benchmark Registration Methods
 
     @classmethod

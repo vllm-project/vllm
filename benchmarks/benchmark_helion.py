@@ -39,6 +39,24 @@ from vllm.compilation.helion.benchmark import (
 )
 
 
+# Mock classes for kernel benchmarking (must be at module level for multiprocessing)
+class MockHFConfig:
+    """Mock HuggingFace config for benchmarking purposes."""
+
+    def __init__(self, hidden_size):
+        self.hidden_size = hidden_size
+
+
+class MockModelConfig:
+    """Mock vLLM ModelConfig that mimics the real one for benchmarking."""
+
+    def __init__(self, hidden_size):
+        self.hf_text_config = MockHFConfig(hidden_size)
+
+    def get_hidden_size(self):
+        return getattr(self.hf_text_config, "hidden_size", 0)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark Helion kernels vs CUDA reference"
@@ -175,19 +193,6 @@ def main():
     # Configure the kernel with the specified hidden size
     try:
         from vllm.compilation.helion.config_manager import ConfigManager
-
-        # Create a mock HuggingFace config with the hidden size
-        class MockHFConfig:
-            def __init__(self, hidden_size):
-                self.hidden_size = hidden_size
-
-        # Create a mock vLLM ModelConfig that mimics the real one
-        class MockModelConfig:
-            def __init__(self, hidden_size):
-                self.hf_text_config = MockHFConfig(hidden_size)
-
-            def get_hidden_size(self):
-                return getattr(self.hf_text_config, "hidden_size", 0)
 
         mock_model_config = MockModelConfig(args.hidden_size)
 

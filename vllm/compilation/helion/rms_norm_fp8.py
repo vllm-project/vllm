@@ -276,13 +276,6 @@ class RMSNormFp8Helion(HelionCustomOp):
         # Use the configured kernel attribute
         return self.rms_norm_fp8(input, weight, scale, epsilon)
 
-    @property
-    def helion_kernels(self):
-        """Return the list of Helion kernel wrappers for autotuning."""
-        if HELION_AVAILABLE:
-            return [rms_norm_fp8]
-        return []
-
 
 class RMSNormFp8Benchmark(KernelBenchmark):
     """

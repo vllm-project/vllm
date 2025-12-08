@@ -157,6 +157,7 @@ class KernelBenchmark(ABC):
         # Temporarily override the enabled method
         def always_enabled(cls):
             return True
+
         custom_op_class.enabled = classmethod(always_enabled)
 
         # Create instance and force re-dispatch
@@ -186,47 +187,161 @@ class KernelBenchmark(ABC):
         Returns:
             Average execution time in milliseconds
         """
+        import torch.distributed as dist
+
+        # Get current rank for logging (if distributed)
+        rank = dist.get_rank() if distributed and dist.is_initialized() else 0
+
+        print(f"[Rank {rank}] Starting kernel timing:")
+        print(f"[Rank {rank}]   - Iterations: {num_iterations}")
+        print(f"[Rank {rank}]   - Warmup: {warmup}")
+        print(
+            f"[Rank {rank}]   - CUDA Graph: {'enabled' if use_cudagraph else 'disabled'}"
+        )
+        print(
+            f"[Rank {rank}]   - Distributed: {'enabled' if distributed else 'disabled'}"
+        )
+
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
-        # Warmup
-        for _ in range(warmup):
+        # Warmup with detailed logging
+        print(f"[Rank {rank}] Starting warmup phase...")
+        warmup_start_time = torch.cuda.Event(enable_timing=True)
+        warmup_end_time = torch.cuda.Event(enable_timing=True)
+
+        warmup_start_time.record()
+        for i in range(warmup):
+            iter_start = torch.cuda.Event(enable_timing=True)
+            iter_end = torch.cuda.Event(enable_timing=True)
+
+            iter_start.record()
             kernel_fn()
             if distributed:
                 dist.barrier()
+            iter_end.record()
+            torch.cuda.synchronize()
+
+            iter_time = iter_start.elapsed_time(iter_end)
+            print(
+                f"[Rank {rank}] Warmup iteration {i + 1}/{warmup}: {iter_time:.4f} ms"
+            )
+
+        warmup_end_time.record()
         torch.cuda.synchronize()
+        total_warmup_time = warmup_start_time.elapsed_time(warmup_end_time)
+        print(f"[Rank {rank}] Warmup completed in {total_warmup_time:.4f} ms")
 
         if use_cudagraph:
+            print(f"[Rank {rank}] Capturing CUDA graph...")
             # Capture CUDA graph - fail fast if capture fails
             graph = torch.cuda.CUDAGraph()
+            graph_capture_start = torch.cuda.Event(enable_timing=True)
+            graph_capture_end = torch.cuda.Event(enable_timing=True)
+
+            graph_capture_start.record()
             with torch.cuda.graph(graph):
                 kernel_fn()
+            graph_capture_end.record()
+            torch.cuda.synchronize()
+
+            capture_time = graph_capture_start.elapsed_time(graph_capture_end)
+            print(f"[Rank {rank}] CUDA graph captured in {capture_time:.4f} ms")
 
             # Synchronize all ranks after graph capture (if distributed)
             if distributed:
+                print(f"[Rank {rank}] Synchronizing after graph capture...")
                 dist.barrier()
 
-            # Time graph replays
+            print(f"[Rank {rank}] Starting timed graph replays...")
+            # Time graph replays with per-iteration logging
+            iteration_times = []
+
             start_event.record()
-            for _ in range(num_iterations):
+            for i in range(num_iterations):
+                iter_start = torch.cuda.Event(enable_timing=True)
+                iter_end = torch.cuda.Event(enable_timing=True)
+
+                iter_start.record()
                 graph.replay()
                 if distributed:
                     dist.barrier()
+                iter_end.record()
+                torch.cuda.synchronize()
+
+                iter_time = iter_start.elapsed_time(iter_end)
+                iteration_times.append(iter_time)
+
+                # Log every 10th iteration or first/last few iterations for detailed tracking
+                if (
+                    i < 5
+                    or i >= num_iterations - 5
+                    or (i + 1) % max(1, num_iterations // 10) == 0
+                ):
+                    print(
+                        f"[Rank {rank}] Graph replay iteration {i + 1}/{num_iterations}: {iter_time:.4f} ms"
+                    )
+
             end_event.record()
             torch.cuda.synchronize()
 
         else:
-            # Time kernel calls
+            print(f"[Rank {rank}] Starting timed kernel calls...")
+            # Time kernel calls with per-iteration logging
+            iteration_times = []
+
             start_event.record()
-            for _ in range(num_iterations):
+            for i in range(num_iterations):
+                iter_start = torch.cuda.Event(enable_timing=True)
+                iter_end = torch.cuda.Event(enable_timing=True)
+
+                iter_start.record()
                 kernel_fn()
                 if distributed:
                     dist.barrier()
+                iter_end.record()
+                torch.cuda.synchronize()
+
+                iter_time = iter_start.elapsed_time(iter_end)
+                iteration_times.append(iter_time)
+
+                # Log every 10th iteration or first/last few iterations for detailed tracking
+                if (
+                    i < 5
+                    or i >= num_iterations - 5
+                    or (i + 1) % max(1, num_iterations // 10) == 0
+                ):
+                    print(
+                        f"[Rank {rank}] Kernel call iteration {i + 1}/{num_iterations}: {iter_time:.4f} ms"
+                    )
+
             end_event.record()
             torch.cuda.synchronize()
 
         total_time_ms = start_event.elapsed_time(end_event)
         avg_time_ms = total_time_ms / num_iterations
+
+        # Calculate and log statistics
+        min_time = min(iteration_times)
+        max_time = max(iteration_times)
+        median_time = sorted(iteration_times)[len(iteration_times) // 2]
+
+        # Calculate percentiles
+        sorted_times = sorted(iteration_times)
+        p95_time = sorted_times[int(0.95 * len(sorted_times))]
+        p99_time = sorted_times[int(0.99 * len(sorted_times))]
+
+        print(f"[Rank {rank}] Kernel timing completed:")
+        print(f"[Rank {rank}]   - Total time: {total_time_ms:.4f} ms")
+        print(f"[Rank {rank}]   - Average time: {avg_time_ms:.4f} ms")
+        print(f"[Rank {rank}]   - Min time: {min_time:.4f} ms")
+        print(f"[Rank {rank}]   - Max time: {max_time:.4f} ms")
+        print(f"[Rank {rank}]   - Median time: {median_time:.4f} ms")
+        print(f"[Rank {rank}]   - 95th percentile: {p95_time:.4f} ms")
+        print(f"[Rank {rank}]   - 99th percentile: {p99_time:.4f} ms")
+        print(
+            f"[Rank {rank}]   - Standard deviation: {(sum((t - avg_time_ms) ** 2 for t in iteration_times) / len(iteration_times)) ** 0.5:.4f} ms"
+        )
 
         return avg_time_ms
 
@@ -569,8 +684,10 @@ class DistributedKernelBenchmark(KernelBenchmark):
                     If None, uses default vLLM distributed initialization
             model_config: vLLM ModelConfig for kernel configuration
         """
-        # Initialize the base KernelBenchmark first
-        super().__init__(model_config=model_config)
+        # Skip base class __init__ to avoid creating non-picklable objects
+        # We'll call setup_custom_op() later in the worker processes
+        self.model_config = model_config
+        self._custom_op = None
 
         self.num_gpus = num_gpus
         self.master_port = master_port
@@ -728,6 +845,14 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
             init_distributed_environment()
             initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+        # Initialize custom op in worker process after distributed setup
+        if self._custom_op is None:
+            self.setup_custom_op()
+
+        # Call post-initialization hook for subclasses
+        if hasattr(self, "__post_init__"):
+            self.__post_init__()
 
     def setup_config(self, local_rank: int, world_size: int, config: BenchmarkConfig):
         """

@@ -470,81 +470,6 @@ if HELION_AVAILABLE:
             return (first_key, available_configs[first_key])
 
 
-def helion_allreduce_add_rmsnorm(
-    input_shared: torch.Tensor,
-    residual: torch.Tensor,
-    rms_gamma: torch.Tensor,
-    rms_eps: float = 1e-6,
-    splits_per_rank: int = 4,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fuses AllReduce + Add + RMSNorm operations with communication/compute overlap.
-
-    This is the main entry point for the fused operation. It:
-    1. Converts regular tensor to symmetric memory if needed
-    2. Starts an asynchronous AllReduce with progress tracking
-    3. Launches a Helion kernel that processes chunks as they arrive
-    4. Ensures proper stream synchronization
-
-    Args:
-        input_shared: Shared tensor across ranks to be reduced [M, K]
-                     Can be either a regular tensor or symmetric memory tensor
-        residual: Residual tensor to add [M, K]
-        rms_gamma: RMSNorm gamma weights [K]
-        rms_eps: RMSNorm epsilon for numerical stability
-        splits_per_rank: Number of splits for overlapping (higher = more overlap)
-
-    Returns:
-        Tuple of (normalized_output, updated_residual) both [M, K]
-        - normalized_output: RMSNorm(AllReduce(input) + residual)
-        - updated_residual: AllReduce(input) + residual
-
-    Example:
-        >>> # In a distributed setting
-        >>> input_tensor = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
-        >>> residual = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
-        >>> rms_gamma = torch.randn(4096, dtype=torch.bfloat16, device="cuda")
-        >>> norm_out, residual_out = helion_allreduce_add_rmsnorm(
-        ...     input_tensor, residual, rms_gamma
-        ... )
-    """
-    if not HELION_AVAILABLE:
-        raise ImportError(
-            "Helion is not installed. Please install Helion to use "
-            "helion_allreduce_add_rmsnorm. Alternatively, use FlashInfer's "
-            "trtllm_allreduce_fusion or call AllReduce and RMSNorm separately."
-        )
-
-    # Create output tensors
-    allreduce_out = torch.empty_like(input_shared)
-    progress = torch.zeros(
-        splits_per_rank,
-        dtype=torch.uint32,
-        device=input_shared.device,
-    )
-
-    # Perform AllReduce with progress tracking (custom op handles fake mode and symmetric memory conversion)
-    torch.ops.vllm_helion.copy_engine_all_reduce_w_progress(
-        allreduce_out, input_shared, progress, splits_per_rank
-    )
-
-    # Call the Helion kernel for Add + RMSNorm
-    norm_out, residual_out = allreduce_add_rmsnorm(
-        allreduce_out,
-        residual,
-        rms_gamma,
-        progress,
-        rms_eps,
-        splits_per_rank,
-    )
-
-    # Wait for the AllReduce backend stream to complete before returning
-    backend_stream = symm_mem._get_backend_stream(priority=-1)
-    torch.cuda.current_stream().wait_stream(backend_stream)
-
-    return norm_out, residual_out
-
-
 @CustomOp.register("allreduce_add_rmsnorm_helion")
 class AllReduceAddRMSNormHelion(HelionCustomOp):
     """
@@ -616,16 +541,41 @@ class AllReduceAddRMSNormHelion(HelionCustomOp):
             - normalized_output: RMSNorm(AllReduce(input) + residual)
             - updated_residual: AllReduce(input) + residual
         """
-        return helion_allreduce_add_rmsnorm(
-            input_shared, residual, rms_gamma, rms_eps, self.splits_per_rank
+        if not HELION_AVAILABLE:
+            raise ImportError(
+                "Helion is not installed. Please install Helion to use "
+                "helion_allreduce_add_rmsnorm. Alternatively, use FlashInfer's "
+                "trtllm_allreduce_fusion or call AllReduce and RMSNorm separately."
+            )
+
+        # Create output tensors
+        allreduce_out = torch.empty_like(input_shared)
+        progress = torch.zeros(
+            self.splits_per_rank,
+            dtype=torch.uint32,
+            device=input_shared.device,
         )
 
-    @property
-    def helion_kernels(self):
-        """Return the list of Helion kernel wrappers for autotuning."""
-        if HELION_AVAILABLE:
-            return [allreduce_add_rmsnorm]
-        return []
+        # Perform AllReduce with progress tracking (custom op handles fake mode and symmetric memory conversion)
+        torch.ops.vllm_helion.copy_engine_all_reduce_w_progress(
+            allreduce_out, input_shared, progress, self.splits_per_rank
+        )
+
+        # Call the Helion kernel for Add + RMSNorm
+        norm_out, residual_out = self.allreduce_add_rmsnorm(
+            allreduce_out,
+            residual,
+            rms_gamma,
+            progress,
+            rms_eps,
+            self.splits_per_rank,
+        )
+
+        # Wait for the AllReduce backend stream to complete before returning
+        backend_stream = symm_mem._get_backend_stream(priority=-1)
+        torch.cuda.current_stream().wait_stream(backend_stream)
+
+        return norm_out, residual_out
 
 
 class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
@@ -819,13 +769,17 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
         # Set deterministic seed per rank FIRST
         torch.manual_seed(42 + dist.get_rank())
 
-        # Create test data with the seeded random state
-        input_data = torch.randn(M, K, dtype=dtype, device="cuda")
+        # Create symmetric memory tensor for input_data (required for AllReduce)
+        input_data = symm_mem.empty(M, K, dtype=dtype, device="cuda")
+        # Fill with random data using the seeded random state
+        input_data.copy_(torch.randn(M, K, dtype=dtype, device="cuda"))
+
+        # Create regular tensors for residual and gamma (they don't need symmetric memory)
         residual_data = torch.randn(M, K, dtype=dtype, device="cuda")
         gamma = torch.ones(K, dtype=dtype, device="cuda")
         eps = 1e-6
 
-        return input_data, residual_data, gamma, eps, splits_per_rank
+        return input_data, residual_data, gamma, eps
 
     def run_baseline(self, *args, **kwargs) -> Any:
         """
@@ -837,7 +791,7 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
         Returns:
             Tuple of (norm_out, residual_out)
         """
-        input_data, residual_data, gamma, eps, splits_per_rank = args
+        input_data, residual_data, gamma, eps = args
 
         M, K = input_data.shape
         local_rank = dist.get_rank()
