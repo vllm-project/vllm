@@ -13,6 +13,8 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     _normalize_quant_group_shape,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
@@ -34,6 +36,10 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+
+if current_platform.is_cuda():
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
@@ -224,12 +230,20 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
 
 
 class MatcherQuantFP8(MatcherCustomOp):
-    def __init__(self, quant_key: QuantKey, enabled: bool | None = None):
+    def __init__(
+        self,
+        quant_key: QuantKey,
+        enabled: bool | None = None,
+        use_col_major_scales: bool = False,
+        use_e8m0: bool = False,
+    ):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
         super().__init__(enabled)
         self.quant_key = quant_key
+        self.use_col_major_scales = use_col_major_scales
+        self.use_e8m0 = use_e8m0
         assert quant_key in QUANT_OPS, f"unsupported quantization scheme {quant_key}"
         self.QUANT_OP = QUANT_OPS[quant_key]
 
@@ -247,6 +261,27 @@ class MatcherQuantFP8(MatcherCustomOp):
         result = torch.empty(
             input.shape, device=input.device, dtype=self.quant_key.dtype
         )
+
+        if self.quant_key.scale.group_shape.is_per_group():
+            assert scale is None
+            scale = self.make_scale(input, transposed=self.use_col_major_scales)
+
+            finfo = torch.finfo(self.quant_key.dtype)
+            fp8_min = finfo.min
+            fp8_max = finfo.max
+
+            _, result, scale = auto_functionalized(
+                self.QUANT_OP,
+                input=input,
+                output_q=result,
+                output_s=scale,
+                group_size=self.quant_key.scale.group_shape[1],
+                eps=1e-10,
+                fp8_min=fp8_min,
+                fp8_max=fp8_max,
+                scale_ue8m0=self.use_e8m0,
+            )
+            return result, scale
 
         if self.quant_key.scale.static:
             assert scale is not None
@@ -269,7 +304,7 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)
 
-    def make_scale(self, input: torch.Tensor):
+    def make_scale(self, input: torch.Tensor, transposed: bool = False):
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
@@ -277,6 +312,11 @@ class MatcherQuantFP8(MatcherCustomOp):
             input.shape[0] // normalized_group_shape[0],
             input.shape[1] // normalized_group_shape[1],
         )
+        if transposed:
+            scale_shape = tuple(reversed(scale_shape))
+            return torch.empty(
+                scale_shape, device=input.device, dtype=torch.float32
+            ).permute(-1, -2)
 
         return torch.empty(scale_shape, device=input.device, dtype=torch.float32)
 

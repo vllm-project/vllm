@@ -43,7 +43,8 @@ class DeepseekV32Tokenizer(HfTokenizer):
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
-        messages = messages.copy()
+        conversation = kwargs.get("conversation", messages)
+        messages = conversation.copy()
         drop_thinking = True
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
@@ -52,6 +53,9 @@ class DeepseekV32Tokenizer(HfTokenizer):
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
+
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
 
     @property
     def all_special_tokens(self) -> list[str]:
