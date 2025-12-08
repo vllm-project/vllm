@@ -204,6 +204,8 @@ from vllm.attention.backends.abstract import (
     AttentionLayer,
     MLAAttentionImpl,
 )
+from vllm.model_executor.layers.quantization.quark.quark import QuarkLinearMethod
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod     
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
@@ -1140,6 +1142,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
         self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_fp4bmm_enabled()
+        self.is_aiter_enabled = rocm_aiter_ops.is_enabled()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1732,20 +1735,61 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-            )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+                from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
+                from aiter.ops.triton.quant import dynamic_mxfp4_quant
+                input = kv_c_normed
+                weight = self.kv_b_proj.weight
+                weight_scale = self.kv_b_proj.weight_scale
 
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+                input_2d = input.view(-1, input.shape[-1])
+                output_dtype = input.dtype
 
-            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                prefill=prefill_metadata,
-                chunk_idx=i,
-                q=q,
-                k=k,
-                v=v,
-            )
+                q_input, x_scale = dynamic_mxfp4_quant(input_2d)
+
+                k, v = fused_gemm_afp4wfp4_split_cat(
+                    q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale.T, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+                )
+            elif self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, Fp8LinearMethod):
+                from aiter.ops.triton.fused_gemm_a8w8_blockscale_split_cat import fused_gemm_a8w8_blockscale_split_cat
+                import aiter as rocm_aiter
+                from aiter import get_hip_quant
+                aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+
+                input = kv_c_normed
+                weight = self.kv_b_proj.weight
+                block_size = self.kv_b_proj.quant_method.quant_config.weight_block_size
+                weight_scale = self.kv_b_proj.weight_scale
+
+                input_2d = input.view(-1, input.shape[-1])
+                output_dtype = input.dtype
+
+                if current_platform.is_fp8_fnuz():
+                    q_input, x_scale = aiter_per1x128_quant(
+                        input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+                else:
+                    q_input, x_scale = per_token_group_quant_fp8(
+                        input_2d, block_size[1], column_major_scales=False)
+
+                k, v = fused_gemm_a8w8_blockscale_split_cat(
+                    q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+                )
+            else:
+                kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+                )
+                k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+                k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+                attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                    prefill=prefill_metadata,
+                    chunk_idx=i,
+                    q=q,
+                    k=k,
+                    v=v,
+                )
 
             if output is None:
                 output = attn_output
@@ -1837,19 +1881,60 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 toks=toks,
             )
 
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-            )
-            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+                from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
+                from aiter.ops.triton.quant import dynamic_mxfp4_quant
+                input = kv_c_normed
+                weight = self.kv_b_proj.weight
+                weight_scale = self.kv_b_proj.weight_scale
 
-            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                prefill=prefill_metadata,
-                chunk_idx=i,
-                q=q,
-                k=k,
-                v=v,
-            )
+                input_2d = input.view(-1, input.shape[-1])
+                output_dtype = input.dtype
+
+                q_input, x_scale = dynamic_mxfp4_quant(input_2d)
+
+                k, v = fused_gemm_afp4wfp4_split_cat(
+                    q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale.T, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+                )
+            elif self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, Fp8LinearMethod):
+                from aiter.ops.triton.fused_gemm_a8w8_blockscale_split_cat import fused_gemm_a8w8_blockscale_split_cat
+                import aiter as rocm_aiter
+                from aiter import get_hip_quant
+                aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+                from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+
+                input = kv_c_normed
+                weight = self.kv_b_proj.weight
+                block_size = self.kv_b_proj.quant_method.quant_config.weight_block_size
+                weight_scale = self.kv_b_proj.weight_scale
+
+                input_2d = input.view(-1, input.shape[-1])
+                output_dtype = input.dtype
+
+                if current_platform.is_fp8_fnuz():
+                    q_input, x_scale = aiter_per1x128_quant(
+                        input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+                else:
+                    q_input, x_scale = per_token_group_quant_fp8(
+                        input_2d, block_size[1], column_major_scales=False)
+
+                k, v = fused_gemm_a8w8_blockscale_split_cat(
+                    q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+                )
+            else:
+                kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+                )
+                k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+                k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+                attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                    prefill=prefill_metadata,
+                    chunk_idx=i,
+                    q=q,
+                    k=k,
+                    v=v,
+                )
 
             if output is None:
                 output = attn_output
@@ -1885,12 +1970,55 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert self.dcp_world_size is not None
 
         has_context = attn_metadata.prefill.chunked_context is not None
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+            from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
+            from aiter.ops.triton.quant import dynamic_mxfp4_quant
+            input = kv_c_normed
+            weight = self.kv_b_proj.weight
+            weight_scale = self.kv_b_proj.weight_scale
+
+            input_2d = input.view(-1, input.shape[-1])
+            output_dtype = input.dtype
+
+            q_input, x_scale = dynamic_mxfp4_quant(input_2d)
+
+            k, v = fused_gemm_afp4wfp4_split_cat(
+                q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale.T, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+            )
+        elif self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, Fp8LinearMethod):
+            from aiter.ops.triton.fused_gemm_a8w8_blockscale_split_cat import fused_gemm_a8w8_blockscale_split_cat
+            import aiter as rocm_aiter
+            from aiter import get_hip_quant
+            aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import per_token_group_quant_fp8
+
+            input = kv_c_normed
+            weight = self.kv_b_proj.weight
+            block_size = self.kv_b_proj.quant_method.quant_config.weight_block_size
+            weight_scale = self.kv_b_proj.weight_scale
+
+            input_2d = input.view(-1, input.shape[-1])
+            output_dtype = input.dtype
+
+            if current_platform.is_fp8_fnuz():
+                q_input, x_scale = aiter_per1x128_quant(
+                    input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+            else:
+                q_input, x_scale = per_token_group_quant_fp8(
+                    input_2d, block_size[1], column_major_scales=False)
+
+            k, v = fused_gemm_a8w8_blockscale_split_cat(
+                q_input, weight, k_pe.expand((-1, self.num_heads, -1)), x_scale, weight_scale, self.qk_nope_head_dim, self.v_head_dim, output_dtype
+            )
+        else:
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+            k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
         output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
