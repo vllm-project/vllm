@@ -84,7 +84,7 @@ async def test_generate_normal_flow(mock_async_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        continue_session=True,
+        resumable=True,
     ):
         outputs.append(output)
 
@@ -125,7 +125,7 @@ async def test_generate_multiple_streaming_requests(mock_async_llm):
         prompt=prompt1,
         sampling_params=sampling_params,
         request_id=request_id,
-        continue_session=True,
+        resumable=True,
     ):
         outputs1.append(output)
 
@@ -156,7 +156,7 @@ async def test_generate_multiple_streaming_requests(mock_async_llm):
         prompt=prompt2,
         sampling_params=sampling_params,
         request_id=request_id,
-        continue_session=True,
+        resumable=True,
     ):
         outputs2.append(output)
 
@@ -194,7 +194,7 @@ async def test_generate_generator_exit(mock_async_llm):
         prompt=prompt,
         sampling_params=sampling_params,
         request_id=request_id,
-        continue_session=True,
+        resumable=True,
     )
 
     # Get first output then close generator

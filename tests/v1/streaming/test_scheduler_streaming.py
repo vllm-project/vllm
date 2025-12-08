@@ -31,7 +31,7 @@ class DummyRequest(Request):
     def __init__(
         self,
         request_id,
-        continue_session=True,
+        resumable=True,
         prompt_token_ids=None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         max_tokens: int | None = 16,
@@ -45,7 +45,7 @@ class DummyRequest(Request):
             pooling_params=None,
             eos_token_id=None,
             mm_features=mm_features,
-            continue_session=continue_session,
+            resumable=resumable,
         )
 
 
@@ -82,7 +82,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         request = DummyRequest(
             request_id="test_request",
-            continue_session=True,
+            resumable=True,
         )
 
         scheduler.add_request(request)
@@ -93,7 +93,7 @@ class TestStreamingScheduler(unittest.TestCase):
 
         next_request = DummyRequest(
             request_id="test_request",
-            continue_session=True,
+            resumable=True,
         )
         scheduler.add_request(next_request)
 
@@ -204,7 +204,7 @@ class TestStreamingScheduler(unittest.TestCase):
         session = DummyRequest(
             request_id="session",
             prompt_token_ids=[1, 2, 3],
-            continue_session=True,
+            resumable=True,
         )
         scheduler.add_request(session)
         session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
@@ -213,7 +213,7 @@ class TestStreamingScheduler(unittest.TestCase):
         close_request = DummyRequest(
             request_id="session",
             prompt_token_ids=[0],
-            continue_session=False,
+            resumable=False,
             max_tokens=1,
         )
         scheduler.add_request(close_request)
@@ -233,7 +233,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
         assert len(out) == 1
         assert out[0].outputs[0].request_id == session.request_id
-        assert out[0].outputs[0].continue_session is False
+        assert out[0].outputs[0].resumable is False
 
     def test_streaming_request_session_update(self):
         scheduler = create_scheduler()
@@ -249,7 +249,7 @@ class TestStreamingScheduler(unittest.TestCase):
         next_request = DummyRequest(
             request_id="session",
             prompt_token_ids=[4, 5],
-            continue_session=True,
+            resumable=True,
         )
 
         scheduler.add_request(next_request)

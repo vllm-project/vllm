@@ -289,7 +289,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
-        continue_session: bool = False,
+        resumable: bool = False,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -320,7 +320,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
-                continue_session,
+                resumable,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt
@@ -383,7 +383,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        continue_session: bool = False,
+        resumable: bool = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -440,7 +440,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
-                continue_session=continue_session,
+                resumable=resumable,
             )
 
             # The output_handler task pushes items into the queue.
@@ -467,7 +467,7 @@ class AsyncLLM(EngineClient):
             raise
 
         except GeneratorExit:
-            if continue_session:
+            if resumable:
                 if self.log_requests:
                     logger.info(
                         "Request %s generator completed, session remains alive.",

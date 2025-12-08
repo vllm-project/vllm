@@ -4,6 +4,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -27,7 +28,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.inputs import PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     compute_encoder_budget,
@@ -834,13 +834,12 @@ class Scheduler(SchedulerInterface):
             assert session._all_token_ids[-1] == session._output_token_ids[-1]
             del session._all_token_ids[-1]
 
-        session.continue_session = request.continue_session
+        session.resumable = request.resumable
         if request.mm_features:
             base = session.num_tokens
             for mm_feature in request.mm_features:
-                mm_feature.mm_position = PlaceholderRange(
-                    offset=mm_feature.mm_position.offset + base,
-                    length=mm_feature.mm_position.length,
+                mm_feature.mm_position = replace(
+                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
                 )
             session.mm_features.extend(request.mm_features)
 
@@ -1207,7 +1206,7 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
-                if request.continue_session:
+                if request.resumable:
                     request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
                     self.waiting.add_request(request)
                 else:
@@ -1252,7 +1251,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
                         num_nans_in_logits=request.num_nans_in_logits,
-                        continue_session=request.continue_session,
+                        resumable=request.resumable,
                     )
                 )
             else:

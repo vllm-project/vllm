@@ -445,10 +445,10 @@ class OutputProcessor:
     def _update_streaming_request_state(
         self, request: EngineCoreRequest, prompt: str | None
     ) -> None:
-        if not request.continue_session:
+        if not request.resumable:
             raise ValueError(
                 f"Existing session {request.request_id} has to be updated with a \
-                streaming request with `continue_session=True`"
+                streaming request with `resumable=True`"
             )
         req_state = self.request_states[request.request_id]
         if req_state.prompt and prompt:
@@ -545,7 +545,7 @@ class OutputProcessor:
             # Free completed requests.
             if (
                 engine_core_output.finish_reason is not None
-                and not engine_core_output.continue_session
+                and not engine_core_output.resumable
             ):
                 self.request_states.pop(req_id)
                 # Remove parent request if applicable.

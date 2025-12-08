@@ -45,7 +45,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
-        continue_session: bool = False,
+        resumable: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -135,10 +135,8 @@ class Request:
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
         # Used for streaming
-        self.continue_session = continue_session
-        self.streaming_queue: deque[Request] | None = (
-            deque() if continue_session else None
-        )
+        self.resumable = resumable
+        self.streaming_queue: deque[Request] | None = deque() if resumable else None
 
     @classmethod
     def from_engine_core_request(
