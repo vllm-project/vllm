@@ -33,6 +33,7 @@ shown in the table below.
 | Architecture                                    | `--convert` | Supported pooling tasks               |
 |-------------------------------------------------|-------------|---------------------------------------|
 | `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
+| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
 | `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
 
 !!! tip
