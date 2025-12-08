@@ -242,7 +242,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
                 SUBBUILD_DIR "${FETCHCONTENT_BASE_DIR}/arm_compute-subbuild"
                 SOURCE_DIR   "${FETCHCONTENT_BASE_DIR}/arm_compute-src"
                 GIT_REPOSITORY https://github.com/ARM-software/ComputeLibrary.git
-                GIT_TAG        v52.2.0
+                GIT_TAG        v52.6.0
                 GIT_SHALLOW    TRUE
                 GIT_PROGRESS   TRUE
             )
@@ -310,7 +310,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         FetchContent_Declare(
             oneDNN
             GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-            GIT_TAG v3.9
+            GIT_TAG v3.10
             GIT_PROGRESS TRUE
             GIT_SHALLOW TRUE
         )
@@ -375,6 +375,7 @@ set(VLLM_EXT_SRC
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/cpu_wna16.cpp"
         ${VLLM_EXT_SRC})
     if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
         set(VLLM_EXT_SRC

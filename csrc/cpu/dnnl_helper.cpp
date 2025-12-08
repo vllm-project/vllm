@@ -396,9 +396,9 @@ MatMulPrimitiveHandler::MatMulPrimitiveHandler(const Args& args)
     : DNNLMatMulPrimitiveHandler(
           static_cast<DNNLMatMulPrimitiveHandler::Args>(args), args.ab_type),
       m_size_cache_(nullptr) {
-  assert(ab_type_ == dnnl::memory::data_type::f32 ||
-         ab_type_ == dnnl::memory::data_type::bf16 ||
-         ab_type_ == dnnl::memory::data_type::f16);
+  assert(b_type_ == dnnl::memory::data_type::f32 ||
+         b_type_ == dnnl::memory::data_type::bf16 ||
+         b_type_ == dnnl::memory::data_type::f16);
 
   dnnl::memory::desc original_b_md({b_k_size_, b_n_size_}, b_type_,
                                    {b_k_stride_, b_n_stride_});

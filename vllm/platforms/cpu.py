@@ -10,22 +10,21 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import psutil
 import regex as re
 import torch
 
 from vllm import envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    AttentionBackendEnum = None
     VllmConfig = None
 
 
@@ -134,9 +133,9 @@ class CpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
+        attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
@@ -150,11 +149,21 @@ class CpuPlatform(Platform):
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
+        node_dir = "/sys/devices/system/node"
         if kv_cache_space is None:
-            kv_cache_space = 4 * GiB_bytes  # type: ignore
+            nodes = (
+                [d for d in os.listdir(node_dir) if d.startswith("node")]
+                if os.path.exists(node_dir)
+                else []
+            )
+            num_numa_nodes = len(nodes) or 1
+            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
+            DEFAULT_CPU_MEM_UTILIZATION = 0.5
+            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
+            kv_cache_space_gib = kv_cache_space / GiB_bytes
             logger.warning_once(
-                "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                "for CPU backend is not set, using 4 by default."
+                "VLLM_CPU_KVCACHE_SPACE not set. Using "
+                f"{kv_cache_space_gib:.2f} GiB for KV cache."
             )
         else:
             kv_cache_space *= GiB_bytes
@@ -192,7 +201,7 @@ class CpuPlatform(Platform):
 
         scheduler_config = vllm_config.scheduler_config
         if (
-            scheduler_config.chunked_prefill_enabled
+            scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
         ) and cache_config.cache_dtype != "auto":
             raise RuntimeError(
@@ -338,10 +347,9 @@ class CpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod
@@ -388,7 +396,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        logger.warning("Pin memory is not supported on CPU.")
         return False
 
     @classmethod
