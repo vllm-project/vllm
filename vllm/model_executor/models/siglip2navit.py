@@ -27,7 +27,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
-    apply_rotary_emb_torch,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -163,7 +162,7 @@ def apply_rotary_pos_emb(
     if is_flash_attn_backend and not current_platform.is_cuda():
         apply_rotary_emb_func = apply_rotary_emb.forward_cuda
     else:
-        apply_rotary_emb_func = apply_rotary_emb_torch
+        apply_rotary_emb_func = apply_rotary_emb.forward_native
 
     q_embed = apply_rotary_emb_func(q.float(), cos.float(), sin.float()).type_as(q)
     k_embed = apply_rotary_emb_func(k.float(), cos.float(), sin.float()).type_as(k)
