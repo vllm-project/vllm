@@ -500,9 +500,12 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_linear_fp8_enaled(cls) -> bool:
+    def is_linear_fp8_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
-        return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
+        if not cls.is_linear_enabled() or not current_platform.is_rocm():
+            return False
+        from vllm.platforms.rocm import on_mi3xx
+        return on_mi3xx()
 
     @classmethod
     @if_aiter_supported
