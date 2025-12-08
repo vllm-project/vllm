@@ -470,6 +470,17 @@ class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
 
         return _attn_out
 
+    def _forward_decode(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError(
+            "FlashMLASparseImpl overrides forward() and does not use _forward_decode()"
+        )
+
     def forward(
         self,
         layer: AttentionLayer,

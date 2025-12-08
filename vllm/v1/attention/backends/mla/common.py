@@ -1183,7 +1183,13 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
                 and current_platform.get_device_capability()[0] == 9
             )
 
-        self.dcp_world_size: int | None = None
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
 
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
