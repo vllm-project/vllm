@@ -1171,17 +1171,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 )
                 weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
                 layer.execution_padding_k_bytes = pad_bytes
-                logger.info(
-                    f"[FP4 Weight Prep] After K-dim padding: weight={weight.shape}, "
-                    f"execution_padding_k_bytes={layer.execution_padding_k_bytes}"
-                )
 
             layer.weight = Parameter(weight, requires_grad=False)
-            logger.info(
-                f"[FP4 Weight Prep] Final weight: {layer.weight.shape}, "
-                f"output_size_per_partition={getattr(layer, 'output_size_per_partition', 'NOT SET')}, "
-                f"execution_padding_k_bytes={getattr(layer, 'execution_padding_k_bytes', 0)}"
-            )
 
     def apply(
         self,
@@ -1224,25 +1215,19 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             # pre-calculated padding
             pad_k_bytes = getattr(layer, "execution_padding_k_bytes", 0)
             output_shape = [x.shape[0], layer.output_size_per_partition]  # needs to preform slicing if we pad 
-            
-            logger.info(
-                f"[FP4 Linear] Before padding: x_fp4={x_fp4.shape}, "
-                f"weight={layer.weight.shape}, pad_k_bytes={pad_k_bytes}, "
-                f"output_size_per_partition={layer.output_size_per_partition}"
-            )
+
             
             x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
 
-            # Fix x_blockscale if it's too small for the padded input
-            k_elements = x_fp4.shape[1] * 2 # 2 fp4 items are packed in the input dimension --> we pad x_fp4 so maybe we need to add block into x_block scale
-            required_scale_cols = k_elements // 16 # 16 is the block size
+            # we pad x_fp4 so we need to add block into x_block scale 
+            k_elements = x_fp4.shape[1] * 2 # 2 fp4 items are packed in the input dimension
+            required_scale_cols = k_elements // 16 # 16 is the block size # todo more general? 
             # Align to 4 to be safe with int32 packing assumptions in kernels
             if required_scale_cols % 4 != 0:
                 required_scale_cols += (4 - (required_scale_cols % 4))
             
             if x_blockscale.shape[1] < required_scale_cols:
                 pad_scales = required_scale_cols - x_blockscale.shape[1]
-                logger.info(f"[FP4 Linear] Padding x_blockscale: {x_blockscale.shape} -> (..., {x_blockscale.shape[1] + pad_scales})")
                 x_blockscale = torch.nn.functional.pad(x_blockscale, (0, pad_scales), value=0.0).contiguous()
 
             mm_args = (
@@ -1255,19 +1240,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
             
-            logger.info(
-                f"[FP4 Linear] After matmul: out={out.shape}, "
-                f"expected_output_shape={output_shape}"
-            )
-            
             # Slice output to remove padding if weight was padded in N dimension
             if out.shape[1] != output_shape[1]:
-                logger.info(
-                    f"[FP4 Linear] Slicing output from {out.shape} to "
-                    f"[:, :{output_shape[1]}]"
-                )
                 out = out[:, :output_shape[1]].contiguous()
-                logger.info(f"[FP4 Linear] After slicing: out={out.shape}")
         else:
             assert self.backend == "cutlass"
             mm_args = (
@@ -1283,10 +1258,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         if bias is not None:
             out = out + bias
 
-        logger.info(
-            f"[FP4 Linear] Final return: out={out.shape}, "
-            f"output_shape={output_shape}, backend={self.backend}"
-        )
         return out.view(*output_shape)
 
 
