@@ -323,6 +323,10 @@ class FusedMoEConfig:
 
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
+    gate_multiplier: Optional[float] = None
+
+    down_multiplier: Optional[float] = None
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
@@ -412,7 +416,9 @@ class FusedMoEConfig:
         in_dtype: torch.dtype,
         max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE,
         quant_config: Optional[Union[FusedMoEQuantConfig,
-                                     QuantizationConfig]] = None
+                                     QuantizationConfig]] = None,
+        gate_multiplier: Optional[float] = None,
+        down_multiplier: Optional[float] = None,
     ) -> "FusedMoEConfig":
 
         _quant_config: Optional[FusedMoEQuantConfig] = None
@@ -481,4 +487,6 @@ class FusedMoEConfig:
             in_dtype=in_dtype,
             quant_config=_quant_config,
             max_num_tokens=max_num_tokens,
+            gate_multiplier=gate_multiplier,
+            down_multiplier=down_multiplier,
         )

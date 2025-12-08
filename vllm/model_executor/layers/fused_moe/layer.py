@@ -421,7 +421,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -462,7 +461,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-            )
+                gate_multiplier=self.moe.gate_multiplier,
+                down_multiplier=self.moe.down_multiplier)
 
     def forward_cpu(
         self,
@@ -639,6 +639,8 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
+        gate_multiplier: Optional[float] = None,
+        down_multiplier: Optional[float] = None,
     ):
         super().__init__()
         if params_dtype is None:
@@ -726,6 +728,8 @@ class FusedMoE(torch.nn.Module):
             in_dtype=model_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             quant_config=quant_config,
+            gate_multiplier=gate_multiplier,
+            down_multiplier=down_multiplier,
         )
         self.moe_config = moe
         self.quant_config = quant_config
@@ -925,6 +929,7 @@ class FusedMoE(torch.nn.Module):
             expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
         else:
+
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
@@ -1535,7 +1540,6 @@ class FusedMoE(torch.nn.Module):
         physical_to_logical_map = \
             EplbState.build_initial_global_physical_to_logical_map(
             num_experts, num_redundant_experts)
-
         return [
             # (param_name, weight_name, expert_id, shard_id)
             ("experts.w13_" if weight_name

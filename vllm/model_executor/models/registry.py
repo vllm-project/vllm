@@ -93,6 +93,7 @@ _TEXT_GENERATION_MODELS = {
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM":("falcon_h1", "FalconH1ForCausalLM"),
+    "FalconH1MoEForCausalLM":("falcon_h1_moe", "FalconH1MoEForCausalLM"),
     "Mamba2ForCausalLM": ("mamba2", "Mamba2ForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
