@@ -108,7 +108,9 @@ class TestTrackTokenIdsValidation:
         assert "[100, 200]" in repr_str
 
     def test_track_token_ids_duplicate_values(self):
-        """Test that duplicate token IDs are allowed (no deduplication at param level)."""
+        """Test that duplicate token IDs are allowed
+        (no deduplication at param level).
+        """
         # Note: Deduplication happens at the batch level in merged_track_token_ids
         params = SamplingParams(track_token_ids=[100, 100, 200])
         assert params.track_token_ids == [100, 100, 200]

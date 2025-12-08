@@ -2600,7 +2600,7 @@ class GPUModelRunner(
         list[str],
         dict[str, int],
         list[int],
-        "TrackedLogprobsLists | None",
+        TrackedLogprobsLists | None,
     ]:
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:

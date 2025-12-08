@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for track_token_ids feature."""
 
 import asyncio
@@ -7,7 +9,6 @@ import os
 os.environ["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
 
 import pytest
-import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -16,7 +17,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
 # Use a smaller model for faster testing
-MODEL_PATH = "Qwen/Qwen3-14B"
+MODEL_PATH = os.environ.get("MODEL_PATH", "Qwen/Qwen3-14B")
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +34,8 @@ def async_llm_instance():
     """Create a shared AsyncLLM instance for streaming tests.
 
     Uses max_logprobs=-1 to allow full vocabulary logprobs for differential tests.
-    Note: Tests using this fixture must use @pytest.mark.asyncio(loop_scope="module")(loop_scope="module")
+    Note: Tests using this fixture must use
+        @pytest.mark.asyncio(loop_scope="module")
     to ensure the event loop scope matches the fixture scope.
     """
     engine_args = AsyncEngineArgs(
@@ -245,9 +247,7 @@ class TestTrackTokenIdsDifferential:
                 if tid in step_full:
                     full_value = step_full[tid].logprob
                 else:
-                    pytest.fail(
-                        f"Token {tid} not in full logprobs at step {step_idx}"
-                    )
+                    pytest.fail(f"Token {tid} not in full logprobs at step {step_idx}")
 
                 # Values should match exactly (same computation)
                 assert math.isclose(tracked_value, full_value), (
@@ -470,9 +470,7 @@ class TestTrackTokenIdsStreaming:
             assert len(all_tracked[tid]) == 5
 
     @pytest.mark.asyncio(loop_scope="module")
-    async def test_streaming_tracked_vs_full_logprobs_match(
-        self, async_llm_instance
-    ):
+    async def test_streaming_tracked_vs_full_logprobs_match(self, async_llm_instance):
         """Test streaming tracked logprobs match full logprobs in same request.
 
         Uses BOTH track_token_ids AND logprobs=-1 in the same streaming request
@@ -529,9 +527,7 @@ class TestTrackTokenIdsStreaming:
                 )
 
     @pytest.mark.asyncio(loop_scope="module")
-    async def test_streaming_differential_more_tokens(
-        self, async_llm_instance
-    ):
+    async def test_streaming_differential_more_tokens(self, async_llm_instance):
         """
         CRITICAL: Test streaming tracked logprobs match full vocabulary logprobs
         with more tokens to track.
@@ -1012,9 +1008,7 @@ class TestTrackTokenIdsSpeculativeDecoding:
         tracked = outputs[0].outputs[0].tracked_logprobs
         assert tracked == {}, f"Expected empty dict, got {tracked}"
 
-    def test_spec_decode_tracked_vs_full_logprobs_match(
-        self, spec_decode_llm_instance
-    ):
+    def test_spec_decode_tracked_vs_full_logprobs_match(self, spec_decode_llm_instance):
         """
         CRITICAL TEST: Verify track_token_ids with spec decode produces same
         values as extracting from full vocabulary logprobs (logprobs=-1).
@@ -1056,9 +1050,7 @@ class TestTrackTokenIdsSpeculativeDecoding:
                 if tid in step_full:
                     full_value = step_full[tid].logprob
                 else:
-                    pytest.fail(
-                        f"Token {tid} not in full logprobs at step {step_idx}"
-                    )
+                    pytest.fail(f"Token {tid} not in full logprobs at step {step_idx}")
 
                 # Values should match exactly (same computation)
                 assert math.isclose(tracked_value, full_value), (
@@ -1246,7 +1238,9 @@ class TestTrackTokenIdsSpeculativeDecodingStreaming:
     async def test_spec_decode_streaming_with_logprobs_coexist(
         self, async_spec_decode_llm_instance
     ):
-        """Test that track_token_ids works alongside regular logprobs in streaming spec decode.
+        """
+        Test that track_token_ids works alongside regular logprobs
+        in streaming spec decode.
 
         Uses both track_token_ids and logprobs in the same request, then verifies
         the tracked values match those extracted from the logprobs dict.
@@ -1493,14 +1487,13 @@ def run_quick_demo():
     print("\n5. Batch Processing")
     print("-" * 50)
     prompts = ["Hello", "World", "Test", "Demo"]
-    params = SamplingParams(
-        temperature=0.8, max_tokens=5, track_token_ids=[100, 200]
-    )
+    params = SamplingParams(temperature=0.8, max_tokens=5, track_token_ids=[100, 200])
     outputs = llm.generate(prompts, params)
     for i, out in enumerate(outputs):
         tracked = out.outputs[0].tracked_logprobs
-        print(f"Prompt {i} ('{prompts[i]}'): {len(tracked)} tracked tokens, "
-              f"5 steps each")
+        print(
+            f"Prompt {i} ('{prompts[i]}'): {len(tracked)} tracked tokens, 5 steps each"
+        )
 
     print("\n" + "=" * 70)
     print("Demo Complete!")
@@ -1624,16 +1617,22 @@ async def run_streaming_demo():
         all_valid = True
         for tid in track_ids:
             values = stream_tracked[tid]
-            valid = all(v <= 0 and not math.isnan(v) and not math.isinf(v) for v in values)
+            valid = all(
+                v <= 0 and not math.isnan(v) and not math.isinf(v) for v in values
+            )
             status = "✓" if valid else "✗"
             print(f"  Token {tid}: {len(values)} values, all valid logprobs: {status}")
             print(f"    Values: {[f'{v:.4f}' for v in values]}")
             if not valid:
                 all_valid = False
 
-        print(f"\nAll values are valid log probabilities: {'YES ✓' if all_valid else 'NO ✗'}")
+        status = "YES ✓" if all_valid else "NO ✗"
+        print(f"\nAll values are valid log probabilities: {status}")
         print("\nNote: For full differential test (streaming vs full logprobs),")
-        print("      run: pytest tests/v1/e2e/test_tracked_logprobs.py::TestTrackTokenIdsStreaming -v")
+        print(
+            "      run: pytest tests/v1/e2e/"
+            "test_tracked_logprobs.py::TestTrackTokenIdsStreaming -v"
+        )
 
     finally:
         engine.shutdown()
