@@ -259,16 +259,6 @@ class KVCacheManager:
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
-        # Free the blocks that are skipped during the attention computation
-        # (e.g., tokens outside the sliding window).
-        # We can do this even if we cannot schedule this request due to
-        # insufficient free blocks.
-        # Should call this function before allocating new blocks to reduce
-        # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(
-            request.request_id, request.num_computed_tokens
-        )
-
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_computed_tokens = request.num_computed_tokens + num_new_computed_tokens
@@ -282,6 +272,37 @@ class KVCacheManager:
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
+        )
+
+        if (
+            num_blocks_to_allocate == 0
+            and new_computed_blocks is None
+            and request.num_output_tokens > 0
+        ):
+            # Early return: no new blocks needed to be allocated for decode steps
+            # (excluding the first decode steps). DO NOT early return for
+            # - prefill steps: to ensure cache_blocks are running
+            # - first decode steps: to ensure remove_skipped_blocks remove
+            #   prompt token blocks slided out of the context window
+            #
+            # NOTE: This optimization may delay block cleanup (remove_skipped_blocks)
+            # in rare edge cases, but the impact is negligible.
+            #
+            # Example: With sliding windows whose size is
+            # not divisible by block size, the first block
+            # may slide out of the window (becoming eligible for removal)
+            # even when no new blocks are allocated at the end. In the worst case,
+            # this delays removal of 1 block per request per single type manager.
+            return self.empty_kv_cache_blocks
+
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self.coordinator.remove_skipped_blocks(
+            request.request_id, request.num_computed_tokens
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
