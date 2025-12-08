@@ -244,13 +244,6 @@ class SiluMulFp8Helion(HelionCustomOp):
         # Use the configured kernel attribute
         return self.silu_mul_fp8(input, scale)
 
-    @property
-    def helion_kernels(self):
-        """Return the list of Helion kernel wrappers for autotuning."""
-        if HELION_AVAILABLE:
-            return [silu_mul_fp8]
-        return []
-
 
 class SiluMulFp8Benchmark(KernelBenchmark):
     """
