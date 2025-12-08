@@ -8,7 +8,6 @@ from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tokenizers import get_tokenizer
-from vllm.tokenizers.hf import CachedHfTokenizer
 
 from ...models.registry import HF_EXAMPLE_MODELS
 from ...utils import VLLM_PATH
@@ -125,8 +124,7 @@ def test_get_gen_prompt(
 
     # Initialize the tokenizer
     tokenizer = get_tokenizer(
-        model_config.tokenizer,
-        tokenizer_cls=CachedHfTokenizer,
+        tokenizer_name=model_config.tokenizer,
         trust_remote_code=model_config.trust_remote_code,
     )
     template_content = load_chat_template(chat_template=template)
