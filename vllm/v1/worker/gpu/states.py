@@ -87,6 +87,7 @@ class RequestState:
         self.temperature = self._make_param(self.max_num_reqs, torch.float32)
         self.top_p = self._make_param(self.max_num_reqs, torch.float32)
         self.top_k = self._make_param(self.max_num_reqs, torch.int32)
+        self.min_p = self._make_param(self.max_num_reqs, torch.float32)
         self.repetition_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.frequency_penalty = self._make_param(self.max_num_reqs, torch.float32)
         self.presence_penalty = self._make_param(self.max_num_reqs, torch.float32)
@@ -162,6 +163,7 @@ class RequestState:
         else:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
+        self.min_p.np[req_idx] = sampling_params.min_p
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
@@ -217,6 +219,10 @@ class RequestState:
         no_top_k = np.all(top_k == self.vocab_size)
         top_k = self.top_k.copy_np_to_gpu(top_k) if not no_top_k else None
 
+        min_p = self.min_p.np[idx_mapping_np]
+        no_min_p = np.all(min_p == 0.0)
+        min_p = self.min_p.copy_np_to_gpu(min_p) if not no_min_p else None
+
         rep_penalty = self.repetition_penalty.np[idx_mapping_np]
         rep_penalty = self.repetition_penalty.copy_np_to_gpu(rep_penalty)
         freq_penalty = self.frequency_penalty.np[idx_mapping_np]
@@ -236,6 +242,7 @@ class RequestState:
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
+            min_p=min_p,
             repetition_penalty=rep_penalty,
             frequency_penalty=freq_penalty,
             presence_penalty=pres_penalty,
