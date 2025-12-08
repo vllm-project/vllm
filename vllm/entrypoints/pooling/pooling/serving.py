@@ -314,29 +314,38 @@ class OpenAIServingPooling(OpenAIServing):
                 usage=usage,
             )
 
-        def encode_bytes():
-            body, items, usage = encode_pooling_bytes(
+        def encode_bytes(bytes_only: bool) -> PoolingBytesResponse:
+            content, items, usage = encode_pooling_bytes(
                 pooling_outputs=final_res_batch,
                 embed_dtype=embed_dtype,
                 endianness=endianness,
             )
 
-            metadata = {
-                "id": request_id,
-                "created": created_time,
-                "model": model_name,
-                "data": items,
-                "usage": usage,
-            }
+            headers = (
+                None
+                if bytes_only
+                else {
+                    "metadata": json.dumps(
+                        {
+                            "id": request_id,
+                            "created": created_time,
+                            "model": model_name,
+                            "data": items,
+                            "usage": usage,
+                        }
+                    )
+                }
+            )
+
             return PoolingBytesResponse(
-                body=body,
-                metadata=json.dumps(metadata),
+                content=content,
+                headers=headers,
             )
 
         if encoding_format == "float" or encoding_format == "base64":
             return encode_float_base64()
-        elif encoding_format == "bytes":
-            return encode_bytes()
+        elif encoding_format == "bytes" or encoding_format == "bytes_only":
+            return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
 
