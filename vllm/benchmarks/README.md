@@ -2,13 +2,15 @@
 
 In this directory, We introduce our works and the test result to support high-throughput benchmark.
 
-## Benchmark multiprocessing
-- Background: TBD
+## Multiprocessing benchmark
+- Background:
+The benchmark throughput measurements provided by vllm by default operate on a single process and single thread. The problem with single-threaded operation is that, at high throughputs, the thread's processing becomes a bottleneck. Specifically, the results from vllm are not measured in a timely manner, leading to incorrect ITL calculations. This issue ultimately arises due to context switching, even when using asyncio.
 
-- Implementation: TBD
+- Implementation:
+If `--max-connections-per-worker [K]` option is given, M (N / K) processes will be created based on `--num_prompts [N]`. These processes will distribute the total requests as evenly as possible and establish M:1 communication with vllm (or proxy server). Each process is responsible for sending and receiving the requests assigned to it and processing the metrics. After all processes are completed, the final benchmark result is calculated by collecting the metric results of each process.
 
 
-## Benchmark trimming
+## Result Trimming
 - Background:
 To measure the high-throughput of the benchmark, the beginning (where decoding batches gradually increase as they are filled) and the end (where decoding batches gradually decrease as they are completed) must be excluded from the overall benchmark duration.
 
@@ -16,18 +18,18 @@ To measure the high-throughput of the benchmark, the beginning (where decoding b
 Trimming is implemented based on the response metadata for each request collected from the benchmark. The response metadata includes the request transmission time, the first token generation delay, and the inter-token generation delay. Based on this, the generation time of all tokens is reversed, and token information within the user-specified time interval is collected based on that time.
 
 
-## Test result
+# Test result
 The benchmark execution script set the warmup-time to 150 seconds and the cooldown-time to 120 seconds. The trimmed experimental results are listed at the bottom of the benchmark output, allowing us to confirm the following metrics: 1) the benchmark execution time after trimming, 2) the number of tokens generated within the defined time interval, 3) the output token throughput, and 4) the Inter-Token Latency (ITL).
 Furthermore, the graph below, which visually compares the difference resulting from the trimming, shows the specific time interval from which token information was aggregated. Additionally, since the width of the bars in the graph represents 1 second, the bar height can be interpreted as tokens per second, which directly represents the output token throughput.
 
-### Test env
-- Heimdall (heimdall & gateway: mi300-6)
-- 1P1D (prefill: mi300-4, decode: mi300-5)
-  - External LB enabled (8 AsyncLLM)
-  - 8 Proxy servers: mi300-5 (1:1 matched to each decode ranks)
+## Test env
+- Heimdall (heimdall & gateway)
+- PD disaggregation (1P1D)
+- External LB enabled on Decode server (8 AsyncLLM processes)
 
-### Test script
+## Test script
 ```
+# Warmup time is set to 150.0s, and Cooldown time is set to 120.0s
 vllm bench serve \
     --backend vllm \
     --model "deepseek-ai/DeepSeek-R1" \
@@ -37,20 +39,22 @@ vllm bench serve \
     --port 80 \
     --num-prompts 10800 \
     --max-concurrency 3600 \
+    --request-rate 50 \
     --ignore-eos \
     --ready-check-timeout-sec 0 \
+    --max-connections-per-worker 432 \
     --dataset-name sharegpt \
     --dataset-path  /app/dataset/ShareGPT_V3_unfiltered_cleaned_split.json\
     --sharegpt-input-len 1000 \
     --sharegpt-output-len 1000 \
-    --warmup-time 150 \ # 150s
-    --cooldown-time 120 \ # 120s
-    --request-rate 50
+    --warmup-time 150.0 \
+    --cooldown-time 120.0
 ```
 
-### Test Result
+## Result
 ```
 ============ Serving Benchmark Result ============
+Number of worker processes:              25
 Successful requests:                     10800
 Maximum request concurrency:             3600
 Request rate configured (RPS):           50.00
