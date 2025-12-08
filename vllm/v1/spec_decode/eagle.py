@@ -1016,6 +1016,10 @@ class EagleProposer:
                 "Qwen3VLForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
+            elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
+                self.model.config.image_token_index = (
+                    target_model.config.vision_config.image_token_id
+                )
             else:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
@@ -1254,7 +1258,7 @@ class EagleProposer:
         num_tokens_padded: int,
     ) -> tuple[int, torch.Tensor]:
         # TODO(Flechman): support DBO ubatching
-        ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
+        should_ubatch, num_toks_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,
@@ -1263,7 +1267,7 @@ class EagleProposer:
             uniform_decode=None,
             num_scheduled_tokens_per_request=None,
         )
-        assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
+        assert not should_ubatch, "DBO ubatching not implemented for EAGLE"
 
         num_tokens_dp_padded = num_tokens_padded
         if num_toks_across_dp is not None:
