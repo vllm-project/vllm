@@ -48,6 +48,7 @@ The responsibilities of the lead maintainers are:
 Committers have write access and merge rights. They typically have deep expertise in specific areas and help the community.
 
 The responsibilities of the committers are:
+
 * Reviewing PRs and providing feedback.
 * Addressing issues and questions from the community.
 * Own specific areas of the codebase and development efforts: reviewing PRs, addressing issues, answering questions, improving documentation.
@@ -71,12 +72,14 @@ Committership is highly selective and merit based. The selection criteria requir
 * **Community leadership**: mentoring contributors, triaging issues, improving docs, and elevating project standards.
 
 To further illustrate, a committer typically satisfies at least two of the following accomplishment patterns:
+
 * Author of an accepted RFC or design that materially shaped project direction
 * Measurable, widely adopted performance or reliability improvement in core paths
 * Long‑term ownership of a subsystem with demonstrable quality and stability gains
 * Significant cross‑project compatibility or ecosystem enablement work (models, hardware, tooling)
 
 While there isn't a quantitative bar, past committers have:
+
 * Submitted approximately 30+ PRs of substantial quality and scope
 * Provided high-quality reviews of approximately 10+ substantial external contributor PRs
 * Addressed multiple issues and questions from the community in issues/forums/Slack

@@ -41,4 +41,3 @@ As hardware gains popularity, we help endorse it in our documentation and market
 The vLLM GitHub organization can host hardware plugin repositories, especially for collaborative efforts among companies.
 
 We rarely add new hardware to vLLM directly. Instead, we make existing hardware platforms modular to keep the vLLM core hardware-agnostic.
-
