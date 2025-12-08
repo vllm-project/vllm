@@ -366,7 +366,7 @@ def should_use_deepgemm_for_fp8_linear(
     input_k_dim: int | None = None,
 ):
     """Check if DeepGEMM can be used for FP8 linear operation.
-    
+
     Args:
         output_dtype: Output data type.
         weight: Weight tensor with shape [N, K].
@@ -375,7 +375,7 @@ def should_use_deepgemm_for_fp8_linear(
             checks that input K dimension is aligned. This is important for
             tensor parallelism scenarios where input_size_per_partition might
             not be aligned.
-    
+
     Returns:
         True if DeepGEMM can be used, False otherwise.
     """
@@ -390,10 +390,9 @@ def should_use_deepgemm_for_fp8_linear(
 
     # Check weight alignment
     weight_valid = (
-        weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        weight.shape[0] % N_MULTIPLE == 0 and weight.shape[1] % K_MULTIPLE == 0
     )
-    
+
     # Check input K dimension alignment if provided
     # This is critical for tensor parallelism where input_size_per_partition
     # might not be divisible by K_MULTIPLE
