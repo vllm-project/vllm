@@ -12,6 +12,4 @@ ray[data]
 setuptools==78.1.0
 nixl==0.3.0
 tpu_info==0.4.0
-
-# Install torch_xla
-torch_xla[tpu, pallas]==2.8.0
+tpu-inference==0.11.1

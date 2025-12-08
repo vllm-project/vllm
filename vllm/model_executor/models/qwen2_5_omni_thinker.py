@@ -23,7 +23,6 @@
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from copy import copy
 from functools import partial
 from typing import Annotated, Any, Literal
 
@@ -68,6 +67,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -88,7 +88,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import encode_tokens
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -386,15 +385,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
         self._validate_mm_updates(mm_prompt_updates, mm_item_counts)
 
-        use_audio_in_video = False
-        if "video" in mm_kwargs:
-            video_items = [item for item in mm_kwargs["video"] if item is not None]
-            # only check video items (if there are any)
-            if video_items:
-                use_audio_in_video = all(
-                    item["use_audio_in_video"].data for item in video_items
-                )
-
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
@@ -403,7 +393,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
         else:
             prompt_ids, mm_placeholders = self._apply_prompt_updates(
@@ -413,7 +402,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             self._validate_mm_placeholders(
                 mm_placeholders,
                 mm_item_counts,
-                use_audio_in_video=use_audio_in_video,
             )
 
         return prompt_ids, mm_placeholders
@@ -602,7 +590,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                     tokenization_kwargs=tokenization_kwargs,
                 )
             tokenizer = self.info.get_tokenizer()
-            prompt_ids = encode_tokens(tokenizer, prompt)
+            prompt_ids = tokenizer.encode(prompt)
         else:
             prompt_ids = self._apply_hf_processor_tokens_only(prompt)
 
@@ -638,19 +626,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         )
 
         return mm_processed_data
-
-    def _validate_mm_placeholders(
-        self,
-        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
-        mm_item_counts: Mapping[str, int],
-        use_audio_in_video: bool = False,
-    ) -> None:
-        if use_audio_in_video:
-            mm_item_counts = copy(mm_item_counts)
-            if "video" in mm_item_counts:
-                assert "audio" in mm_item_counts
-                mm_item_counts["audio"] -= mm_item_counts["video"]
-        super()._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
 
 class Qwen2_5OmniConditionalGenerationMixin:
@@ -798,8 +773,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -923,21 +896,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value (Qwen2.5-Omni version).
-
-        Differences from MRotaryEmbedding:
-            1. Add audio support (and related `audio_feature_lengths`).
-            2. Add `use_audio_in_video` option to read audio from video inputs.
-                In this case, audio and vision position ids will be split into
-                chunks and interleaved.
-
+        """
         Example:
 
             (V_i are vision position ids, A_i are audio position ids)
@@ -945,11 +906,33 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             |V_1 ...    V_n|A_1 ...   A_n|V_n+1 ... V_2n|A_n+1 ... A_2n|...
             |vision chunk 1|audio chunk 1|vision chunk 2|audio chunk 2 |...
         """
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
+        audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
+        use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
+
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         # TODO(fyabc): refactor and share more code with
         #  _vl_get_input_positions_tensor.
 
-        thinker_config = hf_config.thinker_config
+        thinker_config = self.config
         audio_token_id = thinker_config.audio_token_index
         image_token_id = thinker_config.image_token_index
         video_token_id = thinker_config.video_token_index
@@ -962,11 +945,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         tokens_per_second = getattr(
             thinker_config.vision_config, "tokens_per_second", 25
         )
-
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
 
         src_item = input_tokens
         audio_seqlens = audio_feature_lengths
@@ -1126,7 +1104,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         return llm_positions, mrope_position_delta
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
@@ -1152,7 +1130,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     # TODO (ywang96): support overlapping modality embeddings so that
     # `use_audio_in_video` will work on V1.
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1162,16 +1140,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-    def get_multimodal_embeddings_v0(self, **kwargs: object) -> NestedTensors | None:
+    def embed_multimodal_v0(self, **kwargs: object) -> NestedTensors | None:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)

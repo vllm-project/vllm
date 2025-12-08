@@ -40,7 +40,6 @@ from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -327,9 +326,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             return None
 
         if pixel_values is not None:
-            pixel_values = flatten_bn(pixel_values, concat=True)
-
             h = w = self.config.vision_config.image_size
+
             return PaliGemmaImagePixelInputs(
                 type="pixel_values",
                 data=pixel_values,
@@ -337,8 +335,6 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             )
 
         if image_embeds is not None:
-            image_embeds = flatten_bn(image_embeds, concat=True)
-
             return PaliGemmaImageEmbeddingInputs(
                 type="image_embeds",
                 data=image_embeds,
@@ -375,7 +371,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

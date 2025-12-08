@@ -59,8 +59,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import cached_get_processor
-from vllm.transformers_utils.tokenizer import cached_get_tokenizer
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .blip2 import Blip2QFormerModel
@@ -564,7 +564,6 @@ class GraniteSpeechForConditionalGeneration(
     SupportsLoRA,
     SupportsTranscription,
 ):
-    merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -767,7 +766,7 @@ class GraniteSpeechForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self,
         **kwargs: object,
     ) -> MultiModalEmbeddings:
@@ -779,7 +778,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_features = self._process_audio_input(audio_input)
         return audio_features
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -790,9 +789,9 @@ class GraniteSpeechForConditionalGeneration(
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
@@ -862,7 +861,7 @@ class GraniteSpeechForConditionalGeneration(
         else:
             raise ValueError(f"Unsupported task type {task_type}")
 
-        tokenizer = cached_get_tokenizer(model_config.model)
+        tokenizer = cached_tokenizer_from_config(model_config)
         chat = [dict(role="user", content=user_prompt)]
         prompt = tokenizer.apply_chat_template(
             chat,
@@ -886,7 +885,7 @@ class GraniteSpeechForConditionalGeneration(
         model_config: ModelConfig,
     ) -> int | None:
         """Get the number of audio tokens for an audio duration in sec."""
-        processor = cached_get_processor(model_config.model)
+        processor = cached_processor_from_config(model_config)
         hop_length = processor.audio_processor.melspec_kwargs["hop_length"]
         proj_win_size = processor.audio_processor.projector_window_size
         ds_rate = processor.audio_processor.projector_downsample_rate
