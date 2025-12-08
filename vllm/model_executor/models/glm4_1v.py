@@ -47,7 +47,7 @@ from transformers.models.glm4v.video_processing_glm4v import Glm4vVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state

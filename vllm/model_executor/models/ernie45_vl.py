@@ -37,9 +37,7 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (
-    maybe_get_vit_flash_attn_backend,
-)
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state

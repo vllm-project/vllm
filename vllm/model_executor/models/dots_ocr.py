@@ -10,9 +10,7 @@ from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (
-    maybe_get_vit_flash_attn_backend,
-)
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import utils as dist_utils

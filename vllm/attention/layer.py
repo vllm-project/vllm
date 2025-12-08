@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from collections.abc import Callable
 from typing import cast
 
 import torch
@@ -16,6 +15,7 @@ from vllm.attention.backends.abstract import (
     MLAAttentionImpl,
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
@@ -47,40 +47,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
-else:
-    on_gfx9 = lambda *args, **kwargs: False
-
-
-FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
-
-
-def maybe_get_vit_flash_attn_backend(
-    attn_backend: AttentionBackendEnum | None,
-) -> Callable | None:
-    # At this point,
-    # we already have the attn_backend,
-    # overriding logic is done in the platform-specific implementation.
-    # so we don't need to override backend here.
-    # Just return the attn_backend and flash_attn_varlen_func.
-
-    if (
-        attn_backend == AttentionBackendEnum.FLASH_ATTN
-        and current_platform.is_cuda_alike()
-    ):
-        from flash_attn import flash_attn_varlen_func
-    elif attn_backend == AttentionBackendEnum.FLASH_ATTN and current_platform.is_xpu():
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-    elif attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
-        from aiter import flash_attn_varlen_func
-    else:
-        flash_attn_varlen_func = None
-
-    # if attn_backend is TORCH_SDPA,
-    # it will reach here and the flash_attn_varlen_func will be None.
-    return flash_attn_varlen_func
 
 
 def _init_kv_cache_quant(
@@ -479,7 +446,7 @@ class MultiHeadAttention(nn.Module):
         if multimodal_config is not None:
             attn_backend_override = multimodal_config.mm_encoder_attn_backend
 
-        self.backend = get_vit_attn_backend(
+        self.attn_backend = get_vit_attn_backend(
             head_size=head_size,
             dtype=dtype,
             attn_backend_override=attn_backend_override,

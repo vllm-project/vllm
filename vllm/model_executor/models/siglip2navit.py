@@ -13,7 +13,7 @@ from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.conv import Conv2dLayer

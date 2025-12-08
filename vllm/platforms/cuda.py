@@ -404,8 +404,6 @@ class CudaPlatformBase(Platform):
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
         return [
             AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.XFORMERS,
-            AttentionBackendEnum.VLLM_FLASH_ATTN,
             AttentionBackendEnum.FLASH_ATTN,
         ]
 

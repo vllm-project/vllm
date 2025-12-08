@@ -32,9 +32,7 @@ from transformers.modeling_outputs import (
 from transformers.utils import torch_int
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import (
-    maybe_get_vit_flash_attn_backend,
-)
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
 )
@@ -610,11 +608,8 @@ class SiglipAttention(nn.Module):
         )
 
         self.attn_backend = attn_backend
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                attn_backend_override=attn_backend_override,
-            )
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
