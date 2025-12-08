@@ -1077,8 +1077,9 @@ class OpenAIServing:
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
-            for k in extra_data:
-                engine_prompt[k] = extra_data[k]
+
+            # Fill in other keys like MM data
+            engine_prompt.update(extra_data)  # type: ignore
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
