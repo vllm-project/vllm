@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import ClassVar, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy
 import torch
@@ -14,6 +14,9 @@ from torch import fx
 from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear import LinearBase
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -236,6 +239,58 @@ def scaled_dequantize(
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
     x_s = group_broadcast(x_s.to(torch.float32), x_q.shape)
     return (x_q.to(torch.float32) * x_s).to(out_dtype)
+
+
+def get_layer_weight(layer):
+    WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
+    for attr in WEIGHT_NAMES:
+        if hasattr(layer, attr):
+            return getattr(layer, attr)
+    raise AttributeError(
+        f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
+    )
+
+
+def get_and_maybe_dequant_weights(
+    layer: "LinearBase", out_dtype: torch.dtype = torch.float32
+):
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    weight = get_layer_weight(layer)
+    assert layer.quant_method is not None
+
+    # Unquantized layer: just return base weights
+    if isinstance(layer.quant_method, UnquantizedLinearMethod):
+        return weight
+
+    # Simple Fp8 case: rescale with tensor or block weight scales
+    if isinstance(layer.quant_method, Fp8LinearMethod):
+        dequant_weights = scaled_dequantize(
+            weight,
+            layer.weight_scale,
+            layer.weight_block_size,
+            out_dtype=out_dtype,
+        )
+        if layer.weight_block_size is not None:
+            dequant_weights = dequant_weights.T
+        return dequant_weights
+
+    # NOTE: Most generic base case
+    # - Call the layer with identity matrix which returns unquantized weights.
+    # - Must be used with extra care when dealing with static activation quantization:
+    #   quantizing 1.0 may lead to over/underflows
+    # - Should only be used offline, since it's O(N^3)
+    assert hasattr(layer, "input_size_per_partition")
+    eye = torch.eye(
+        layer.input_size_per_partition,
+        dtype=out_dtype,
+        device=weight.device,
+    )
+    dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
+    if layer.weight_block_size is not None:
+        dequant_weights = dequant_weights.T
+    return dequant_weights
 
 
 def pack_quantized_values_into_int32(

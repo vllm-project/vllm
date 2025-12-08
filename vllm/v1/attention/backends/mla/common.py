@@ -217,7 +217,9 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
@@ -1140,26 +1142,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        def get_layer_weight(layer):
-            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
-            for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
-                    return getattr(layer, attr)
-            raise AttributeError(
-                f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
-            )
-
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = scaled_dequantize(
-            get_layer_weight(self.kv_b_proj),
-            self.kv_b_proj.weight_scale,
-            self.kv_b_proj.weight_block_size,
-            out_dtype=act_dtype,
+        kv_b_proj_weight = get_and_maybe_dequant_weights(
+            self.kv_b_proj, out_dtype=act_dtype
         )
-        if self.kv_b_proj.weight_block_size is not None:
-            kv_b_proj_weight = kv_b_proj_weight.T
 
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
@@ -1544,26 +1532,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return attn_out, lse.transpose(0, 1).contiguous()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        def get_layer_weight(layer):
-            WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
-            for attr in WEIGHT_NAMES:
-                if hasattr(layer, attr):
-                    return getattr(layer, attr)
-            raise AttributeError(
-                f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
-            )
-
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = scaled_dequantize(
-            get_layer_weight(self.kv_b_proj),
-            self.kv_b_proj.weight_scale,
-            self.kv_b_proj.weight_block_size,
-            out_dtype=act_dtype,
+        kv_b_proj_weight = get_and_maybe_dequant_weights(
+            self.kv_b_proj, out_dtype=act_dtype
         )
-        if self.kv_b_proj.weight_block_size is not None:
-            kv_b_proj_weight = kv_b_proj_weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
