@@ -117,6 +117,10 @@ def _quantize_dequantize_fp8_ds_mla(
 def test_sparse_backend_decode_correctness(
     dist_init, batch_name, kv_cache_dtype, tensor_parallel_size
 ):
+    ok, reason = flashmla.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
@@ -303,10 +307,6 @@ def test_sparse_backend_decode_correctness(
     debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
     mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
 
-    ok, reason = flashmla.is_flashmla_sparse_supported()
-    if not ok:
-        pytest.skip(reason)
-
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
     kv_b_proj_weight = kv_b_proj_weight.view(
         kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
@@ -321,6 +321,8 @@ def test_sparse_backend_decode_correctness(
 
     # Create the actual MLAAttention layer
     torch.set_default_dtype(dtype)
+
+    # Set the global config for the duration of the test
 
     mla_layer = MLAAttention(
         num_heads=num_heads,

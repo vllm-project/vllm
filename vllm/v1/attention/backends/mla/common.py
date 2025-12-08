@@ -1183,22 +1183,23 @@ class MLACommonImpl(MLAAttentionImpl[A], Generic[A]):
                 and current_platform.get_device_capability()[0] == 9
             )
 
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
+        if self.dcp_world_size == 1:
             self.dcp_rank = 0
 
-        self.chunked_prefill_workspace_size = (
-            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                get_current_vllm_config()
+        try:
+            vllm_config = get_current_vllm_config()
+            self.chunked_prefill_workspace_size = (
+                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                    vllm_config
+                )
             )
-        )
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-        )
+            self.cp_kv_cache_interleave_size = (
+                vllm_config.parallel_config.cp_kv_cache_interleave_size
+            )
+        except ValueError:
+            # vLLM config is not set in testing
+            self.chunked_prefill_workspace_size = 0
+            self.cp_kv_cache_interleave_size = 1
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
