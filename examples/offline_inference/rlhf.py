@@ -139,10 +139,7 @@ for name, p in train_model.named_parameters():
     handle = llm.collective_rpc.remote(
         "update_weight", args=(name, dtype_name, p.shape)
     )
-    if current_platform.is_xpu():
-        model_update_group.broadcast(p, src=0, stream=torch.xpu.current_stream())
-    else:
-        model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
+        model_update_group.broadcast(p, src=0, stream=current_platform.current_stream())
     ray.get(handle)
 
 # Verify that the inference weights have been updated.
