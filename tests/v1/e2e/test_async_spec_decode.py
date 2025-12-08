@@ -113,6 +113,7 @@ def test_no_sync_with_spec_decode(
             "model": spec_model,
         },
         enforce_eager=True,
+        async_scheduling=True,
     )
 
     outputs = llm.generate(
