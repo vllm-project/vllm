@@ -4,18 +4,26 @@
 import torch
 import triton
 import triton.language as tl
-from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
 from triton.tools.tensor_descriptor import TensorDescriptor
+
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import swizzle_blockscale
+
 logger = init_logger(__name__)
 
-def mxfp8_e4m3_quantize_python(data: torch.Tensor, is_sf_swizzled_layout: bool=False) -> tuple[torch.Tensor, torch.Tensor]:
+
+def mxfp8_e4m3_quantize_python(
+    data: torch.Tensor, is_sf_swizzled_layout: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(data.shape) == 2, "Only 2d input tensor is supported"
     block_size1 = 32
     block_size0 = 1
     shape_before_padding = data.shape
-    # pad data to make its shape a multiple of weight_block_size with the last element of data
-    assert data.shape[1] % block_size1 == 0 and data.shape[0] % block_size0 == 0, "Data shape must be a multiple of tile size [1, 32]"
+    # pad data to make its shape a multiple of weight_block_size
+    # with the last element of data
+    assert data.shape[1] % block_size1 == 0 and data.shape[0] % block_size0 == 0, (
+        "Data shape must be a multiple of tile size [1, 32]"
+    )
 
     # FP8
     max_dtype = torch.finfo(torch.float8_e4m3fn).max
@@ -60,17 +68,21 @@ def mxfp8_e4m3_quantize_python(data: torch.Tensor, is_sf_swizzled_layout: bool=F
     # remove the padding
     if data.shape != shape_before_padding:
         fp_data = fp_data[: shape_before_padding[0], : shape_before_padding[1]]
-    if is_sf_swizzled_layout:   
-        exponent = swizzle_blockscale(exponent) 
+    if is_sf_swizzled_layout:
+        exponent = swizzle_blockscale(exponent)
     # Convert to target format, but still in original precision container
     return fp_data, exponent
+
 
 def compute_swizzled_layout_sf_size(total_row, total_column, row_size=128):
     padded_row = (total_row + row_size - 1) // row_size * row_size
     padded_column = (total_column + 3) // 4 * 4
     return padded_row, padded_column
 
-def mxfp8_e4m3_quantize(x: torch.Tensor, is_sf_swizzled_layout: bool=False) -> tuple[torch.Tensor, torch.Tensor]:
+
+def mxfp8_e4m3_quantize(
+    x: torch.Tensor, is_sf_swizzled_layout: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     try:
         from flashinfer import mxfp8_quantize as mxfp8_e4m3_quantize
     except ImportError as err:
@@ -80,13 +92,17 @@ def mxfp8_e4m3_quantize(x: torch.Tensor, is_sf_swizzled_layout: bool=False) -> t
             "`pip install flashinfer`"
         ) from err
     if x.shape[-1] % 32 != 0:
-        x = torch.nn.functional.pad(x, (0, 32 - (x.shape[-1] % 32)), mode='constant', value=0)
+        x = torch.nn.functional.pad(
+            x, (0, 32 - (x.shape[-1] % 32)), mode="constant", value=0
+        )
     x_q, x_scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=is_sf_swizzled_layout)
-    x_q = x_q[..., :x.shape[-1]]
+    x_q = x_q[..., : x.shape[-1]]
     if is_sf_swizzled_layout:
-        padded_row, padded_col = compute_swizzled_layout_sf_size(x.shape[0], x.shape[1] // 32, 128)
+        padded_row, padded_col = compute_swizzled_layout_sf_size(
+            x.shape[0], x.shape[1] // 32, 128
+        )
         x_scales = x_scales.view(padded_row, padded_col)
-        
+
     if x_scales.ndim == 1 and not is_sf_swizzled_layout:
         x_scales = x_scales.view(x.size(0), -1)
     return x_q, x_scales
@@ -95,14 +111,14 @@ def mxfp8_e4m3_quantize(x: torch.Tensor, is_sf_swizzled_layout: bool=False) -> t
 def _cast_mxfp8_scales_to_bf16(scales: torch.Tensor) -> torch.Tensor:
     """
     Cast MXFP8 scales from uint8 to BF16.
-    
+
     The scales are stored in uint8 format and need to be converted to BF16
     by left-shifting by 7 bits (to form the exponent) and reinterpreting
     as bfloat16.
-    
+
     Args:
         scales: uint8 tensor containing MXFP8 scales
-        
+
     Returns:
         BF16 tensor with the converted scales
     """
@@ -149,25 +165,25 @@ def _matmul_launch_metadata(grid, kernel, args):
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
 def block_scaled_matmul_kernel(  #
-        a_desc,  #
-        a_scale_desc,  #
-        b_desc,  #
-        b_scale_desc,  #
-        c_desc,  #
-        M: tl.constexpr,  #
-        N: tl.constexpr,  #
-        K: tl.constexpr,  #
-        output_type: tl.constexpr,  #
-        ELEM_PER_BYTE_A: tl.constexpr,  #
-        ELEM_PER_BYTE_B: tl.constexpr,  #
-        VEC_SIZE: tl.constexpr,  #
-        BLOCK_M: tl.constexpr,  #
-        BLOCK_N: tl.constexpr,  #
-        BLOCK_K: tl.constexpr,  #
-        rep_m: tl.constexpr,  #
-        rep_n: tl.constexpr,  #
-        rep_k: tl.constexpr,  #
-        NUM_STAGES: tl.constexpr,  #
+    a_desc,  #
+    a_scale_desc,  #
+    b_desc,  #
+    b_scale_desc,  #
+    c_desc,  #
+    M: tl.constexpr,  #
+    N: tl.constexpr,  #
+    K: tl.constexpr,  #
+    output_type: tl.constexpr,  #
+    ELEM_PER_BYTE_A: tl.constexpr,  #
+    ELEM_PER_BYTE_B: tl.constexpr,  #
+    VEC_SIZE: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,  #
+    BLOCK_K: tl.constexpr,  #
+    rep_m: tl.constexpr,  #
+    rep_n: tl.constexpr,  #
+    rep_k: tl.constexpr,  #
+    NUM_STAGES: tl.constexpr,  #
 ):  #
     if output_type == 0:
         output_dtype = tl.float32
@@ -199,15 +215,29 @@ def block_scaled_matmul_kernel(  #
         scale_a = a_scale_desc.load([0, offs_scale_m, offs_scale_k, 0, 0])
         scale_b = b_scale_desc.load([0, offs_scale_n, offs_scale_k, 0, 0])
 
-        scale_a = scale_a.reshape(rep_m, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_M, BLOCK_K // VEC_SIZE)
-        scale_b = scale_b.reshape(rep_n, rep_k, 32, 4, 4).trans(0, 3, 2, 1, 4).reshape(BLOCK_N, BLOCK_K // VEC_SIZE)
+        scale_a = (
+            scale_a.reshape(rep_m, rep_k, 32, 4, 4)
+            .trans(0, 3, 2, 1, 4)
+            .reshape(BLOCK_M, BLOCK_K // VEC_SIZE)
+        )
+        scale_b = (
+            scale_b.reshape(rep_n, rep_k, 32, 4, 4)
+            .trans(0, 3, 2, 1, 4)
+            .reshape(BLOCK_N, BLOCK_K // VEC_SIZE)
+        )
 
         if MIXED_PREC:
-            accumulator = tl.dot_scaled(a, scale_a, "e4m3", b.T, scale_b, "e2m1", accumulator)
+            accumulator = tl.dot_scaled(
+                a, scale_a, "e4m3", b.T, scale_b, "e2m1", accumulator
+            )
         elif ELEM_PER_BYTE_A == 2 and ELEM_PER_BYTE_B == 2:
-            accumulator = tl.dot_scaled(a, scale_a, "e2m1", b.T, scale_b, "e2m1", accumulator)
+            accumulator = tl.dot_scaled(
+                a, scale_a, "e2m1", b.T, scale_b, "e2m1", accumulator
+            )
         else:
-            accumulator = tl.dot_scaled(a, scale_a, "e4m3", b.T, scale_b, "e4m3", accumulator)
+            accumulator = tl.dot_scaled(
+                a, scale_a, "e4m3", b.T, scale_b, "e4m3", accumulator
+            )
 
         offs_k_a += BLOCK_K // ELEM_PER_BYTE_A
         offs_k_b += BLOCK_K // ELEM_PER_BYTE_B
@@ -215,9 +245,19 @@ def block_scaled_matmul_kernel(  #
 
     c_desc.store([offs_am, offs_bn], accumulator.to(output_dtype))
 
-def block_scaled_matmul(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor, b_scale: torch.Tensor, 
-                        dtype_dst: torch.dtype, block_scale_type: str="mxfp8", is_swizzled: bool=False) -> torch.Tensor:
-    assert block_scale_type in ["mxfp4", "mxfp8", "mixed"], f"Invalid block scale type: {block_scale_type}"
+
+def block_scaled_matmul(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    dtype_dst: torch.dtype,
+    block_scale_type: str = "mxfp8",
+    is_swizzled: bool = False,
+) -> torch.Tensor:
+    assert block_scale_type in ["mxfp4", "mxfp8", "mixed"], (
+        f"Invalid block scale type: {block_scale_type}"
+    )
 
     M = a.shape[0]
     N = b.shape[0]
@@ -234,19 +274,19 @@ def block_scaled_matmul(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor,
 
     a_desc = TensorDescriptor.from_tensor(a, [BLOCK_M, BLOCK_K // ELEM_PER_BYTE_A])
     b_desc = TensorDescriptor.from_tensor(b, [BLOCK_N, BLOCK_K // ELEM_PER_BYTE_B])
-   
+
     rep_m = BLOCK_M // 128
     rep_n = BLOCK_N // 128
     rep_k = BLOCK_K // VEC_SIZE // 4
 
     def _round_up(x: int, m: int) -> int:
         return (x + m - 1) // m
-    
+
     # Use 5D TMA descriptor [1, rep_m, rep_k, 2, 256] with uint8 elements.
     # With 256 elements we better utilize the L2 and don't require the TMA
     # engine to emit many small messages (16B) messages as with 32x16xu8.
-    a_scale_shape = [1,_round_up(M,128), _round_up(K // VEC_SIZE, 4), 2, 256]
-    b_scale_shape = [1, _round_up(N,128), _round_up(K // VEC_SIZE, 4), 2, 256]
+    a_scale_shape = [1, _round_up(M, 128), _round_up(K // VEC_SIZE, 4), 2, 256]
+    b_scale_shape = [1, _round_up(N, 128), _round_up(K // VEC_SIZE, 4), 2, 256]
     a_scale_block_shape = [1, rep_m, rep_k, 2, 256]
     b_scale_block_shape = [1, rep_n, rep_k, 2, 256]
 
@@ -257,8 +297,12 @@ def block_scaled_matmul(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor,
         a_scale = a_scale.view(a_scale_shape)
         b_scale = swizzle_blockscale(b_scale).view(b_scale_shape)
 
-    a_scale_desc = TensorDescriptor.from_tensor(a_scale, block_shape=a_scale_block_shape)
-    b_scale_desc = TensorDescriptor.from_tensor(b_scale, block_shape=b_scale_block_shape)
+    a_scale_desc = TensorDescriptor.from_tensor(
+        a_scale, block_shape=a_scale_block_shape
+    )
+    b_scale_desc = TensorDescriptor.from_tensor(
+        b_scale, block_shape=b_scale_block_shape
+    )
 
     output = torch.empty((M, N), dtype=dtype_dst, device="cuda")
     if dtype_dst == torch.float32:
@@ -299,6 +343,13 @@ def block_scaled_matmul(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor,
     return output
 
 
-def block_scaled_matmul_fake(a: torch.Tensor, a_scale: torch.Tensor, b: torch.Tensor, b_scale: torch.Tensor, 
-                        dtype_dst: torch.dtype, block_scale_type: str="mxfp8", is_swizzled: bool=False) -> torch.Tensor:
+def block_scaled_matmul_fake(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    dtype_dst: torch.dtype,
+    block_scale_type: str = "mxfp8",
+    is_swizzled: bool = False,
+) -> torch.Tensor:
     return a.to(torch.bfloat16) @ b.T.to(torch.bfloat16)
