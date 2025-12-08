@@ -25,7 +25,7 @@ pull_request_rules:
       message: |
         Hi @{{author}}, the pre-commit checks have failed. Please run:
 
-        ```bash 
+        ```bash
         uv pip install pre-commit
         pre-commit install
         pre-commit run --all-files
