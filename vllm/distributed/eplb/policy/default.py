@@ -12,8 +12,9 @@ Please find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example
 on how the EPLB algorithm works.
 """
 
-import numpy as np
 import heapq
+
+import numpy as np
 import torch
 
 from .abstract import AbstractEplbPolicy
@@ -63,20 +64,20 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             # Heap is ordered by current_weight (first element of tuple)
             heap = [(0.0, pack_id, 0) for pack_id in range(num_packs)]
             heapq.heapify(heap)
-            
+
             for group in indices_np[i]:
                 # Pop the pack with minimum weight
                 current_weight, pack_id, num_items = heapq.heappop(heap)
-                
+
                 # Assign group to this pack
                 assert num_items < groups_per_pack
                 pack_index_np[i, group] = pack_id
                 rank_in_pack_np[i, group] = num_items
-                
+
                 # Update pack weight and item count
                 new_weight = current_weight + weight_np[i, group].item()
                 new_num_items = num_items + 1
-                
+
                 # Push back to heap if pack is not full
                 if new_num_items < groups_per_pack:
                     heapq.heappush(heap, (new_weight, pack_id, new_num_items))
