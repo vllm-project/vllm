@@ -867,7 +867,7 @@ class BenchmarkTensors:
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
             "top_k_num": ctx.top_k_num,
-             # Use lora_ids from LoRAKernelMeta and synthetic adapter_enabled.
+            # Use lora_ids from LoRAKernelMeta and synthetic adapter_enabled.
             "lora_ids": self.lora_kernel_meta.active_lora_ids,
             "adapter_enabled": adapter_enabled,
             "device": self.input.device,
@@ -1001,9 +1001,7 @@ class BenchmarkTensors:
         ref_output = self.output.clone()
 
         self.output.zero_()
-        op_type.bench_fn()(
-            **self.bench_fn_kwargs(ctx, op_type, expand_fn_add_inputs)
-        )
+        op_type.bench_fn()(**self.bench_fn_kwargs(ctx, op_type, expand_fn_add_inputs))
 
         op_type.run_ref_group_gemm(
             ref_output,

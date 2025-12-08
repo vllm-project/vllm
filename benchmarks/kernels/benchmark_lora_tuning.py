@@ -4,29 +4,29 @@ import json
 import os
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import torch
+from typing import Any
 
 import benchmark_lora as _benchmark_lora_mod
+import torch
 from benchmark_lora import BenchmarkContext, OpType, bench_optype, dtype_to_str
-from vllm.triton_utils import HAS_TRITON, triton
 
-from vllm.lora.ops.triton_ops import lora_expand, lora_shrink  # noqa: F401
-from vllm.lora.ops.triton_ops import (
+from vllm.lora.ops.triton_ops import (  # noqa: F401
     fused_moe_lora_expand,
     fused_moe_lora_shrink,
+    lora_expand,
+    lora_shrink,
 )  # noqa: F401
+from vllm.lora.ops.triton_ops import (
+    fused_moe_lora_op as _fused_moe_lora_mod,
+)
 from vllm.lora.ops.triton_ops import (
     lora_expand_op as _lora_expand_mod,
 )
 from vllm.lora.ops.triton_ops import (
     lora_shrink_op as _lora_shrink_mod,
 )
-from vllm.lora.ops.triton_ops import (
-    fused_moe_lora_op as _fused_moe_lora_mod,
-)
 from vllm.lora.ops.triton_ops import utils as _lora_utils_mod
+from vllm.triton_utils import HAS_TRITON, triton
 
 try:
     from transformers import AutoConfig
@@ -43,26 +43,26 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 _ORIGINAL_GET_LORA_OP_CONFIGS = _lora_utils_mod.get_lora_op_configs
-_CURRENT_LORA_KERNEL_CONFIG: Optional[Dict[str, Any]] = None
+_CURRENT_LORA_KERNEL_CONFIG: dict[str, Any] | None = None
 _PATCHED = False
 
 
 def _find_first_key(
-    dct: Dict[str, Any], candidates: List[str]
-) -> Tuple[Optional[Any], Optional[str]]:
+    dct: dict[str, Any], candidates: list[str]
+) -> tuple[Any | None, str | None]:
     for key in candidates:
         if key in dct:
             return dct[key], key
     return None, None
 
 
-def _infer_lora_rank_from_config(lora_dir: str) -> Tuple[Optional[int], str]:
+def _infer_lora_rank_from_config(lora_dir: str) -> tuple[int | None, str]:
     for fname in ("adapter_config.json", "adapter_config.bin", "config.json"):
         path = os.path.join(lora_dir, fname)
         if not os.path.isfile(path):
             continue
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception:
             continue
@@ -73,11 +73,11 @@ def _infer_lora_rank_from_config(lora_dir: str) -> Tuple[Optional[int], str]:
     return None, ""
 
 
-def _infer_lora_rank_from_safetensors(lora_dir: str) -> Tuple[Optional[int], str]:
+def _infer_lora_rank_from_safetensors(lora_dir: str) -> tuple[int | None, str]:
     if _load_safetensors is None:
         return None, ""
 
-    safepath: Optional[str] = None
+    safepath: str | None = None
     for fname in ("adapter_model.safetensors", "lora.safetensors"):
         path = os.path.join(lora_dir, fname)
         if os.path.isfile(path):
@@ -98,7 +98,7 @@ def _infer_lora_rank_from_safetensors(lora_dir: str) -> Tuple[Optional[int], str
     except Exception:
         return None, ""
 
-    preferred_keys = [k for k in tensors.keys() if "lora_" in k.lower()]
+    preferred_keys = [k for k in tensors if "lora_" in k.lower()]
     keys_to_check = preferred_keys or list(tensors.keys())
 
     for name in keys_to_check:
@@ -115,9 +115,7 @@ def _maybe_auto_infer_dims(args: argparse.Namespace, is_fused_moe: bool) -> None
         cfg = AutoConfig.from_pretrained(args.model_path)
         cfg_dict = cfg.to_dict()
 
-        hidden_size, _ = _find_first_key(
-            cfg_dict, ["hidden_size", "n_embd", "d_model"]
-        )
+        hidden_size, _ = _find_first_key(cfg_dict, ["hidden_size", "n_embd", "d_model"])
         num_experts, _ = _find_first_key(
             cfg_dict,
             [
@@ -167,13 +165,14 @@ def _patched_get_lora_op_configs(
     hidden_size: int,
     rank: int,
     num_slices: int,
-    add_inputs: Optional[bool] = None,
-    moe_intermediate_size: Optional[int] = None,
-) -> Dict[str, Any]:
+    add_inputs: bool | None = None,
+    moe_intermediate_size: int | None = None,
+) -> dict[str, Any]:
     if _CURRENT_LORA_KERNEL_CONFIG is not None:
         cfg = _CURRENT_LORA_KERNEL_CONFIG
-        # For fused_moe_lora ops, benchmark_lora expects BLOCK_SIZE_*/GROUP_SIZE_M/NUM_WARPS/NUM_STAGES/SPLIT_K
-        # style keys, while our search space uses lower-case names. Convert here.
+        # For fused_moe_lora ops, benchmark_lora expects
+        # BLOCK_SIZE_*/GROUP_SIZE_M/NUM_WARPS/NUM_STAGES/SPLIT_K style keys,
+        # while our search space uses lower-case names. Convert here.
         if op_type.startswith("fused_moe_lora_"):
             return {
                 "BLOCK_SIZE_M": cfg["block_m"],
@@ -215,12 +214,12 @@ def _ensure_patched() -> None:
         _benchmark_lora_mod,
     ):
         if hasattr(mod, "get_lora_op_configs"):
-            setattr(mod, "get_lora_op_configs", _patched_get_lora_op_configs)
+            mod.get_lora_op_configs = _patched_get_lora_op_configs
 
     _PATCHED = True
 
 
-def _build_search_space() -> List[Dict[str, Any]]:
+def _build_search_space() -> list[dict[str, Any]]:
     # Search space as suggested in README_TUNING.md.
     block_m_range = [16, 32, 64, 128, 256]
     block_n_range = [32, 64, 128, 256]
@@ -230,7 +229,7 @@ def _build_search_space() -> List[Dict[str, Any]]:
     num_ctas_range = [1]
     split_k_range = [4, 8, 16, 32, 64]
 
-    search_space: List[Dict[str, Any]] = []
+    search_space: list[dict[str, Any]] = []
     for (
         block_m,
         block_n,
@@ -248,7 +247,7 @@ def _build_search_space() -> List[Dict[str, Any]]:
         num_ctas_range,
         split_k_range,
     ):
-        cfg: Dict[str, Any] = {
+        cfg: dict[str, Any] = {
             "block_m": block_m,
             "block_n": block_n,
             "block_k": block_k,
@@ -276,14 +275,14 @@ def _to_torch_dtype(dt: str) -> torch.dtype:
 
 
 def _benchmark_single_config(
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     ctx: BenchmarkContext,
     op_type: OpType,
     arg_pool_size: int,
-    cuda_graph_nops: Optional[int],
-    expand_fn_add_inputs: Optional[bool],
+    cuda_graph_nops: int | None,
+    expand_fn_add_inputs: bool | None,
     test_correctness: bool,
-) -> Optional[float]:
+) -> float | None:
     global _CURRENT_LORA_KERNEL_CONFIG
 
     _CURRENT_LORA_KERNEL_CONFIG = cfg
@@ -307,7 +306,7 @@ def _benchmark_single_config(
 def _tune_fused_moe_lora_ops(
     ctx_list: list[BenchmarkContext],
     args: argparse.Namespace,
-    search_space: list[Dict[str, Any]],
+    search_space: list[dict[str, Any]],
     dtype: torch.dtype,
     fieldnames: list[str],
 ) -> None:
@@ -334,7 +333,7 @@ def _tune_fused_moe_lora_ops(
             )
 
             best_joint_time_ms: float = float("inf")
-            best_cfg_per_op: Dict[OpType, Dict[str, Any]] = {}
+            best_cfg_per_op: dict[OpType, dict[str, Any]] = {}
 
             for block_m in block_m_values:
                 block_cfgs = [
@@ -343,8 +342,8 @@ def _tune_fused_moe_lora_ops(
                 if not block_cfgs:
                     continue
 
-                per_op_best_cfg: Dict[OpType, Dict[str, Any]] = {}
-                per_op_best_time_ms: Dict[OpType, float] = {}
+                per_op_best_cfg: dict[OpType, dict[str, Any]] = {}
+                per_op_best_time_ms: dict[OpType, float] = {}
                 valid_for_all_ops = True
 
                 total_block_cfgs = len(block_cfgs)
@@ -352,7 +351,7 @@ def _tune_fused_moe_lora_ops(
 
                 for op in fused_ops:
                     best_time_ms: float = float("inf")
-                    best_cfg: Optional[Dict[str, Any]] = None
+                    best_cfg: dict[str, Any] | None = None
 
                     for idx, cfg in enumerate(block_cfgs, start=1):
                         median_time_ms = _benchmark_single_config(
@@ -369,7 +368,7 @@ def _tune_fused_moe_lora_ops(
                             "ok" if median_time_ms is not None else "out_of_resources"
                         )
 
-                        row: Dict[str, Any] = {
+                        row: dict[str, Any] = {
                             "op_type": op.name,
                             "dtype": dtype_to_str(dtype),
                             "batch_size": ctx.batch_size,
@@ -398,10 +397,7 @@ def _tune_fused_moe_lora_ops(
                             row[key] = cfg.get(key)
                         writer.writerow(row)
 
-                        if (
-                            median_time_ms is not None
-                            and median_time_ms < best_time_ms
-                        ):
+                        if median_time_ms is not None and median_time_ms < best_time_ms:
                             best_time_ms = median_time_ms
                             best_cfg = dict(cfg)
 
@@ -415,7 +411,8 @@ def _tune_fused_moe_lora_ops(
                             else:
                                 print(
                                     f"[M={m_val}] BLOCK_M={block_m} "
-                                    f"{op.name} [{idx}/{total_block_cfgs}] benchmarking..."
+                                    f"{op.name} [{idx}/{total_block_cfgs}] "
+                                    "benchmarking..."
                                 )
 
                     if best_cfg is None:
@@ -493,10 +490,11 @@ def _tune_fused_moe_lora_ops(
                             break
                         idx += 1
                     print(
-                        f"JSON file {json_name} exists and --json-overwrite is not set; "
+                        f"JSON file {json_name} exists and "
+                        "--json-overwrite is not set; "
                         f"writing tuned config to {json_path.name} instead."
                     )
-                    config_data: Dict[str, Any] = {}
+                    config_data: dict[str, Any] = {}
                 else:
                     if json_path.exists():
                         with json_path.open("r") as jf:
@@ -524,9 +522,7 @@ def _tune_fused_moe_lora_ops(
                 config_data.setdefault(max_loras_key, {})
                 config_data[max_loras_key].setdefault(num_slices_key, {})
                 config_data[max_loras_key][num_slices_key].setdefault(m_key, {})
-                config_data[max_loras_key][num_slices_key][m_key].setdefault(
-                    k_key, {}
-                )
+                config_data[max_loras_key][num_slices_key][m_key].setdefault(k_key, {})
 
                 if (
                     hasattr(args, "moe_intermediate_size")
@@ -540,9 +536,9 @@ def _tune_fused_moe_lora_ops(
                         i_key
                     ] = best_cfg
                 else:
-                    config_data[max_loras_key][num_slices_key][m_key][k_key][
-                        n_key
-                    ] = best_cfg
+                    config_data[max_loras_key][num_slices_key][m_key][k_key][n_key] = (
+                        best_cfg
+                    )
 
                 with json_path.open("w") as jf:
                     json.dump(config_data, jf)
@@ -562,7 +558,7 @@ def main(args: argparse.Namespace) -> None:
     # User-level fused MoE entry point: "fused_moe_lora" triggers joint tuning
     # of all four fused MoE LoRA kernels (gate_up/down × shrink/expand).
     if raw_op_type == "fused_moe_lora":
-        op_type: Optional[OpType] = None
+        op_type: OpType | None = None
         is_fused_moe = True
     else:
         op_type = OpType.from_str(raw_op_type)
@@ -649,13 +645,11 @@ def main(args: argparse.Namespace) -> None:
             )
         )
 
-    expand_fn_add_inputs: Optional[bool]
+    expand_fn_add_inputs: bool | None
     # For shrink or any fused_moe_lora op, benchmark_lora expects add_inputs to be None.
     # When using the user-level "fused_moe_lora" op_type, op_type is None and
     # is_fused_moe is True, so we also force expand_fn_add_inputs=None.
-    if op_type is None:
-        expand_fn_add_inputs = None
-    elif op_type.is_shrink_fn() or op_type.is_fused_moe_lora_fn():
+    if op_type is None or op_type.is_shrink_fn() or op_type.is_fused_moe_lora_fn():
         expand_fn_add_inputs = None
     else:
         expand_fn_add_inputs = bool(args.expand_add_inputs)
@@ -707,7 +701,7 @@ def main(args: argparse.Namespace) -> None:
             print(f"Tuning M={m_val} over {total_configs} kernel configs")
             log_interval = max(1, total_configs // 10)
 
-            best_cfg: Optional[Dict[str, Any]] = None
+            best_cfg: dict[str, Any] | None = None
             best_time_ms: float = float("inf")
 
             for idx, cfg in enumerate(search_space, start=1):
@@ -726,7 +720,7 @@ def main(args: argparse.Namespace) -> None:
                     best_time_ms = median_time_ms
                     best_cfg = dict(cfg)
 
-                row: Dict[str, Any] = {
+                row: dict[str, Any] = {
                     "op_type": op_type.name,
                     "dtype": dtype_to_str(dtype),
                     "batch_size": ctx.batch_size,
@@ -775,8 +769,10 @@ def main(args: argparse.Namespace) -> None:
                 gpu_name = gpu_name.replace(" ", "_").replace("-", "_")
 
                 # Determine op name for JSON file
-                # NOTE: fused_moe_lora_* uses separate *_shrink / *_expand names and cannot rely on
-                # is_shrink_fn() (which only returns True for LORA_SHRINK), otherwise shrink/expand would write to the same file.
+                # NOTE: fused_moe_lora_* uses separate *_shrink / *_expand
+                # names and cannot rely on is_shrink_fn() (which only returns
+                # True for LORA_SHRINK), otherwise shrink/expand would write
+                # to the same file.
                 if op_type in (
                     OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
                     OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
@@ -818,7 +814,8 @@ def main(args: argparse.Namespace) -> None:
                             break
                         idx += 1
                     print(
-                        f"JSON file {json_name} exists and --json-overwrite is not set; "
+                        f"JSON file {json_name} exists and "
+                        "--json-overwrite is not set; "
                         f"writing tuned config to {json_path.name} instead."
                     )
                     config_data = {}
@@ -849,9 +846,7 @@ def main(args: argparse.Namespace) -> None:
                 config_data.setdefault(max_loras_key, {})
                 config_data[max_loras_key].setdefault(num_slices_key, {})
                 config_data[max_loras_key][num_slices_key].setdefault(m_key, {})
-                config_data[max_loras_key][num_slices_key][m_key].setdefault(
-                    k_key, {}
-                )
+                config_data[max_loras_key][num_slices_key][m_key].setdefault(k_key, {})
 
                 # For fused_moe_lora, add moe_intermediate_size dimension if needed
                 if (
@@ -867,9 +862,9 @@ def main(args: argparse.Namespace) -> None:
                         i_key
                     ] = best_cfg
                 else:
-                    config_data[max_loras_key][num_slices_key][m_key][k_key][
-                        n_key
-                    ] = best_cfg
+                    config_data[max_loras_key][num_slices_key][m_key][k_key][n_key] = (
+                        best_cfg
+                    )
 
                 with json_path.open("w") as jf:
                     json.dump(config_data, jf)
