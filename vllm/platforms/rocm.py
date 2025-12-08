@@ -225,6 +225,22 @@ class RocmPlatform(Platform):
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
+        logger.info(
+            "ROCm get_attn_backend_cls parameters:\n"
+            "    selected_backend: %s,\n"
+            "    is_gfx9: %s,\n"
+            "    use_mla: %s,\n"
+            "    use_sparse: %s,\n"
+            "    block_size: %s,\n"
+            "    attn_type: %s",
+            selected_backend,
+            on_gfx9(),
+            use_mla,
+            use_sparse,
+            block_size,
+            attn_type,
+        )
+
         if use_sparse:
             if kv_cache_dtype.startswith("fp8"):
                 raise ValueError(
