@@ -79,7 +79,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Hook to prepare tensors and extra tensors for DP allgather + EP dispatch."""
         raise NotImplementedError(
-            f"Method 'prepare_dp_allgather_tensor' is not implemented in {self.__class__.__name__}."
+            "Method 'prepare_dp_allgather_tensor' is not implemented in "
+            f"{self.__class__.__name__}."
         )
 
     @abstractmethod
