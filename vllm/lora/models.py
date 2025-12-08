@@ -735,11 +735,18 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
+
         device = (
             lora.lora_a[0].device
             if isinstance(lora.lora_a, list)
             else lora.lora_a.device
         )
+        # Execute pin_memory after LoRA weight merging, mainly because: 
+        # 1. Some MoE models have a large number of LoRA weights. If we 
+        # perform # pin_memory immediately after loading weights, the 
+        # overhead is significant. 
+        # 2. The weight packing above (e.g., pack_moe) may invalidate the 
+        # pin_memory allocation, so we execute it after packing.
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         if pin_memory:
             for lora in lora_model.loras.values():
@@ -750,7 +757,6 @@ class LoRAModelManager:
                 else:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
-        pass
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
