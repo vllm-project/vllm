@@ -507,15 +507,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 del group_hit_blocks[num_other_blocks:]
 
         group_ids_to_hit_blocks: dict[int, list[KVCacheBlock]] = {}
-        for group_id, hit_blocks in zip(
+        for group_id, group_hit_blocks in zip(
             self.full_attention_group_ids, hit_blocks_full_attn
         ):
-            group_ids_to_hit_blocks[group_id] = hit_blocks
+            group_ids_to_hit_blocks[group_id] = group_hit_blocks
         for (_, group_ids, _), hit_blocks_other in zip(
             self.other_specs_data, other_hit_blocks
         ):
-            for group_id, hit_blocks in zip(group_ids, hit_blocks_other):
-                group_ids_to_hit_blocks[group_id] = hit_blocks
+            for group_id, group_hit_blocks in zip(group_ids, hit_blocks_other):
+                group_ids_to_hit_blocks[group_id] = group_hit_blocks
 
         hit_blocks = tuple(
             group_ids_to_hit_blocks[group_id]
