@@ -87,7 +87,8 @@ class FlashMLASparseBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        # Support Hopper (9), Ampere/Hopper (10), and Blackwell (100)
+        return capability.major in [9, 10, 100]
 
     @staticmethod
     def get_kv_cache_shape(

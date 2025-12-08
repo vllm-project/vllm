@@ -176,6 +176,9 @@ class CudaPlatformBase(Platform):
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
+            # NOTE: When sparse attention is required (e.g., DeepSeek-V3.2),
+            # we should NOT force CUTLASS_MLA as it doesn't support sparse.
+            # Let automatic backend selection choose a sparse-compatible backend.
             use_flashmla = False
             use_cutlass_mla = False
             use_flashinfer_mla = False
@@ -190,15 +193,35 @@ class CudaPlatformBase(Platform):
                     vllm_config.attention_config.backend = (
                         AttentionBackendEnum.CUTLASS_MLA
                     )
+                elif cls.is_device_capability(100) and use_sparse:
+                    # Blackwell with sparse attention => Don't force any backend.
+                    # Let automatic selection choose a sparse-compatible backend.
+                    # This prevents forcing CUTLASS_MLA which doesn't support sparse.
+                    logger.info(
+                        "Sparse attention detected on Blackwell GPU. "
+                        "Using automatic backend selection to choose a "
+                        "sparse-compatible backend."
+                    )
                 else:
                     # Not Blackwell
                     use_flashmla = True
             else:
-                # Forced case
+                # Forced case - validate that the selected backend supports sparse
+                # if sparse is required
                 backend = vllm_config.attention_config.backend
                 use_flashmla = backend == AttentionBackendEnum.FLASHMLA
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
                 use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
+                
+                # If sparse is required and user forced a backend that doesn't support it,
+                # warn them (but don't override - let the validation in get_attn_backend_cls
+                # catch it with a clear error message)
+                if use_sparse and use_cutlass_mla:
+                    logger.warning(
+                        "Sparse attention is required but CUTLASS_MLA backend "
+                        "does not support sparse attention. This will cause an error. "
+                        "Please use a sparse-compatible backend like FLASHMLA_SPARSE."
+                    )
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
