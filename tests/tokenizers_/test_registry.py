@@ -49,10 +49,8 @@ class TestTokenizer(TokenizerLike):
 
 @pytest.mark.parametrize("runner_type", ["generate", "pooling"])
 def test_resolve_tokenizer_args_idempotent(runner_type):
-    tokenizer_name = "facebook/opt-125m"
-
     tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
-        tokenizer_name,
+        "facebook/opt-125m",
         runner_type=runner_type,
     )
 
