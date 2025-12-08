@@ -443,10 +443,13 @@ class EagleProposer:
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
-            # Invalidate the CPU-side seq_lens and num_computed_tokens_cpu to
-            # avoid H<>D sync.
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
+
+            # Also update the CPU-side shadow; not this is hacky and should be
+            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
+            if common_attn_metadata._seq_lens_cpu is not None:
+                common_attn_metadata._seq_lens_cpu += 1
+            if common_attn_metadata._num_computed_tokens_cpu is not None:
+                common_attn_metadata._num_computed_tokens_cpu += 1
 
             # Compute the slot mapping.
             if self.uses_mrope:
