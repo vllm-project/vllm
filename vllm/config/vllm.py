@@ -872,14 +872,16 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
-            if self.afd_config is None:
-                assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
-                    "Microbatching currently only supports the deepep_low_latency and "
-                    f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                    "supported. To fix use --all2all-backend=deepep_low_latency or "
-                    "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                    " kernels."
-                )
+            assert a2a_backend in [
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            ], (
+                "Microbatching currently only supports the deepep_low_latency and "
+                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
+                "supported. To fix use --all2all-backend=deepep_low_latency or "
+                "--all2all-backend=deepep_high_throughput and install the DeepEP"
+                " kernels."
+            )
 
             if not self.model_config.disable_cascade_attn:
                 self.model_config.disable_cascade_attn = True

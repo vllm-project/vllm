@@ -3028,10 +3028,14 @@ class GPUModelRunner(
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    self.parallel_config.num_of_microbatches
+                    self.parallel_config.num_of_microbatches,
                 )
 
-                logger.info("jcz ubatch_slices: %s, ubatch_slices_padded: %s", ubatch_slices, ubatch_slices_padded)
+                logger.info(
+                    "jcz ubatch_slices: %s, ubatch_slices_padded: %s",
+                    ubatch_slices,
+                    ubatch_slices_padded,
+                )
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -4098,10 +4102,17 @@ class GPUModelRunner(
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-            should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded,
-            self.vllm_config.parallel_config.num_of_microbatches
+            should_ubatch,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.vllm_config.parallel_config.num_of_microbatches,
         )
-        logger.info("jcz ubatch_slices: %s, ubatch_slices_padded: %s", ubatch_slices, ubatch_slices_padded)
+        logger.info(
+            "jcz ubatch_slices: %s, ubatch_slices_padded: %s",
+            ubatch_slices,
+            ubatch_slices_padded,
+        )
 
         attn_metadata: PerLayerAttnMetadata | None = None
 

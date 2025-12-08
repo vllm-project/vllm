@@ -7,14 +7,13 @@ import torch
 
 from vllm import forward_context
 from vllm.forward_context import ForwardContext
-from vllm.utils.torch_utils import current_stream
-
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
 
 _THREAD_ID_TO_CONTEXT: dict = {}
-# Here we hardcode the number of microbatches to 2 for default. 
+# Here we hardcode the number of microbatches to 2 for default.
 _NUM_OF_MICRO_BATCHES: int = 2
 _CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = []
 
@@ -211,7 +210,7 @@ def make_ubatch_contexts(
 ) -> list[UBatchContext]:
     global _NUM_OF_MICRO_BATCHES, _CURRENT_CONTEXTS
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
-    
+
     _NUM_OF_MICRO_BATCHES = num_micro_batches
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:

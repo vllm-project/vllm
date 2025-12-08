@@ -46,7 +46,6 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
-
 # This pads the last ubatch slice out to the total number of tokens
 # (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
 def _pad_out_ubatch_slices(
@@ -56,16 +55,13 @@ def _pad_out_ubatch_slices(
         return ubatch_slices
 
     last_slice = ubatch_slices[-1]
-    padded_last_request_slice = slice(
-        last_slice.request_slice.start, num_reqs_padded
-    )
-    padded_last_token_slice = slice(
-        last_slice.token_slice.start, num_total_tokens
-    )
+    padded_last_request_slice = slice(last_slice.request_slice.start, num_reqs_padded)
+    padded_last_token_slice = slice(last_slice.token_slice.start, num_total_tokens)
 
     return ubatch_slices[:-1] + [
         UBatchSlice(padded_last_request_slice, padded_last_token_slice)
     ]
+
 
 def maybe_create_ubatch_slices(
     should_ubatch: bool,
@@ -73,7 +69,7 @@ def maybe_create_ubatch_slices(
     num_tokens_padded: int,
     num_reqs_padded: int,
     num_microbatches: int,
-    split_point: list[int] | None = None,
+    split_point: list[int] | int | None = None,
 ) -> tuple[UBatchSlices | None, UBatchSlices | None]:
     if not should_ubatch:
         return None, None
@@ -90,7 +86,7 @@ def maybe_create_ubatch_slices(
 
     ubatch_slices = []
     start_token = 0
-    
+
     # Add the end point to the split points to make iteration easier
     all_points = token_split_points + [cu_num_tokens[-1]]
 
@@ -99,21 +95,17 @@ def maybe_create_ubatch_slices(
 
         # Determine request slices using exclusive stop semantics
         # Ubatch includes requests whose tokens overlap [start_token, end_token)
-        
+
         # Start at the request that contains the start_token
         # or the request starting exactly at start_token (if on boundary)
-        req_start = int(
-            np.searchsorted(cu_num_tokens, start_token, side="right") - 1
-        )
-        
+        req_start = int(np.searchsorted(cu_num_tokens, start_token, side="right") - 1)
+
         # Stop at the request that starts at or after end_token
-        req_stop = int(
-            np.searchsorted(cu_num_tokens, end_token, side="left")
-        )
-        
+        req_stop = int(np.searchsorted(cu_num_tokens, end_token, side="left"))
+
         req_slice = slice(req_start, req_stop)
         ubatch_slices.append(UBatchSlice(req_slice, token_slice))
-        
+
         start_token = end_token
 
     ubatch_slices_padded = _pad_out_ubatch_slices(
