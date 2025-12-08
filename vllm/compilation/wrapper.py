@@ -4,7 +4,7 @@
 import os
 import sys
 from abc import abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import CodeType
 from typing import Any
 
@@ -13,6 +13,7 @@ import torch._C._dynamo.guards
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
 
@@ -125,23 +126,49 @@ class TorchCompileWithNoGuardsWrapper:
         if isinstance(backend, str) and backend == "inductor":
             options = vllm_config.compilation_config.inductor_compile_config
 
-        if mode != CompilationMode.STOCK_TORCH_COMPILE:
-            # Drop all the guards.
-            options["guard_filter_fn"] = lambda x: [False for _ in x]
-
-        # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
-        from vllm.compilation.decorators import DynamicShapesType
+        self.first_compile = True
+        self.evaluate_guards = (
+            vllm_config.compilation_config.dynamic_shapes_config.evaluate_guards
+        )
 
         ds_type = vllm_config.compilation_config.dynamic_shapes_config.type
-        compiled_ptr: Any = self.forward
-        if ds_type == DynamicShapesType.UNBACKED:
-            if envs.VLLM_USE_BYTECODE_HOOK:
-                # reason is that bytecode does this hack torch._dynamo.eval_frame.
-                # remove_from_cache(self.original_code_object()) to force a new
-                # re-compilation.
-                raise ValueError(
-                    "UNBACKED dynamic shapes require VLLM_USE_BYTECODE_HOOK=0. "
+
+        if mode != CompilationMode.STOCK_TORCH_COMPILE:
+            # Drop all the guards.
+            if self.evaluate_guards:
+                assert not envs.VLLM_USE_BYTECODE_HOOK, (
+                    "compilation_config.dynamic_shapes_config.evaluate_guards "
+                    "requires VLLM_USE_BYTECODE_HOOK=0. "
                 )
+
+                if envs.VLLM_USE_AOT_COMPILE:
+                    # disabled until https://github.com/pytorch/pytorch/pull/169239
+                    # is picked up.
+                    assert ds_type != DynamicShapesType.BACKED, (
+                        "evaluate_guards for backed shapes requires "
+                        "VLLM_USE_AOT_COMPILE=False. "
+                    )
+
+                options["guard_filter_fn"] = lambda x: [
+                    entry.guard_type == "SHAPE_ENV" for entry in x
+                ]
+            else:
+                options["guard_filter_fn"] = lambda x: [False for _ in x]
+
+        compiled_ptr: Any = self.forward
+        # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
+
+        if ds_type == DynamicShapesType.UNBACKED:
+            # reason is that bytecode does torch._dynamo.eval_frame.
+            # remove_from_cache(self.original_code_object()) to force a new
+            # re-compilation. And if we use
+            # compiled_ptr = self.check_invariants_and_forward
+            # it will reset all entries.
+            assert not envs.VLLM_USE_BYTECODE_HOOK, (
+                "UNBACKED dynamic shapes requires VLLM_USE_BYTECODE_HOOK=0. "
+            )
+            assert not self.evaluate_guards, "UNBACKED dynamic shapes do not add guards"
+
             compiled_ptr = self.check_invariants_and_forward
 
         if envs.VLLM_USE_AOT_COMPILE:
@@ -195,7 +222,13 @@ class TorchCompileWithNoGuardsWrapper:
                         self.forward, *args, **kwargs
                     )
         else:
-            with _compilation_context():
+            ctx = (
+                nullcontext()
+                if self.first_compile or not self.evaluate_guards
+                else torch.compiler.set_stance("fail_on_recompile")
+            )
+            self.first_compile = False
+            with _compilation_context(), ctx:
                 return self._call_with_optional_nvtx_range(
                     self._compiled_callable, *args, **kwargs
                 )
