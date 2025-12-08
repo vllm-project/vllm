@@ -1761,7 +1761,7 @@ class OpenAIServingChat(OpenAIServing):
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
         sys_msg = get_system_message(
-            model_identity=request.chat_template_kwargs.get("model_identity", None),
+            model_identity=(request.chat_template_kwargs or {}).get("model_identity"),
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
             python_description=None,
