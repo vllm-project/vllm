@@ -1217,9 +1217,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # x_blockscale is implicitly padded/rounded by the kernel to satisfy alignment
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
-        # actual_batch_size = x_fp4.shape[0]
-        # x_blockscale = x_blockscale[:actual_batch_size, :].contiguous()
-
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
         assert x_fp4.dtype == torch.uint8
