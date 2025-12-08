@@ -115,7 +115,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
-        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
             if is_base_embeddding_weights(tensor_name):
@@ -139,14 +139,8 @@ class LoRAModel:
                         f" with the base model's vocabulary size({model_vocab_size})."
                     )
                 loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
-                if pin_memory:
-                    loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
             else:
                 loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
-
-                if pin_memory:
-                    loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
-
         return cls(lora_model_id, peft_helper.r, loras)
 
     @classmethod
@@ -741,6 +735,22 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
+        device = (
+            lora.lora_a[0].device
+            if isinstance(lora.lora_a, list)
+            else lora.lora_a.device
+        )
+        pin_memory = str(device) == "cpu" and is_pin_memory_available()
+        if pin_memory:
+            for lora in lora_model.loras.values():
+                if isinstance(lora.lora_a, list):
+                    for index in range(len(lora.lora_a)):
+                        lora.lora_a[index] = lora.lora_a[index].pin_memory()
+                        lora.lora_b[index] = lora.lora_b[index].pin_memory()
+                else:
+                    lora.lora_a = lora.lora_a.pin_memory()
+                    lora.lora_b = lora.lora_b.pin_memory()
+        pass
 
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
