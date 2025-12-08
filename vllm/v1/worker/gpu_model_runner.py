@@ -4743,7 +4743,7 @@ class GPUModelRunner(
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            self.max_num_tokens // self.pcp_world_size, is_profile=True
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
