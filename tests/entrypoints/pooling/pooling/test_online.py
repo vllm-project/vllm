@@ -361,7 +361,6 @@ async def test_bytes_only_embed_dtype_and_endianness(
     input_texts = [
         "The best thing about vLLM is that it supports many different models",
     ] * 2
-    n_tokens = 15
 
     url = server.url_for("pooling")
     float_response = requests.post(
@@ -374,6 +373,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     )
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
+    n_tokens = responses_float.usage.prompt_tokens // len(input_texts)
 
     for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
         for endianness in ENDIANNESS:

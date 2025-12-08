@@ -36,7 +36,6 @@ if current_platform.is_rocm():
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"
-embedding_size = 384
 
 
 @pytest.fixture(scope="module")
@@ -359,6 +358,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
         input=input_texts, model=model_name, encoding_format="float"
     )
     float_data = [d.embedding for d in responses_float.data]
+    embedding_size = len(float_data[0])
 
     for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
         for endianness in ENDIANNESS:
