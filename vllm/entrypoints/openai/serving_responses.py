@@ -1219,6 +1219,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser = self.reasoning_parser(tokenizer)
         previous_text = ""
         previous_token_ids: list[int] = []
+        previous_logprobs: list = []
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
@@ -1242,6 +1243,8 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                 previous_text += output.text
                 previous_token_ids += output.token_ids
+                if output.logprobs is not None:
+                    previous_logprobs.extend(output.logprobs)
                 if not delta_message:
                     continue
                 if not first_delta_sent:
@@ -1499,6 +1502,18 @@ class OpenAIServingResponses(OpenAIServing):
                         item=item,
                     )
                 )
+
+        # Update context.last_output with accumulated text, token_ids and logprobs
+        # so that responses_full_generator can build the correct final response
+        if (
+            isinstance(context, SimpleContext)
+            and context.last_output is not None
+            and context.last_output.outputs
+        ):
+            context.last_output.outputs[0].text = previous_text
+            context.last_output.outputs[0].token_ids = tuple(previous_token_ids)
+            if previous_logprobs:
+                context.last_output.outputs[0].logprobs = previous_logprobs
 
     async def _process_harmony_streaming_events(
         self,
