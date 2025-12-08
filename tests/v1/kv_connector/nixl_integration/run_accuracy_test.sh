@@ -167,7 +167,8 @@ run_tests_for_model() {
     FULL_CMD="$BASE_CMD"
     fi
 
-    eval "$FULL_CMD &"
+    echo "Full command: $FULL_CMD" > prefill_instance_$i.log
+    eval "$FULL_CMD  2>&1 | tee -a prefill_instance_$i.log &"
 
     # Store host and port for proxy configuration
     PREFILL_HOSTS+=("localhost")
@@ -222,7 +223,8 @@ run_tests_for_model() {
     FULL_CMD="$BASE_CMD"
     fi
 
-    eval "$FULL_CMD &"
+    echo "Full command: $FULL_CMD" > decode_instance_$i.log
+    eval "$FULL_CMD 2>&1 | tee -a decode_instance_$i.log &"
 
     # Store host and port for proxy configuration
     DECODE_HOSTS+=("localhost")
