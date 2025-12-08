@@ -735,7 +735,9 @@ class LoRAModelManager:
 
         for lora in lora_model.loras.values():
             lora.optimize()
-
+            
+        lora = next(iter(lora_model.loras.values()), None)
+        assert lora is not None
         device = (
             lora.lora_a[0].device
             if isinstance(lora.lora_a, list)
