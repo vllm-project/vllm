@@ -473,10 +473,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
     def forward(
         self,
         layer: AttentionLayer,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        k_c_normed: torch.Tensor,  # latent/compressed KV
-        k_pe: torch.Tensor,  # value in unified attn
+        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        key: torch.Tensor,  # latent/compressed KV
+        value: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         output: torch.Tensor | None = None,
@@ -502,10 +501,17 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
+        if isinstance(query, tuple):
+            q_nope, q_pe = query
+        else:
+            q_nope, q_pe = query.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
         q_nope = q_nope[:num_actual_toks, ...]
         q_pe = q_pe[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
+        k_c_normed = key[:num_actual_toks, ...]
+        k_pe = value[:num_actual_toks, ...]
 
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)

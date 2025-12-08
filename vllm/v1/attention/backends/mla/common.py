@@ -1903,10 +1903,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def forward(
         self,
         layer: AttentionLayer,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
+        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: torch.Tensor | None = None,
@@ -1930,8 +1929,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     self.num_heads,
                     self.qk_nope_head_dim + self.v_head_dim,
                 ),
-                device=k_c_normed.device,
-                dtype=k_c_normed.dtype,
+                device=key.device,
+                dtype=key.dtype,
             )
 
             # The zero fill is required when used with DP + EP
@@ -1949,10 +1948,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
+        if isinstance(query, tuple):
+            q_nope, q_pe = query
+        else:
+            q_nope, q_pe = query.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
         q_nope = q_nope[:num_actual_toks, ...]
         q_pe = q_pe[:num_actual_toks, ...]
-        kv_c_normed = kv_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
+        kv_c_normed = key[:num_actual_toks, ...]
+        k_pe = value[:num_actual_toks, ...]
 
         assert (
             attn_metadata.num_decodes is not None

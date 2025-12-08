@@ -698,25 +698,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     output_shape, dtype=q_nope.dtype, device=q_nope.device
                 )
                 self.impl.forward(
-                    self,
-                    q_nope,
-                    q_pe,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
+                    layer=self,
+                    query=(q_nope, q_pe),
+                    key=kv_c_normed,
+                    value=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                     output=output,
                 )
                 return output
             else:
                 return self.impl.forward(
-                    self,
-                    q_nope,
-                    q_pe,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
+                    layer=self,
+                    query=(q_nope, q_pe),
+                    key=kv_c_normed,
+                    value=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -964,7 +962,12 @@ def unified_mla_attention(
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(
-        self, q_nope, q_pe, kv_c_normed, k_pe, kv_cache, attn_metadata
+        layer=self,
+        query=(q_nope, q_pe),
+        key=kv_c_normed,
+        value=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
     )
 
     return output
@@ -1008,13 +1011,12 @@ def unified_mla_attention_with_output(
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
-        self,
-        q_nope,
-        q_pe,
-        kv_c_normed,
-        k_pe,
-        kv_cache,
-        attn_metadata,
+        layer=self,
+        query=(q_nope, q_pe),
+        key=kv_c_normed,
+        value=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
