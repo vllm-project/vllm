@@ -1736,13 +1736,9 @@ class EngineArgs:
             )
 
         observability_config = ObservabilityConfig(
-<<<<<<< HEAD
             show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
-=======
-            show_hidden_metrics_for_version=(self.show_hidden_metrics_for_version),
             disable_prometheus_metrics=self.disable_prometheus_metrics,
             enable_otel_metrics=self.enable_otel_metrics,
->>>>>>> 3143cebda (implement otel metrics)
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
             kv_cache_metrics=self.kv_cache_metrics,
