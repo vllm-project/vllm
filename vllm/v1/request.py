@@ -135,6 +135,11 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
+        # SLA tier metadata (for scheduler prioritization); defaults to "batch".
+        self.sla_tier = (
+            sampling_params.sla_tier if sampling_params is not None else "batch"
+        )
+
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
     @classmethod
