@@ -312,7 +312,10 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
-        return self._forward_sdpa(query, key, value, cu_seqlens)
+        assert self.is_flash_attn_backend, (
+            "XPU only supports FLASH_ATTN for vision attention."
+        )
+        return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
 
     def forward_tpu(
         self,

@@ -90,10 +90,7 @@ def get_vit_attn_backend(
     """
     attn_backend = attn_backend_override
 
-    # Lazy import to avoid circular dependency.
-    from vllm.attention.selector import get_env_variable_attn_backend
-
-    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
+    selected_backend = get_current_vllm_config().attention_config.backend
     if attn_backend is None:
         attn_backend = selected_backend
 
