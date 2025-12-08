@@ -303,3 +303,6 @@ windo = "windo"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13.9'"
+]
