@@ -237,6 +237,26 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
+    def current_stream(cls):
+        return torch.xpu.current_stream()
+
+    @classmethod
+    def synchronize(cls):
+        return torch.xpu.synchronize()
+
+    @classmethod
+    def empty_cache(cls):
+        return torch.xpu.empty_cache()
+
+    @classmethod
+    def mem_get_info(cls):
+        return torch.xpu.mem_get_info()
+
+    @classmethod
+    def manual_seed_all(cls):
+        return torch.xpu.manual_seed_all()
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()

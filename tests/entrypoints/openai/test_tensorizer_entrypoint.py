@@ -25,10 +25,7 @@ LORA_PATH = "davzoku/finqa_adapter_1b"
 
 def _cleanup():
     gc.collect()
-    if current_platform.is_xpu():
-        torch.xpu.empty_cache()
-    else:
-        torch.cuda.empty_cache()
+    current_platform.empty_cache()
 
 
 @pytest.fixture(autouse=True)
