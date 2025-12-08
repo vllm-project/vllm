@@ -184,23 +184,15 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        apply_rotary_emb = None
+        if find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
 
-        # If torch compile is not enabled, use rotary embedding function from
-        # flash_attn package, otherwise use the naive pytorch embedding
-        # implementation is faster when torch compile is enabled.
-        if not torch.compiler.is_compiling():
-            if find_spec("flash_attn") is not None:
-                from flash_attn.ops.triton.rotary import apply_rotary
-
-                apply_rotary_emb = apply_rotary
-            else:
-                logger.warning(
-                    "flash_attn is not installed. Falling back to PyTorch "
-                    "implementation for rotary embeddings."
-                )
-
-        if apply_rotary_emb is None:
+            apply_rotary_emb = apply_rotary
+        else:
+            logger.warning(
+                "flash_attn is not installed. Falling back to PyTorch "
+                "implementation for rotary embeddings."
+            )
             apply_rotary_emb = self.forward_native
 
         output = apply_rotary_emb(x, cos, sin).type_as(x)
