@@ -468,7 +468,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             shard_size = layer.intermediate_size_per_partition
 
             # convert gptq and awq weight to a standard format
-            if layer.quant_config.linear_quant_method == "awq":
+            # awq_marlin uses the same weight format as awq
+            if layer.quant_config.linear_quant_method in ("awq", "awq_marlin"):
                 assert layer.quant_config.weight_bits == 4
                 if "weight" in weight_name:
                     loaded_weight = convert_awq_tensor(loaded_weight, "qweight")
