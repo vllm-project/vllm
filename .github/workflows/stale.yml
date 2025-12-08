@@ -7,6 +7,8 @@ on:
 
 jobs:
   close-issues-and-pull-requests:
+    # Prevents triggering on forks or other repos
+    if: github.repository == 'vllm-project/vllm'
     permissions:
       issues: write
       pull-requests: write
