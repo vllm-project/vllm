@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.serving_engine import (
     EmbeddingServeContext,
     OpenAIServing,
     ServeContext,
-    TextTokensPrompt,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
@@ -244,7 +243,7 @@ class EmbeddingMixin(OpenAIServing):
         request,
         input_ids: list[int],
         input_text: str,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         """Override to support chunked processing for embedding requests."""
         token_num = len(input_ids)
 
@@ -309,7 +308,7 @@ class EmbeddingMixin(OpenAIServing):
                         )
                     )
 
-            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # For other request types, use the parent's implementation
         return super()._validate_input(request, input_ids, input_text)

@@ -11,7 +11,6 @@ from http import HTTPStatus
 from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import numpy as np
-import torch
 from fastapi import Request
 from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
@@ -49,9 +48,9 @@ from vllm.entrypoints.pooling.score.protocol import (
 )
 
 if sys.version_info >= (3, 12):
-    from typing import TypedDict
+    pass
 else:
-    from typing_extensions import TypedDict
+    pass
 
 from openai.types.responses import (
     ToolChoiceFunction,
@@ -160,15 +159,6 @@ AnyResponse: TypeAlias = (
     | ScoreResponse
     | GenerateResponse
 )
-
-
-class TextTokensPrompt(TypedDict):
-    prompt: str
-    prompt_token_ids: list[int]
-
-
-class EmbedsPrompt(TypedDict):
-    prompt_embeds: torch.Tensor
 
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
@@ -845,7 +835,7 @@ class OpenAIServing:
         prompt: str,
         tokenizer: TokenizerLike,
         add_special_tokens: bool,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
 
         if (
@@ -886,7 +876,7 @@ class OpenAIServing:
         request: AnyRequest,
         prompt_ids: list[int],
         tokenizer: TokenizerLike | None,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 
         if truncate_prompt_tokens is None:
@@ -909,7 +899,7 @@ class OpenAIServing:
         request: AnyRequest,
         input_ids: list[int],
         input_text: str,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest, ClassificationRequest,
@@ -940,7 +930,7 @@ class OpenAIServing:
                     f"{token_num} tokens in the input for {operation}. "
                     f"Please reduce the length of the input."
                 )
-            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
@@ -948,7 +938,7 @@ class OpenAIServing:
             request,
             (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
         ):
-            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
@@ -976,7 +966,7 @@ class OpenAIServing:
                 f" - {token_num})."
             )
 
-        return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+        return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
     async def _tokenize_prompt_input_async(
         self,
@@ -984,7 +974,7 @@ class OpenAIServing:
         tokenizer: TokenizerLike,
         prompt_input: str | list[int],
         add_special_tokens: bool = True,
-    ) -> TextTokensPrompt:
+    ) -> TokensPrompt:
         """
         A simpler implementation that tokenizes a single prompt input.
         """
@@ -1003,7 +993,7 @@ class OpenAIServing:
         tokenizer: TokenizerLike,
         prompt_inputs: Iterable[str | list[int]],
         add_special_tokens: bool = True,
-    ) -> AsyncGenerator[TextTokensPrompt, None]:
+    ) -> AsyncGenerator[TokensPrompt, None]:
         """
         A simpler implementation that tokenizes multiple prompt inputs.
         """
@@ -1074,13 +1064,12 @@ class OpenAIServing:
         )
 
         if "prompt_token_ids" not in engine_prompt:
-            tokenized_prompt = await self._tokenize_prompt_input_async(
+            engine_prompt = await self._tokenize_prompt_input_async(
                 request,
                 renderer.get_tokenizer(),
                 engine_prompt["prompt"],
                 add_special_tokens=add_special_tokens,
             )
-            engine_prompt = TokensPrompt(**tokenized_prompt)
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
