@@ -140,7 +140,7 @@ def video_with_metadata_glm4_1v():
     metadata = VIDEO_ASSETS[0].metadata
     question = "Describe the video."
     video_prompt = "<|begin_of_video|><|video|><|end_of_video|>"
-    formatted_prompt = f"<|user|>\n{video_prompt}{question}<|assistant|>\n"
+    formatted_prompt = f"[gMASK]<|user|>\n{video_prompt}{question}<|assistant|>\n"
 
     scales = [0.1, 0.2, 0.25]
     video_input = [

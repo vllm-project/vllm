@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -9,10 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
-    UBatchSlice,
-    UBatchSlices,
     check_ubatch_thresholds,
-    create_ubatch_slices,
     is_second_ubatch_empty,
 )
 
@@ -91,20 +89,6 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
         return num_tokens_across_dp.cpu()
 
 
-# This just pads the second ubatch slice out to the total number of tokens
-# (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
-def _pad_out_ubatch_slice(
-    ubatch_slices: UBatchSlices, num_total_tokens: int
-) -> UBatchSlices:
-    padded_second_token_slice = slice(
-        ubatch_slices[1].token_slice.start, num_total_tokens
-    )
-    ubatch_slices[1] = UBatchSlice(
-        ubatch_slices[1].request_slice, padded_second_token_slice
-    )
-    return ubatch_slices
-
-
 def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
@@ -175,7 +159,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
-) -> tuple[UBatchSlices | None, torch.Tensor | None]:
+) -> tuple[bool, torch.Tensor | None]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -204,7 +188,7 @@ def coordinate_batch_across_dp(
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return None, None
+        return False, None
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -228,23 +212,4 @@ def coordinate_batch_across_dp(
         parallel_config,
     )
 
-    # Don't microbatch unless every other DP worker is also microbatching
-    if not should_ubatch:
-        return (None, num_tokens_after_padding)
-
-    # This doesn't actually pad the ubatch slices. It just initializes the
-    # split point to the padded value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_slice after attention
-    # metadata creation
-    assert num_tokens_after_padding is not None
-    num_tokens_padded = int(num_tokens_after_padding[0].item())
-    token_split_point = int(num_tokens_padded) // 2
-
-    assert num_scheduled_tokens_per_request is not None
-    ubatch_slices = create_ubatch_slices(
-        num_scheduled_tokens_per_request, token_split_point
-    )
-    ubatch_slices = _pad_out_ubatch_slice(ubatch_slices, num_tokens_padded)
-    assert sum(s.num_tokens for s in ubatch_slices) == num_tokens_padded
-
-    return (ubatch_slices, num_tokens_after_padding)
+    return (should_ubatch, num_tokens_after_padding)
