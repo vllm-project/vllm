@@ -1056,9 +1056,10 @@ class OpenAIServing:
             **(chat_template_kwargs or {}),
         }
 
-        # For now, use the async tokenizer for chat template tokenization if possible
+        # For now, use the async tokenizer for chat template tokenization if possible.
         # Later we can move the async tokenizer into the renderer so we can return both
-        # text and token IDs from render_messages_async.
+        # text and token IDs in the same prompt from `render_messages_async` which is
+        # used for logging and `enable_response_messages`.
         from vllm.tokenizers.mistral import MistralTokenizer
 
         conversation, engine_prompt = await renderer.render_messages_async(
