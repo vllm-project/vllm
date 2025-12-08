@@ -82,12 +82,10 @@ def resolve_tokenizer_args(
     *args,
     runner_type: "RunnerType" = "generate",
     tokenizer_mode: str = "auto",
-    trust_remote_code: bool = False,
-    revision: str | None = None,
-    download_dir: str | None = None,
     **kwargs,
 ):
-    tokenizer_kwargs = kwargs
+    revision: str | None = kwargs.get("revision")
+    download_dir: str | None = kwargs.get("download_dir")
 
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
@@ -115,7 +113,7 @@ def resolve_tokenizer_args(
     # Separate model folder from file path for GGUF models
     if is_gguf(tokenizer_name):
         if check_gguf_file(tokenizer_name):
-            tokenizer_kwargs["gguf_file"] = Path(tokenizer_name).name
+            kwargs["gguf_file"] = Path(tokenizer_name).name
             tokenizer_name = Path(tokenizer_name).parent
         elif is_remote_gguf(tokenizer_name):
             tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
@@ -125,22 +123,22 @@ def resolve_tokenizer_args(
                 quant_type,
                 revision=revision,
             )
-            tokenizer_kwargs["gguf_file"] = gguf_file
+            kwargs["gguf_file"] = gguf_file
 
-    if "truncation_side" not in tokenizer_kwargs:
+    if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":
-            tokenizer_kwargs["truncation_side"] = "left"
+            kwargs["truncation_side"] = "left"
         elif runner_type == "pooling":
-            tokenizer_kwargs["truncation_side"] = "right"
+            kwargs["truncation_side"] = "right"
         else:
             assert_never(runner_type)
 
     if tokenizer_mode == "slow":
-        if tokenizer_kwargs.get("use_fast", False):
+        if kwargs.get("use_fast", False):
             raise ValueError("Cannot use the fast tokenizer in slow tokenizer mode.")
 
         tokenizer_mode = "hf"
-        tokenizer_kwargs["use_fast"] = False
+        kwargs["use_fast"] = False
 
     # Try to use official Mistral tokenizer if possible
     if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
@@ -157,14 +155,7 @@ def resolve_tokenizer_args(
     if tokenizer_mode == "auto":
         tokenizer_mode = "hf"
 
-    tokenizer_args = args
-    tokenizer_kwargs = {
-        "trust_remote_code": trust_remote_code,
-        "revision": revision,
-        **tokenizer_kwargs,
-    }
-
-    return tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs
+    return tokenizer_mode, tokenizer_name, args, kwargs
 
 
 cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
@@ -194,15 +185,13 @@ def get_tokenizer(
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
-    tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs = (
-        cached_resolve_tokenizer_args(
-            tokenizer_name,
-            *args,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            download_dir=download_dir,
-            **kwargs,
-        )
+    tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
+        tokenizer_name,
+        *args,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        download_dir=download_dir,
+        **kwargs,
     )
 
     if tokenizer_cls == TokenizerLike:
@@ -210,9 +199,7 @@ def get_tokenizer(
     else:
         tokenizer_cls_ = tokenizer_cls
 
-    tokenizer = tokenizer_cls_.from_pretrained(
-        tokenizer_name, *tokenizer_args, **tokenizer_kwargs
-    )
+    tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "

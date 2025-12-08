@@ -4,7 +4,7 @@ import inspect
 from collections import deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 import jinja2
 import jinja2.ext
@@ -497,11 +497,13 @@ class HfRenderer(RendererLike):
         if config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = cached_get_tokenizer(
-                tokenizer_cls=CachedHfTokenizer,  # type: ignore[type-abstract]
-                **tokenizer_kwargs,
+            tokenizer = cast(
+                HfTokenizer,
+                cached_get_tokenizer(
+                    tokenizer_cls=CachedHfTokenizer,  # type: ignore[type-abstract]
+                    **tokenizer_kwargs,
+                ),
             )
-            assert isinstance(tokenizer, HfTokenizer)
 
         self._tokenizer = tokenizer
 

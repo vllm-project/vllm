@@ -51,22 +51,13 @@ class TestTokenizer(TokenizerLike):
 def test_resolve_tokenizer_args_idempotent(runner_type):
     tokenizer_name = "facebook/opt-125m"
 
-    tokenizer_mode, tokenizer_name, tokenizer_args, tokenizer_kwargs = (
-        resolve_tokenizer_args(
-            tokenizer_name,
-            runner_type=runner_type,
-        )
+    tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
+        tokenizer_name,
+        runner_type=runner_type,
     )
 
-    assert (
-        tokenizer_mode,
-        tokenizer_name,
-        tokenizer_args,
-        tokenizer_kwargs,
-    ) == resolve_tokenizer_args(
-        tokenizer_name,
-        *tokenizer_args,
-        **tokenizer_kwargs,
+    assert (tokenizer_mode, tokenizer_name, args, kwargs) == resolve_tokenizer_args(
+        tokenizer_name, *args, **kwargs
     )
 
 
