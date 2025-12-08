@@ -38,7 +38,7 @@ pull_request_rules:
         > [!TIP]
         > <details>
         > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
-        > </br>
+        > <br/>
         > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
         >
         > ```bash
