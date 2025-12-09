@@ -1293,6 +1293,8 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
+    eplb_static: bool = False,
+    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1332,29 +1334,30 @@ def eplb_map_to_physical_and_record(
 
     topk_ids = physical_ids
 
-    # 2. Record expert load metrics.
+    if eplb_static:
+        # 2. Record expert load metrics.
 
-    # TODO(bowen): When using `FusedMoEModularKernel`, this
-    # can be done in a more unified way, since
-    # `FusedMoEPrepareAndFinalize` will return the expert
-    # token count, in some cases directly from the kernel.
-    # However, now there are many code paths not using
-    # the modular kernel, e.g. calling `fused_experts`,
-    # so we decide to keep the logic here.
-    #
-    # If later refactor moved all the MoE kernel calls
-    # to the modular kernel, we can move this logic there
-    # to achieve better efficiency.
+        # TODO(bowen): When using `FusedMoEModularKernel`, this
+        # can be done in a more unified way, since
+        # `FusedMoEPrepareAndFinalize` will return the expert
+        # token count, in some cases directly from the kernel.
+        # However, now there are many code paths not using
+        # the modular kernel, e.g. calling `fused_experts`,
+        # so we decide to keep the logic here.
+        #
+        # If later refactor moved all the MoE kernel calls
+        # to the modular kernel, we can move this logic there
+        # to achieve better efficiency.
 
-    # `expert_load_view`: (num_physical_experts,)
+        # `expert_load_view`: (num_physical_experts,)
 
-    # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-    topk_ids_flatten = topk_ids.flatten()
-    expert_load_view.scatter_add_(
-        dim=0,
-        index=topk_ids_flatten.long(),
-        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-    )
+        # `torch.bincount` is not compilable, so use `scatter_add_` instead.
+        topk_ids_flatten = topk_ids.flatten()
+        expert_load_view.scatter_add_(
+            dim=0,
+            index=topk_ids_flatten.long(),
+            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+        )
     return topk_ids
 
 

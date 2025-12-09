@@ -353,6 +353,7 @@ class FusedMoE(CustomOp):
         activation: str = "silu",
         is_act_and_mul: bool = True,
         enable_eplb: bool = False,
+        eplb_static: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
@@ -436,6 +437,7 @@ class FusedMoE(CustomOp):
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
+        self.eplb_static = eplb_static
         self.expert_load_view: torch.Tensor | None = None
         self.logical_to_physical_map: torch.Tensor | None = None
         self.logical_replica_count: torch.Tensor | None = None
@@ -1633,6 +1635,8 @@ class FusedMoE(CustomOp):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
+                eplb_static=self.eplb_static,
+                indices_type=indices_type,
             )
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
@@ -1820,6 +1824,7 @@ class FusedMoE(CustomOp):
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
                 enable_eplb=self.enable_eplb,
+                eplb_static=self.eplb_static,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
@@ -1984,6 +1989,7 @@ class FusedMoE(CustomOp):
                 activation=self.activation,
                 apply_router_weight_on_input=self.apply_router_weight_on_input,
                 enable_eplb=self.enable_eplb,
+                eplb_static=self.eplb_static,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,

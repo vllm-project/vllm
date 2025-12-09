@@ -195,6 +195,7 @@ class Glm4MoE(nn.Module):
             routed_scaling_factor=1.0,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
+            eplb_static=eplb_config.static,
             num_redundant_experts=self.n_redundant_experts,
         )
 

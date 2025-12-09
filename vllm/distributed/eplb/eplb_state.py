@@ -30,8 +30,10 @@ import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
+from safetensors.torch import load_file, save_file
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
@@ -204,6 +206,40 @@ class EplbModelState:
     """
 
 
+def save_eplb_state(
+    global_expert_load_windows: list[torch.Tensor],
+    save_dir: Path,
+    state_iter: int,
+    model_states: list[EplbModelState],
+) -> None:
+    tensors = {}
+    for eplb_model_state, global_expert_load_window in zip(
+        model_states, global_expert_load_windows
+    ):
+        name = type(eplb_model_state.model).__name__
+        tensors[f"global_expert_load_window_{name}"] = global_expert_load_window
+    try:
+        file_path = f"{save_dir}/global_expert_load_window_i{state_iter}.safetensors"  # noqa: E501
+        save_file(tensors, file_path)
+        logger.info("Successfully saved to %s.", file_path)
+    except Exception as e:
+        logger.error("An error occurred while saving the tensor: %s.", e)
+
+
+def load_eplb_state(
+    eplb_load_path: Path, model_states: list[EplbModelState]
+) -> list[torch.Tensor]:
+    loaded_tensors = load_file(eplb_load_path)
+    global_load_windows = []
+    for eplb_model_state in model_states:
+        name = type(eplb_model_state.model).__name__
+        tensor = loaded_tensors[f"global_expert_load_window_{name}"]
+        tensor = tensor.to(eplb_model_state.expert_load_window.device)
+        global_load_windows.append(tensor)
+    logger.info("Successfully loaded %s.", eplb_load_path)
+    return global_load_windows
+
+
 class EplbState:
     """
     EplbState of each expert parallel model. Key is the model config hash.
@@ -243,6 +279,10 @@ class EplbState:
         """
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
+        """
+        self.saved_state_iter = 0
+        """
+        Iterator for the saved state file.
         """
         self.is_async: bool = False
         """
@@ -413,11 +453,17 @@ class EplbState:
             device=self.device,
         )
 
-        # Set the initial progress of rearrangement to 3/4
         eplb_step_interval = self.parallel_config.eplb_config.step_interval
-        self.expert_rearrangement_step = max(
-            0, eplb_step_interval - eplb_step_interval // 4
-        )
+        if (
+            self.parallel_config.eplb_config.load_initial_load_window
+            or self.parallel_config.eplb_config.save_load_window
+        ):
+            self.expert_rearrangement_step = 0
+        else:
+            # Set the initial progress of rearrangement to 3/4
+            self.expert_rearrangement_step = max(
+                0, eplb_step_interval - eplb_step_interval // 4
+            )
         self.expert_rearrangement_step_interval = eplb_step_interval
 
         # Set the policy based on the selected eplb algorithm type.
@@ -661,6 +707,7 @@ class EplbState:
         self,
         is_profile: bool = False,
         execute_shuffle: bool = True,
+        load_initial_load_window: bool = False,
         global_expert_loads: list[torch.Tensor] | None = None,
         rank_mapping: dict[int, int] | None = None,
     ) -> torch.Tensor | None:
@@ -695,9 +742,21 @@ class EplbState:
                 "(profile)" if is_profile else "",
             )
 
-        if global_expert_loads is None:
+        if load_initial_load_window:
+            assert self.parallel_config.eplb_config.load_path is not None
+            global_expert_load_windows = load_eplb_state(
+                self.parallel_config.eplb_config.load_path,
+                list(self.model_states.values()),
+            )
+            assert global_expert_load_windows is not None
+        elif global_expert_loads is None:
             # Map the physical expert load to global logical experts
             global_expert_load_windows = []
+            should_save_eplb_state = (
+                self.parallel_config.eplb_config.save_load_window
+                and not is_profile
+                and not load_initial_load_window
+            )
             if not execute_shuffle:
                 num_models = torch.tensor(
                     [len(self.model_states)], dtype=torch.int32, device="cpu"
@@ -738,6 +797,17 @@ class EplbState:
 
                 global_expert_load_window = logical_expert_load_window.sum(dim=0)
                 global_expert_load_windows.append(global_expert_load_window)
+
+            if is_main_rank and should_save_eplb_state:
+                assert self.parallel_config.eplb_config.save_dir is not None
+                save_eplb_state(
+                    global_expert_load_windows,
+                    self.parallel_config.eplb_config.save_dir,
+                    self.saved_state_iter,
+                    list(self.model_states.values()),
+                )
+                self.saved_state_iter += 1
+
             # Perform all-reduce to get the expert load across all ranks for each model
             global_expert_load_windows = self._allreduce_list(
                 global_expert_load_windows

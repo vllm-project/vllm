@@ -2368,6 +2368,10 @@ class GPUModelRunner(
         """
         if not self.parallel_config.enable_eplb:
             return
+        if self.parallel_config.eplb_config.load_initial_load_window and is_profile:
+            return
+        if self.parallel_config.eplb_config.static:
+            return
 
         assert self.eplb_state is not None
         model = self.get_model()
@@ -3666,7 +3670,11 @@ class GPUModelRunner(
                 old_global_expert_indices,
                 rank_mapping,
             )
-            if self.eplb_state.is_async:
+            if self.parallel_config.eplb_config.load_initial_load_window:
+                self.eplb_state.rearrange(load_initial_load_window=True)
+                if self.parallel_config.eplb_config.static:
+                    self.eplb_state = None
+            if self.eplb_state and self.eplb_state.is_async:
                 self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
         if (
