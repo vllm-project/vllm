@@ -30,6 +30,9 @@ class Sampler:
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
+        # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
+        # that num_nans is computed before applying penalties and temperature.
+        num_nans = get_num_nans(logits) if self.compute_nans else None
         sampled, processed_logits = self.sample(logits, sampling_metadata)
         if sampling_metadata.max_num_logprobs is not None:
             logits = (
@@ -45,7 +48,6 @@ class Sampler:
         else:
             logprobs_tensors = None
 
-        num_nans = get_num_nans(processed_logits) if self.compute_nans else None
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
