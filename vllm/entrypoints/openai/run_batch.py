@@ -261,18 +261,13 @@ async def stream_file_lines(path_or_url: str) -> AsyncIterator[str]:
     """Stream lines from a local file or URL without loading everything into memory."""
     if path_or_url.startswith(("http://", "https://")):
         async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
-            buffer = ""
-            async for chunk in resp.content.iter_any():
-                buffer += chunk.decode("utf-8")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.strip()
-                    if line:
-                        yield line
+            resp.raise_for_status()
 
-            # Don't forget the last line if no trailing newline
-            if buffer.strip():
-                yield buffer.strip()
+            async for line_bytes in resp.content:
+                line = line_bytes.decode("utf-8")
+
+                if line:
+                    yield line
     else:
         async with aiofiles.open(path_or_url, encoding="utf-8") as f:
             async for line in f:
@@ -330,11 +325,13 @@ class OrderedStreamingWriter(AbstractAsyncContextManager):
 
         # If output is a URL, upload the temp file
         if self._is_url and self._temp_path is not None:
-            logger.info("Uploading outputs to %s", self.output_path)
-            await upload_data(self.output_path, self._temp_path, from_file=True)
-            import os
+            try:
+                logger.info("Uploading outputs to %s", self.output_path)
+                await upload_data(self.output_path, self._temp_path, from_file=True)
+            finally:
+                import os
 
-            os.unlink(self._temp_path)
+                os.unlink(self._temp_path)
 
     async def add_result(self, index: int, result: BatchRequestOutput) -> None:
         """Add a result and flush any ready results to disk."""
@@ -507,7 +504,6 @@ async def make_async_error_request_output(
 
 
 async def run_request(
-    semaphore: asyncio.Semaphore,
     serving_engine_func: Callable,
     request: BatchRequestInput,
     index: int,
@@ -516,8 +512,7 @@ async def run_request(
 ) -> None:
     """Run a request and stream the result to the writer."""
     try:
-        async with semaphore:
-            response = await serving_engine_func(request.body)
+        response = await serving_engine_func(request.body)
 
         if isinstance(
             response,
@@ -660,17 +655,17 @@ async def run_batch(
             async for request_json in stream_file_lines(args.input_file):
                 request = BatchRequestInput.model_validate_json(request_json)
 
-                # Create task for this request
-                task = await create_request_task(
-                    semaphore=semaphore,
-                    request=request,
-                    index=index,
-                    tracker=tracker,
-                    writer=writer,
-                    openai_serving_chat=openai_serving_chat,
-                    openai_serving_embedding=openai_serving_embedding,
-                    openai_serving_scores=openai_serving_scores,
-                )
+                async with semaphore:
+                    # Create task for this request
+                    task = await create_request_task(
+                        request=request,
+                        index=index,
+                        tracker=tracker,
+                        writer=writer,
+                        openai_serving_chat=openai_serving_chat,
+                        openai_serving_embedding=openai_serving_embedding,
+                        openai_serving_scores=openai_serving_scores,
+                    )
 
                 if task is not None:
                     tasks.add(task)
@@ -693,7 +688,6 @@ async def run_batch(
 
 
 async def create_request_task(
-    semaphore: asyncio.Semaphore,
     request: BatchRequestInput,
     index: int,
     tracker: StreamingBatchProgressTracker,
@@ -716,7 +710,6 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
-                semaphore,
                 openai_serving_chat.create_chat_completion,
                 request,
                 index,
@@ -737,7 +730,6 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
-                semaphore,
                 openai_serving_embedding.create_embedding,
                 request,
                 index,
@@ -758,7 +750,6 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
-                semaphore,
                 openai_serving_scores.create_score,
                 request,
                 index,
@@ -779,7 +770,6 @@ async def create_request_task(
         tracker.submitted()
         return asyncio.create_task(
             run_request(
-                semaphore,
                 openai_serving_scores.do_rerank,
                 request,
                 index,
