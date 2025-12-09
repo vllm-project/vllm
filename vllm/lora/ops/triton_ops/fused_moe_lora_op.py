@@ -263,9 +263,6 @@ def _fused_moe_lora_kernel(
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
-    cur_b_scale_ptr = tl.load(b_scale_ptr + slice_id).to(
-        tl.pointer_type(c_ptr.dtype.element_ty)
-    )
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     # remove modulo wrap-around
@@ -292,16 +289,21 @@ def _fused_moe_lora_kernel(
         tl.extra.cuda.gdc_launch_dependents()
 
     if use_int8_w8a16:
+        cur_b_scale_ptr = tl.load(b_scale_ptr + slice_id).to(
+            tl.pointer_type(c_ptr.dtype.element_ty)
+        )
         b_scale_ptrs = (
             cur_b_scale_ptr
             + lora_id * stride_bsl
             + expert_id * stride_bse
-            + offs_k[:, None] * stride_bsk
             + offs_bn[None, :] * stride_bsn
         )
         b_scale = tl.load(b_scale_ptrs)
 
     if use_fp8_w8a8 or use_int8_w8a8:
+        cur_b_scale_ptr = tl.load(b_scale_ptr + slice_id).to(
+            tl.pointer_type(c_ptr.dtype.element_ty)
+        )
         cur_a_scale_ptr = a_scale_ptr + (slice_id % num_slice_a) * slice_a_size
         # block-wise scale ptrs
         if group_k > 0 and group_n > 0:
@@ -440,8 +442,8 @@ def _fused_moe_lora_shrink(
     num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
-    A_scale: torch.Tensor | None = None,
-    B_scale: torch.Tensor | None = None,
+    act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
@@ -449,23 +451,29 @@ def _fused_moe_lora_shrink(
     block_shape: list[int] | None = None,
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
-        assert B_scale is not None, "B_scale must be provided for w8a8 quantization"
+        assert lora_a_scale_stacked is not None, (
+            "lora_a_scale_stacked must be provided for w8a8 quantization"
+        )
         assert block_shape is None or triton.cdiv(
             lora_a_stacked[0].size(-2), block_shape[0]
-        ) == B_scale.size(-2), "Incompatible block shape for B_scale.size(-2) "
+        ) == lora_a_scale_stacked[0].size(-2), (
+            "Incompatible block shape for lora_a_scale_stacked.size(-2) "
+        )
         assert block_shape is None or triton.cdiv(
             lora_a_stacked[0].size(-1), block_shape[1]
-        ) == B_scale.size(-1), "Incompatible block shape for B_scale.size(-1) "
-
+        ) == lora_a_scale_stacked[0].size(-1), (
+            "Incompatible block shape for lora_a_scale_stacked.size(-1) "
+        )
     elif use_int8_w8a16:
-        assert B_scale is not None, "B_scale must be provided for w8a16 quantization"
+        assert lora_a_scale_stacked is not None, (
+            "lora_a_scale_stacked must be provided for w8a16 quantization"
+        )
         assert block_shape is None or block_shape[0] == 0, (
             "Block shape for activation must be 0 for w8a16"
         )
-
     else:
-        assert A_scale is None
-        assert B_scale is None
+        assert act_scale is None
+        assert lora_a_scale_stacked is None
 
     w1_lora_a_stacked = lora_a_stacked[0]
 
@@ -488,6 +496,10 @@ def _fused_moe_lora_shrink(
     grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
         num_active_loras, sorted_token_ids, expert_ids
     )
+    if lora_a_scale_stacked is not None:
+        b_scale_ptr = _get_ptr(lora_a_scale_stacked, device)
+        w1_lora_a_scale_stacked = lora_a_scale_stacked[0]
+
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -499,8 +511,8 @@ def _fused_moe_lora_shrink(
         qcurr_hidden_states,
         b_ptr,
         a_intermediate_cache1,
-        A_scale,
-        B_scale,
+        act_scale,
+        b_scale_ptr if lora_a_scale_stacked is not None else None,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -525,12 +537,20 @@ def _fused_moe_lora_shrink(
         a_intermediate_cache1.stride(3),
         stride_tl,
         stride_el,
-        A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
-        A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(3) if B_scale is not None and B_scale.ndim == 4 else 0,
-        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 4 else 0,
+        act_scale.stride(0) if act_scale is not None and act_scale.ndim == 2 else 0,
+        act_scale.stride(1) if act_scale is not None and act_scale.ndim == 2 else 0,
+        w1_lora_a_scale_stacked.stride(0)
+        if lora_a_scale_stacked is not None and w1_lora_a_scale_stacked.ndim >= 2
+        else 0,
+        w1_lora_a_scale_stacked.stride(1)
+        if lora_a_scale_stacked is not None and w1_lora_a_scale_stacked.ndim >= 2
+        else 0,
+        w1_lora_a_scale_stacked.stride(3)
+        if lora_a_scale_stacked is not None and w1_lora_a_scale_stacked.ndim == 4
+        else 0,
+        w1_lora_a_scale_stacked.stride(2)
+        if lora_a_scale_stacked is not None and w1_lora_a_scale_stacked.ndim == 4
+        else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=qcurr_hidden_states.numel(),
@@ -588,8 +608,8 @@ def _fused_moe_lora_expand(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
-    A_scale: torch.Tensor | None = None,
-    B_scale: torch.Tensor | None = None,
+    act_scale: torch.Tensor | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
@@ -597,29 +617,39 @@ def _fused_moe_lora_expand(
     block_shape: list[int] | None = None,
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
-        assert B_scale is not None, "B_scale must be provided for w8a8 quantization"
+        assert lora_b_scale_stacked is not None, (
+            "lora_b_scale_stacked must be provided for w8a8 quantization"
+        )
         assert block_shape is None or triton.cdiv(
             lora_b_stacked[0].size(-2), block_shape[0]
-        ) == B_scale.size(-2), "Incompatible block shape for B_scale.size(-2) "
+        ) == lora_b_scale_stacked[0].size(-2), (
+            "Incompatible block shape for lora_b_scale_stacked.size(-2) "
+        )
         assert block_shape is None or triton.cdiv(
             lora_b_stacked[0].size(-1), block_shape[1]
-        ) == B_scale.size(-1), "Incompatible block shape for B_scale.size(-1) "
-
+        ) == lora_b_scale_stacked[0].size(-1), (
+            "Incompatible block shape for lora_b_scale_stacked.size(-1) "
+        )
     elif use_int8_w8a16:
-        assert B_scale is not None, "B_scale must be provided for w8a16 quantization"
+        assert lora_b_scale_stacked is not None, (
+            "lora_b_scale_stacked must be provided for w8a16 quantization"
+        )
         assert block_shape is None or block_shape[0] == 0, (
             "Block shape for activation must be 0 for w8a16"
         )
-
     else:
-        assert A_scale is None
-        assert B_scale is None
+        assert act_scale is None
+        assert lora_b_scale_stacked is None
 
     b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
     N = w1_output_dim_size
 
     w1_lora_b_stacked = lora_b_stacked[0]
+
+    if lora_b_scale_stacked is not None:
+        b_scale_ptr = _get_ptr(lora_b_scale_stacked, device)
+        w1_lora_b_scale_stacked = lora_b_scale_stacked[0]
 
     a_intermediate_cache1 = a_intermediate_cache1.view(
         -1, a_intermediate_cache1.shape[3]
@@ -657,8 +687,8 @@ def _fused_moe_lora_expand(
         a_intermediate_cache1,
         b_ptr,
         out_view,
-        A_scale,
-        B_scale,
+        act_scale,
+        b_scale_ptr if lora_b_scale_stacked is not None else None,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -683,12 +713,20 @@ def _fused_moe_lora_expand(
         out_view.stride(2),
         stride_tl,
         stride_el,
-        A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
-        A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
-        B_scale.stride(3) if B_scale is not None and B_scale.ndim == 4 else 0,
-        B_scale.stride(2) if B_scale is not None and B_scale.ndim == 4 else 0,
+        act_scale.stride(0) if act_scale is not None and act_scale.ndim == 2 else 0,
+        act_scale.stride(1) if act_scale is not None and act_scale.ndim == 2 else 0,
+        w1_lora_b_scale_stacked.stride(0)
+        if lora_b_scale_stacked is not None and w1_lora_b_scale_stacked.ndim >= 2
+        else 0,
+        w1_lora_b_scale_stacked.stride(1)
+        if lora_b_scale_stacked is not None and w1_lora_b_scale_stacked.ndim >= 2
+        else 0,
+        w1_lora_b_scale_stacked.stride(3)
+        if lora_b_scale_stacked is not None and w1_lora_b_scale_stacked.ndim == 4
+        else 0,
+        w1_lora_b_scale_stacked.stride(2)
+        if lora_b_scale_stacked is not None and w1_lora_b_scale_stacked.ndim == 4
+        else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
@@ -940,8 +978,8 @@ def _fused_moe_lora_shrink_fake(
     num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
-    A_scale: torch.Tensor | None = None,
-    B_scale: torch.Tensor | None = None,
+    act_scale: torch.Tensor | None = None,
+    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
@@ -984,8 +1022,8 @@ def _fused_moe_lora_expand_fake(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
-    A_scale: torch.Tensor | None = None,
-    B_scale: torch.Tensor | None = None,
+    act_scale: torch.Tensor | None = None,
+    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
