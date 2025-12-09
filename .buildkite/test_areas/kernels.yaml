@@ -1,0 +1,117 @@
+group: Kernels
+depends_on: 
+  - image-build
+steps:
+- label: Kernels Core Operation Test
+  timeout_in_minutes: 75
+  source_file_dependencies:
+  - csrc/
+  - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
+  commands:
+    - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+
+- label: Kernels Attention Test %N
+  timeout_in_minutes: 35
+  source_file_dependencies:
+  - csrc/attention/
+  - vllm/attention
+  - vllm/v1/attention
+  - tests/kernels/attention
+  commands:
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels Quantization Test %N
+  timeout_in_minutes: 90
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  commands:
+    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels MoE Test %N
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/distributed/device_communicators/
+  - vllm/envs.py
+  - vllm/config
+  commands:
+    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
+
+- label: Kernels Mamba Test
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
+  commands:
+    - pytest -v -s kernels/mamba
+
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies:
+  - tools/install_deepgemm.sh
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  commands:
+    - pytest -v -s kernels/quantization/test_block_fp8.py -k deep_gemm
+    - pytest -v -s kernels/moe/test_deepgemm.py
+    - pytest -v -s kernels/moe/test_batched_deepgemm.py
+    - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
+- label: Kernels (B200)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  # optional: true
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/mla/cutlass_mla.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/platforms/cuda.py
+  - vllm/attention/selector.py
+  commands:
+    - nvidia-smi
+    - python3 examples/offline_inference/basic/chat.py
+    # Attention
+    # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
+    - pytest -v -s tests/kernels/attention/test_attention_selector.py
+    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    # Quantization
+    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
+    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
