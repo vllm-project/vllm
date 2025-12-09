@@ -434,6 +434,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         Args:
             kv_caches: dictionary of layer names, kv cache
         """
+        logger.info("Registering kv caches!")
         self.worker_adapter.register_kv_caches(kv_caches)
         return
 
@@ -654,6 +655,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         tracker.num_lmcache_hit_blocks = num_lmcache_blocks
 
         need_to_load = max(0, ret - num_computed_tokens)
+        logger.debug(
+            "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
+        )
         return need_to_load, need_to_load > 0
 
     def update_state_after_alloc(
@@ -710,6 +714,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self._process_retrieve_requests(metadata)
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
+        if len(metadata) > 0:
+            logger.debug("Final connector metadata: %s", metadata)
 
         return metadata
 
