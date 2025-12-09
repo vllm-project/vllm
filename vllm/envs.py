@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
+    VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -144,6 +145,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
+    VLLM_ENABLE_MOE_DP_CHUNK: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -451,6 +453,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Main CUDA version of vLLM. This follows PyTorch but can be overridden.
     "VLLM_MAIN_CUDA_VERSION": lambda: os.getenv("VLLM_MAIN_CUDA_VERSION", "").lower()
     or "12.9",
+    # Controls PyTorch float32 matmul precision mode within vLLM workers.
+    # Valid options mirror torch.set_float32_matmul_precision
+    "VLLM_FLOAT32_MATMUL_PRECISION": env_with_choices(
+        "VLLM_FLOAT32_MATMUL_PRECISION",
+        "highest",
+        ["highest", "high", "medium"],
+        case_sensitive=False,
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -1101,6 +1111,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
     # units.
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
+    "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+    ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0"
