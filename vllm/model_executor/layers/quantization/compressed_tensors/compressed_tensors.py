@@ -116,16 +116,37 @@ class CompressedTensorsConfig(QuantizationConfig):
         return "compressed-tensors"
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.target_scheme_map = hf_to_vllm_mapper.apply_dict(self.target_scheme_map)
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
-        self.sparsity_scheme_map = hf_to_vllm_mapper.apply_dict(
-            self.sparsity_scheme_map
-        )
-        self.sparsity_ignore_list = hf_to_vllm_mapper.apply_list(
-            self.sparsity_ignore_list
-        )
+        """
+        Transform layer paths in config targets to match vLLM's naming.
+
+        The WeightsMapper is designed for weight paths, but some backends
+        (e.g. transformers) use broad prefix mappings like "" -> "model."
+        which would incorrectly transform non-path targets.
+
+        compressed-tensors targets can be:
+        - Layer paths: "layers.0.self_attn.q_proj" -> transformed
+        - Module class names: "Linear" -> preserved (no ".")
+        - Regex patterns: "re:.*proj" -> preserved (starts with "re:")
+        """
+
+        def _map_target(target: str) -> str | None:
+            is_layer_path = "." in target and not target.startswith("re:")
+            if is_layer_path:
+                return hf_to_vllm_mapper._map_name(target)
+            return target
+
+        def _apply_dict(d: dict) -> dict:
+            return {k: v for t, v in d.items() if (k := _map_target(t)) is not None}
+
+        def _apply_list(lst: list) -> list:
+            return [t for x in lst if (t := _map_target(x)) is not None]
+
+        self.target_scheme_map = _apply_dict(self.target_scheme_map)
+        self.ignore = _apply_list(self.ignore)
+        self.sparsity_scheme_map = _apply_dict(self.sparsity_scheme_map)
+        self.sparsity_ignore_list = _apply_list(self.sparsity_ignore_list)
         if self.kv_cache_scheme is not None:
-            self.kv_cache_scheme = hf_to_vllm_mapper.apply_dict(self.kv_cache_scheme)
+            self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
 
     def get_quant_method(
         self,
