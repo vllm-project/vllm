@@ -122,7 +122,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return self.tokenizer.get_vocab()
 
     def get_added_vocab(self) -> dict[str, int]:
-        return self._added_vocab
+        return self._added_vocab.copy()
 
     def encode(
         self,
