@@ -487,6 +487,7 @@ class Base(
             )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.check_version("5.0.0.dev0", "Eagle3 support")
         self.aux_hidden_state_layers = layers
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
