@@ -21,11 +21,13 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalBatchedField,
+                                    MultiModalFeatureSpec,
                                     MultiModalFieldConfig, MultiModalFieldElem,
                                     MultiModalFlatField, MultiModalKwargs,
                                     MultiModalKwargsItem,
                                     MultiModalKwargsItems,
-                                    MultiModalSharedField, NestedTensors)
+                                    MultiModalSharedField, NestedTensors,
+                                    PlaceholderRange)
 # yapf: enable
 from vllm.v1.engine import UtilityResult
 
@@ -101,7 +103,7 @@ class MsgpackEncoder:
     Note that unlike vanilla `msgspec` Encoders, this interface is generally
     not thread-safe when encoding tensors / numpy arrays.
 
-    By default, arrays below 256B are serialized inline Larger will get sent 
+    By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
     """
 
@@ -268,6 +270,31 @@ class MsgpackEncoder:
                         for f in dataclasses.fields(field))
         return name, *field_values
 
+    def encode_tokens_and_mm(
+            self, token_ids,
+            mm_features: Optional[list[MultiModalFeatureSpec]]):
+        self.aux_buffers = bufs = [b'']
+        obj = {
+            "token_ids":
+            token_ids,
+            "mm_features": [{
+                "modality":
+                feature.modality,
+                "identifier":
+                feature.identifier,
+                "mm_position":
+                dataclasses.asdict(feature.mm_position),
+                "data":
+                self._encode_mm_item(feature.data) if feature.data else None
+            } for feature in mm_features] if mm_features else None
+        }
+        bufs[0] = self.encoder.encode(obj)
+        # This `bufs` list allows us to collect direct pointers to backing
+        # buffers of tensors and np arrays, and return them along with the
+        # top-level encoded buffer instead of copying their data into the
+        # new buffer.
+        return bufs
+
 
 class MsgpackDecoder:
     """Decoder with custom torch tensor and numpy array serialization.
@@ -421,3 +448,27 @@ class MsgpackDecoder:
 
         raise NotImplementedError(
             f"Extension type code {code} is not supported")
+
+    def decode_tokens_and_mm(self, bufs: Union[bytestr, Sequence[bytestr]]):
+        self.aux_buffers = bufs
+        obj = self.decoder.decode(bufs[0])
+
+        token_ids_obj = obj.get("token_ids")
+        token_ids = self._decode_nested_tensors(token_ids_obj)
+        mm_features_raw = obj.get("mm_features")
+
+        if mm_features_raw is None:
+            mm_features = None
+        else:
+            mm_features = []
+            for feature_obj in mm_features_raw:
+                mm_position = PlaceholderRange(**feature_obj["mm_position"])
+                data = (self._decode_mm_item(feature_obj["data"])
+                        if feature_obj["data"] is not None else None)
+                mm_features.append(
+                    MultiModalFeatureSpec(modality=feature_obj["modality"],
+                                          identifier=feature_obj["identifier"],
+                                          mm_position=mm_position,
+                                          data=data))
+
+        return token_ids, mm_features
