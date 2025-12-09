@@ -10,9 +10,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (
-    SharedStorageConnector,
-    SharedStorageConnectorMetadata,
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ExampleConnectorMetadata,
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -26,15 +26,15 @@ logging.basicConfig(level=logging.INFO)
 
 
 @dataclass
-class RogueSharedStorageConnectorMetadata(SharedStorageConnectorMetadata):
+class LoadRecoveryExampleConnectorMetadata(ExampleConnectorMetadata):
     req_to_block_ids: dict[str, set[int]] = field(default_factory=dict)
 
     @classmethod
-    def from_base(cls, base: SharedStorageConnectorMetadata):
+    def from_base(cls, base: ExampleConnectorMetadata):
         return cls(requests=base.requests)
 
 
-class RogueSharedStorageConnector(SharedStorageConnector):
+class LoadRecoveryExampleConnector(ExampleConnector):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._async_load = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -45,7 +45,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
         self._req_to_block_ids: dict[str, list[int]] = dict()
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
-        assert isinstance(connector_metadata, RogueSharedStorageConnectorMetadata)
+        assert isinstance(connector_metadata, LoadRecoveryExampleConnectorMetadata)
         index, failed_request = next(
             (
                 (i, x)
@@ -84,7 +84,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
     ) -> tuple[set[str] | None, set[str] | None]:
         if self._async_load:
             meta = self._get_connector_metadata()
-            assert isinstance(meta, RogueSharedStorageConnectorMetadata)
+            assert isinstance(meta, LoadRecoveryExampleConnectorMetadata)
             if meta.req_to_block_ids:
                 return None, set(meta.req_to_block_ids)
 
@@ -126,9 +126,9 @@ class RogueSharedStorageConnector(SharedStorageConnector):
     ) -> KVConnectorMetadata:
         if not self._async_load:
             base = super().build_connector_meta(scheduler_output)
-            meta = RogueSharedStorageConnectorMetadata.from_base(base)
+            meta = LoadRecoveryExampleConnectorMetadata.from_base(base)
         else:
-            meta = RogueSharedStorageConnectorMetadata()
+            meta = LoadRecoveryExampleConnectorMetadata()
             if self._requests_need_load:
                 for req_id, request in self._requests_need_load.items():
                     meta.add_request(
