@@ -64,8 +64,6 @@ def test_model_arch_config():
         assert model_arch_config.total_num_kv_heads == expected["total_num_kv_heads"]
         assert model_arch_config.num_experts == expected["num_experts"]
         assert model_arch_config.is_deepseek_mla == expected["is_deepseek_mla"]
-        assert model_arch_config.is_multimodal_model == expected["is_multimodal_model"]
-
         dtype = model_arch_config.torch_dtype
         assert str(dtype) == expected["dtype"]
 

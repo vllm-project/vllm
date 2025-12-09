@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, final
+from typing import final
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -17,16 +17,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config,
     try_get_safetensors_metadata,
 )
-from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
-
-if TYPE_CHECKING:
-    import vllm.model_executor.models.registry as me_models_registry
-else:
-    # Use lazy loading to avoid circular import
-    me_models_registry = LazyLoader(
-        "model_executor", globals(), "vllm.model_executor.models.registry"
-    )
 
 logger = init_logger(__name__)
 
@@ -248,12 +239,6 @@ class ModelArchConfigConvertorBase:
             derived_max_model_len = tmp_max_len
         return derived_max_model_len, max_len_key
 
-    def is_multimodal_model(self) -> bool:
-        return any(
-            multi_model_arch in self.hf_config.architectures
-            for multi_model_arch in me_models_registry._MULTIMODAL_MODELS
-        )
-
     def convert(self, model_id: str, revision: str | None) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
             architectures=getattr(self.hf_config, "architectures", []),
@@ -268,7 +253,6 @@ class ModelArchConfigConvertorBase:
             num_experts=self.get_num_experts(self.hf_text_config),
             quantization_config=self.get_quantization_config(self.hf_config),
             torch_dtype=self.get_torch_dtype(self.hf_config, model_id, revision),
-            is_multimodal_model=self.is_multimodal_model(),
             is_deepseek_mla=self.is_deepseek_mla(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
