@@ -33,6 +33,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -53,9 +54,13 @@ class GGUFConfig(QuantizationConfig):
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # GGUF dequantization kernels use half precision (fp16) internally.
-        # bfloat16 may cause incorrect output on some architectures (e.g., Blackwell)
-        # but is kept for users who explicitly request it on hardware where it works.
-        # See: arg_utils.py auto-defaults to float16 for GGUF when dtype="auto"
+        # bfloat16 has precision issues on SM 120+ devices (Blackwell).
+        if current_platform.has_device_capability(120):
+            logger.warning_once(
+                "GGUF has precision issues with bfloat16 on SM 120+ devices. "
+                "bfloat16 is unavailable for Blackwell devices."
+            )
+            return [torch.half, torch.float32]
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
