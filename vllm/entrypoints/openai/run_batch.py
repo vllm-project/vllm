@@ -652,7 +652,8 @@ async def run_batch(
     async with OrderedStreamingWriter(args.output_file) as writer:
         tasks: set[asyncio.Task] = set()
 
-        semaphore = asyncio.Semaphore(10_000)
+        max_num_seqs = engine_client.vllm_config.scheduler_config.max_num_seqs
+        semaphore = asyncio.Semaphore(2 * max_num_seqs)
 
         with tracker.pbar():
             index = 0
