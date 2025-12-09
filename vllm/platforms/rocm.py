@@ -402,7 +402,6 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
