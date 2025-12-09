@@ -71,7 +71,6 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
-    parser.add_argument("--common-prefix-len", type=int, default=0)
     return parser.parse_args()
 
 
@@ -216,7 +215,6 @@ if __name__ == "__main__":
         assert args.top_p == 1.0
         assert args.top_k == -1
         assert args.enable_chunked_prefill
-        assert args.common_prefix_len == 0
 
         # check acceptance length is within 2% of expected value
         rtol = 0.02
