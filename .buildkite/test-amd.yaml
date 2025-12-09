@@ -398,7 +398,8 @@ steps:
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
-    - vllm/
+    - vllm/v1/attention
+    - vllm/model_executor/layers
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -440,23 +441,29 @@ steps:
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
+    # for basic
+    - python3 offline_inference/basic/chat.py
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-    - python3 offline_inference/basic/chat.py
-    - python3 offline_inference/prefix_caching.py
-    - python3 offline_inference/llm_engine_example.py
+    - python3 offline_inference/basic/classify.py
+    - python3 offline_inference/basic/embed.py
+    - python3 offline_inference/basic/score.py
+    # for multi-modal models
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
     - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
-    - python3 offline_inference/basic/classify.py
-    - python3 offline_inference/basic/embed.py
-    - python3 offline_inference/basic/score.py
+    # for pooling models
+    - python3 pooling/pooling/vision_language_pooling.py --seed 0
+    # for features demo
+    - python3 offline_inference/prefix_caching.py
+    - python3 offline_inference/llm_engine_example.py
+    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
@@ -718,6 +725,18 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
+- label: LM Eval Small Models # 53min
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  # grade: Blocking
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+
 - label: OpenAI API correctness # 10min
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -727,7 +746,7 @@ steps:
   - csrc/
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
-  commands: # LMEval
+  commands: # LMEval+Transcription WER check
   # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
   - pytest -s entrypoints/openai/correctness/
 
@@ -963,6 +982,19 @@ steps:
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
+- label: Multi-Modal Accuracy Eval (Small Models) # 150min - 180min
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  # grade: Blocking
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+
 - label: Multi-Modal Models Test (Extended) 1 # 60min
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
@@ -1098,7 +1130,6 @@ steps:
   - vllm/model_executor/layers/layernorm.py
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - vllm/model_executor/layers/fused_moe/layer.py
   - tests/compile/test_fusion_attn.py
   - tests/compile/test_silu_mul_quant_fusion.py
   - tests/compile/distributed/test_fusion_all_reduce.py
@@ -1132,11 +1163,24 @@ steps:
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
   - tests/compile/distributed/test_fusions_e2e.py
-  - tests/compile/fullgraph/test_full_graph.py
   commands:
     - nvidia-smi
     # Run all e2e fusion tests
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
+
+- label: Blackwell GPT-OSS Eval
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  optional: true # run on nightlies
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: Blackwell Quantized MoE Test
   timeout_in_minutes: 60
@@ -1154,6 +1198,16 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
+
+- label: Blackwell LM Eval Small Models
+  timeout_in_minutes: 120
+  gpu: b200
+  optional: true # run on nightlies
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -1397,6 +1451,39 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
+
+- label: LM Eval Large Models # optional
+  gpu: a100
+  optional: true
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+##### H100 test #####
+- label: LM Eval Large Models (H100) # optional
+  gpu: h100
+  optional: true
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+
+
 ##### H200 test #####
 - label: Distributed Tests (H200) # optional
   mirror_hardwares: [amdexperimental]
@@ -1440,29 +1527,6 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
-- label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 120
-  gpu: b200
-  optional: true # run on nightlies
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
-
-- label: Multi-Modal Accuracy Eval (Small Models) # 10min
-  timeout_in_minutes: 70
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
-  commands:
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
-
 - label: LM Eval Large Models (4 Card)
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
@@ -1477,21 +1541,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
-
-- label: LM Eval Large Models (H100) # optional
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
-    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 - label: ROCm LM Eval Large Models (8 Card)
   mirror_hardwares: [amdproduction]
@@ -1517,6 +1566,20 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
+##### RL Integration Tests #####
+- label: Prime-RL Integration Test # 15min
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_2
+  # grade: Blocking
+  timeout_in_minutes: 30
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/
+  - .buildkite/scripts/run-prime-rl-test.sh
+  commands:
+    - bash .buildkite/scripts/run-prime-rl-test.sh
 - label: DeepSeek V2-Lite Accuracy
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
@@ -1550,17 +1613,26 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-##### RL Integration Tests #####
-- label: Prime-RL Integration Test # 15min
+- label: DeepSeek V2-Lite Async EPLB Accuracy
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_2
+  agent_pool: mi325_4
   # grade: Blocking
-  timeout_in_minutes: 30
+  gpu: h100
   optional: true
-  num_gpus: 2
+  num_gpus: 4
   working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/
-  - .buildkite/scripts/run-prime-rl-test.sh
   commands:
-    - bash .buildkite/scripts/run-prime-rl-test.sh
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
+
+- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_4
+  # grade: Blocking
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
