@@ -30,6 +30,7 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
@@ -268,12 +269,15 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        assert self.deepgemm_input_quant_op is not None
-        q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
-            input_2d,
-            group_size=self.act_quant_group_shape.col,
-            use_ue8m0=True,
-        )
+        if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
+            q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+                input_2d,
+                group_size=self.act_quant_group_shape.col,
+                use_ue8m0=True,
+            )
+        else:
+            assert self.deepgemm_input_quant_op is not None
+            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,

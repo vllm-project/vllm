@@ -399,6 +399,7 @@ def should_use_deepgemm_for_fp8_linear_for_nk(
 
 __all__ = [
     "calc_diff",
+    "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
