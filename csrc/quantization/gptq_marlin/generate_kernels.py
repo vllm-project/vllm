@@ -191,7 +191,7 @@ def generate_new_kernels():
             s_type = quant_config.get("s_type", c_type)
             if (a_type, b_type, c_type) not in result_dict:
                 result_dict[(a_type, b_type, c_type)] = []
-                if a_type in ["kFloat16", "kS8"]:
+                if a_type in ["kFloat16", "kS8"] and c_type == "kFloat16":
                     sm_75_result_dict[(a_type, b_type, c_type)] = []
 
             for group_blocks, m_blocks, thread_configs in itertools.product(
