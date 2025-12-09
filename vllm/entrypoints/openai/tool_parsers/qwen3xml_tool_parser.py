@@ -1182,66 +1182,81 @@ class Qwen3XMLToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        self.parser.reset_streaming_state()
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
-        if request:
-            self.parser.set_tools(request.tools)
-        result = self.parser.parse_single_streaming_chunks(model_output)
-        if not result.tool_calls:
-            return ExtractedToolCallInformation(
-                tool_calls=[],
-                tools_called=False,
-                content=result.content,
-            )
-        else:
-            tool_calls = []
-            for tool_call in result.tool_calls:
-                if tool_call.function and tool_call.function.name:
-                    tool_calls.append(
-                        ToolCall(
-                            id=tool_call.id,
-                            type=tool_call.type,
-                            function=FunctionCall(
-                                name=tool_call.function.name,
-                                arguments=tool_call.function.arguments,
-                            ),
+
+        tool_calls = []
+        found_tool_calls = False
+
+        # Search for all tool call blocks using regex to handle multiple calls in one chunk
+        # This prevents the XML parser from failing on multiple root elements
+        iterator = re.finditer(r"<tool_call>.*?</tool_call>", model_output, re.DOTALL)
+
+        for match in iterator:
+            found_tool_calls = True
+            chunk = match.group(0)
+
+            # Reset parser state for each tool call to treat it as a separate document
+            self.parser.reset_streaming_state()
+            if request:
+                self.parser.set_tools(request.tools)
+
+            result = self.parser.parse_single_streaming_chunks(chunk)
+
+            if result.tool_calls:
+                for tool_call in result.tool_calls:
+                    if tool_call.function and tool_call.function.name:
+                        tool_calls.append(
+                            ToolCall(
+                                id=tool_call.id,
+                                type=tool_call.type,
+                                function=FunctionCall(
+                                    name=tool_call.function.name,
+                                    arguments=tool_call.function.arguments,
+                                ),
+                            )
                         )
-                    )
 
-                    # Update tool call tracking arrays for compatibility
-                    tool_index = (
-                        tool_call.index
-                        if tool_call.index is not None
-                        else len(self.prev_tool_call_arr) - 1
-                    )
+                        # Update tracking arrays (logic copied from original)
+                        tool_index = (
+                            tool_call.index
+                            if tool_call.index is not None
+                            else len(self.prev_tool_call_arr) - 1
+                        )
+                        while len(self.prev_tool_call_arr) <= tool_index:
+                            self.prev_tool_call_arr.append(
+                                {"name": "", "arguments": ""}
+                            )
+                        while len(self.streamed_args_for_tool) <= tool_index:
+                            self.streamed_args_for_tool.append("")
 
-                    # Ensure we have enough entries in our tracking arrays
-                    while len(self.prev_tool_call_arr) <= tool_index:
-                        self.prev_tool_call_arr.append({"name": "", "arguments": ""})
-                    while len(self.streamed_args_for_tool) <= tool_index:
-                        self.streamed_args_for_tool.append("")
-
-                    # Update tool call information
-                    self.prev_tool_call_arr[tool_index]["name"] = (
-                        tool_call.function.name
-                    )
-                    self.prev_tool_call_arr[tool_index]["arguments"] = (
-                        tool_call.function.arguments
-                    )
-
-                    # Update streamed arguments
-                    if tool_call.function.arguments:
-                        self.streamed_args_for_tool[tool_index] = (
+                        self.prev_tool_call_arr[tool_index]["name"] = (
+                            tool_call.function.name
+                        )
+                        self.prev_tool_call_arr[tool_index]["arguments"] = (
                             tool_call.function.arguments
                         )
+                        if tool_call.function.arguments:
+                            self.streamed_args_for_tool[tool_index] = (
+                                tool_call.function.arguments
+                            )
 
-            return ExtractedToolCallInformation(
-                tool_calls=tool_calls,
-                tools_called=len(tool_calls) > 0,
-                content=result.content,
-            )
+        # If no tool calls were found via regex, it might be plain text or incomplete XML.
+        # Fallback to parsing the original string to capture content.
+        content = None
+        if not found_tool_calls:
+            self.parser.reset_streaming_state()
+            if request:
+                self.parser.set_tools(request.tools)
+            result = self.parser.parse_single_streaming_chunks(model_output)
+            content = result.content
+
+        return ExtractedToolCallInformation(
+            tool_calls=tool_calls,
+            tools_called=len(tool_calls) > 0,
+            content=content,
+        )
 
     def extract_tool_calls_streaming(
         self,
