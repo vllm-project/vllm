@@ -401,7 +401,7 @@ if HELION_AVAILABLE:
                 batch_size, hidden_size, dtype=torch.bfloat16, device="cuda"
             )
             rms_gamma = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
-            progress = torch.zeros(splits_per_rank, dtype=torch.uint32, device="cuda")
+            progress = torch.ones(splits_per_rank, dtype=torch.uint32, device="cuda")
 
             inputs[str(hidden_size)] = (
                 allreduce_buf,

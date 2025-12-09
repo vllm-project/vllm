@@ -3,7 +3,7 @@
     1
   ],
   "reduction_loops": [
-    1024
+    null
   ],
   "range_unroll_factors": [
     0
@@ -22,10 +22,10 @@
     "",
     "",
     "",
-    "",
     "first",
-    "",
-    "first"
+    "first",
+    "last",
+    ""
   ],
   "num_warps": 4,
   "num_stages": 1,
@@ -35,11 +35,11 @@
     "pointer",
     "pointer",
     "pointer",
+    "pointer",
+    "pointer",
+    "pointer",
     "tensor_descriptor",
-    "pointer",
-    "pointer",
     "tensor_descriptor",
-    "pointer",
     "tensor_descriptor",
     "pointer"
   ],
