@@ -367,6 +367,8 @@ class Qwen2MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -512,6 +514,12 @@ class Qwen2MoeModel(nn.Module):
                             continue
                         else:
                             name = remapped_kv_scale_name
+                    # GGUF: make sure that shared_expert_gate is a 2D tensor.
+                    if (
+                        "mlp.shared_expert_gate" in name
+                        and len(loaded_weight.shape) == 1
+                    ):
+                        loaded_weight = loaded_weight[None, :]
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
