@@ -8,7 +8,6 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -264,6 +263,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
         self.compilation_config = vllm_config.compilation_config
+        self.attention_config = vllm_config.attention_config
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
             self.parallel_config
@@ -304,7 +304,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            self.max_num_splits = (
+                self.attention_config.flash_attn_max_num_splits_for_cuda_graph
+            )
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
@@ -554,8 +556,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-    def supports_quant_query_input(self) -> bool:
-        return True
+        self.supports_quant_query_input = True
 
     def forward(
         self,
