@@ -513,7 +513,7 @@ class P2pNcclEngine:
         if item.remote_address not in self.socks:
             self.create_connect(item.remote_address)
 
-        tensor = item.tensor.to(self.device)
+        tensor = item.tensor
         tensor, quant_meta = self._quantize_tensor_for_send(tensor)
 
         sock = self.socks[item.remote_address]
@@ -543,7 +543,7 @@ class P2pNcclEngine:
             )
             return False
 
-        self.send(comm, tensor, rank ^ 1, self.send_stream)
+        self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
 
         if self.send_type == "PUT_ASYNC":
             self.have_sent_tensor_id(item.tensor_id)
@@ -605,9 +605,7 @@ class P2pNcclEngine:
         if not self.enable_kv_quantization:
             return tensor, None
 
-        abs_max = tensor.abs().max()
-        max_value = abs_max.item() if abs_max.numel() > 0 else 0.0
-        # Avoid division by zero: use scale=1.0 for zero tensors
+        max_value = tensor.abs().max().item()
         scale = float(max_value / 127.0) if max_value > 0 else 1.0
 
         q_tensor = torch.clamp(torch.round(tensor / scale), -128, 127).to(torch.int8)
