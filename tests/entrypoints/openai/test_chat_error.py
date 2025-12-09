@@ -99,7 +99,7 @@ async def test_chat_error_non_stream():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)
@@ -153,7 +153,7 @@ async def test_chat_error_stream():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_chat = _build_serving_chat(mock_engine)

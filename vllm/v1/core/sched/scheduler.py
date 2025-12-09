@@ -1183,9 +1183,9 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(stopped_preempted_reqs)
 
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
-            for req_id in failed_kv_load_req_ids:
-                request = self.requests[req_id]
-                self.finish_requests(req_id, RequestStatus.FINISHED_ERROR)
+            requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
+            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
+            for request in requests:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,

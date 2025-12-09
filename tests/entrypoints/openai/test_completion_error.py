@@ -87,7 +87,7 @@ async def test_completion_error_non_stream():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_completion = _build_serving_completion(mock_engine)
@@ -141,7 +141,7 @@ async def test_completion_error_stream():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-    mock_engine.processor = MagicMock()
+    mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
 
     serving_completion = _build_serving_completion(mock_engine)
