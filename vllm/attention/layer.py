@@ -3,7 +3,10 @@
 """Attention layer."""
 
 from collections.abc import Callable
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 
 import torch
 import torch.nn as nn
@@ -47,11 +50,6 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
-from vllm.v1.attention.backends.mla.common import (
-    MLACommonMetadata,
-    dynamic_per_batched_tensor_quant,
-    reorg_kvcache,
-)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -64,7 +62,7 @@ if current_platform.is_rocm():
 else:
     on_gfx9 = lambda *args, **kwargs: False
 
-M = TypeVar("M", bound=MLACommonMetadata)
+M = TypeVar("M", bound="MLACommonMetadata")
 
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -784,6 +782,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        from vllm.v1.attention.backends.mla.common import (
+            dynamic_per_batched_tensor_quant,
+        )
+
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
             for attr in WEIGHT_NAMES:
@@ -955,7 +957,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: "MLACommonMetadata",
         k_scale: torch.Tensor,
     ):
         assert attn_metadata.prefill is not None
@@ -1021,10 +1023,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: "MLACommonMetadata",
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
+        from vllm.v1.attention.backends.mla.common import reorg_kvcache
+
         assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -1128,7 +1132,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: "MLACommonMetadata",
         k_scale: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
