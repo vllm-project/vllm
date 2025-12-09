@@ -673,6 +673,19 @@ def test_extract_tool_calls_streaming(
             ],
             "bla",
         ),
+        (
+            # Complex
+            """[TOOL_CALLS]bash{"command": "re.compile(r\'{}\')"}""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="bash",
+                        arguments=json.dumps({"command": "re.compile(r'{}')"}),
+                    )
+                )
+            ],
+            "",
+        ),
     ],
 )
 def test_extract_tool_calls_streaming_one_chunk(
