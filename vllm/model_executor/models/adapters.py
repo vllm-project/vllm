@@ -189,9 +189,14 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
                 self.should_load_lm_head = True
             else:
                 # These are not used in pooling models
-                for attr in ("lm_head", "logits_processor"):
-                    if hasattr(self, attr):
-                        delattr(self, attr)
+                objects_to_clean = [self]
+                if language_model := getattr(self, "language_model", None):
+                    objects_to_clean.append(language_model)
+
+                for obj in objects_to_clean:
+                    for attr in ("lm_head", "logits_processor"):
+                        if hasattr(obj, attr):
+                            delattr(obj, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
