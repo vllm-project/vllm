@@ -67,7 +67,9 @@ class HelionAttentionMetadata:
 
 class HelionAttentionMetadataBuilder(AttentionMetadataBuilder[HelionAttentionMetadata]):
     # TODO
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # reorder_batch_threshold: int = 1
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(
         self,
@@ -352,10 +354,14 @@ class HelionAttentionImpl(AttentionImpl):
 
         # descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-        if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4:
+        # if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4:
+        # if attn_metadata.max_seq_len < 16:
+        if False:
+        # if True:
+        # if max_seqlen_q == 1:
             print(
-                f"DEBUG: calling triton attention for seq lens"
-                f"{attn_metadata.max_query_len} and batch size "
+                f"DEBUG: calling triton attention for seq lens "
+                f"{attn_metadata.max_seq_len} and batch size "
                 f"{len(seqused_k)}."
             )
             from vllm.attention.ops.triton_unified_attention import (
@@ -400,7 +406,7 @@ class HelionAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
-                max_query_len_int=attn_metadata.max_query_len,
+                # max_query_len_int=attn_metadata.max_query_len,
                 num_seqs=attn_metadata.num_reqs,
                 softcap=self.logits_soft_cap,
                 q_descale=None,  # Not supported
