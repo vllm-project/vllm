@@ -436,6 +436,46 @@ def rms_norm_dynamic_per_token_quant(
     return output, scales
 
 
+# fused quant layer norm ops blocked
+def rms_norm_per_block_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+    scale_ub: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert len(group_size) == 2
+    output = torch.empty_like(input, dtype=quant_dtype)
+    if is_scale_transposed:
+        scales = torch.empty(
+            (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
+            device=input.device,
+            dtype=torch.float32,
+        ).transpose(0, 1)
+    else:
+        scales = torch.empty(
+            (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
+            device=input.device,
+            dtype=torch.float32,
+        )
+
+    torch.ops._C.rms_norm_per_block_quant(
+        output,
+        input,
+        weight,
+        scales,
+        epsilon,
+        scale_ub,
+        residual,
+        group_size[1],
+        is_scale_transposed,
+    )
+    return output, scales
+
+
 # quantization ops
 # awq
 def awq_dequantize(
@@ -653,6 +693,10 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
 
     @register_fake("_C::cutlass_encode_and_reorder_int4b")
     def cutlass_encode_and_reorder_int4b_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
+
+    @register_fake("_C::cutlass_encode_and_reorder_int4b_grouped")
+    def cutlass_encode_and_reorder_int4b_grouped_fake(b: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(b, memory_format=torch.contiguous_format)
 
 
@@ -1018,6 +1062,7 @@ def get_cutlass_moe_mm_problem_sizes(
     n: int,
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
+    force_swap_ab: bool | None = None,
 ):
     """
     Compute only the per-expert problem sizes needed by the two grouped matrix
@@ -1027,9 +1072,20 @@ def get_cutlass_moe_mm_problem_sizes(
     - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
                                     multiplication for the two grouped MMs
                                     used in the fused MoE operation.
+    Optional:
+    - force_swap_ab: If set to True or False, explicitly enable or disable the
+                     A/B input swap optimization. If None (default), the swap
+                     is selected automatically based on tensor sizes.
     """
     return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
-        topk_ids, problem_sizes1, problem_sizes2, num_experts, n, k, blockscale_offsets
+        topk_ids,
+        problem_sizes1,
+        problem_sizes2,
+        num_experts,
+        n,
+        k,
+        blockscale_offsets,
+        force_swap_ab,
     )
 
 
@@ -1417,6 +1473,78 @@ def cutlass_encode_and_reorder_int4b(b: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.cutlass_encode_and_reorder_int4b(b)
 
 
+def cutlass_w4a8_moe_mm(
+    out_tensors: torch.Tensor,
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    a_scales: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_group_scales: torch.Tensor,
+    b_group_size: int,
+    expert_offsets: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    a_strides: torch.Tensor,
+    b_strides: torch.Tensor,
+    c_strides: torch.Tensor,
+    group_scale_strides: torch.Tensor,
+    maybe_schedule: str | None = None,
+):
+    """
+    Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
+    W4A8 quantization scheme. Uses group-wise quantization (INT4 -> FP8)
+    and both per-channel + per-token scaling in the epilogue.
+
+    Args:
+        out_tensors:
+            Output buffer for all experts (updated in-place).
+        a_tensors:
+            FP8 (E4M3FN) activations for all experts.
+        b_tensors:
+            INT4-packed weight matrix for all experts, packed to INT32
+        a_scales:
+            Per-token FP8 activation scales, applied in the epilogue.
+        b_scales:
+            Per-channel FP8 weight scales for each expert, applied in the epilogue.
+        b_group_scales:
+            FP8 scale values for group-wise INT4 weight blocks.
+        b_group_size:
+            Number of elements grouped under each entry of b_group_scales.
+        expert_offsets:
+            Cumulative token offsets
+        problem_sizes:
+            Per-expert (M, N, K) GEMM sizes used by the grouped GEMM launcher.
+        a/b/c/group_scale_strides:
+            Strides describing the memory layout of the input tensors.
+        maybe_schedule:
+            Optional override to choose a specific kernel or epilogue schedule.
+
+    Returns:
+        out_tensors updated in-place with the dequantized INT4xFP8 grouped GEMM result.
+    """
+    return torch.ops._C.cutlass_w4a8_moe_mm(
+        out_tensors,
+        a_tensors,
+        b_tensors,
+        a_scales,
+        b_scales,
+        b_group_scales,
+        b_group_size,
+        expert_offsets,
+        problem_sizes,
+        a_strides,
+        b_strides,
+        c_strides,
+        group_scale_strides,
+        maybe_schedule,
+    )
+
+
+def cutlass_encode_and_reorder_int4b_grouped(
+    b_tensors: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
+
+
 if hasattr(torch.ops._C, "permute_cols"):
 
     @register_fake("_C::permute_cols")
@@ -1598,7 +1726,7 @@ def scaled_fp8_quant(
                 output, input, scale, scale_ub
             )
         else:
-            scale = torch.empty((1, 1), device=input.device, dtype=torch.float32)
+            scale = torch.empty(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         assert scale.numel() == 1, f"{scale.shape}"
@@ -1877,6 +2005,7 @@ def moe_align_block_size(
     sorted_token_ids: torch.Tensor,
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_align_block_size(
         topk_ids,
@@ -1885,6 +2014,7 @@ def moe_align_block_size(
         sorted_token_ids,
         experts_ids,
         num_tokens_post_pad,
+        expert_map,
     )
 
 
@@ -1919,6 +2049,7 @@ def moe_lora_align_block_size(
     num_tokens_post_pad: torch.Tensor,
     adapter_enabled: torch.Tensor,
     lora_ids: torch.Tensor,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     torch.ops._moe_C.moe_lora_align_block_size(
         topk_ids,
@@ -1933,6 +2064,7 @@ def moe_lora_align_block_size(
         num_tokens_post_pad,
         adapter_enabled,
         lora_ids,
+        expert_map,
     )
 
 
