@@ -2317,15 +2317,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=layer.use_grouped_topk,
-            top_k=layer.top_k,
-            renormalize=layer.renormalize,
-            topk_group=layer.topk_group,
-            num_expert_group=layer.num_expert_group,
-            custom_routing_function=layer.custom_routing_function,
-            scoring_func=layer.scoring_func,
-            routed_scaling_factor=layer.routed_scaling_factor,
-            e_score_correction_bias=layer.e_score_correction_bias,
         )
 
         return torch.ops._C.dynamic_4bit_int_moe(
@@ -2613,25 +2604,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ):
-        if enable_eplb:
+        if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
             )
@@ -2652,9 +2626,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             topk_weights,
             topk_ids,
             quant_config=self.moe_quant_config,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=None if self.disable_expert_map else expert_map,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=None if self.disable_expert_map else layer.expert_map,
             a_strides1=self.a_strides1_c_strides2,
             a_strides2=self.a_strides2,
             b_strides1=self.b_strides1,
