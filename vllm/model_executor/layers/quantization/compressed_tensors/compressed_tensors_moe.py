@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     int4_w4a16_moe_quant_config,
     int4_w4afp8_moe_quant_config,
@@ -61,6 +62,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
+    swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     expert_weight_is_col_major,
@@ -97,6 +99,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
+from vllm.utils.flashinfer import has_flashinfer_moe
 from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
@@ -729,6 +732,23 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             get_marlin_input_dtype(layer_name) if self.use_marlin else None
         )
 
+        # flashinfer path
+        self.use_flashinfer_trtllm = (
+            self.block_quant
+            and self.is_fp8_w8a8_sm100
+            and envs.VLLM_USE_FLASHINFER_MOE_FP8
+            and has_flashinfer_moe()
+        )
+        self.flashinfer_moe_backend: FlashinferMoeBackend | None = (
+            None if not self.use_flashinfer_trtllm else get_flashinfer_moe_backend()
+        )  # type: ignore
+
+        # TODO(dbari): fix selection of backend
+        assert self.use_marlin + self.use_cutlass + self.use_flashinfer_trtllm <= 1, (
+            "Only one of Marlin, Cutlass, or FlashInfer TRT-LLM "
+            "can be used for CompressedTensorsW8A8Fp8MoEMethod."
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -981,9 +1001,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w13_weight_scale_inv, requires_grad=False
             )
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale = Parameter(
-                w2_weight_scale_inv, requires_grad=False
-            )
+            layer.w2_weight_scale = Parameter(w2_weight_scale_inv, requires_grad=False)
             layer.w2_weight_scale_inv = Parameter(
                 w2_weight_scale_inv, requires_grad=False
             )
@@ -1206,7 +1224,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 f"Expected 'silu' activation but got {activation}"
             )
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK, (
-                "Flashinfer TRT-LLM backend currently only supports block-wise quantization for weights."
+                "Flashinfer TRT-LLM backend currently only supports "
+                "block-wise quantization for weights."
             )
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
@@ -1239,6 +1258,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
             return flashinfer_result
+
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
