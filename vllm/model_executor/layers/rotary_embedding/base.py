@@ -51,7 +51,6 @@ class RotaryEmbeddingBase(CustomOp):
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
-            is_unsqueeze=True,
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:

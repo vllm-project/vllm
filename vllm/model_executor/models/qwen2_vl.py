@@ -330,9 +330,7 @@ class Qwen2VisionAttention(nn.Module):
             multimodal_config=multimodal_config,
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            is_neox_style=True,
-        )
+        self.apply_rotary_emb = ApplyRotaryEmb()
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]

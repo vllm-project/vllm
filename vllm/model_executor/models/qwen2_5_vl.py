@@ -355,9 +355,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             multimodal_config=multimodal_config,
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            is_neox_style=True,
-        )
+        self.apply_rotary_emb = ApplyRotaryEmb()
 
     def forward(
         self,
