@@ -27,6 +27,7 @@ from vllm.utils.serial_utils import tensor2base64
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 
 
 @pytest.fixture(scope="function")
@@ -102,6 +103,17 @@ def qwen25omni_model_config_mm_interleaved():
             "image": 2,
             "audio": 1,
             "video": 1,
+        },
+    )
+
+
+@pytest.fixture(scope="function")
+def mistral_model_config():
+    return ModelConfig(
+        MISTRAL_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={
+            "image": 2,
         },
     )
 
