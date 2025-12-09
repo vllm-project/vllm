@@ -615,6 +615,7 @@ def test_extract_tool_calls_streaming(
         "single_tool_weather",
         "multiple_tool_calls",
         "content_before_tool",
+        "escape",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -675,12 +676,14 @@ def test_extract_tool_calls_streaming(
         ),
         (
             # Complex
-            """[TOOL_CALLS]bash{"command": "re.compile(r\'{}\')"}""",  # noqa: E501
+            """[TOOL_CALLS]bash{"command": "print(\\"hello world!\\")\\nre.compile(r\'{}\')"}""",  # noqa: E501
             [
                 ToolCall(
                     function=FunctionCall(
                         name="bash",
-                        arguments=json.dumps({"command": "re.compile(r'{}')"}),
+                        arguments=json.dumps(
+                            {"command": "print(\"hello world!\")\nre.compile(r'{}')"}
+                        ),
                     )
                 )
             ],
