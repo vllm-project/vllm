@@ -136,10 +136,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             return target
 
         def _apply_dict(d: dict) -> dict:
-            return {k: v for t, v in d.items() if (k := _map_target(t))}
+            return {k: v for t, v in d.items() if (k := _map_target(t)) is not None}
 
         def _apply_list(lst: list) -> list:
-            return [t for x in lst if (t := _map_target(x))]
+            return [t for x in lst if (t := _map_target(x)) is not None]
 
         self.target_scheme_map = _apply_dict(self.target_scheme_map)
         self.ignore = _apply_list(self.ignore)
