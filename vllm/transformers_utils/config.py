@@ -954,6 +954,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,
