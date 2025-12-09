@@ -24,8 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
-    SharedStorageConnector,
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
+    ExampleConnector,
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -264,10 +264,10 @@ def create_model_runner_output(
     )
 
 
-class TestSharedStorageConnector(SharedStorageConnector):
+class TestExampleConnector(ExampleConnector):
     def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = SharedStorageConnector(config, role)
+        self._connector = ExampleConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -394,7 +394,7 @@ class MockKVConnector(KVConnectorBase_V1):
 
 
 KVConnectorFactory.register_connector(
-    "TestSharedStorageConnector", __name__, TestSharedStorageConnector.__name__
+    "TestExampleConnector", __name__, TestExampleConnector.__name__
 )
 
 KVConnectorFactory.register_connector(

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for ECSharedStorageConnector.
+Unit tests for ECExampleConnector.
 """
 
 import os
@@ -13,9 +13,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
-from vllm.distributed.ec_transfer.ec_connector.shared_storage_connector import (
-    ECSharedStorageConnector,
-    ECSharedStorageConnectorMetadata,
+from vllm.distributed.ec_transfer.ec_connector.example_connector import (
+    ECExampleConnector,
+    ECExampleConnectorMetadata,
     MMMeta,
 )
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
@@ -81,12 +81,12 @@ def mock_request_with_3_mm():
 
 
 # ------------------ Unit Tests ------------------ #
-class TestECSharedStorageConnectorBasics:
+class TestECExampleConnectorBasics:
     """Test basic EC connector functionality."""
 
     def test_initialization_producer(self, mock_vllm_config_producer, temp_storage):
         """Test connector initializes correctly as producer."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -98,7 +98,7 @@ class TestECSharedStorageConnectorBasics:
 
     def test_initialization_consumer(self, mock_vllm_config_consumer, temp_storage):
         """Test connector initializes correctly as consumer."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
@@ -109,11 +109,11 @@ class TestECSharedStorageConnectorBasics:
 
     def test_role_assignment(self, mock_vllm_config_producer):
         """Test role is correctly assigned."""
-        scheduler_connector = ECSharedStorageConnector(
+        scheduler_connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
-        worker_connector = ECSharedStorageConnector(
+        worker_connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -133,7 +133,7 @@ class TestCacheExistence:
     ):
         """Test has_caches returns True when all 3 caches exist."""
         # Test for producer first
-        producer = ECSharedStorageConnector(
+        producer = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -154,7 +154,7 @@ class TestCacheExistence:
         assert all(producer_result), f"Expected all True, got {producer_result}"
 
         # Also test consumer can check if cache exists
-        consumer = ECSharedStorageConnector(
+        consumer = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -170,7 +170,7 @@ class TestCacheExistence:
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test has_caches returns False when no caches exist."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -186,7 +186,7 @@ class TestCacheExistence:
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test has_caches with some caches existing (1 of 3)."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -213,7 +213,7 @@ class TestStateManagement:
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test state update after allocation for 3 MM items."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -238,7 +238,7 @@ class TestStateManagement:
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test metadata building for 3 MM items."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -252,7 +252,7 @@ class TestStateManagement:
         metadata = connector.build_connector_meta(scheduler_output)
 
         # Assert
-        assert isinstance(metadata, ECSharedStorageConnectorMetadata)
+        assert isinstance(metadata, ECExampleConnectorMetadata)
         assert len(metadata.mm_datas) == 3
         assert metadata.mm_datas[0].mm_hash == "img_hash_1"
         assert metadata.mm_datas[0].num_token == 100
@@ -266,7 +266,7 @@ class TestStateManagement:
 
     def test_build_connector_meta_empty(self, mock_vllm_config_producer):
         """Test metadata building with empty state."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -274,14 +274,14 @@ class TestStateManagement:
         scheduler_output = Mock(spec=SchedulerOutput)
         metadata = connector.build_connector_meta(scheduler_output)
 
-        assert isinstance(metadata, ECSharedStorageConnectorMetadata)
+        assert isinstance(metadata, ECExampleConnectorMetadata)
         assert len(metadata.mm_datas) == 0
 
     def test_state_cleared_after_metadata_build(
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
         """Test that state is properly cleared after building metadata."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
@@ -310,7 +310,7 @@ class TestCacheSaving:
         self, mock_vllm_config_producer, mock_request_with_3_mm, temp_storage
     ):
         """Test cache saving as producer for 3 different MM items."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -336,7 +336,7 @@ class TestCacheSaving:
 
     def test_save_caches_consumer_skips(self, mock_vllm_config_consumer):
         """Test cache saving is skipped for consumer."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
@@ -366,7 +366,7 @@ class TestCacheLoading:
     ):
         """Test consumer loads 3 caches from storage."""
         # First, create producer to save caches
-        producer = ECSharedStorageConnector(
+        producer = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -379,13 +379,13 @@ class TestCacheLoading:
             producer.save_caches(saved_caches, mm_hash)
 
         # Now consumer loads
-        consumer = ECSharedStorageConnector(
+        consumer = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
         # Setup metadata for all 3
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         for mm_hash in mm_hashes:
             metadata.add_mm_data(MMMeta.make_meta(mm_hash, 100))
         consumer.bind_connector_metadata(metadata)
@@ -410,7 +410,7 @@ class TestCacheLoading:
     ):
         """Test cache loading skips already cached items."""
         # Setup: producer saves cache
-        producer = ECSharedStorageConnector(
+        producer = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -420,12 +420,12 @@ class TestCacheLoading:
         producer.save_caches({mm_hash: saved_cache}, mm_hash)
 
         # Consumer setup
-        consumer = ECSharedStorageConnector(
+        consumer = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         metadata.add_mm_data(MMMeta.make_meta(mm_hash, 100))
         consumer.bind_connector_metadata(metadata)
 
@@ -444,13 +444,13 @@ class TestCacheLoading:
 
     def test_start_load_caches_empty_metadata(self, mock_vllm_config_consumer):
         """Test loading with empty metadata does nothing."""
-        consumer = ECSharedStorageConnector(
+        consumer = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
         # Setup empty metadata
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         consumer.bind_connector_metadata(metadata)
 
         # Load (should not raise)
@@ -466,7 +466,7 @@ class TestFilenameGeneration:
 
     def test_generate_foldername(self, mock_vllm_config_producer, temp_storage):
         """Test folder name generation."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -479,7 +479,7 @@ class TestFilenameGeneration:
 
     def test_generate_filename(self, mock_vllm_config_producer, temp_storage):
         """Test filename generation."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -493,7 +493,7 @@ class TestFilenameGeneration:
 
     def test_generate_filename_consistency(self, mock_vllm_config_producer):
         """Test filename generation is consistent."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -510,12 +510,12 @@ class TestMetadataBindingLifecycle:
 
     def test_bind_connector_metadata(self, mock_vllm_config_consumer):
         """Test binding connector metadata."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         metadata.add_mm_data(MMMeta.make_meta("hash_1", 100))
 
         connector.bind_connector_metadata(metadata)
@@ -524,12 +524,12 @@ class TestMetadataBindingLifecycle:
 
     def test_clear_connector_metadata(self, mock_vllm_config_consumer):
         """Test clearing connector metadata."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         connector.bind_connector_metadata(metadata)
 
         connector.clear_connector_metadata()
@@ -538,12 +538,12 @@ class TestMetadataBindingLifecycle:
 
     def test_get_connector_metadata(self, mock_vllm_config_consumer):
         """Test getting connector metadata."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         connector.bind_connector_metadata(metadata)
 
         retrieved = connector._get_connector_metadata()
@@ -552,7 +552,7 @@ class TestMetadataBindingLifecycle:
 
     def test_get_connector_metadata_not_set(self, mock_vllm_config_consumer):
         """Test getting metadata when not set raises."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
@@ -566,7 +566,7 @@ class TestEdgeCases:
 
     def test_save_empty_cache(self, mock_vllm_config_producer):
         """Test saving empty tensor."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.WORKER,
         )
@@ -579,12 +579,12 @@ class TestEdgeCases:
 
     def test_load_nonexistent_cache(self, mock_vllm_config_consumer):
         """Test loading cache that doesn't exist raises error."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_consumer,
             role=ECConnectorRole.WORKER,
         )
 
-        metadata = ECSharedStorageConnectorMetadata()
+        metadata = ECExampleConnectorMetadata()
         metadata.add_mm_data(MMMeta.make_meta("nonexistent_hash", 100))
         connector.bind_connector_metadata(metadata)
 
@@ -596,7 +596,7 @@ class TestEdgeCases:
 
     def test_has_caches_empty_request(self, mock_vllm_config_producer):
         """Test has_caches with request that has no MM data."""
-        connector = ECSharedStorageConnector(
+        connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )

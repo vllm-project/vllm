@@ -79,7 +79,7 @@ class ECConnectorFactory:
 # only load the files corresponding to the current connector.
 
 ECConnectorFactory.register_connector(
-    "ECSharedStorageConnector",
-    "vllm.distributed.ec_transfer.ec_connector.shared_storage_connector",
-    "ECSharedStorageConnector",
+    "ECExampleConnector",
+    "vllm.distributed.ec_transfer.ec_connector.example_connector",
+    "ECExampleConnector",
 )
