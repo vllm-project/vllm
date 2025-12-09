@@ -503,8 +503,12 @@ class EngineCore:
 
         self.model_executor.reset_mm_cache()
 
-    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
-        return self.scheduler.reset_prefix_cache(reset_running_requests)
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.scheduler.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)

@@ -50,6 +50,7 @@ from vllm.config import (
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
+    ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -531,6 +532,8 @@ class EngineArgs:
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
+
+    profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -1164,7 +1167,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
-
+        vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1602,12 +1605,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
-            logger.info(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.disable_nccl_for_dp_synchronization = True
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1788,6 +1785,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
         )
