@@ -4,11 +4,11 @@
 import regex as re
 
 from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         self.tool_call_start_token: str = "<longcat_tool_call>"

@@ -1,0 +1,25 @@
+group: Weight Loading
+depends_on: 
+  - image-build
+steps:
+- label: Weight Loading Multiple GPU  # 33min
+  timeout_in_minutes: 45
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+
+- label: Weight Loading Multiple GPU - Large Models # optional
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  gpu: a100
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt

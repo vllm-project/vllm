@@ -16,7 +16,7 @@ from transformers import (
     ChameleonVQVAEConfig,
 )
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -918,8 +918,6 @@ class ChameleonModel(nn.Module):
 class ChameleonForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

@@ -371,9 +371,23 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 
 Supported models:
 
-* TODO (will be updated after Olmo 3 release)
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
 
 Flags: `--tool-call-parser olmo3`
+
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -421,7 +435,7 @@ Here is a summary of a plugin file:
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens

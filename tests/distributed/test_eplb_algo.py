@@ -4,10 +4,7 @@
 import pytest
 import torch
 
-from vllm.distributed.eplb.rebalance_algo import (
-    preserve_intragpu_slots,
-    rebalance_experts,
-)
+from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
 
 
 def test_basic_rebalance():
@@ -26,7 +23,7 @@ def test_basic_rebalance():
     num_nodes = 2
     num_gpus = 8
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -80,7 +77,7 @@ def test_single_gpu_case():
     num_nodes = 1
     num_gpus = 1
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -102,7 +99,7 @@ def test_equal_weights():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -125,7 +122,7 @@ def test_extreme_weight_imbalance():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -153,7 +150,7 @@ def test_multiple_layers():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -178,14 +175,14 @@ def test_parameter_validation():
     # Test non-divisible case - this should handle normally without throwing
     # errors because the function will fall back to global load balancing
     # strategy
-    phy2log, log2phy, logcnt = rebalance_experts(weight, 8, 3, 2, 4)
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(weight, 8, 3, 2, 4)
     assert phy2log.shape == (1, 8)
     assert logcnt.shape == (1, 4)
 
     # Test cases that will actually cause errors:
     # num_physical_experts not divisible by num_gpus
     with pytest.raises(AssertionError):
-        rebalance_experts(weight, 7, 2, 2, 4)  # 7 not divisible by 4
+        DefaultEplbPolicy.rebalance_experts(weight, 7, 2, 2, 4)  # 7 not divisible by 4
 
 
 def test_small_scale_hierarchical():
@@ -200,7 +197,7 @@ def test_small_scale_hierarchical():
     num_nodes = 2  # 2 nodes
     num_gpus = 4  # 4 GPUs
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -227,7 +224,7 @@ def test_global_load_balance_fallback():
     num_nodes = 2
     num_gpus = 4
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -249,7 +246,7 @@ def test_device_compatibility(device):
     num_nodes = 1
     num_gpus = 2
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
 
@@ -266,7 +263,9 @@ def test_additional_cases():
     weight1 = torch.tensor(
         [[50, 100, 75, 120, 90, 60, 80, 110, 40, 70, 95, 85, 65, 55, 45, 35]]
     )
-    phy2log1, log2phy1, logcnt1 = rebalance_experts(weight1, 24, 8, 4, 8)
+    phy2log1, log2phy1, logcnt1 = DefaultEplbPolicy.rebalance_experts(
+        weight1, 24, 8, 4, 8
+    )
 
     assert phy2log1.shape == (1, 24)
     assert logcnt1.shape == (1, 16)
@@ -279,7 +278,9 @@ def test_additional_cases():
             [12, 25, 50, 100, 150, 200],  # Increasing weights
         ]
     )
-    phy2log2, log2phy2, logcnt2 = rebalance_experts(weight2, 10, 3, 1, 2)
+    phy2log2, log2phy2, logcnt2 = DefaultEplbPolicy.rebalance_experts(
+        weight2, 10, 3, 1, 2
+    )
 
     assert phy2log2.shape == (2, 10)
     assert logcnt2.shape == (2, 6)
@@ -303,7 +304,7 @@ if __name__ == "__main__":
     num_nodes = 2
     num_gpus = 8
 
-    phy2log, log2phy, logcnt = rebalance_experts(
+    phy2log, log2phy, logcnt = DefaultEplbPolicy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes, num_gpus
     )
     print(phy2log)
@@ -330,11 +331,11 @@ def _validate_intragpu_rearrangement(
     new_phyrank: torch.Tensor,
     post_phy2log: torch.Tensor,
     post_phyrank: torch.Tensor,
-    num_gpus: int,
+    num_ranks: int,
     slots_per_gpu: int,
 ):
     # Per-GPU checks
-    for gpu_idx in range(num_gpus):
+    for gpu_idx in range(num_ranks):
         start = gpu_idx * slots_per_gpu
         end = start + slots_per_gpu
         old_seg = old_global_expert_indices[0, start:end]
@@ -378,7 +379,7 @@ def _validate_intragpu_rearrangement(
 def test_preserve_intragpu_slots_simple():
     """Experts that stay on a GPU keep their old slots; incoming not lost."""
     # Setup: 2 GPUs, 4 slots each, 1 layer
-    num_gpus = 2
+    num_ranks = 2
     slots_per_gpu = 4
     # Old mapping: GPU0 -> [0,1,2,3], GPU1 -> [4,5,6,7]
     old_global_expert_indices = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]])
@@ -389,8 +390,8 @@ def test_preserve_intragpu_slots_simple():
     # Derive phyrank from replica occurrence order per expert
     phyrank = _make_phyrank_from_phy2log(phy2log)
 
-    post_phy2log, post_phyrank = preserve_intragpu_slots(
-        phy2log, phyrank, num_gpus, old_global_expert_indices
+    post_phy2log, post_phyrank = DefaultEplbPolicy.preserve_intragpu_slots(
+        phy2log, phyrank, num_ranks, old_global_expert_indices
     )
 
     # Shapes preserved
@@ -403,7 +404,7 @@ def test_preserve_intragpu_slots_simple():
         phyrank,
         post_phy2log,
         post_phyrank,
-        num_gpus,
+        num_ranks,
         slots_per_gpu,
     )
 
@@ -411,7 +412,7 @@ def test_preserve_intragpu_slots_simple():
 def test_preserve_intragpu_slots_with_duplicates():
     """Test preserve intragpu slots with duplicates"""
     # Setup: 2 GPUs, 5 slots each (total 10 physical experts), 1 layer
-    num_gpus = 2
+    num_ranks = 2
     slots_per_gpu = 5
     # Old mapping:
     #   GPU0 -> [0, 1, 0, 2, 3]  (expert 0 duplicated)
@@ -425,8 +426,8 @@ def test_preserve_intragpu_slots_with_duplicates():
     # Derive ranks so duplicates have ranks [0,1,...] by occurrence
     phyrank = _make_phyrank_from_phy2log(phy2log)
 
-    post_phy2log, post_phyrank = preserve_intragpu_slots(
-        phy2log, phyrank, num_gpus, old_global_expert_indices
+    post_phy2log, post_phyrank = DefaultEplbPolicy.preserve_intragpu_slots(
+        phy2log, phyrank, num_ranks, old_global_expert_indices
     )
 
     # Shapes preserved
@@ -439,6 +440,6 @@ def test_preserve_intragpu_slots_with_duplicates():
         phyrank,
         post_phy2log,
         post_phyrank,
-        num_gpus,
+        num_ranks,
         slots_per_gpu,
     )

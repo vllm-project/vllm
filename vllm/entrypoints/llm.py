@@ -71,11 +71,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.transformers_utils.tokenizer import (
-    AnyTokenizer,
-    MistralTokenizer,
-    get_cached_tokenizer,
-)
+from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -191,7 +188,7 @@ class LLM:
         runner: RunnerOption = "auto",
         convert: ConvertOption = "auto",
         tokenizer: str | None = None,
-        tokenizer_mode: TokenizerMode = "auto",
+        tokenizer_mode: TokenizerMode | str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         allowed_local_media_path: str = "",
@@ -347,14 +344,14 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
+        self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
-    def get_tokenizer(self) -> AnyTokenizer:
+    def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
     @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
@@ -364,7 +361,7 @@ class LLM:
             self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
     def get_default_sampling_params(self) -> SamplingParams:
@@ -405,6 +402,9 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list of integers matching the length
+                of `prompts`, where each priority value corresponds to the prompt
+                at the same index.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -834,7 +834,6 @@ class LLM:
             conversation, mm_data, mm_uuids = parse_chat_messages(
                 msgs,
                 model_config,
-                tokenizer,
                 content_format=resolved_content_format,
             )
 
@@ -1077,6 +1076,7 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1114,6 +1114,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1151,6 +1152,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
@@ -1162,6 +1164,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1197,6 +1200,7 @@ class LLM:
             pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
@@ -1210,6 +1214,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """
         Generate rewards for each prompt.
@@ -1237,17 +1242,19 @@ class LLM:
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
             pooling_task="token_classify",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _embedding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         text_1: list[str | TextPrompt | TokensPrompt],
         text_2: list[str | TextPrompt | TokensPrompt],
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
@@ -1256,6 +1263,7 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             pooling_task="embed",
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
@@ -1273,13 +1281,14 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         data_1: list[str] | list[ScoreContentPartParam],
         data_2: list[str] | list[ScoreContentPartParam],
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1295,7 +1304,8 @@ class LLM:
         pooling_params.verify("score", model_config)
         pooling_params_list = list[PoolingParams]()
 
-        tokenization_kwargs: dict[str, Any] = {}
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
 
         _validate_truncation_size(
             model_config.max_model_len, truncate_prompt_tokens, tokenization_kwargs
@@ -1492,8 +1502,12 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self) -> None:
-        self.llm_engine.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.llm_engine.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         """
@@ -1554,6 +1568,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None,
         priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
@@ -1599,6 +1614,7 @@ class LLM:
                     if isinstance(lora_request, Sequence)
                     else lora_request,
                     priority=priority[i] if priority else 0,
+                    tokenization_kwargs=tokenization_kwargs,
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -1662,16 +1678,19 @@ class LLM:
         *,
         lora_request: LoRARequest | None,
         priority: int,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for LLMEngine."""
-        tokenization_kwargs: dict[str, Any] = {}
+
+        local_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = local_kwargs.copy()
         _validate_truncation_size(
             self.model_config.max_model_len,
             params.truncate_prompt_tokens,
             tokenization_kwargs,
         )
 
-        engine_request = self.processor.process_inputs(
+        engine_request = self.input_processor.process_inputs(
             request_id,
             engine_prompt,
             params,
@@ -1687,6 +1706,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
@@ -1697,6 +1717,7 @@ class LLM:
             params,
             lora_request=lora_request,
             priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         self.llm_engine.add_request(
