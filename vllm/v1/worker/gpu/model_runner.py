@@ -25,7 +25,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
 )
-from vllm.v1.sample.sampler import SamplerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_barrier
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -53,6 +52,7 @@ from vllm.v1.worker.gpu.sample.metadata import (
     SamplingMetadata,
     expand_sampling_metadata,
 )
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
