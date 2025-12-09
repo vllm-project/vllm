@@ -178,6 +178,10 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             for attr in ("lm_head", "logits_processor"):
                 if hasattr(self, attr):
                     delattr(self, attr)
+            if language_model := getattr(self, "language_model"):
+                for attr in ("lm_head", "logits_processor"):
+                    if hasattr(language_model, attr):
+                        delattr(language_model, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
