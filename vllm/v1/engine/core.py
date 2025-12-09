@@ -588,7 +588,7 @@ class EngineCore:
 
         max_num_batched_tokens = config.max_num_batched_tokens
         if max_num_batched_tokens is None:
-            max_num_batched_tokens = org_scheduler_config.max_num_seqs
+            max_num_batched_tokens = org_scheduler_config.max_num_batched_tokens
 
         if max_num_seqs > org_scheduler_config.max_num_seqs:
             return False
