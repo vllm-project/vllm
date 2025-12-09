@@ -97,7 +97,7 @@ def test_update_config():
         ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "embed"),
         ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )
@@ -629,8 +629,8 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support chunked prefill.",
+            True,
+            "Pooling models with causal attn and all pooling support chunked prefill.",
         ),
         (
             "BAAI/bge-base-en",
@@ -748,8 +748,8 @@ def test_is_chunked_prefill_supported(
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support prefix caching.",
+            True,
+            "Pooling models with causal attn and all pooling support prefix caching.",
         ),
         (
             "BAAI/bge-base-en",

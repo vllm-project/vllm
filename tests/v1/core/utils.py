@@ -108,7 +108,7 @@ def create_scheduler(
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
@@ -121,7 +121,7 @@ def create_scheduler(
 
     ec_transfer_config = (
         ECTransferConfig(
-            ec_connector="ECSharedStorageConnector",
+            ec_connector="ECExampleConnector",
             ec_role=ec_role,
             ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
         )

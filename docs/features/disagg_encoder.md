@@ -32,14 +32,14 @@ Design doc: <https://docs.google.com/document/d/1aed8KtC6XkXtdoV87pWT0a8OJlZ-Cpn
 
 ## 2  Usage Example
 
-The current reference pathway is **SharedStorageConnector**.  
+The current reference pathway is **ExampleConnector**.  
 Below ready-to-run scripts shows the workflow:
 
 1 Encoder instance + 1 PD instance:
-`examples/online_serving/disaggregated_encoder/shared_storage_connector/disagg_encoder_example.sh`
+`examples/online_serving/disaggregated_encoder/disagg_1e1pd_example.sh`
 
 1 Encoder instance + 1 Prefill instance + 1 Decode instance:
-`examples/online_serving/disaggregated_encoder/shared_storage_connector/disagg_epd_example.sh`
+`examples/online_serving/disaggregated_encoder/disagg_1e1p1d_example.sh`
 
 ---
 
