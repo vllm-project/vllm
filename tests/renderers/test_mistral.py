@@ -6,9 +6,10 @@ import time
 from unittest.mock import Mock
 
 import pytest
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.config import ModelConfig
-from vllm.renderers.mistral import MistralRenderer
+from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
 from vllm.tokenizers.mistral import MistralTokenizer
 
 
@@ -47,3 +48,53 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop():
         "Mocked blocking tokenizer was not called"
     )
     assert blocked_count == 0, "Event loop blocked during tokenization"
+
+
+def test_apply_mistral_chat_template_thinking_chunk():
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "You are a helpful assistant."},
+                {
+                    "type": "thinking",
+                    "closed": True,
+                    "thinking": "Only return the answer when you are confident.",
+                },
+            ],
+        },
+        {"role": "user", "content": "What is 2+2?"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me think about it."},
+                {"type": "thinking", "closed": True, "thinking": "2+2 = 4"},
+                {
+                    "type": "text",
+                    "text": "The answer is 4.",
+                },
+            ],
+        },
+        {"role": "user", "content": "Thanks, what is 3+3?"},
+    ]
+    mistral_tokenizer = MistralTokenizer.from_pretrained(
+        "mistralai/Magistral-Small-2509"
+    )
+
+    tokens_ids = safe_apply_chat_template(
+        mistral_tokenizer, messages, chat_template=None, tools=None
+    )
+
+    string_tokens = mistral_tokenizer.mistral.decode(
+        tokens_ids, special_token_policy=SpecialTokenPolicy.KEEP
+    )
+
+    expected_tokens = (
+        r"<s>[SYSTEM_PROMPT]You are a helpful assistant.[THINK]Only return the"
+        r" answer when you are confident.[/THINK][/SYSTEM_PROMPT]"
+        r"[INST]What is 2+2?[/INST]"
+        r"Let me think about it.[THINK]2+2 = 4[/THINK]The answer is 4.</s>"
+        r"[INST]Thanks, what is 3+3?[/INST]"
+    )
+
+    assert string_tokens == expected_tokens

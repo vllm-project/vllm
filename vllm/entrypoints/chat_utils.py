@@ -60,6 +60,8 @@ def __getattr__(name: str):
 
         return resolve_chat_template
 
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 MODALITY_PLACEHOLDERS_MAP = {
     "image": "<##IMAGE##>",
