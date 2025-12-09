@@ -929,10 +929,11 @@ class VllmConfig:
                 prev_disable_hma is False
                 and self.scheduler_config.disable_hybrid_kv_cache_manager is True
             ):
-                logger.info(
-                    "Hybrid KV cache manager explicitly enabled but not supported in "
-                    "this configuration; falling back to standard manager. Consider "
-                    "omitting this setting to let vLLM decide automatically."
+                raise ValueError(
+                    "Hybrid KV cache manager was explicitly enabled but is not "
+                    "supported in this configuration. Consider omitting the "
+                    "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
+                    " automatically."
                 )
 
         if (
