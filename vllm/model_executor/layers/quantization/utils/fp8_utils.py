@@ -27,9 +27,11 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
@@ -268,12 +270,15 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        assert self.deepgemm_input_quant_op is not None
-        q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
-            input_2d,
-            group_size=self.act_quant_group_shape.col,
-            use_ue8m0=True,
-        )
+        if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
+            q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+                input_2d,
+                group_size=self.act_quant_group_shape.col,
+                use_ue8m0=True,
+            )
+        else:
+            assert self.deepgemm_input_quant_op is not None
+            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,
@@ -1400,12 +1405,12 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     if should_use_deepgemm:
         dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
             wq=layer.weight.data,
-            ws=layer.weight_scale.data,
+            ws=layer.weight_scale_inv.data,
             quant_block_shape=tuple(layer.weight_block_size),
             use_e8m0=is_deep_gemm_e8m0_used(),
         )
-        layer.weight = torch.nn.Parameter(dg_weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(dg_weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", dg_weight)
+        replace_parameter(layer, "weight_scale_inv", dg_weight_scale)
 
 
 def expert_weight_is_col_major(x: torch.Tensor) -> bool:

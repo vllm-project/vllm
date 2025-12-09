@@ -166,32 +166,24 @@ class AsyncLLM(EngineClient):
             pass
 
         if (
-            envs.VLLM_TORCH_PROFILER_DIR
-            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+            vllm_config.profiler_config.profiler == "torch"
+            and not vllm_config.profiler_config.ignore_frontend
         ):
+            profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                envs.VLLM_TORCH_PROFILER_DIR,
+                profiler_dir,
             )
-            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
-                logger.warning_once(
-                    "Torch profiler received max_iters or delay_iters setting. These "
-                    "are not compatible with the AsyncLLM profiler and will be ignored "
-                    "for the AsyncLLM process. Engine process profiling will still "
-                    "respect these settings. Consider setting "
-                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
-                    "AsyncLLM profiling."
-                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR,
+                    profiler_dir,
                     worker_name=worker_name,
-                    use_gzip=envs.VLLM_TORCH_PROFILER_USE_GZIP,
+                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
                 ),
             )
         else:
