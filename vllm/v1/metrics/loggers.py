@@ -870,6 +870,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_decode_time_request, engine_indexes, model_name
         )
 
+        histogram_prefill_kv_computed_request = self._histogram_cls(
+            name="vllm:request_prefill_kv_computed_tokens",
+            documentation=(
+                "Histogram of new KV tokens computed during prefill "
+                "(excluding cached tokens)."
+            ),
+            buckets=build_1_2_5_buckets(max_model_len),
+            labelnames=labelnames,
+        )
+        self.histogram_prefill_kv_computed_request = make_per_engine(
+            histogram_prefill_kv_computed_request, engine_indexes, model_name
+        )
+
         #
         # KV Cache residency metrics
         #
@@ -952,7 +965,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
-                raise NotImplementedError("LoRA in DP mode is not supported yet.")
+                logger.warning(
+                    "vllm:lora_requests_info prometheus metrics may be "
+                    "incorrect/misleading with data parallel deployments."
+                )
             self.labelname_max_lora = "max_lora"
             self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
             self.labelname_running_lora_adapters = "running_lora_adapters"
@@ -1114,6 +1130,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.histogram_decode_time_request[engine_idx].observe(
                 finished_request.decode_time
+            )
+            # Calculate prefill KV compute (excludes cached tokens)
+            prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                finished_request.num_cached_tokens, 0
+            )
+            self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                prefill_kv_computed
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens

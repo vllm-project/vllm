@@ -133,6 +133,7 @@ class CpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:

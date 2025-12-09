@@ -23,9 +23,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
+    per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
 )
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
@@ -157,23 +159,40 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _act_mul_quant(
         self, input: torch.Tensor, output: torch.Tensor, activation: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if activation == "silu":
-            return silu_mul_per_token_group_quant_fp8_colmajor(
-                input=input, output=output
-            )
-        else:
-            # This is a fallback path. If we find ourselves using any activation other
-            # than silu, we should add that activation to
-            # silu_mul_per_token_group_quant_fp8_colmajor kernel as it is much faster.
+        assert self.block_shape is not None
+        block_k = self.block_shape[1]
+        scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
+
+        # 1. DeepGemm UE8M0: use packed per-token-group quant
+        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
             M_sum, N = input.size()
             act_out = torch.empty(
                 (M_sum, N // 2), dtype=input.dtype, device=input.device
             )
             self.activation(activation, act_out, input)
-            assert self.block_shape is not None
-            return per_token_group_quant_fp8(
-                act_out, self.block_shape[1], column_major_scales=True, out_q=output
+            a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+                act_out,
+                block_k,
+                out_q=output,
             )
+            return a2q, a2q_scale
+
+        # 2. Hopper / non‑E8M0: prefer the fused SiLU+mul+quant kernel
+        if activation == "silu":
+            use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+            return silu_mul_per_token_group_quant_fp8_colmajor(
+                input=input,
+                output=output,
+                use_ue8m0=use_ue8m0,
+            )
+
+        # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
+        M_sum, N = input.size()
+        act_out = torch.empty((M_sum, N // 2), dtype=input.dtype, device=input.device)
+        self.activation(activation, act_out, input)
+        return per_token_group_quant_fp8(
+            act_out, block_k, column_major_scales=True, out_q=output
+        )
 
     def apply(
         self,

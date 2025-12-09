@@ -402,7 +402,11 @@ def test_eagle_correctness(
             # Scout requires default backend selection
             # because vision encoder has head_dim 88 being incompatible
             #  with FLASH_ATTN and needs to fall back to Flex Attn
-            pass
+
+            # pass if not ROCm
+            if current_platform.is_rocm():
+                # TODO: Enable Flex Attn for spec_decode on ROCm
+                pytest.skip("Flex Attn for spec_decode not supported on ROCm currently")
         else:
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
@@ -413,9 +417,9 @@ def test_eagle_correctness(
                 "multi-token eagle spec decode on current platform"
             )
 
-        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+        if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
             if "deepseek" in model_setup[1].lower():
-                pytest.skip("FLASH_ATTN for deepseek not supported on ROCm platform")
+                pytest.skip("ROCM_AITER_FA for deepseek not supported on ROCm platform")
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 

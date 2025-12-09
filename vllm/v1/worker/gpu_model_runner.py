@@ -48,7 +48,10 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import (
@@ -329,6 +332,7 @@ class GPUModelRunner(
         self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -1097,7 +1101,6 @@ class GPUModelRunner(
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1701,6 +1704,26 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
+        if self.is_mm_prefix_lm:
+            req_doc_ranges = {}
+            for req_id in self.input_batch.req_ids:
+                image_doc_ranges = []
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    image_doc_ranges.extend(img_doc_range)
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                req_doc_ranges[req_idx] = image_doc_ranges
+
+            if isinstance(attn_metadata, list):
+                for ub_metadata in attn_metadata:
+                    for _metadata in ub_metadata.values():
+                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+            else:
+                for _metadata in attn_metadata.values():
+                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
@@ -2109,7 +2132,6 @@ class GPUModelRunner(
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             curr_group_outputs: list[torch.Tensor] = []
 
@@ -2135,7 +2157,6 @@ class GPUModelRunner(
                             [video_mm_kwargs_item],
                             device=self.device,
                             pin_memory=self.pin_memory,
-                            multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
 
@@ -3887,14 +3908,12 @@ class GPUModelRunner(
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
-        model = cast(SupportsMultiModal, self.model)
         return next(
             mm_kwargs_group
             for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 

@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from collections.abc import Mapping, Sequence, Set
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
@@ -175,6 +175,31 @@ class PlaceholderRange:
 
         return int(self.is_embed.sum().item())
 
+    def extract_embeds_range(self) -> list[tuple[int, int]]:
+        """Extract the start and end indices of the embedded region in prompt.
+
+        For example, given `PlaceholderRange(offset=2, length=5)` and
+        `is_embed = [False, True, False, True, True]`, the output is
+        `[(1 + offset, 1 + offset), (3 + offset, 4 + offset)]`.
+
+        Returns:
+            A tuple `(start, end)` representing the start and end
+            indices (inclusive) of the embedded region.
+            Returns full placeholder range if `is_embed` is `None`.
+        """
+        if self.is_embed is None:
+            return [(self.offset, self.offset + self.length)]
+
+        mask_i = self.is_embed.int()
+        starts = torch.nonzero(
+            torch.diff(mask_i, prepend=mask_i.new_zeros(1)) == 1
+        ).flatten()
+        ends = torch.nonzero(
+            torch.diff(mask_i, append=mask_i.new_zeros(1)) == -1
+        ).flatten()
+        ranges = torch.stack((starts, ends), dim=1) + self.offset
+        return [tuple(x) for x in ranges.tolist()]
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
@@ -221,6 +246,23 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
 
     # Both a and b are scalars
     return a == b
+
+
+def _nested_tensors_h2d(
+    tensors: NestedTensors,
+    device: torch.types.Device,
+) -> NestedTensors:
+    if device is None:
+        return tensors
+
+    return json_map_leaves(
+        (
+            lambda x: x.to(device=device, non_blocking=True)
+            if isinstance(x, torch.Tensor)
+            else x
+        ),
+        tensors,
+    )
 
 
 BatchedTensorInputs: TypeAlias = dict[str, NestedTensors]
@@ -334,12 +376,18 @@ class MultiModalFieldElem:
         )  # noqa: E721
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class BaseMultiModalField(ABC):
     """
     Defines how to interpret tensor data belonging to a keyword argument in
     [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs] for multiple
     multi-modal items, and vice versa.
+    """
+
+    keep_on_cpu: bool = False
+    """
+    If `True`, then this field is excluded from being moved to the accelerator
+    when `MultiModalKwargsItems.get_data()` is called to batch the data.
     """
 
     def _field_factory(self, *, modality: str, key: str):
@@ -386,6 +434,7 @@ class BaseMultiModalField(ABC):
         self,
         elems: list[MultiModalFieldElem],
         *,
+        device: torch.types.Device = None,
         pin_memory: bool = False,
     ) -> NestedTensors:
         """
@@ -399,11 +448,17 @@ class BaseMultiModalField(ABC):
         if len(set(field_types)) > 1:
             raise ValueError(f"Cannot merge different {field_types=}")
 
+        if device is not None and self.keep_on_cpu:
+            device = "cpu"
+        if pin_memory and self.keep_on_cpu:
+            pin_memory = False
+
         batch = [elem.data for elem in elems]
-        return self._reduce_data(batch, pin_memory=pin_memory)
+        out = self._reduce_data(batch, pin_memory=pin_memory)
+        return _nested_tensors_h2d(out, device=device)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MultiModalBatchedField(BaseMultiModalField):
     """
     Info:
@@ -445,7 +500,7 @@ class MultiModalBatchedField(BaseMultiModalField):
         return batch
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MultiModalFlatField(BaseMultiModalField):
     """
     Info:
@@ -505,7 +560,7 @@ class MultiModalFlatField(BaseMultiModalField):
         return [e for elem in batch for e in elem]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class MultiModalSharedField(BaseMultiModalField):
     """
     Info:
@@ -532,9 +587,10 @@ class MultiModalSharedField(BaseMultiModalField):
         return batch[0]
 
 
+@dataclass(frozen=True)
 class MultiModalFieldConfig:
     @staticmethod
-    def batched(modality: str):
+    def batched(modality: str, *, keep_on_cpu: bool = False):
         """
         Defines a field where an element in the batch is obtained by
         indexing into the first dimension of the underlying data.
@@ -542,6 +598,7 @@ class MultiModalFieldConfig:
         Args:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
+            keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
 
@@ -558,7 +615,7 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalBatchedField(),
+            field=MultiModalBatchedField(keep_on_cpu=keep_on_cpu),
             modality=modality,
         )
 
@@ -567,6 +624,8 @@ class MultiModalFieldConfig:
         modality: str,
         slices: Sequence[slice] | Sequence[Sequence[slice]],
         dim: int = 0,
+        *,
+        keep_on_cpu: bool = False,
     ):
         """
         Defines a field where an element in the batch is obtained by
@@ -579,6 +638,7 @@ class MultiModalFieldConfig:
                 slices (dim>0) that is used to extract the data corresponding
                 to it.
             dim: The dimension to extract data, default to 0.
+            keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
 
@@ -613,12 +673,22 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalFlatField(slices=slices, dim=dim),
+            field=MultiModalFlatField(
+                slices=slices,
+                dim=dim,
+                keep_on_cpu=keep_on_cpu,
+            ),
             modality=modality,
         )
 
     @staticmethod
-    def flat_from_sizes(modality: str, size_per_item: "torch.Tensor", dim: int = 0):
+    def flat_from_sizes(
+        modality: str,
+        size_per_item: "torch.Tensor",
+        dim: int = 0,
+        *,
+        keep_on_cpu: bool = False,
+    ):
         """
         Defines a field where an element in the batch is obtained by
         slicing along the first dimension of the underlying data.
@@ -629,6 +699,7 @@ class MultiModalFieldConfig:
             size_per_item: For each multi-modal item, the size of the slice
                 that is used to extract the data corresponding to it.
             dim: The dimension to slice, default to 0.
+            keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
 
@@ -676,10 +747,20 @@ class MultiModalFieldConfig:
             for i in range(len(size_per_item))
         ]
 
-        return MultiModalFieldConfig.flat(modality, slices, dim=dim)
+        return MultiModalFieldConfig.flat(
+            modality,
+            slices,
+            dim=dim,
+            keep_on_cpu=keep_on_cpu,
+        )
 
     @staticmethod
-    def shared(modality: str, batch_size: int):
+    def shared(
+        modality: str,
+        batch_size: int,
+        *,
+        keep_on_cpu: bool = False,
+    ):
         """
         Defines a field where an element in the batch is obtained by
         taking the entirety of the underlying data.
@@ -690,6 +771,7 @@ class MultiModalFieldConfig:
             modality: The modality of the multi-modal item that uses this
                 keyword argument.
             batch_size: The number of multi-modal items which share this data.
+            keep_on_cpu: Whether to keep this field on the CPU for the model inputs.
 
         Example:
 
@@ -708,18 +790,15 @@ class MultiModalFieldConfig:
         ```
         """
         return MultiModalFieldConfig(
-            field=MultiModalSharedField(batch_size),
+            field=MultiModalSharedField(
+                batch_size=batch_size,
+                keep_on_cpu=keep_on_cpu,
+            ),
             modality=modality,
         )
 
-    def __init__(self, field: BaseMultiModalField, modality: str) -> None:
-        super().__init__()
-
-        self.field = field
-        self.modality = modality
-
-    def __repr__(self) -> str:
-        return f"MultiModalFieldConfig(field={self.field}, modality={self.modality})"
+    field: BaseMultiModalField
+    modality: str
 
     def build_elems(
         self,
@@ -744,7 +823,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
             modality=modality,
             key="dummy",
             data=torch.empty(nbytes, dtype=torch.uint8),
-            field=MultiModalSharedField(1),
+            field=MultiModalSharedField(batch_size=1),
         )
         return MultiModalKwargsItem.from_elems([mm_elem])
 
@@ -844,7 +923,6 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
         *,
         device: torch.types.Device = None,
         pin_memory: bool = False,
-        cpu_fields: Set[str] = frozenset(),
     ) -> BatchedTensorInputs:
         """Construct a dictionary of keyword arguments to pass to the model."""
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
@@ -859,20 +937,13 @@ class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
                     elems_by_key[key].append(elem)
 
         data = {
-            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
+            key: elems[0].field.reduce_data(
+                elems,
+                device=device,
+                pin_memory=pin_memory,
+            )
             for key, elems in elems_by_key.items()
         }
-
-        if device is not None:
-            for k in data.keys() - cpu_fields:
-                data[k] = json_map_leaves(
-                    (
-                        lambda x: x.to(device=device, non_blocking=True)
-                        if isinstance(x, torch.Tensor)
-                        else x
-                    ),
-                    data[k],
-                )
 
         return data
 
