@@ -203,15 +203,30 @@ class ApplyRotaryEmb(CustomOp):
         if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
-            apply_rotary_emb = apply_rotary
+            origin_shape = x.shape
+            if len(origin_shape) == 3:
+                # x: [seq_len, num_heads, head_size]
+                x = x.unsqueeze(0)
+
+            """
+            Arguments of apply_rotary() in flash_attn:
+                x: [batch_size, seq_len, nheads, headdim]
+                cos, sin: [seqlen_rotary, rotary_dim / 2]
+                interleaved: defalut as False (Neox-style).
+                ...
+            """
+            interleaved = not self.is_neox_style
+            output = apply_rotary(x, cos, sin, interleaved).type_as(x)
+
+            if len(origin_shape) == 3:
+                output = output.squeeze(0)
         else:
             logger.warning(
                 "flash_attn is not installed. Falling back to PyTorch "
                 "implementation for rotary embeddings."
             )
-            apply_rotary_emb = self.forward_native
+            output = self.forward_native(x, cos, sin)
 
-        output = apply_rotary_emb(x, cos, sin).type_as(x)
         return output
 
     def extra_repr(self) -> str:
