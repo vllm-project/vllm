@@ -122,7 +122,7 @@ def _quantize_dequantize_fp8_ds_mla(
     reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
 )
 def test_sparse_backend_decode_correctness(
-    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size
+    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size, workspace_init
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")

@@ -251,7 +251,8 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
         # Initialize workspace manager
-        init_workspace_manager(self.device, self.vllm_config)
+        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
+        init_workspace_manager(self.device, num_ubatches)
 
         # Construct the model runner
         if self.use_v2_model_runner:

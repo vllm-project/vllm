@@ -10,7 +10,6 @@ from typing import Optional
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -37,11 +36,10 @@ class WorkspaceManager:
     Can be locked to prevent further growth during execution.
     """
 
-    def __init__(self, device: torch.device, vllm_config):
+    def __init__(self, device: torch.device, num_ubatches: int | None = None):
         self._device = device
-        self._vllm_config = vllm_config
-        # Cache num ubatches at init based on configuration
-        self._num_ubatches = 2 if vllm_config.parallel_config.enable_dbo else 1
+        # Cache num ubatches at init based on configuration (default to 1)
+        self._num_ubatches = num_ubatches if num_ubatches is not None else 1
         self._current_workspaces: list[torch.Tensor | None] = [None, None]
         self._locked: bool = False
 
@@ -192,7 +190,9 @@ def current_workspace_manager() -> "WorkspaceManager":
     return _manager
 
 
-def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> None:
+def init_workspace_manager(
+    device: torch.device, num_ubatches: int | None = None
+) -> None:
     """Initialize the workspace manager with a device.
 
     Must be called before using any workspace functions. Typically called
@@ -200,6 +200,7 @@ def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> Non
 
     Args:
         device: The device to allocate workspace on.
+        num_ubatches: Number of micro-batches. Defaults to 1.
     """
     global _manager
     if _manager is not None:
@@ -209,7 +210,7 @@ def init_workspace_manager(device: torch.device, vllm_config: VllmConfig) -> Non
             _manager._device,
             device,
         )
-    _manager = WorkspaceManager(device, vllm_config)
+    _manager = WorkspaceManager(device, num_ubatches)
 
 
 def lock_workspace() -> None:
@@ -232,3 +233,13 @@ def lock_workspace() -> None:
         # Now all get_workspace calls must fit in pre-allocated size
     """
     current_workspace_manager().lock()
+
+
+def reset_workspace_manager() -> None:
+    """Reset the workspace manager to uninitialized state.
+
+    This is primarily intended for testing purposes to allow tests
+    to reinitialize the workspace manager cleanly.
+    """
+    global _manager
+    _manager = None
