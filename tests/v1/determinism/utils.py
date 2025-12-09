@@ -13,7 +13,7 @@ from vllm.utils.flashinfer import has_flashinfer
 skip_unsupported = pytest.mark.skipif(
     not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
     # Supports testing on Ampere and Ada Lovelace devices.
-    # Note: For devices with SM < 90, batch variant is also supported without CUDA GRAPH.
+    # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
     reason="Requires CUDA and >= Ampere (SM80)",
 )
 
