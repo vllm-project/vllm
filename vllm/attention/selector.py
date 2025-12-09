@@ -28,7 +28,7 @@ class AttentionSelectorConfig(NamedTuple):
     has_sink: bool = False
     use_sparse: bool = False
     use_mm_prefix: bool = False
-    attn_type: AttentionType = AttentionType.DECODER
+    attn_type: str = AttentionType.DECODER
 
     def __repr__(self):
         return (
