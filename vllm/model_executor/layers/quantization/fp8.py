@@ -14,6 +14,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.attention.layer import Attention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -68,6 +69,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
@@ -120,12 +124,16 @@ class Fp8MoeBackend(Enum):
 
 
 def get_fp8_moe_backend(
-    block_quant: bool, moe_parallel_config: FusedMoEParallelConfig
+    block_quant: bool,
+    moe_parallel_config: FusedMoEParallelConfig,
+    with_lora_support: bool,
 ) -> Fp8MoeBackend:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    if with_lora_support:
+        return Fp8MoeBackend.TRITON
     # Prefer FlashInfer backends on supported GPUs; allow SM90 and SM100.
     if (
         current_platform.is_cuda()
@@ -277,7 +285,6 @@ class Fp8Config(QuantizationConfig):
     def get_xpu_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention
         from vllm.model_executor.layers.quantization.ipex_quant import (
             XPUFp8LinearMethod,
             XPUFp8MoEMethod,
@@ -307,8 +314,6 @@ class Fp8Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if current_platform.is_xpu():
             return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
@@ -318,7 +323,9 @@ class Fp8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            return Fp8LinearMethod(self)
+            quant_method = Fp8LinearMethod(self)
+            quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return quant_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
                 prefix=prefix,
@@ -326,7 +333,9 @@ class Fp8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            return Fp8MoEMethod(self, layer)
+            moe_quant_method = Fp8MoEMethod(self, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+            return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -377,6 +386,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
+        self.marlin_input_dtype = None
         self.use_marlin = (
             not current_platform.has_device_capability(89)
             or envs.VLLM_TEST_FORCE_FP8_MARLIN
@@ -455,6 +465,30 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_size_per_partition, input_size_per_partition, weight_loader
             )
         else:
+
+            def patched_weight_loader(param, loaded_weight, *args, **kwargs):
+                # load the current weight chunk
+                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+
+                # track how many elements we have updated
+                if not hasattr(layer, "_loaded_numel"):
+                    layer._loaded_numel = 0
+                layer._loaded_numel += loaded_weight.numel()
+
+                # if we have loaded all of the elements, call
+                # process_weights_after_loading
+                target_loaded_numel = layer.weight.numel()
+                if layer._loaded_numel == target_loaded_numel:
+                    self.process_weights_after_loading(layer)
+
+                    # Delete the bookkeeping
+                    del layer._loaded_numel
+                    # Prevent the usual `process_weights_after_loading` call from doing
+                    # anything
+                    layer._already_called_process_weights_after_loading = True
+
+                return res
+
             # For non-serialized checkpoints, use original dtype
             weight = ModelWeightParameter(
                 data=torch.empty(
@@ -464,7 +498,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 ),
                 input_dim=1,
                 output_dim=0,
-                weight_loader=weight_loader,
+                weight_loader=patched_weight_loader,
             )
         layer.register_parameter("weight", weight)
 
@@ -505,6 +539,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         size_k_first = True
         input_scale = None
         # TODO(rob): refactor block quant into separate class.
@@ -554,7 +591,9 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         if self.use_marlin:
-            prepare_fp8_layer_for_marlin(layer, size_k_first)
+            prepare_fp8_layer_for_marlin(
+                layer, size_k_first, input_dtype=self.marlin_input_dtype
+            )
             # Activations not quantized for marlin.
             del layer.input_scale
             return
@@ -612,6 +651,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 workspace=layer.workspace,
                 size_n=layer.output_size_per_partition,
                 size_k=layer.input_size_per_partition,
+                input_dtype=self.marlin_input_dtype,
                 bias=bias,
             )
 
@@ -656,9 +696,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
         self.fp8_backend = get_fp8_moe_backend(
-            self.block_quant, layer.moe_parallel_config
+            self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
 
+        self.marlin_input_dtype = None
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
@@ -723,6 +764,41 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"{intermediate_size_per_partition} is not divisible by "
                     f"weight quantization block_k = {block_k}."
                 )
+
+        # if we are doing online quantization, patch the weight
+        # loaded to call `process_weights_after_loading` in a streaming fashion
+        # as soon as the last weight chunk is loaded
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            weight_loader = extra_weight_attrs["weight_loader"]
+            # create a new holder to prevent modifying behavior of any other
+            # objects which might depend on the old one
+            new_extra_weight_attrs = extra_weight_attrs
+
+            def patched_weight_loader(param, loaded_weight, *args, **kwargs):
+                # load the current weight chunk
+                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+
+                # add a counter to track how many elements we have updated
+                if not hasattr(layer, "_loaded_numel"):
+                    layer._loaded_numel = 0
+                layer._loaded_numel += loaded_weight.numel()
+
+                # if we have loaded all of the elements, call
+                # process_weights_after_loading
+                target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
+                if layer._loaded_numel == target_loaded_numel:
+                    self.process_weights_after_loading(layer)
+
+                    # Delete the bookkeeping
+                    del layer._loaded_numel
+                    # Prevent the usual `process_weights_after_loading` call
+                    # from doing anything
+                    layer._already_called_process_weights_after_loading = True
+
+                return res
+
+            new_extra_weight_attrs["weight_loader"] = patched_weight_loader
+            extra_weight_attrs = new_extra_weight_attrs
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
@@ -825,6 +901,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.rocm_aiter_moe_enabled = False
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
         # Lazy import to avoid importing triton too early.
 
         self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
@@ -1033,7 +1112,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w13_weight.data = w13_weight.data
 
         if self.use_marlin:
-            prepare_moe_fp8_layer_for_marlin(layer, False)
+            prepare_moe_fp8_layer_for_marlin(
+                layer, False, input_dtype=self.marlin_input_dtype
+            )
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
@@ -1072,6 +1153,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import (
             BatchedDeepGemmExperts,
             BatchedTritonExperts,
+            TritonExperts,
             TritonOrDeepGemmExperts,
         )
 
@@ -1104,7 +1186,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
             )
-
+        elif self.moe.is_lora_enabled:
+            return TritonExperts(quant_config=self.moe_quant_config)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             # Select GEMM experts with block-scale when weights are block-quantized
             experts = select_cutlass_fp8_gemm_impl(
@@ -1272,6 +1355,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:

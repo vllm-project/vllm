@@ -24,9 +24,9 @@ class MLAModules:
     q_b_proj: torch.nn.Module | None
     q_proj: torch.nn.Module | None
     indexer: torch.nn.Module | None
-    indexer_rotary_emb: torch.nn.Module | None
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
+    indexer_rotary_emb: torch.nn.Module | None = None
 
 
 @CustomOp.register("multi_head_latent_attention")
@@ -111,6 +111,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -158,6 +159,9 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             _topk_indices = self.indexer(
                 hidden_states, q_c, positions, self.indexer_rope_emb
             )
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
 
         attn_out = self.mla_attn(
             q,

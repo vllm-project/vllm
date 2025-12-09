@@ -42,12 +42,12 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 import torch
 
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -565,11 +565,25 @@ class KVConnectorBase_V1(ABC):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> Optional["KVConnectorPromMetrics"]:
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
         expose connector transfer stats via Prometheus.
         """
+        return None
+
+    def reset_cache(self) -> bool | None:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        logger.debug(
+            "Connector cache reset requested, but %s does not implement reset_cache().",
+            type(self).__name__,
+        )
+
         return None
