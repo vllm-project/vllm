@@ -1119,14 +1119,6 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        print("-------------------------------------------------")
-        print(f"{self.quant_config=}")
-        print(f"{param.shape=}")
-        print(f"{loaded_weight.shape=}")
-        print(f"{weight_name=}")
-        print(f"{shard_id=}")
-        print(f"{expert_id=}")
-        print("-------------------------------------------------")
         if self._is_mxfp4:
             if self.quant_config.get_name() == "mxfp4":
                 # (FIXME) for gpt-oss all experts are combined
