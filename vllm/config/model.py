@@ -1188,15 +1188,10 @@ class ModelConfig:
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
     def get_head_size(self) -> int:
-        if self.is_attention_free:
-            return 0
         return self.model_arch_config.head_size
 
     def get_total_num_kv_heads(self) -> int:
         """Returns the total number of KV heads."""
-        if self.is_attention_free:
-            return 0
-
         return self.model_arch_config.total_num_kv_heads
 
     def get_num_kv_heads(self, parallel_config: ParallelConfig) -> int:
