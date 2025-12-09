@@ -357,9 +357,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            is_neox_style=True,
-        )
+        self.apply_rotary_emb = ApplyRotaryEmb()
 
     def forward(
         self,

@@ -123,11 +123,9 @@ class ApplyRotaryEmb(CustomOp):
     def __init__(
         self,
         is_neox_style: bool = True,
-        is_unsqueeze: bool = False,
     ) -> None:
         super().__init__()
         self.is_neox_style = is_neox_style
-        self.is_unsqueeze = is_unsqueeze
 
     @staticmethod
     def forward_static(
@@ -136,6 +134,13 @@ class ApplyRotaryEmb(CustomOp):
         sin: torch.Tensor,
         is_neox_style: bool = True,
     ) -> torch.Tensor:
+        """
+        Args:
+            x: [num_tokens, num_heads, head_size]
+            cos: [num_tokens, head_size // 2]
+            sin: [num_tokens, head_size // 2]
+            is_neox_style: Whether to use the Neox-style or GPT-J-style.
+        """
         cos = cos.unsqueeze(-2).to(x.dtype)
         sin = sin.unsqueeze(-2).to(x.dtype)
 
@@ -170,12 +175,11 @@ class ApplyRotaryEmb(CustomOp):
     ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
-        if self.is_unsqueeze:
-            output = apply_rotary_emb(
-                x.unsqueeze(0), cos, sin, not self.is_neox_style
-            ).squeeze(0)
-        else:
-            output = apply_rotary_emb(x, cos, sin).type_as(x)
+        output = (
+            apply_rotary_emb(x.unsqueeze(0), cos, sin, not self.is_neox_style)
+            .squeeze(0)
+            .type_as(x)
+        )
         return output
 
     def forward_hip(
@@ -197,3 +201,7 @@ class ApplyRotaryEmb(CustomOp):
 
         output = apply_rotary_emb(x, cos, sin).type_as(x)
         return output
+
+    def extra_repr(self) -> str:
+        s = f"is_neox_style={self.is_neox_style}"
+        return s
