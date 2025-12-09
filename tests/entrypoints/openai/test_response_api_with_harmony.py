@@ -7,11 +7,10 @@ import time
 import pytest
 import pytest_asyncio
 import requests
+from openai import BadRequestError, NotFoundError, OpenAI
 from openai_harmony import (
     Message,
 )
-
-from openai import BadRequestError, NotFoundError, OpenAI
 
 from ...utils import RemoteOpenAIServer
 

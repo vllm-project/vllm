@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 import pytest_asyncio
+from openai import OpenAI
 from openai_harmony import ToolDescription, ToolNamespaceConfig
 
-from openai import OpenAI
 from vllm.entrypoints.tool_server import MCPToolServer
 
 from ...utils import RemoteOpenAIServer
