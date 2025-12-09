@@ -957,6 +957,36 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(
                 max_w13_scales, requires_grad=False
             )
+        elif self.weight_quant.strategy == QuantizationStrategy.BLOCK:
+            assert not self.static_input_scales
+            if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+                # NOTE: weights have to be swapped since the activation is
+                # applied on different half for flashinfer vs vllm
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                w13_weight_scale_inv = swap_w13_to_w31(layer.w13_weight_scale.data)
+                w2_weight = layer.w2_weight.data
+                w2_weight_scale_inv = layer.w2_weight_scale.data
+            else:
+                w13_weight = layer.w13_weight.data
+                w13_weight_scale_inv = layer.w13_weight_scale.data
+                w2_weight = layer.w2_weight
+                w2_weight_scale_inv = layer.w2_weight_scale.data
+
+            # torch.compile() cannot use Parameter subclasses.
+            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
+                w13_weight_scale_inv, requires_grad=False
+            )
+            layer.w13_weight_scale_inv = Parameter(
+                w13_weight_scale_inv, requires_grad=False
+            )
+            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+            layer.w2_weight_scale = Parameter(
+                w2_weight_scale_inv, requires_grad=False
+            )
+            layer.w2_weight_scale_inv = Parameter(
+                w2_weight_scale_inv, requires_grad=False
+            )
 
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
@@ -1171,6 +1201,44 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            assert activation == "silu", (
+                f"Expected 'silu' activation but got {activation}"
+            )
+            assert self.weight_quant.strategy == QuantizationStrategy.BLOCK, (
+                "Flashinfer TRT-LLM backend currently only supports block-wise quantization for weights."
+            )
+            import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
+
+            e_score_correction_bias = (
+                e_score_correction_bias.to(x.dtype)
+                if e_score_correction_bias is not None
+                else None
+            )
+            routing_method_type = layer.routing_method_type
+            flashinfer_result = torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                routing_logits=router_logits.to(torch.float32)
+                if routing_method_type == RoutingMethodType.DeepSeekV3
+                else router_logits,
+                routing_bias=e_score_correction_bias,
+                x=x,
+                w13_weight=layer.w13_weight,
+                w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                w2_weight=layer.w2_weight,
+                w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                global_num_experts=global_num_experts,
+                top_k=top_k,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                intermediate_size=layer.intermediate_size_per_partition,
+                expert_offset=layer.ep_rank * layer.local_num_experts,
+                local_num_experts=layer.local_num_experts,
+                block_shape=self.weight_block_size,
+                routing_method_type=routing_method_type,
+                routed_scaling=routed_scaling_factor,
+            )
+
+            return flashinfer_result
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
