@@ -1085,7 +1085,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(MARLIN_MOE_OTHER_SRC "csrc/moe/marlin_moe_wna16/ops.cu")
     set_gencode_flags_for_srcs(
       SRCS "${MARLIN_MOE_OTHER_SRC}"
-      CUDA_ARCHS "${MARLIN_OTHER_ARCHS}")
+      CUDA_ARCHS "${MARLIN_MOE_OTHER_ARCHS}")
     if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
       set_source_files_properties(${MARLIN_MOE_OTHER_SRC}
         PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")

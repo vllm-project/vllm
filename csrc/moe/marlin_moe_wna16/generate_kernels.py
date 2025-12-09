@@ -166,8 +166,8 @@ def generate_new_kernels():
     sm_75_result_dict = {}
 
     for quant_config in QUANT_CONFIGS:
-        c_types = quant_config.get("c_type", ["kFloat16"])
-        a_types = quant_config.get("a_type", ["kFloat16"])
+        c_types = quant_config.get("c_type", ["kFloat16", "kBFloat16"])
+        a_types = quant_config.get("a_type", ["kFloat16", "kBFloat16"])
         b_type = quant_config["b_type"]
         all_group_blocks = quant_config["group_blocks"]
         all_m_blocks = quant_config["thread_m_blocks"]
