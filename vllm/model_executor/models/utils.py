@@ -82,6 +82,25 @@ class WeightsMapper:
         }
 
 
+# Skip language model in Encoder instance
+def maybe_init_language_model(init_fn):
+    if has_ec_transfer() and get_ec_transfer().is_producer:
+        return None
+    return init_fn()
+
+
+# Skiped language model prefix
+def maybe_skip_language_model_prefix(
+    module: nn.Module,
+    skip_prefixes: list[str],
+    language_attr: str = "language_model",
+):
+    if (has_ec_transfer() and get_ec_transfer().is_producer
+            and hasattr(module, language_attr)
+            and getattr(module, language_attr) is None):
+        skip_prefixes.append(f"{language_attr}.")
+
+
 class AutoWeightsLoader:
     """
     Helper class to load weights into a [`torch.nn.Module`][]. It is able

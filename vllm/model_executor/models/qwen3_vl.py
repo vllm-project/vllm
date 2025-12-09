@@ -82,7 +82,9 @@ from .qwen2_5_vl import (Qwen2_5_VisionAttention,
 from .qwen2_vl import Qwen2VLProcessingInfo
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    maybe_prefix, merge_multimodal_embeddings)
+                    maybe_init_language_model, maybe_prefix,
+                    maybe_skip_language_model_prefix,
+                    merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend, run_dp_sharded_mrope_vision_model
 
 logger = init_logger(__name__)
@@ -1138,13 +1140,14 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 use_data_parallel=self.use_data_parallel,
             )
 
-        self.language_model = Qwen3LLMForCausalLM(vllm_config=vllm_config,
-                                                  prefix=maybe_prefix(
-                                                      prefix,
-                                                      "language_model"))
+        self.language_model = maybe_init_language_model(
+            lambda: Qwen3LLMForCausalLM(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(
+                                            prefix, "language_model")))
 
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
+        if self.language_model is not None:
+            self.make_empty_intermediate_tensors = (
+                self.language_model.make_empty_intermediate_tensors)
 
         self.use_deepstack = hasattr(config.vision_config,
                                      'deepstack_visual_indexes')
@@ -1599,6 +1602,7 @@ class Qwen3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         skip_prefixes = []
         if self.visual is None:
             skip_prefixes.extend(["visual."])
+        maybe_skip_language_model_prefix(self, skip_prefixes, "language_model")
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

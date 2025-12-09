@@ -46,7 +46,8 @@ from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .qwen3_vl import (Qwen3_VisionTransformer, Qwen3VLDummyInputsBuilder,
                        Qwen3VLForConditionalGeneration,
                        Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import (is_pp_missing_parameter, maybe_init_language_model,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -331,13 +332,14 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                 use_data_parallel=self.use_data_parallel,
             )
 
-        self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
-                                                     prefix=maybe_prefix(
-                                                         prefix,
-                                                         "language_model"))
+        self.language_model = maybe_init_language_model(
+            lambda: Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
+                                           prefix=maybe_prefix(
+                                               prefix, "language_model")))
 
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
+        if self.language_model is not None:
+            self.make_empty_intermediate_tensors = (
+                self.language_model.make_empty_intermediate_tensors)
 
         self.use_deepstack = hasattr(config.vision_config,
                                      'deepstack_visual_indexes')
