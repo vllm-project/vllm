@@ -654,10 +654,12 @@ class BenchmarkTensors:
             )
             # Newer ops.moe_lora_align_block_size signature requires
             # adapter_enabled and lora_ids. For benchmarking we can use
-            # synthetic values that enable all loras.
+            # synthetic values that enable all loras. The last entry represents
+            # the base model (no LoRA) and should be disabled.
             adapter_enabled = torch.ones(
                 (max_loras + 1,), dtype=torch.int32, device=topk_ids.device
             )
+            adapter_enabled[-1] = 0
             lora_ids = torch.arange(
                 max_loras + 1, dtype=torch.int32, device=topk_ids.device
             )
