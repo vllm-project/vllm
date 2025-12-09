@@ -47,7 +47,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, AborRequest
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -221,7 +221,8 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
-        aborted_requests: list[tuple[int, str, str]] = []
+        # List of all abort request (cause by any errors of the backend)
+        aborted_requests: list[AborRequest] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -448,7 +449,9 @@ class Scheduler(SchedulerInterface):
                         logger.warning(f"{error_msg} for request {request.request_id}")
 
                         # 2. Add to local list
-                        aborted_requests.append((request.client_index, request.request_id, error_msg))
+                        aborted_requests.append(AborRequest(client_index=request.client_index,
+                                                            request_id=request.request_id,
+                                                            error_message=error_msg))
 
                         # 3. Finish the request (clean up resources)
                         if self.finished_req_ids_dict is None:
@@ -1165,25 +1168,18 @@ class Scheduler(SchedulerInterface):
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # 1. Process Aborted Requests (passed safely via core.py)
-            for client_index, req_id, error_msg in scheduler_output.aborted_reqs:
-                # We can't look up self.requests[req_id] because it was deleted in schedule()
-                # But we only need the ID and the message to construct the error.
-
-                # NOTE: You might need to track client_index in aborted_requests
-                # if you have multiple clients. Assuming client_index=0 or derived if simpler.
-                # For robustness, you might want to store (request_id, client_index, error_msg) in Step 2.
-
+            # 1. Process Aborted Requests
+            for aborted_req in scheduler_output.aborted_reqs:
                 # Construct the error output
-                outputs[client_index].append(  # Assuming single client or you tracked client_index
+                outputs[aborted_req.client_index].append(
                         EngineCoreOutput(
-                                request_id=req_id,
+                                request_id=aborted_req.request_id,
                                 new_token_ids=[],
                                 finish_reason=FinishReason.STOP,
                                 new_logprobs=None,
                                 new_prompt_logprobs_tensors=None,
                                 pooling_output=None,
-                                stop_reason=error_msg,
+                                stop_reason=aborted_req.error_msg,
                                 events=request.take_events(),
                                 kv_transfer_params=None,
                                 trace_headers=request.trace_headers,

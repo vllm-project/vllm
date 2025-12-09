@@ -8,6 +8,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from pydantic import BaseModel
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -239,6 +240,11 @@ class Request:
         if self.request_id != other.request_id:
             return self.request_id < other.request_id
         return id(self) < id(other)
+
+class AborRequest(BaseModel):
+    client_index: int
+    request_id: str
+    error_message: str
 
 
 class RequestStatus(enum.IntEnum):
