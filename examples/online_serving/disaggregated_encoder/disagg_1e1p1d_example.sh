@@ -102,7 +102,7 @@ CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
     --max-num-seqs 128 \
     --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
-        "ec_connector": "ECSharedStorageConnector",
+        "ec_connector": "ECExampleConnector",
         "ec_role": "ec_producer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
@@ -126,7 +126,7 @@ vllm serve "$MODEL" \
     --max-num-seqs 128 \
     --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
     --ec-transfer-config '{
-        "ec_connector": "ECSharedStorageConnector",
+        "ec_connector": "ECExampleConnector",
         "ec_role": "ec_consumer",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"

@@ -1,0 +1,62 @@
+group: Models - Basic
+depends_on: 
+  - image-build
+steps:
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  commands:
+    # Run a subset of model initialization tests
+    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+
+- label: Basic Models Tests (Extra Initialization) %N
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  commands:
+    # Only when vLLM model source is modified - test initialization of a large
+    # subset of supported models (the complement of the small subset in the above
+    # test.) Also run if model initialization test file is modified
+    - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 2
+
+- label: Basic Models Tests (Other)
+  timeout_in_minutes: 45
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_transformers.py
+  - tests/models/test_registry.py
+  commands:
+    - pytest -v -s models/test_transformers.py models/test_registry.py
+
+- label: Basic Models Test (Other CPU) # 5min
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
+  no_gpu: true
+  commands:
+    - pytest -v -s models/test_utils.py models/test_vision.py
+
+- label: Transformers Nightly Models
+  working_dir: "/vllm-workspace/"
+  optional: true
+  soft_fail: true
+  commands:
+    - pip install --upgrade git+https://github.com/huggingface/transformers
+    - pytest -v -s tests/models/test_initialization.py
+    - pytest -v -s tests/models/test_transformers.py
+    - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py
+    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # Whisper needs spawn method to avoid deadlock
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
