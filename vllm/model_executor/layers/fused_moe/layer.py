@@ -753,7 +753,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
-        )
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_internal_router(self) -> bool:
