@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
+from quark.torch.kernel.hw_emulation.hw_emulation_interface import fake_quantize_mx
+from quark.torch.quantization.config.type import Dtype
+
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -69,7 +72,7 @@ def _get_max_quant_exp(dtype: tl.constexpr):
 # fmt: off
 @triton.jit
 def _compute_quant_and_scale(src_tensor, valid_src_mask, mx_tensor_dtype: tl.constexpr,
-                             DEQUANT_SCALE_ROUNDING_MODE: tl.constexpr = 0):
+                             DEQUANT_SCALE_ROUNDING_MODE: tl.constexpr = 0, pack_order: tl.constexpr = 1):
     is_fp8: tl.constexpr = mx_tensor_dtype == tl.float8e4nv or mx_tensor_dtype == tl.float8e5
     BLOCK_SIZE_OUT_DIM: tl.constexpr = src_tensor.shape[0]
     BLOCK_SIZE_QUANT_DIM: tl.constexpr = src_tensor.shape[1]
@@ -148,7 +151,7 @@ def _compute_quant_and_scale(src_tensor, valid_src_mask, mx_tensor_dtype: tl.con
 
         e2m1_value = tl.reshape(e2m1_value, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_DIM // 2, 2])
         evens, odds = tl.split(e2m1_value)
-        out_tensor = evens | (odds << 4)
+        out_tensor = evens | (odds << 4) if (pack_order==0) else odds | (evens<< 4) # this is corret way under MI355 test
 
     return out_tensor, dequant_scale_exponent
 
@@ -172,12 +175,13 @@ def _mxfp4_quant_op(
     amax = amax.to(tl.int32, bitcast=True)
     amax = (amax + 0x200000).to(tl.uint32, bitcast=True) & 0xFF800000
     amax = amax.to(tl.float32, bitcast=True)
-    #scale_e8m0_unbiased = (tl.log2(amax) + 0.5).floor() - 2
+    #scale_e8m0_unbiased = (tl.log2(amax) + 0.5).floor() #- 2
     scale_e8m0_unbiased = tl.log2(amax).floor() - 2
     scale_e8m0_unbiased = tl.clamp(scale_e8m0_unbiased, min=-127, max=127)
 
     # blockscale_e8m0
-    bs_e8m0 = scale_e8m0_unbiased.to(tl.uint8) + 127  # in fp32, we have 2&(e - 127)
+    bs_e8m0 = scale_e8m0_unbiased.to(tl.uint16) + 127  # in fp32, we have 2&(e - 127)
+    bs_e8m0 = bs_e8m0.to(tl.uint8)
 
     quant_scale = tl.exp2(-scale_e8m0_unbiased)
 
@@ -195,7 +199,6 @@ def _mxfp4_quant_op(
     #           S101 -> +/- 3.0
     #           S110 -> +/- 4.0
     #           S111 -> +/- 6.0
-    #qx = tl.where(qx > 0, qx + 0.25, qx - 0.25)
     qx = qx.to(tl.uint32, bitcast=True)
 
     # Extract sign, exponents and mantissa fields from FP32
@@ -223,6 +226,9 @@ def _mxfp4_quant_op(
     )
     evens, odds = tl.split(e2m1_value)
     x_fp4 = evens | (odds << 4)
+    #x_fp4_l = x_fp4 << 4
+    #x_fp4_R = x_fp4 >> 4
+    #x_fp4 = x_fp4_l | x_fp4_R
     x_fp4 = x_fp4.reshape(BLOCK_SIZE_M, BLOCK_SIZE_N // 2)
 
     return x_fp4, bs_e8m0.reshape(BLOCK_SIZE_M, NUM_QUANT_BLOCKS)
@@ -276,7 +282,11 @@ def kernel_unified_attention_2d(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
     use_native_fp4: tl.constexpr = 0, # options: 0 Original; 1 - native fp4 QK and fp8 PV; 2 - smoothed fp4 QK based on sage-attention2 and fp8 PV; >=3 - smoothed fp4 QK and fp4 PV
+    fp4_data_ptr = None,
+    fp4_scale_ptr = None,
+    test_id : tl.int64 = 0,
     PACK_ALONG_K: tl.constexpr = True,
+    MXOP_SEL: tl.constexpr = 1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -301,6 +311,7 @@ def kernel_unified_attention_2d(
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
+
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
@@ -330,8 +341,8 @@ def kernel_unified_attention_2d(
        Q1 = tl.full(shape=Q.shape, value=1, dtype=tl.int32)
 
        if use_native_fp4 == 1:
-          #q_fp4, scale_q = _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
-          q_fp4, scale_q = _compute_quant_and_scale(Q, Q1, tl.uint8,2)
+          q_fp4, scale_q = _compute_quant_and_scale(Q, Q1, tl.uint8,2) if (MXOP_SEL == 1) else \
+                           _mxfp4_quant_op(Q, HEAD_SIZE_PADDED, BLOCK_M, 32)
        else:
           q_avg = tl.sum(Q,1)/HEAD_SIZE_PADDED
           q_avg = tl.reshape(q_avg,(BLOCK_M,1))
@@ -342,8 +353,28 @@ def kernel_unified_attention_2d(
               tl.device_print("q_avg:",q_avg.shape[0], q_avg.shape[1])
 
           Qr = Q - q_avg
-          #q_fp4, scale_q = _mxfp4_quant_op(Qr, HEAD_SIZE_PADDED, BLOCK_M, 32)
-          q_fp4, scale_q = _compute_quant_and_scale(Qr, Q1, tl.uint8,2)
+          q_fp4, scale_q = _compute_quant_and_scale(Qr, Q1, tl.uint8,2) if (MXOP_SEL == 1) else \
+                           _mxfp4_quant_op(Qr, HEAD_SIZE_PADDED, BLOCK_M, 32)
+
+       if fp4_data_ptr is not None and fp4_scale_ptr is not None and pid0 < 1 and pid1 < 1:
+          offset_dfp4 = tl.arange(0, HEAD_SIZE_PADDED//2)
+          offset_sfp4 = tl.arange(0, HEAD_SIZE_PADDED//32)
+
+          q_fp4_offset = (query_offset_0[:, None] * query_stride_0//2 +
+                          query_offset_1[:, None] * query_stride_1//2 + offset_dfp4[None, :])
+          if pid0 < -1 and pid1 < 1:
+              tl.device_print("qfp4:",q_fp4.shape[0], q_fp4.shape[1])
+              tl.device_print("offset:",offset_dfp4)
+          dim_mask_fp4 = tl.where(offset_dfp4 < HEAD_SIZE//2, 1, 0).to(tl.int1)
+          tl.store( fp4_data_ptr + q_fp4_offset, q_fp4,
+                    mask=dim_mask_fp4[None, :] & query_mask_0[:, None] & query_mask_1[:, None], )
+
+          s_fp4_offset = (query_offset_0[:, None] * query_stride_0//32 +
+                          query_offset_1[:, None] * query_stride_1//32 + offset_sfp4[None, :])
+          dim_mask_s = tl.where(offset_sfp4 < HEAD_SIZE//32, 1, 0).to(tl.int1)
+          tl.store( fp4_scale_ptr + s_fp4_offset, scale_q,
+                    mask=dim_mask_s[None, :] & query_mask_0[:, None] & query_mask_1[:, None], )
+
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -444,6 +475,9 @@ def kernel_unified_attention_2d(
         else:
             K = K_load
 
+        if pid0 < -1 and pid1 < 1 and j == 0 and test_id == 0:
+            tl.device_print("K:",tl.trans(K))
+
         # V : (TILE_SIZE, HEAD_SIZE)
         V_load = tl.load(value_cache_ptr + v_offset,
                          mask=dim_mask[None, :] & tile_mask[:, None],
@@ -466,25 +500,31 @@ def kernel_unified_attention_2d(
         if use_native_fp4:
            K1 = tl.full(shape=K.shape, value=1, dtype=tl.int32)
            kt = tl.trans(K)
+           k1t= tl.trans(K1)
 
-           if use_native_fp4 == 2:
+           if use_native_fp4 >= 2:
               k_avg = tl.sum(kt,1) / HEAD_SIZE_PADDED
               k_avg = tl.reshape(k_avg,(TILE_SIZE,1))
               ones = tl.full((1,HEAD_SIZE_PADDED), 1.0, dtype=tl.float32)
               k_avg = tl.dot(k_avg, ones)
               kt -= k_avg
               detS = tl.dot(q_avg, tl.trans(kt))
-           #k_fp4, scale_k = _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
-           k_fp4, scale_k = _compute_quant_and_scale(kt, tl.trans(K1), tl.uint8,2)
+
+           k_fp4, scale_k = _compute_quant_and_scale(kt, k1t, tl.uint8,2) if (MXOP_SEL == 1) else \
+                            _mxfp4_quant_op(kt, HEAD_SIZE_PADDED, TILE_SIZE, 32)
 
            # fp4 debug info
-           if pid0 < -1 and pid1 < 1 and j == 0:
-              tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
+           if pid0 < -1 and pid1 < 1 and j == 0 and test_id == 0:
+              #tl.device_print("k_fp4:",k_fp4.shape[0], k_fp4.shape[1])
+              tl.device_print("k_fp4:", k_fp4) #tl.trans(k_fp4))
+              #tl.device_print("scale_k:", scale_k) #tl.trans(scale_k))
 
            # copied from triton def dot_scaled()
            # M, K_LHS = lhs.type.shape[-2:]
            # K_RHS, N = rhs.type.shape[-2:]
-           s_fp4 = tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), tl.trans(scale_k), "e2m1", S2, lhs_k_pack=PACK_ALONG_K,
+           # rhs_scale (e8m0 type represented as an uint8 tensor, or None.) – Scale factor for rhs tensor. Shape should be [N, K//group_size]
+           # where rhs is [K, N]. Important: Do NOT transpose rhs_scale
+           s_fp4 = tl.dot_scaled(q_fp4, scale_q, "e2m1", tl.trans(k_fp4), scale_k, "e2m1", lhs_k_pack=PACK_ALONG_K,
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32)
            if use_native_fp4 >= 2:
                S2 += scale * (s_fp4 + detS)
@@ -493,12 +533,29 @@ def kernel_unified_attention_2d(
         else:
            S += scale * tl.dot(Q, K)
 
-        if pid0 < -1 and pid1 < 1 and j == 0:
-           tl.device_print("S-S2 ",S - S2)
-           #tl.device_print("S2: ",S2)
+        if pid0 < 1 and pid1 < 1 and j == 0 and test_id == 0:
+           #tl.device_print("S-S2 ",S - S2)
+           if use_native_fp4:
+              tl.device_print("S2: ",S2)
+              S += scale * tl.dot(Q, K) # debug only
+           tl.device_print("S: ",S)
 
         if use_native_fp4:
            S = S2
+
+        if False: # debug code for qk verification
+           offs_d_tile = tl.arange(0, TILE_SIZE)
+           tile_mask = tl.where(offs_d_tile < TILE_SIZE, 1, 0).to(tl.int1)
+           output_offset = (query_offset_0[:, None] * output_stride_0 +
+                     query_offset_1[:, None] * output_stride_1 +
+                     offs_d_tile[None, :])
+
+           tl.store(
+                     output_ptr + output_offset,
+                     S,
+                     mask=tile_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+           )
+           return
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -570,7 +627,7 @@ def kernel_unified_attention_2d(
                                    rhs_k_pack=PACK_ALONG_K, out_dtype=tl.float32) / 6.0
         #elif use_native_fp4 >= 1:
         #   acc += tl.dot(P.to(tl.float8e5), V.to(tl.float8e5))
-        else:           
+        else:
            acc += tl.dot(P.to(V.dtype), V)
 
         if pid0 < -1 and pid1 < 1 and j == 0:
@@ -950,7 +1007,7 @@ def reduce_segments(
                      tl.arange(0, HEAD_SIZE_PADDED))
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
-
+total_print = 0
 def unified_attention(
     q,
     k,
@@ -973,9 +1030,10 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
-    use_native_fp4=2,
+    use_native_fp4=1,
+    use_fake_quantize=1,
 ):
-
+    global total_print
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
@@ -999,6 +1057,7 @@ def unified_attention(
        BLOCK_M = 32
     #print("num_queries_per_kv, BLOK_M, block_size: ", num_queries_per_kv, BLOCK_M, block_size, "qkv dtype: ", q.dtype, k.dtype, v.dtype,
     #        "max seqlen q: ", max_seqlen_q, "seqused k, max seqlen k : ", seqused_k.data[0], max_seqlen_k,"num_kv_heads: ", num_kv_heads)
+
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Ideally we would launch with kernel with:
@@ -1017,6 +1076,57 @@ def unified_attention(
     # and at least 16 for all other data types.
     TILE_SIZE_PREFILL = 64 #32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
+
+    #mx_dtype = Dtype.fp6_e3m2
+    mx_dtype = Dtype.fp4
+    if not use_native_fp4 and use_fake_quantize:
+       q_mx = fake_quantize_mx(
+                            input_tensor=q.to(torch.bfloat16),
+                            scale=None,
+                            mx_element_dtype=mx_dtype,
+                            axis=-1,
+                            block_size=32,
+                            #scale_calculation_mode="floor",
+                            )
+
+       if total_print < 3:
+          print("Q=", q.shape)
+          print("q_mx=", q_mx.shape, "\n", q_mx[0,0,:])
+
+       k_mx = fake_quantize_mx(
+                            input_tensor=k.to(torch.bfloat16),
+                            scale=None,
+                            mx_element_dtype=mx_dtype,
+                            axis=-1,
+                            block_size=32,
+                            #scale_calculation_mode="floor",
+                            )
+
+       if total_print < 3:
+          print("k=", k.shape, "\n", k[0,0,0,:])
+          print("k_mx=", k_mx.shape, "\n", k_mx[0,0,0,:])
+
+       v_mx = fake_quantize_mx(
+                            input_tensor=k.to(torch.bfloat16),
+                            scale=None,
+                            mx_element_dtype=mx_dtype,
+                            axis=-1,
+                            block_size=32,
+                            #scale_calculation_mode="floor",
+                            )
+       if not use_native_fp4:
+          q=q_mx
+          k=k_mx
+
+    num_dim = len(q.shape)
+    q_fp4_data = None
+    s_fp4_data = None
+    if num_dim == 3:
+       q_fp4_shape =  (q.shape[0], q.shape[1], q.shape[2]//2)
+       s_fp4_shape =  (q.shape[0], q.shape[1], q.shape[2]//32)
+
+       q_fp4_data = torch.zeros(q_fp4_shape).to(torch.uint8).to(q.device)
+       s_fp4_data = torch.zeros(s_fp4_shape).to(torch.uint8).to(q.device)
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
@@ -1069,7 +1179,16 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
             use_native_fp4=use_native_fp4,
+            fp4_data_ptr = q_fp4_data,
+            fp4_scale_ptr = s_fp4_data,
+            test_id = total_print,
         )
+        if  (q_fp4_data is not None) and  (s_fp4_data is not None) and total_print < 3:
+            print("q_input=\n", q[0,0,:])
+            print("q_fp4_data=\n", q_fp4_data[0,0,:])
+            print("s_fp4_data=\n", s_fp4_data[0,0,:])
+            print("qk_output=\n",out[0,0,:])
+            total_print += 1
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
         # value that showed good performance in tests
