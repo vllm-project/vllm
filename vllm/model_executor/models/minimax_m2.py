@@ -199,6 +199,9 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        if rope_parameters is not None:
+            rope_parameters["partial_rotary_factor"] = 1.0
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=rotary_dim,
