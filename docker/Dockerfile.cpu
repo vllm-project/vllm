@@ -119,7 +119,7 @@ FROM base AS vllm-test-deps
 
 WORKDIR /workspace/vllm
 
-# TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
+# TODO: Update to 2.9.1 when there is a new build for intel_extension_for_pytorch for that version
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \

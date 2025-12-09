@@ -26,7 +26,7 @@ torch._inductor.config.compile_threads = 1
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
-# This change monkeypatches memory_plan_reuse in pytorch 2.9.0 to work around
+# This change monkeypatches memory_plan_reuse in pytorch 2.9.1 to work around
 # a test failure for test_multi_graph_piecewise_compile_outputs_equal.
 # For more context, see https://github.com/pytorch/pytorch/pull/165514.
 
@@ -93,7 +93,7 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # torch 2.9 Inductor get_graph_partition_signature monkeypatch
 # ===================================================
-# This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
+# This change monkeypatches get_graph_partition_signature in pytorch 2.9.1 to
 # fix inductor partition + attention-nvfp4 quant fusion, tested in
 # `tests/compile/distributed/test_fusions_e2e.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
@@ -363,12 +363,12 @@ def _update_scheduler_patched(self) -> None:
         self.scheduler = Scheduler(self.operations)
 
 
-if is_torch_equal("2.9.0"):
+if is_torch_equal("2.9.1"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
     from torch.utils._config_module import _Config, _ConfigEntry
 
-    # `custom_should_partition_ops` is a new config after 2.9.0. So this would
+    # `custom_should_partition_ops` is a new config after 2.9.1. So this would
     # not overwrite any user configs.
     torch._inductor.config._config["custom_should_partition_ops"] = _ConfigEntry(
         _Config(default=[])
