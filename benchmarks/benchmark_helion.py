@@ -261,8 +261,8 @@ def main():
         if trace_files:
             for trace_file in sorted(trace_files):
                 print(f"📊 {trace_file}")
-            print(f"\nTo view traces, open Chrome and go to chrome://tracing")
-            print(f"Then load the trace files above.")
+            print("\nTo view traces, open Chrome and go to chrome://tracing")
+            print("Then load the trace files above.")
         else:
             print("No trace files were generated.")
         print("=" * 60)
