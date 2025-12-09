@@ -24,6 +24,78 @@ import torch.distributed as dist
 _distributed_results_container = [None]
 
 
+def _sanitize_filename(name: str) -> str:
+    """
+    Sanitize a string for use in filenames by replacing problematic characters.
+
+    Args:
+        name: String to sanitize
+
+    Returns:
+        Sanitized string safe for filenames
+    """
+    # Replace problematic characters with underscores or remove them
+    return (name.replace("(", "")
+                .replace(")", "")
+                .replace(",", "_")
+                .replace(" ", "")
+                .replace("=", "")
+                .replace("torch.", ""))
+
+
+def capture_gpu_trace(
+    kernel_fn: Callable,
+    trace_name: str,
+    output_path: str,
+    num_iterations: int = 5,
+) -> str:
+    """
+    Capture GPU execution trace for a kernel function.
+
+    Args:
+        kernel_fn: Callable that executes the kernel
+        trace_name: Name for the trace (used in filename)
+        output_path: Directory to save the trace file
+        num_iterations: Number of iterations to trace
+
+    Returns:
+        Path to the generated trace file
+    """
+    # Ensure output directory exists
+    Path(output_path).mkdir(parents=True, exist_ok=True)
+
+    # Sanitize trace name for filename
+    clean_trace_name = _sanitize_filename(trace_name)
+
+    # Create trace filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trace_file = Path(output_path) / f"{clean_trace_name}_{timestamp}_trace.json"
+
+    print(f"🔍 Capturing GPU trace: {trace_name} ({num_iterations} iterations)")
+
+    # Capture trace
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=False,
+        with_modules=False,
+    ) as prof:
+        for _ in range(num_iterations):
+            kernel_fn()
+            prof.step()  # Mark each iteration as a step
+
+    # Export trace in Chrome trace format
+    prof.export_chrome_trace(str(trace_file))
+
+    print(f"  ✓ Trace saved: {trace_file}")
+    return str(trace_file)
+
+
 def verify_correctness(
     output: torch.Tensor,
     reference: torch.Tensor,
@@ -73,6 +145,9 @@ class BenchmarkConfig:
     verify: bool = True
     atol: float = 1e-5
     rtol: float = 1e-3
+    enable_trace: bool = True
+    trace_iterations: int = 5
+    trace_output_dir: str = "/tmp"
 
 
 @dataclass
@@ -551,6 +626,15 @@ class KernelBenchmark(ABC):
             use_cudagraph=config.use_cudagraph,
         )
 
+        # Capture trace for baseline if enabled (after warmup)
+        if config.enable_trace:
+            capture_gpu_trace(
+                baseline_fn,
+                f"baseline_{shape_desc}_{config.dtype}",
+                config.trace_output_dir,
+                config.trace_iterations,
+            )
+
         # Benchmark Helion kernel
         def helion_fn():
             return self.run_helion(*inputs)
@@ -561,6 +645,15 @@ class KernelBenchmark(ABC):
             warmup=config.warmup,
             use_cudagraph=config.use_cudagraph,
         )
+
+        # Capture trace for Helion if enabled (after warmup)
+        if config.enable_trace:
+            capture_gpu_trace(
+                helion_fn,
+                f"helion_{shape_desc}_{config.dtype}",
+                config.trace_output_dir,
+                config.trace_iterations,
+            )
 
         return BenchmarkResult(
             shape_params=config.shape_params,
@@ -581,6 +674,9 @@ class KernelBenchmark(ABC):
         verify: bool = True,
         atol: float = 1e-3,
         rtol: float = 1e-3,
+        enable_trace: bool = True,
+        trace_iterations: int = 5,
+        trace_output_dir: str = "/tmp",
     ) -> list[BenchmarkResult]:
         """
         Run all benchmark configurations for the given mode.
@@ -596,6 +692,9 @@ class KernelBenchmark(ABC):
             verify: Whether to verify correctness
             atol: Absolute tolerance for verification
             rtol: Relative tolerance for verification
+            enable_trace: Whether to capture GPU execution traces
+            trace_iterations: Number of iterations to trace for each kernel
+            trace_output_dir: Directory to save trace files
 
         Returns:
             List of BenchmarkResult objects (excluding failed verifications)
@@ -626,6 +725,9 @@ class KernelBenchmark(ABC):
                     verify=verify,
                     atol=atol,
                     rtol=rtol,
+                    enable_trace=enable_trace,
+                    trace_iterations=trace_iterations,
+                    trace_output_dir=trace_output_dir,
                 )
                 result = self.run_benchmark(config)
                 if result is not None:
@@ -702,6 +804,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
         verify: bool = True,
         atol: float = 1e-3,
         rtol: float = 1e-3,
+        enable_trace: bool = True,
+        trace_iterations: int = 5,
+        trace_output_dir: str = "/tmp",
     ) -> list[BenchmarkResult]:
         """
         Run distributed benchmark using torch.multiprocessing.spawn.
@@ -717,6 +822,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
             verify: Whether to verify correctness
             atol: Absolute tolerance for verification
             rtol: Relative tolerance for verification
+            enable_trace: Whether to capture GPU execution traces
+            trace_iterations: Number of iterations to trace for each kernel
+            trace_output_dir: Directory to save trace files
 
         Returns:
             List of BenchmarkResult objects
@@ -759,6 +867,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
                                 verify=verify,
                                 atol=atol,
                                 rtol=rtol,
+                                enable_trace=enable_trace,
+                                trace_iterations=trace_iterations,
+                                trace_output_dir=trace_output_dir,
                             )
                         )
                 else:
@@ -773,6 +884,9 @@ class DistributedKernelBenchmark(KernelBenchmark):
                             verify=verify,
                             atol=atol,
                             rtol=rtol,
+                            enable_trace=enable_trace,
+                            trace_iterations=trace_iterations,
+                            trace_output_dir=trace_output_dir,
                         )
                     )
 
@@ -1046,6 +1160,16 @@ class DistributedKernelBenchmark(KernelBenchmark):
                 if local_rank == 0:
                     print(f"    Baseline: {baseline_time:.4f} ms")
 
+                # Capture trace for baseline if enabled (after warmup) - all ranks
+                if config.enable_trace:
+                    shape_desc = self.get_shape_description(**config.shape_params)
+                    capture_gpu_trace(
+                        baseline_fn,
+                        f"baseline_{shape_desc}_{config.dtype}_rank{local_rank}",
+                        config.trace_output_dir,
+                        config.trace_iterations,
+                    )
+
                 dist.barrier()
 
                 # Benchmark Helion
@@ -1079,6 +1203,16 @@ class DistributedKernelBenchmark(KernelBenchmark):
 
                 if local_rank == 0:
                     print(f"    Helion: {helion_time:.4f} ms")
+
+                # Capture trace for Helion if enabled (after warmup) - all ranks
+                if config.enable_trace:
+                    shape_desc = self.get_shape_description(**config.shape_params)
+                    capture_gpu_trace(
+                        helion_fn,
+                        f"helion_{shape_desc}_{config.dtype}_rank{local_rank}",
+                        config.trace_output_dir,
+                        config.trace_iterations,
+                    )
 
                 dist.barrier()
 
