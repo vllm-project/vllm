@@ -730,6 +730,8 @@ def per_token_group_quant_fp8(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
+    # Using the default value (240.0) from pytorch will cause accuracy
+    # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm.
     finfo = torch.finfo(dtype)
     fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
     fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
