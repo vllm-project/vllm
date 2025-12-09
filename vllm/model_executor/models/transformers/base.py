@@ -36,6 +36,8 @@ from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
+    SupportsEagle,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
     SupportsQuant,
@@ -92,7 +94,15 @@ def vllm_flash_attention_forward(
 ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
-class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
+class Base(
+    nn.Module,
+    VllmModel,
+    SupportsQuant,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+):
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -425,19 +435,29 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
         else:
             position_ids = positions[None, ...]
 
-        hidden_states = self.model(
+        outputs = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
             position_ids=position_ids,
             attention_instances=self.attention_instances,
             return_dict=False,
+            output_hidden_states=True,
             **kwargs,
-        )[0][0, ...]  # we remove batch dimension for now
+        )
+        # We must remove the batch dimension from these outputs
+        hidden_states = outputs[0][0, ...]
+        aux_hidden_states = [
+            x[0, ...]
+            for i, x in enumerate(outputs[1])
+            if i in self.aux_hidden_state_layers
+        ]
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(
@@ -462,3 +482,10 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
                 f"Transformers modeling backend requires transformers>={required} "
                 f"for {feature}, but got {installed}"
             )
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = self.text_config.num_hidden_layers
+        return (2, num_layers // 2, num_layers - 3)
