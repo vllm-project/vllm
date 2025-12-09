@@ -24,6 +24,15 @@ def is_aiter_found() -> bool:
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
 
+# Can't use dtypes.fp8 directly inside an op
+# because it returns wrong result on gfx942.
+# This is a workaround to get the correct FP8 dtype.
+# This might because that the get_gfx() is wrapped as a custom op.
+if IS_AITER_FOUND:
+    from aiter import dtypes
+
+    AITER_FP8_DTYPE = dtypes.fp8
+
 
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
@@ -43,36 +52,6 @@ def if_aiter_supported(func: Callable) -> Callable:
         return None
 
     return wrapper
-
-
-def _rocm_aiter_group_fp8_quant_impl(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
-    from aiter import QuantType, dtypes, get_hip_quant
-
-    aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-    return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
-
-
-def _rocm_aiter_group_fp8_quant_fake(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
-
-    M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=dtypes.fp8, device=x.device)
-    out_bs = torch.empty(
-        (
-            M,
-            (N + group_size - 1) // group_size,
-        ),
-        dtype=torch.float32,
-        device=x.device,
-    )
-    return x_fp8, out_bs
 
 
 def _rocm_aiter_fused_moe_impl(
@@ -522,6 +501,142 @@ def _rocm_aiter_per_token_quant_fake(
     )
 
 
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=AITER_FP8_DTYPE,
+        res1=residual,
+    )
+    return (x_quant, x_quant_scales, res)
+
+
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+        torch.empty_like(residual, device=residual.device),
+    )
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=AITER_FP8_DTYPE,
+        res1=None,
+    )
+    return (x_quant, x_quant_scales)
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
+def _rocm_aiter_group_fp8_quant_impl(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
+    from aiter import QuantType, get_hip_quant
+
+    aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
+    return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
+
+
+def _rocm_aiter_group_fp8_quant_fake(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    x_fp8 = torch.empty((M, N), dtype=AITER_FP8_DTYPE, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    return act_mul_and_fp8_group_quant(
+        x,
+        activation="silu",
+        group_size=group_size,
+        dtype_quant=AITER_FP8_DTYPE,
+    )
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    assert N % 2 == 0
+    N_half = N // 2
+    x_fp8 = torch.empty((M, N_half), dtype=AITER_FP8_DTYPE, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N_half + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -557,7 +672,7 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_linear_fp8_enaled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
-        return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
+        return cls.is_linear_enabled()
 
     @classmethod
     @if_aiter_supported
@@ -633,14 +748,6 @@ class rocm_aiter_ops:
 
             # register all the custom ops here
             direct_register_custom_op(
-                op_name="rocm_aiter_group_fp8_quant",
-                op_func=_rocm_aiter_group_fp8_quant_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_group_fp8_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
                 op_func=_rocm_aiter_asm_moe_tkw1_impl,
                 mutates_args=[],
@@ -699,25 +806,44 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rms_norm",
                 op_func=_rocm_aiter_rms_norm_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rms_norm_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_fp8_group_quant",
+                op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_group_fp8_quant",
+                op_func=_rocm_aiter_group_fp8_quant_impl,
+                fake_impl=_rocm_aiter_group_fp8_quant_fake,
             )
 
             direct_register_custom_op(
