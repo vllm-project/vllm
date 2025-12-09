@@ -225,16 +225,10 @@ def benchmark_attention(
             0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=device
         )
 
-        # For flash attention, we also need queries in the same total sequence format
-        # We'll create a new query tensor that matches the expected format
-        q_flash = torch.empty(
-            total_query_tokens, num_query_heads, head_size, dtype=dtype, device=device
-        )
-        q_flash.uniform_(-scale, scale)
-
+        # The `query` tensor is already in the correct format for flash_attn_varlen_func
         def run_flash_attn():
             flash_attn_varlen_func(
-                q=q_flash,
+                q=query,
                 k=k_flash,
                 v=v_flash,
                 cu_seqlens_q=cu_seqlens_q,
