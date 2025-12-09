@@ -136,9 +136,9 @@ class ApplyRotaryEmb(CustomOp):
     ) -> torch.Tensor:
         """
         Args:
-            x: [num_tokens, num_heads, head_size]
-            cos: [num_tokens, head_size // 2]
-            sin: [num_tokens, head_size // 2]
+            x: [batch_size (optional), seq_len, num_heads, head_size]
+            cos: [seq_len, head_size // 2]
+            sin: [seq_len, head_size // 2]
             is_neox_style: Whether to use the Neox-style or GPT-J-style.
         """
         cos = cos.unsqueeze(-2).to(x.dtype)
@@ -175,11 +175,23 @@ class ApplyRotaryEmb(CustomOp):
     ) -> torch.Tensor:
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
-        output = (
-            apply_rotary_emb(x.unsqueeze(0), cos, sin, not self.is_neox_style)
-            .squeeze(0)
-            .type_as(x)
-        )
+        origin_shape = x.shape
+        if len(origin_shape) == 3:
+            # x: [seq_len, num_heads, head_size]
+            x = x.unsqueeze(0)
+
+        """
+        Arguments of apply_rotary_emb() in vllm_flash_attn:
+            x: [batch_size, seq_len, nheads, headdim]
+            cos, sin: [seqlen_rotary, rotary_dim / 2]
+            interleaved: defalut as False (Neox-style).
+            ...
+        """
+        interleaved = not self.is_neox_style
+        output = apply_rotary_emb(x, cos, sin, interleaved).type_as(x)
+
+        if len(origin_shape) == 3:
+            output = output.squeeze(0)
         return output
 
     def forward_hip(
