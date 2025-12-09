@@ -5,7 +5,7 @@ import os
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_torch_equal
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -363,7 +363,7 @@ def _update_scheduler_patched(self) -> None:
         self.scheduler = Scheduler(self.operations)
 
 
-if is_torch_equal("2.9.1"):
+if is_torch_equal_or_newer("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
     from torch.utils._config_module import _Config, _ConfigEntry
