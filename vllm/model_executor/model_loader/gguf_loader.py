@@ -4,6 +4,7 @@ import os
 from collections.abc import Generator
 
 import gguf
+import regex as re
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
@@ -94,6 +95,7 @@ class GGUFModelLoader(BaseModelLoader):
             hasattr(config, "vision_config") and config.vision_config is not None
         )
         gguf_to_hf_name_map = {}
+        sideload_params: list[re.Pattern] = []
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
             model_type = "command-r"
@@ -118,6 +120,12 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
         if model_type in ("qwen2_moe", "qwen3_moe"):
             model_type = model_type.replace("_", "")
             # GGUF layer map assumes that we will have a merged expert weights
@@ -131,6 +139,12 @@ class GGUFModelLoader(BaseModelLoader):
                 )
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
                 )
 
         arch = None
@@ -241,7 +255,15 @@ class GGUFModelLoader(BaseModelLoader):
                 # Parameter not in manual overrides either
                 unmapped_params.append(hf_name)
 
-        # All parameters must be mapped: both vision/projector and backbone
+        # All parameters (except those initialized by other means) must be mapped:
+        # both vision/projector and backbone
+        if unmapped_params:
+            unmapped_params = list(
+                filter(
+                    lambda x: not any(re.fullmatch(p, x) for p in sideload_params),
+                    unmapped_params,
+                )
+            )
         if unmapped_params:
             raise RuntimeError(
                 f"Failed to map GGUF parameters "
