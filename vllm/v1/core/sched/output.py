@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -206,6 +206,9 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # List of tuples: (request_id, error_message)
+    aborted_reqs: list[tuple[int, str, str]] = field(default_factory=list)
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

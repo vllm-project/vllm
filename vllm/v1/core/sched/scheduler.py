@@ -40,7 +40,7 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
@@ -83,6 +83,8 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
+        # All pending query that failed, (structured output compilation failed)
+        self.pending_error_outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -219,6 +221,7 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        aborted_requests: list[tuple[int, str, str]] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -438,7 +441,22 @@ class Scheduler(SchedulerInterface):
                 # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    try:
+                        grammar_ready = structured_output_req and structured_output_req.grammar
+                    except Exception as e:
+                        error_msg = f"Structured output grammar compilation failed: {e}"
+                        logger.warning(f"{error_msg} for request {request.request_id}")
+
+                        # 2. Add to local list
+                        aborted_requests.append((request.client_index, request.request_id, error_msg))
+
+                        # 3. Finish the request (clean up resources)
+                        if self.finished_req_ids_dict is None:
+                            self.finished_req_ids_dict = defaultdict(set)
+                        self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                        continue
+
+                    if grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
@@ -723,6 +741,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            aborted_reqs=aborted_requests,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1145,6 +1164,33 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+
+            # 1. Process Aborted Requests (passed safely via core.py)
+            for client_index, req_id, error_msg in scheduler_output.aborted_reqs:
+                # We can't look up self.requests[req_id] because it was deleted in schedule()
+                # But we only need the ID and the message to construct the error.
+
+                # NOTE: You might need to track client_index in aborted_requests
+                # if you have multiple clients. Assuming client_index=0 or derived if simpler.
+                # For robustness, you might want to store (request_id, client_index, error_msg) in Step 2.
+
+                # Construct the error output
+                outputs[client_index].append(  # Assuming single client or you tracked client_index
+                        EngineCoreOutput(
+                                request_id=req_id,
+                                new_token_ids=[],
+                                finish_reason=FinishReason.STOP,
+                                new_logprobs=None,
+                                new_prompt_logprobs_tensors=None,
+                                pooling_output=None,
+                                stop_reason=error_msg,
+                                events=request.take_events(),
+                                kv_transfer_params=None,
+                                trace_headers=request.trace_headers,
+                                num_cached_tokens=request.num_cached_tokens,
+                                num_nans_in_logits=request.num_nans_in_logits,
+                                )
+                        )
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
