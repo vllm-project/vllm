@@ -354,68 +354,68 @@ class HelionAttentionImpl(AttentionImpl):
 
         # descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+        # to debug crashes
         # if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4:
         # if attn_metadata.max_seq_len < 16:
-        if False:
-        # if True:
-        # if max_seqlen_q == 1:
-            print(
-                f"DEBUG: calling triton attention for seq lens "
-                f"{attn_metadata.max_seq_len} and batch size "
-                f"{len(seqused_k)}."
-            )
-            from vllm.attention.ops.triton_unified_attention import (
-                unified_attention as triton_unified_attention,
-            )
+        # if False:
+        #     print(
+        #         f"DEBUG: calling triton attention for seq lens "
+        #         f"{attn_metadata.max_seq_len} and batch size "
+        #         f"{len(seqused_k)}."
+        #     )
+        #     from vllm.attention.ops.triton_unified_attention import (
+        #         unified_attention as triton_unified_attention,
+        #     )
 
-            triton_unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=None,
-                v_descale=None,
-                # k_descale=layer._k_scale.expand(descale_shape),
-                # v_descale=layer._v_scale.expand(descale_shape),
-                # sinks=self.sinks,
-                # output_scale=output_scale,
-            )
-        else:
-            helion_unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                # max_query_len_int=attn_metadata.max_query_len,
-                num_seqs=attn_metadata.num_reqs,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=None,
-                v_descale=None,
-                # k_descale=layer._k_scale.expand(descale_shape),
-                # v_descale=layer._v_scale.expand(descale_shape),
-                # sinks=self.sinks,
-                # output_scale=output_scale,
-            )
+        #     triton_unified_attention(
+        #         q=query[:num_actual_tokens],
+        #         k=key_cache,
+        #         v=value_cache,
+        #         out=output[:num_actual_tokens],
+        #         cu_seqlens_q=cu_seqlens_q,
+        #         max_seqlen_q=max_seqlen_q,
+        #         seqused_k=seqused_k,
+        #         max_seqlen_k=max_seqlen_k,
+        #         softmax_scale=self.scale,
+        #         causal=True,
+        #         alibi_slopes=self.alibi_slopes,
+        #         window_size=self.sliding_window,
+        #         block_table=block_table,
+        #         softcap=self.logits_soft_cap,
+        #         q_descale=None,  # Not supported
+        #         k_descale=None,
+        #         v_descale=None,
+        #         # k_descale=layer._k_scale.expand(descale_shape),
+        #         # v_descale=layer._v_scale.expand(descale_shape),
+        #         # sinks=self.sinks,
+        #         # output_scale=output_scale,
+        #     )
+        # else:
+
+        helion_unified_attention(
+            q=query[:num_actual_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=block_table,
+            # max_query_len_int=attn_metadata.max_query_len,
+            num_seqs=attn_metadata.num_reqs,
+            softcap=self.logits_soft_cap,
+            q_descale=None,  # Not supported
+            k_descale=None,
+            v_descale=None,
+            # k_descale=layer._k_scale.expand(descale_shape),
+            # v_descale=layer._v_scale.expand(descale_shape),
+            # sinks=self.sinks,
+            # output_scale=output_scale,
+        )
 
         return output
