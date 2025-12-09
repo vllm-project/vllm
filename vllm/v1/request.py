@@ -245,6 +245,10 @@ class AbortRequest(BaseModel):
     client_index: int
     request_id: str
     error_message: str
+    events: list["EngineCoreEvent"] | None = None
+    trace_headers: "Mapping[str, str] | None" = None
+    num_cached_tokens: int = 0
+    num_nans_in_logits: int = 0
 
 
 class RequestStatus(enum.IntEnum):

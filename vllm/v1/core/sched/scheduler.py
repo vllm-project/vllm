@@ -447,9 +447,17 @@ class Scheduler(SchedulerInterface):
                         logger.warning(f"{error_msg} for request {request.request_id}")
 
                         # 2. Add to local list
-                        aborted_requests.append(AbortRequest(client_index=request.client_index,
-                                                             request_id=request.request_id,
-                                                             error_message=error_msg))
+                        aborted_requests.append(
+                            AbortRequest(
+                                client_index=request.client_index,
+                                request_id=request.request_id,
+                                error_message=error_msg,
+                                events=request.take_events(),
+                                trace_headers=request.trace_headers,
+                                num_cached_tokens=request.num_cached_tokens,
+                                num_nans_in_logits=request.num_nans_in_logits
+                                )
+                            )
 
                         # 3. Finish the request (clean up resources)
                         if self.finished_req_ids_dict is None:
@@ -1177,12 +1185,12 @@ class Scheduler(SchedulerInterface):
                                 new_logprobs=None,
                                 new_prompt_logprobs_tensors=None,
                                 pooling_output=None,
-                                stop_reason=aborted_req.error_msg,
-                                events=request.take_events(),
+                                stop_reason=aborted_req.error_message,
+                                events=aborted_req.events,
                                 kv_transfer_params=None,
-                                trace_headers=request.trace_headers,
-                                num_cached_tokens=request.num_cached_tokens,
-                                num_nans_in_logits=request.num_nans_in_logits,
+                                trace_headers=aborted_req.trace_headers,
+                                num_cached_tokens=aborted_req.num_cached_tokens,
+                                num_nans_in_logits=aborted_req.num_nans_in_logits,
                                 )
                         )
 
