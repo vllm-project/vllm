@@ -48,6 +48,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    SchedulerReconfigure,
     UtilityOutput,
     UtilityResult,
 )
@@ -576,6 +577,34 @@ class EngineCore:
             # compilation status before scheduling request.
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
+
+    def reconfigure_scheduler(self, config: SchedulerReconfigure):
+        vllm_config = self.vllm_config
+        org_scheduler_config = vllm_config.org_scheduler_config
+
+        max_num_seqs = config.max_num_seqs
+        if max_num_seqs is None:
+            max_num_seqs = org_scheduler_config.max_num_seqs
+
+        max_num_batched_tokens = config.max_num_batched_tokens
+        if max_num_batched_tokens is None:
+            max_num_batched_tokens = org_scheduler_config.max_num_seqs
+
+        if max_num_seqs > org_scheduler_config.max_num_seqs:
+            return False
+
+        if max_num_batched_tokens > org_scheduler_config.max_num_batched_tokens:
+            return False
+
+        scheduler_config = self.vllm_config.scheduler_config
+        scheduler_config.max_num_seqs = config.max_num_seqs
+        scheduler_config.max_num_batched_tokens = config.max_num_batched_tokens
+
+        self.scheduler.reconfigure(
+            max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens
+        )
+
+        return True
 
 
 class EngineCoreProc(EngineCore):

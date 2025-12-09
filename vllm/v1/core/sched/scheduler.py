@@ -1749,3 +1749,7 @@ class Scheduler(SchedulerInterface):
         # Return the IDs of affected running requests to skip in
         # update_from_output.
         return sync_affected_req_ids
+
+    def reconfigure(self, max_num_seqs: int, max_num_batched_tokens: int):
+        self.max_num_running_reqs = max_num_seqs
+        self.max_num_scheduled_tokens = max_num_batched_tokens

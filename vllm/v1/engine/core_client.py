@@ -36,6 +36,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
+    SchedulerReconfigure,
     UtilityOutput,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -176,6 +177,9 @@ class EngineCoreClient(ABC):
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
+        raise NotImplementedError
+
+    def reconfigure_scheduler(self, config: SchedulerReconfigure):
         raise NotImplementedError
 
     def collective_rpc(
@@ -338,6 +342,9 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
+
+    def reconfigure_scheduler(self, config: SchedulerReconfigure):
+        self.engine_core.reconfigure_scheduler(config)
 
 
 @dataclass
@@ -803,6 +810,9 @@ class SyncMPClient(MPClient):
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
+
+    def reconfigure_scheduler(self, config: SchedulerReconfigure):
+        self.call_utility("reconfigure_scheduler", config)
 
 
 class AsyncMPClient(MPClient):
