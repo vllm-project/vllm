@@ -105,7 +105,7 @@ class UBatchWrapper:
         self.comm_stream = torch.cuda.Stream(device=device)
         # Ubatch threads plus the main thread
         self.ready_barrier = threading.Barrier(
-            self.vllm_config.parallel_config.num_of_ubatches + 1
+            self.vllm_config.parallel_config.num_ubatches + 1
         )
 
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
@@ -421,17 +421,14 @@ class UBatchWrapper:
         assert dp_metadata is not None
         ubatch_dp_metadata = []
         for ubatch_slice in ubatch_slices:
-            num_tokens_per_ubatch = (
-                ubatch_slice.token_slice.stop - ubatch_slice.token_slice.start
-            )
             dp_size = self.vllm_config.parallel_config.data_parallel_size
             ubatch_num_tokens_across_dp = torch.tensor(
-                [num_tokens_per_ubatch] * dp_size, device="cpu", dtype=torch.int32
+                [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
             )
             ubatch_dp_metadata.append(
                 DPMetadata.make(
                     self.vllm_config.parallel_config,
-                    num_tokens_per_ubatch,
+                    ubatch_slice.num_tokens,
                     ubatch_num_tokens_across_dp,
                 )
             )

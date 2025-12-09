@@ -3028,7 +3028,7 @@ class GPUModelRunner(
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    self.parallel_config.num_of_ubatches,
+                    self.parallel_config.num_ubatches,
                 )
 
                 logger.debug(
@@ -4109,7 +4109,7 @@ class GPUModelRunner(
             num_scheduled_tokens,
             num_tokens_padded,
             num_reqs_padded,
-            self.vllm_config.parallel_config.num_of_ubatches,
+            self.vllm_config.parallel_config.num_ubatches,
         )
         logger.debug(
             "ubatch_slices: %s, ubatch_slices_padded: %s",
@@ -4664,7 +4664,6 @@ class GPUModelRunner(
             # version of the graph
             allow_microbatching = (
                 self.parallel_config.use_ubatching
-                and self.parallel_config.num_of_ubatches > 1
                 and cudagraph_runtime_mode == CUDAGraphMode.FULL
                 and uniform_decode
                 and check_ubatch_thresholds(
@@ -4800,7 +4799,7 @@ class GPUModelRunner(
                     else None,
                     num_metadata_builders=1
                     if not self.parallel_config.use_ubatching
-                    else self.parallel_config.num_of_ubatches,
+                    else self.parallel_config.num_ubatches,
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,

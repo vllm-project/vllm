@@ -332,7 +332,7 @@ class ParallelConfig:
         return self.enable_dbo or self.ubatch_size > 1
 
     @property
-    def num_of_ubatches(self) -> int:
+    def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
 
     def get_next_dp_init_port(self) -> int:

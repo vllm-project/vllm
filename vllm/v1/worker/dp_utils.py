@@ -148,7 +148,7 @@ def _synchronize_dp_ranks(
     assert should_attempt_dp_padding == should_dp_pad
 
     # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_of_ubatches)
+    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
     if should_ubatch and not should_dp_pad:
         logger.debug_once(
