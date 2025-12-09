@@ -35,12 +35,14 @@ def _sanitize_filename(name: str) -> str:
         Sanitized string safe for filenames
     """
     # Replace problematic characters with underscores or remove them
-    return (name.replace("(", "")
-                .replace(")", "")
-                .replace(",", "_")
-                .replace(" ", "")
-                .replace("=", "")
-                .replace("torch.", ""))
+    return (
+        name.replace("(", "")
+        .replace(")", "")
+        .replace(",", "_")
+        .replace(" ", "")
+        .replace("=", "")
+        .replace("torch.", "")
+    )
 
 
 def capture_gpu_trace(
