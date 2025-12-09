@@ -217,9 +217,10 @@ def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
     quant_config: QuantizationConfig | None,
+    quant_method: FusedMoEMethodBase,
     moe_parallel_config: FusedMoEParallelConfig,
     is_lora_enabled: bool,
-) -> int:
+) -> tuple[int, bool]:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
@@ -246,7 +247,9 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
+    if quant_config and (
+        quant_config.get_name() == "mxfp4" or \
+        (quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.input_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2)):
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -265,7 +268,9 @@ def maybe_roundup_hidden_size(
         ):
             hidden_size = round_up(hidden_size, 256)
 
-    return hidden_size
+        return hidden_size, True
+
+    return hidden_size, False
 
 
 @CustomOp.register("fused_moe")
@@ -379,15 +384,6 @@ class FusedMoE(CustomOp):
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
-
-        # Round up hidden size if needed.
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size,
-            moe_in_dtype,
-            quant_config,
-            self.moe_parallel_config,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
-        )
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -561,6 +557,31 @@ class FusedMoE(CustomOp):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
+
+        # Round up hidden size if needed.
+        hidden_size, is_rounded_hidden_size = maybe_roundup_hidden_size(
+            hidden_size,
+            moe_in_dtype,
+            quant_config,
+            self.quant_method,
+            self.moe_parallel_config,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
+        )
+
+        if is_rounded_hidden_size:
+            self.hidden_size = hidden_size
+            self.moe_config: FusedMoEConfig = FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                in_dtype=moe_in_dtype,
+                max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+                has_bias=has_bias,
+                is_act_and_mul=is_act_and_mul,
+                is_lora_enabled=vllm_config.lora_config is not None,
+            )
 
         if not self.moe_config.is_act_and_mul:
             # Avoid circular import
