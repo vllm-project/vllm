@@ -101,7 +101,12 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             config,
         )
 
-    def create_new_topk_data(
+    # The dispatched topk ids and weights are often required by the fused
+    # experts, but unlike the high throughput kernels, the hybrid DeepEP
+    # kernels do not provide either of these in an easily digestible format.
+    # As a workaround, we dispatch the ids and weights to all the DP ranks.
+    # Ideally, the hybrid kernels would take care of this.
+    def _dispatch_topk_data(
         self,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -165,8 +170,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        print(f"GOT HERE 1")
-
         (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
             hidden=a1q,
             scaling_factor=a1q_scale,
@@ -179,14 +182,11 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_of_experts=num_experts,
         )
 
-        print(f"GOT HERE 2")
-
         self.handle = handle
         self.expert_probs = expert_probs
         assert self.handle is not None
 
-        # TODO(bnell): add comment
-        new_topk_ids, new_topk_weights = self.create_new_topk_data(
+        new_topk_ids, new_topk_weights = self._dispatch_topk_data(
             topk_ids,
             topk_weights,
         )
@@ -238,15 +238,11 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
-        print("GOT HERE 3")
-
         combined_x, combined_probs = self.buffer.combine(
             hidden=fused_expert_output,
             probs=probs,
             handle=self.handle,
         )
-
-        print("GOT HERE 4")
 
         weight_and_reduce_impl.apply(
             output=output,

@@ -558,13 +558,6 @@ class FusedMoE(CustomOp):
             else:
                 self.routing_method_type = RoutingMethodType.TopK
 
-        # TODO(bnell): total hack to get around deepep hybrid
-        # problem size restrictions.
-        if envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid":
-            max_num_tokens = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-        else:
-            max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
-
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
@@ -572,7 +565,7 @@ class FusedMoE(CustomOp):
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
-            max_num_tokens=max_num_tokens,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -759,7 +752,6 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_parallel_config.use_deepep_hybrid_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
@@ -1708,6 +1700,27 @@ class FusedMoE(CustomOp):
                 value=0.0,
             )
 
+        if self.use_deepep_hybrid_kernels:
+            ctx = get_forward_context()
+            max_tokens_across_dispatchers = ctx.dp_metadata.max_tokens_across_dp_cpu
+            num_tokens = hidden_states.size(0)
+            print(f"CHECK PADDING {num_tokens} {max_tokens_across_dispatchers}")
+            if num_tokens < max_tokens_across_dispatchers:
+                pad = max_tokens_across_dispatchers - num_tokens
+                print(f"PADDING {pad}")
+                hidden_states = F.pad(
+                    hidden_states,
+                    (0, 0, 0, pad),
+                    mode="constant",
+                    value=0.0,
+                )
+                router_logits = F.pad(
+                    router_logits,
+                    (0, 0, 0, pad),
+                    mode="constant",
+                    value=0.0,
+                )
+
         def reduce_output(states: torch.Tensor) -> torch.Tensor:
             if (
                 not self.is_sequence_parallel
@@ -1793,12 +1806,7 @@ class FusedMoE(CustomOp):
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
 
-        def process_chunk(
-            chunk_start,
-            chunk_end,
-            skip_result_store=False,
-            max_tokens_across_dispatchers=0,
-        ):
+        def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
@@ -1829,22 +1837,6 @@ class FusedMoE(CustomOp):
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
-            num_tokens = staged_hidden_states.shape[0]
-            if num_tokens < max_tokens_across_dispatchers:
-                pad = max_tokens_across_dispatchers - num_tokens
-                staged_hidden_states = F.pad(
-                    staged_hidden_states,
-                    (0, 0, 0, pad),
-                    mode="constant",
-                    value=0.0,
-                )
-                staged_router_logits = F.pad(
-                    staged_router_logits,
-                    (0, 0, 0, pad),
-                    mode="constant",
-                    value=0.0,
-                )
-
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -1859,16 +1851,9 @@ class FusedMoE(CustomOp):
                 shared_output = self.shared_experts(staged_hidden_states)
 
                 final_hidden_states = (
-                    shared_output[:num_tokens],
-                    final_hidden_states[:num_tokens],
+                    shared_output,
+                    final_hidden_states,
                 )
-            elif isinstance(final_hidden_states, tuple):
-                final_hidden_states = (
-                    final_hidden_states[0][:num_tokens],
-                    final_hidden_states[1][:num_tokens],
-                )
-            else:
-                final_hidden_states = final_hidden_states[:num_tokens]
 
             if self.has_zero_experts:
                 assert isinstance(final_hidden_states, tuple)
@@ -1917,13 +1902,7 @@ class FusedMoE(CustomOp):
                 self.sp_size, moe_dp_chunk_size_per_rank, chunk_idx
             ):
                 process_chunk(
-                    chunk_start,
-                    chunk_end,
-                    skip_result_store=chunk_start_ >= num_tokens,
-                    # TODO: use isinstance condition on this?
-                    max_tokens_across_dispatchers=max_tokens_across_dispatchers
-                    if self.use_deepep_hybrid_kernels
-                    else 0,
+                    chunk_start, chunk_end, skip_result_store=chunk_start_ >= num_tokens
                 )
 
         if self.shared_experts is None:
@@ -1995,9 +1974,6 @@ class FusedMoE(CustomOp):
                     router_logits,
                     dim=0,
                 )
-
-            # TODO: might require padding here if deepep hybrid goes down
-            # this codepath.
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
