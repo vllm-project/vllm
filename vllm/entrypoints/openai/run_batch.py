@@ -13,6 +13,7 @@ from typing import Any, TypeAlias
 import aiofiles
 import aiohttp
 import torch
+from aiofiles.threadpool.text import AsyncTextIOWrapper
 from prometheus_client import start_http_server
 from pydantic import TypeAdapter, field_validator
 from pydantic_core.core_schema import ValidationInfo
@@ -280,15 +281,16 @@ class OrderedStreamingWriter(AbstractAsyncContextManager):
     """
     Writes batch outputs to a file in order, streaming results as they complete.
 
-    Buffers out-of-order results and flushes them as soon as preceding results arrive.
-    This bounds memory usage by the maximum "out-of-orderness" rather than total batch size.
+    Buffers out-of-order results and flushes them as soon as preceding results
+    arrive. This bounds memory usage by the maximum "out-of-orderness" rather
+    than total batch size.
     """
 
     def __init__(self, output_path: str) -> None:
         self.output_path = output_path
         self.next_to_write = 0
         self.buffer: dict[int, BatchRequestOutput] = {}
-        self.file_handle = None
+        self.file_handle: AsyncTextIOWrapper | None = None
         self._lock = asyncio.Lock()
         self._is_url = False
         self._temp_path: str | None = None
@@ -297,11 +299,10 @@ class OrderedStreamingWriter(AbstractAsyncContextManager):
         # If the output file is a HTTP upload we write to a named temporary file
         # a future implementation could use multipart uploads for S3-like storages.
         if self.output_path.startswith(("http://", "https://")):
-            self._temp_file = tempfile.NamedTemporaryFile(
+            with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", delete=False, suffix=".jsonl"
-            )
-            self._temp_path = self._temp_file.name
-            self._temp_file.close()
+            ) as temp_file:
+                self._temp_path = temp_file.name
             self.file_handle = await aiofiles.open(
                 self._temp_path, mode="w", encoding="utf-8"
             )
@@ -782,8 +783,8 @@ async def create_request_task(
         await run_request_with_error(
             request,
             index,
-            f"URL {request.url} was used. "
-            "Supported endpoints: /v1/chat/completions, /v1/embeddings, /score, /rerank.",
+            f"URL {request.url} was used. Supported endpoints: "
+            "/v1/chat/completions, /v1/embeddings, /score, /rerank.",
             writer,
         )
         return None
