@@ -27,6 +27,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -1404,12 +1405,12 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     if should_use_deepgemm:
         dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
             wq=layer.weight.data,
-            ws=layer.weight_scale.data,
+            ws=layer.weight_scale_inv.data,
             quant_block_shape=tuple(layer.weight_block_size),
             use_e8m0=is_deep_gemm_e8m0_used(),
         )
-        layer.weight = torch.nn.Parameter(dg_weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(dg_weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", dg_weight)
+        replace_parameter(layer, "weight_scale_inv", dg_weight_scale)
 
 
 def expert_weight_is_col_major(x: torch.Tensor) -> bool:
