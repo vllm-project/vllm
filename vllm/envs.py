@@ -89,20 +89,23 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
-    VLLM_TORCH_CUDA_PROFILE: bool = False
+    # Deprecated env variables for profiling, kept for backward compatibility
+    # See also vllm/config/profiler.py and `--profiler-config` argument
+    VLLM_TORCH_CUDA_PROFILE: str | None = None
     VLLM_TORCH_PROFILER_DIR: str | None = None
-    VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
-    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
-    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: bool = False
+    VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
+    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
+    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: str | None = None
+    VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
+    VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
+    VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
+    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
+    VLLM_PROFILER_DELAY_ITERS: str | None = None
+    VLLM_PROFILER_MAX_ITERS: str | None = None
+    # End of deprecated env variables for profiling
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
-    VLLM_TORCH_PROFILER_WITH_STACK: bool = True
-    VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
-    VLLM_PROFILER_DELAY_ITERS: int = 0
-    VLLM_PROFILER_MAX_ITERS: int = 0
-    VLLM_TORCH_PROFILER_USE_GZIP: bool = True
-    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: bool = True
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -850,71 +853,52 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
     ),
-    # Enables torch CUDA profiling if set.
-    # On NVIDIA GPUs, this will start/stop cudaProfilerApi when triggered.
-    "VLLM_TORCH_CUDA_PROFILE": lambda: bool(
-        os.getenv("VLLM_TORCH_CUDA_PROFILE", "0") != "0"
-    ),
+    # Enables torch CUDA profiling if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_CUDA_PROFILE": lambda: os.getenv("VLLM_TORCH_CUDA_PROFILE"),
     # Enables torch profiler if set.
-    # Both AsyncLLM's CPU traces as well as workers'
-    # traces (CPU & GPU) will be saved under this directory.
-    # Note that it must be an absolute path.
-    "VLLM_TORCH_PROFILER_DIR": lambda: (
-        None
-        if (val := os.getenv("VLLM_TORCH_PROFILER_DIR")) is None
-        else (
-            val
-            if val.startswith("gs://") and val[5:] and val[5] != "/"
-            else os.path.abspath(os.path.expanduser(val))
-        )
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_DIR": lambda: os.getenv("VLLM_TORCH_PROFILER_DIR"),
+    # Enable torch profiler to record shapes if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_RECORD_SHAPES": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_RECORD_SHAPES")
     ),
-    # Enable torch profiler to record shapes if set
-    # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
-    # not record shapes.
-    "VLLM_TORCH_PROFILER_RECORD_SHAPES": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_RECORD_SHAPES", "0") != "0"
+    # Enable torch profiler to profile memory if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY")
     ),
-    # Enable torch profiler to profile memory if set
-    # VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1. If not set, torch profiler
-    # will not profile memory.
-    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY", "0") != "0"
+    # Enable torch profiler to profile stack if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_WITH_STACK": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_WITH_STACK")
     ),
-    # Enable torch profiler to profile stack if set
-    # VLLM_TORCH_PROFILER_WITH_STACK=1. If not set, torch profiler WILL
-    # profile stack by default.
-    "VLLM_TORCH_PROFILER_WITH_STACK": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_WITH_STACK", "1") != "0"
+    # Enable torch profiler to profile flops if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS")
     ),
-    # Enable torch profiler to profile flops if set
-    # VLLM_TORCH_PROFILER_WITH_FLOPS=1. If not set, torch profiler will
-    # not profile flops.
-    "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"
-    ),
-    # Disable torch profiling of the AsyncLLMEngine process.
-    # If set to 1, will not profile the engine process.
-    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM", "0") != "0"
+    # Disable torch profiling of the AsyncLLMEngine process if set to 1.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM")
     ),
     # Delay number of iterations before starting profiling when using
     # the torch/torch CUDA profiler. If set to 0, will start profiling immediately.
-    "VLLM_PROFILER_DELAY_ITERS": lambda: int(
-        os.getenv("VLLM_PROFILER_DELAY_ITERS", "0")
-    ),
+    # Deprecated, see profiler_config.
+    "VLLM_PROFILER_DELAY_ITERS": lambda: (os.getenv("VLLM_PROFILER_DELAY_ITERS")),
     # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
     # If set to 0, will not limit the number of iterations.
-    "VLLM_PROFILER_MAX_ITERS": lambda: int(os.getenv("VLLM_PROFILER_MAX_ITERS", "0")),
+    "VLLM_PROFILER_MAX_ITERS": lambda: os.getenv("VLLM_PROFILER_MAX_ITERS"),
     # Control whether torch profiler gzip-compresses profiling files.
-    # Set VLLM_TORCH_PROFILER_USE_GZIP=0 to disable gzip (enabled by default).
-    "VLLM_TORCH_PROFILER_USE_GZIP": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_USE_GZIP", "1") != "0"
-    ),
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_USE_GZIP": lambda: os.getenv("VLLM_TORCH_PROFILER_USE_GZIP"),
     # Control whether torch profiler dumps the self_cuda_time_total table.
-    # Set VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL=0 to disable dumping
-    # (enabled by default).
-    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: bool(
-        os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL", "1") != "0"
+    # Set to 0 to disable dumping the table.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL")
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
