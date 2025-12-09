@@ -63,12 +63,12 @@ def replace_parameter(layer: torch.nn.Module, param_name: str, new_data: torch.T
         new_data: New data of the new parameter
     """
     # should not be used on a tied/shared param
-    old_param: torch.nn.Parameter = getattr(layer, param_name)
     if isinstance(new_data, torch.nn.Parameter):
         new_data = new_data.data
-    new_param = torch.nn.Parameter(new_data, requires_grad=old_param.requires_grad)
+    new_param = torch.nn.Parameter(new_data, requires_grad=False)
 
-    if hasattr(old_param, "weight_loader"):
+    old_param: torch.nn.Parameter | None = getattr(layer, param_name, None)
+    if old_param is not None and hasattr(old_param, "weight_loader"):
         weight_loader = old_param.weight_loader
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
