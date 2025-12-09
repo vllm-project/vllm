@@ -667,6 +667,32 @@ def int8_w8a16_moe_quant_config(
     )
 
 
+def mxfp4_w4a4_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        "mxfp4",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=block_shape,
+    )
+
+
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
@@ -680,7 +706,6 @@ def biased_moe_quant_config(
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
     )
-
 
 # A FusedMoEQuantConfig constant for an unquantized MoE op.
 FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()

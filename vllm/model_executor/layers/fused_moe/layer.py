@@ -419,7 +419,10 @@ class FusedMoE(CustomOp):
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
 
+        self._is_mxfp4 = self.is_mxfp4_quant(quant_config=quant_config)
+        
         # Round up hidden size if needed.
+        unpadded_hidden_size = hidden_size
         hidden_size = maybe_roundup_hidden_size(
             hidden_size,
             moe_in_dtype,
@@ -636,6 +639,7 @@ class FusedMoE(CustomOp):
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
+            "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
@@ -1115,16 +1119,55 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        print("-------------------------------------------------")
+        print(f"{self.quant_config=}")
+        print(f"{param.shape=}")
+        print(f"{loaded_weight.shape=}")
+        print(f"{weight_name=}")
+        print(f"{shard_id=}")
+        print(f"{expert_id=}")
+        print("-------------------------------------------------")
+        if self._is_mxfp4:
+            if self.quant_config.get_name() == "mxfp4":
+                # (FIXME) for gpt-oss all experts are combined
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            elif self.quant_config.get_name() == "quark":
+                # When self._is_mxfp4 is true, model_dtype must be gpt_oss
+                expert_data = param.data[expert_id]
+                if "input_scale" in weight_name:
+                    assert loaded_weight.numel() == 1
+                    expert_data.data.copy_(loaded_weight)
+                    return True if return_success else None
+
+                shard_dim = 0 if shard_id in (
+                    "w1", "w3") or "bias" in weight_name else 1
+                if shard_id == "w2":
+                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                    loaded_weight = loaded_weight.narrow(
+                        shard_dim, shard_size * self.tp_rank, shard_size)
+                    if "bias" in weight_name:
+                        dim1 = loaded_weight.shape[0]
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                elif shard_id is None:
+                    if "bias" in weight_name:
+                        dim1 = loaded_weight.shape[0]
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
@@ -2089,6 +2132,21 @@ class FusedMoE(CustomOp):
 
         return s
 
+    def is_mxfp4_quant(self,
+                       quant_config: QuantizationConfig | None
+                       ) -> bool:
+        name = quant_config.get_name() if quant_config else None
+        if name == "mxfp4":
+            return True
+        elif name == "quark":
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+            model_type = getattr(vllm_config.model_config.hf_config,
+                                 "model_type", None)
+            # Padding for triton kernel only is enabled when it is gpt_oss
+            return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
+        else:
+            return False
 
 def moe_forward(
     hidden_states: torch.Tensor,
