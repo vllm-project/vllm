@@ -1139,6 +1139,7 @@ class OpenAIServing:
                 conversation=conversation,
                 messages=messages,
                 model_config=model_config,
+                reasoning=request.reasoning,
                 **_chat_template_kwargs,
             )
         else:
