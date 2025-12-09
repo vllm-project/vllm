@@ -22,6 +22,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.attention.ops import flashmla
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
@@ -327,28 +328,29 @@ def test_sparse_backend_decode_correctness(
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
     impl_cls = FlashMLASparseBackend.get_impl_cls()
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=1,
-        alibi_slopes=None,
-        sliding_window=None,
-        kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-        logits_soft_cap=None,
-        attn_type="decoder",
-        kv_sharing_target_layer_name=None,
-        q_lora_rank=None,
-        kv_lora_rank=kv_lora_rank,
-        qk_nope_head_dim=qk_nope_head_dim,
-        qk_rope_head_dim=qk_rope_head_dim,
-        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
-        v_head_dim=v_head_dim,
-        kv_b_proj=mock_kv_b_proj,
-        indexer=mock_indexer,
-    )
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+            logits_soft_cap=None,
+            attn_type="decoder",
+            kv_sharing_target_layer_name=None,
+            q_lora_rank=None,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_b_proj=mock_kv_b_proj,
+            indexer=mock_indexer,
+        )
 
-    impl.process_weights_after_loading(dtype)
+        impl.process_weights_after_loading(dtype)
 
     layer = MockAttentionLayer(device)
     out_buffer = torch.empty(
