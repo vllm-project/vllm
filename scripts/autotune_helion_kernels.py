@@ -134,6 +134,10 @@ def autotune_kernel(
     try:
         logger.info("Autotuning kernel: %s", kernel_name)
 
+        # Initialize config manager once for the entire function
+        config_manager = ConfigManager(output_dir)
+        config_manager.ensure_base_dir_exists()
+
         # Get autotune inputs to check what will be generated
         autotune_inputs = kernel_wrapper.get_autotune_inputs()
         logger.info(
@@ -145,7 +149,6 @@ def autotune_kernel(
         # Filter out existing configs (unless forcing)
         configs_to_autotune = autotune_inputs
         if not force:
-            config_manager = ConfigManager(output_dir)
             existing_configs = []
             configs_to_autotune = {}
 
@@ -178,33 +181,59 @@ def autotune_kernel(
             logger.info("No configs to autotune for %s", kernel_name)
             return True
 
-        # Run autotuning with filtered inputs
-        start_time = time.time()
-        configs = kernel_wrapper.run_autotune(configs_to_autotune)
-        end_time = time.time()
-
-        # Save the generated configs
-        config_manager = ConfigManager(output_dir)
-        config_manager.ensure_base_dir_exists()
-
         saved_configs = []
-        for config_key, config in configs.items():
-            try:
-                config_path = config_manager.save_config(
-                    kernel_name, config_key, config
-                )
-                saved_configs.append(config_key)
-                logger.info("Saved config %s to: %s", config_key, config_path)
-            except Exception as e:
-                logger.error("Failed to save config %s: %s", config_key, e)
+        failed_configs = []
+        total_start_time = time.time()
 
-        logger.info("Autotuning completed in %.2fs", end_time - start_time)
+        logger.info("Starting autotuning for %d configs", len(configs_to_autotune))
+
+        # Autotune and save each config immediately
+        for config_key, inputs in configs_to_autotune.items():
+            logger.info("Autotuning config: %s", config_key)
+
+            try:
+                # Autotune this single config
+                config_start_time = time.time()
+                config = kernel_wrapper.run_autotune(inputs)
+                config_end_time = time.time()
+
+                # Save immediately after successful autotuning
+                try:
+                    config_path = config_manager.save_config(
+                        kernel_name, config_key, config
+                    )
+                    saved_configs.append(config_key)
+
+                    config_duration = config_end_time - config_start_time
+                    logger.info(
+                        "✓ Autotuned and saved config %s (%.2fs) to: %s",
+                        config_key,
+                        config_duration,
+                        config_path,
+                    )
+
+                except Exception as e:
+                    logger.error("Failed to save config %s: %s", config_key, e)
+                    failed_configs.append(config_key)
+
+            except Exception as e:
+                logger.error("Autotuning failed for config %s: %s", config_key, e)
+                failed_configs.append(config_key)
+
+        total_end_time = time.time()
+        total_duration = total_end_time - total_start_time
+
+        logger.info("All autotuning completed in %.2fs", total_duration)
         logger.info(
-            "Generated and saved %d configs for %s: %s",
+            "Successfully generated and saved %d/%d configs for %s: %s",
             len(saved_configs),
+            len(configs_to_autotune),
             kernel_name,
             saved_configs,
         )
+
+        if failed_configs:
+            logger.warning("Failed configs for %s: %s", kernel_name, failed_configs)
 
         return True
 

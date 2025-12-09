@@ -86,17 +86,6 @@ class HelionKernelWrapper:
             f"Both return a ConfiguredHelionKernel that can be called directly."
         )
 
-    def autotune(self, *args, **kwargs):
-        """
-        Delegate autotuning to the underlying Helion kernel function.
-
-        For autotuning, we apply @helion.kernel with just the settings (no config),
-        since the point of autotuning is to discover the optimal config.
-        """
-        # Get or create decorated kernel for autotuning (no specific config needed)
-        decorated_kernel = self._get_autotune_kernel()
-        return decorated_kernel.autotune(*args, **kwargs)
-
     def _apply_helion_decorator(self, config):
         """
         Apply @helion.kernel decorator to the raw function with specific config.
@@ -293,17 +282,21 @@ class HelionKernelWrapper:
         return self._benchmark_class
 
     def run_autotune(
-        self, autotune_inputs: dict[str, tuple], tuner_kwargs: dict | None = None
-    ) -> dict[str, "helion.Config"]:
+        self, inputs: tuple, tuner_kwargs: dict | None = None
+    ) -> "helion.Config":
         """
-        Run autotuning and return configs (without saving).
+        Run autotuning for a single input configuration.
 
         Args:
-            autotune_inputs: Dictionary mapping config keys to input tuples for autotuning
+            inputs: Input tuple for autotuning
             tuner_kwargs: Additional arguments for Helion tuner
 
         Returns:
-            Dictionary mapping config keys to tuned Helion configs
+            Tuned Helion config
+
+        Raises:
+            ImportError: If Helion is not available
+            Exception: If autotuning fails
         """
         if not HELION_AVAILABLE:
             raise ImportError(
@@ -322,22 +315,9 @@ class HelionKernelWrapper:
         }
         default_tuner_kwargs.update(tuner_kwargs)
 
-        results = {}
-
-        for config_key, inputs in autotune_inputs.items():
-            logger.info(f"Autotuning {self.op_name} for config: {config_key}")
-
-            try:
-                # Use Helion's built-in autotune method
-                config = kernel_fn.autotune(inputs, **default_tuner_kwargs)
-                results[config_key] = config
-
-            except Exception as e:
-                logger.error(
-                    f"Autotuning failed for {self.op_name} config {config_key}: {e}"
-                )
-
-        return results
+        # Use Helion's built-in autotune method
+        config = kernel_fn.autotune(inputs, **default_tuner_kwargs)
+        return config
 
     def create_configured_op_from_model(self, model_config, config_manager):
         """
