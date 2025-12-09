@@ -428,6 +428,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
+        use_sparse: bool = False,
     ) -> None:
         raise NotImplementedError
 
