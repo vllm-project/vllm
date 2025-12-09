@@ -39,6 +39,7 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
+from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -218,6 +219,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
+    profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
+    """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -296,6 +299,8 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.structured_outputs_config:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
+        if self.profiler_config:
+            vllm_factors.append(self.profiler_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
