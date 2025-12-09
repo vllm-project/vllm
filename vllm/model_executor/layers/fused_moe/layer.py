@@ -1705,6 +1705,8 @@ class FusedMoE(CustomOp):
             )
 
         if self.use_deepep_hybrid_kernels:
+            # The DeepEP hybrid kernels require a consistent number of tokens across
+            # DP ranks since they perform a torch all_gather in the dispatch step.
             ctx = get_forward_context()
             max_tokens_across_dispatchers = ctx.dp_metadata.max_tokens_across_dp_cpu
             num_tokens = hidden_states.size(0)
