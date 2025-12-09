@@ -73,7 +73,6 @@ def capture_gpu_trace(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     trace_file = Path(output_path) / f"{clean_trace_name}_{timestamp}_trace.json"
 
-    print(f"🔍 Capturing GPU trace: {trace_name} ({num_iterations} iterations)")
 
     # Capture trace
     with torch.profiler.profile(
@@ -94,7 +93,6 @@ def capture_gpu_trace(
     # Export trace in Chrome trace format
     prof.export_chrome_trace(str(trace_file))
 
-    print(f"  ✓ Trace saved: {trace_file}")
     return str(trace_file)
 
 
@@ -266,159 +264,48 @@ class KernelBenchmark(ABC):
         """
         import torch.distributed as dist
 
-        # Get current rank for logging (if distributed)
-        rank = dist.get_rank() if distributed and dist.is_initialized() else 0
-
-        print(f"[Rank {rank}] Starting kernel timing:")
-        print(f"[Rank {rank}]   - Iterations: {num_iterations}")
-        print(f"[Rank {rank}]   - Warmup: {warmup}")
-        print(
-            f"[Rank {rank}]   - CUDA Graph: {'enabled' if use_cudagraph else 'disabled'}"
-        )
-        print(
-            f"[Rank {rank}]   - Distributed: {'enabled' if distributed else 'disabled'}"
-        )
-
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
-        # Warmup with detailed logging
-        print(f"[Rank {rank}] Starting warmup phase...")
-        warmup_start_time = torch.cuda.Event(enable_timing=True)
-        warmup_end_time = torch.cuda.Event(enable_timing=True)
-
-        warmup_start_time.record()
+        # Warmup
         for i in range(warmup):
-            iter_start = torch.cuda.Event(enable_timing=True)
-            iter_end = torch.cuda.Event(enable_timing=True)
-
-            iter_start.record()
             kernel_fn()
             if distributed:
                 dist.barrier()
-            iter_end.record()
             torch.cuda.synchronize()
-
-            iter_time = iter_start.elapsed_time(iter_end)
-            print(
-                f"[Rank {rank}] Warmup iteration {i + 1}/{warmup}: {iter_time:.4f} ms"
-            )
-
-        warmup_end_time.record()
-        torch.cuda.synchronize()
-        total_warmup_time = warmup_start_time.elapsed_time(warmup_end_time)
-        print(f"[Rank {rank}] Warmup completed in {total_warmup_time:.4f} ms")
 
         if use_cudagraph:
-            print(f"[Rank {rank}] Capturing CUDA graph...")
-            # Capture CUDA graph - fail fast if capture fails
+            # Capture CUDA graph
             graph = torch.cuda.CUDAGraph()
-            graph_capture_start = torch.cuda.Event(enable_timing=True)
-            graph_capture_end = torch.cuda.Event(enable_timing=True)
-
-            graph_capture_start.record()
             with torch.cuda.graph(graph):
                 kernel_fn()
-            graph_capture_end.record()
             torch.cuda.synchronize()
-
-            capture_time = graph_capture_start.elapsed_time(graph_capture_end)
-            print(f"[Rank {rank}] CUDA graph captured in {capture_time:.4f} ms")
 
             # Synchronize all ranks after graph capture (if distributed)
             if distributed:
-                print(f"[Rank {rank}] Synchronizing after graph capture...")
                 dist.barrier()
 
-            print(f"[Rank {rank}] Starting timed graph replays...")
-            # Time graph replays with per-iteration logging
-            iteration_times = []
-
+            # Time graph replays
             start_event.record()
             for i in range(num_iterations):
-                iter_start = torch.cuda.Event(enable_timing=True)
-                iter_end = torch.cuda.Event(enable_timing=True)
-
-                iter_start.record()
                 graph.replay()
                 if distributed:
                     dist.barrier()
-                iter_end.record()
-                torch.cuda.synchronize()
-
-                iter_time = iter_start.elapsed_time(iter_end)
-                iteration_times.append(iter_time)
-
-                # Log every 10th iteration or first/last few iterations for detailed tracking
-                if (
-                    i < 5
-                    or i >= num_iterations - 5
-                    or (i + 1) % max(1, num_iterations // 10) == 0
-                ):
-                    print(
-                        f"[Rank {rank}] Graph replay iteration {i + 1}/{num_iterations}: {iter_time:.4f} ms"
-                    )
-
             end_event.record()
             torch.cuda.synchronize()
 
         else:
-            print(f"[Rank {rank}] Starting timed kernel calls...")
-            # Time kernel calls with per-iteration logging
-            iteration_times = []
-
+            # Time kernel calls
             start_event.record()
             for i in range(num_iterations):
-                iter_start = torch.cuda.Event(enable_timing=True)
-                iter_end = torch.cuda.Event(enable_timing=True)
-
-                iter_start.record()
                 kernel_fn()
                 if distributed:
                     dist.barrier()
-                iter_end.record()
-                torch.cuda.synchronize()
-
-                iter_time = iter_start.elapsed_time(iter_end)
-                iteration_times.append(iter_time)
-
-                # Log every 10th iteration or first/last few iterations for detailed tracking
-                if (
-                    i < 5
-                    or i >= num_iterations - 5
-                    or (i + 1) % max(1, num_iterations // 10) == 0
-                ):
-                    print(
-                        f"[Rank {rank}] Kernel call iteration {i + 1}/{num_iterations}: {iter_time:.4f} ms"
-                    )
-
             end_event.record()
             torch.cuda.synchronize()
 
         total_time_ms = start_event.elapsed_time(end_event)
         avg_time_ms = total_time_ms / num_iterations
-
-        # Calculate and log statistics
-        min_time = min(iteration_times)
-        max_time = max(iteration_times)
-        median_time = sorted(iteration_times)[len(iteration_times) // 2]
-
-        # Calculate percentiles
-        sorted_times = sorted(iteration_times)
-        p95_time = sorted_times[int(0.95 * len(sorted_times))]
-        p99_time = sorted_times[int(0.99 * len(sorted_times))]
-
-        print(f"[Rank {rank}] Kernel timing completed:")
-        print(f"[Rank {rank}]   - Total time: {total_time_ms:.4f} ms")
-        print(f"[Rank {rank}]   - Average time: {avg_time_ms:.4f} ms")
-        print(f"[Rank {rank}]   - Min time: {min_time:.4f} ms")
-        print(f"[Rank {rank}]   - Max time: {max_time:.4f} ms")
-        print(f"[Rank {rank}]   - Median time: {median_time:.4f} ms")
-        print(f"[Rank {rank}]   - 95th percentile: {p95_time:.4f} ms")
-        print(f"[Rank {rank}]   - 99th percentile: {p99_time:.4f} ms")
-        print(
-            f"[Rank {rank}]   - Standard deviation: {(sum((t - avg_time_ms) ** 2 for t in iteration_times) / len(iteration_times)) ** 0.5:.4f} ms"
-        )
 
         return avg_time_ms
 
