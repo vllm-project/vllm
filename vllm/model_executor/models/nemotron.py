@@ -178,7 +178,6 @@ class NemotronAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.partial_rotary_factor = config.partial_rotary_factor
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -203,7 +202,6 @@ class NemotronAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(
             self.num_heads,

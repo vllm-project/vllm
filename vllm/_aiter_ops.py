@@ -9,6 +9,8 @@ import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
+_FP8_DTYPE = current_platform.fp8_dtype()
+
 
 def is_aiter_found() -> bool:
     from importlib.util import find_spec
@@ -283,6 +285,28 @@ def _rocm_aiter_grouped_topk_fake(
     pass
 
 
+# Cache whether aiter supports FP8 MLA parameters
+_AITER_MLA_SUPPORTS_FP8: bool | None = None
+
+
+def _check_aiter_mla_fp8_support() -> bool:
+    """Check if aiter.mla.mla_decode_fwd supports q_scale and kv_scale parameters."""
+    global _AITER_MLA_SUPPORTS_FP8
+    if _AITER_MLA_SUPPORTS_FP8 is None:
+        try:
+            import inspect
+
+            from aiter.mla import mla_decode_fwd
+
+            sig = inspect.signature(mla_decode_fwd)
+            _AITER_MLA_SUPPORTS_FP8 = (
+                "q_scale" in sig.parameters and "kv_scale" in sig.parameters
+            )
+        except Exception:
+            _AITER_MLA_SUPPORTS_FP8 = False
+    return _AITER_MLA_SUPPORTS_FP8
+
+
 def _rocm_aiter_mla_decode_fwd_impl(
     q: torch.Tensor,
     kv_buffer: torch.Tensor,
@@ -299,6 +323,16 @@ def _rocm_aiter_mla_decode_fwd_impl(
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
+    kwargs = {
+        "sm_scale": sm_scale,
+        "logit_cap": logit_cap,
+    }
+
+    # Only pass q_scale and kv_scale if the aiter library supports them
+    if _check_aiter_mla_fp8_support():
+        kwargs["q_scale"] = q_scale
+        kwargs["kv_scale"] = kv_scale
+
     mla_decode_fwd(
         q,
         kv_buffer.view(-1, 1, 1, q.shape[-1]),
@@ -308,10 +342,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
         kv_indices,
         kv_last_page_lens,
         max_seqlen_qo,
-        sm_scale=sm_scale,
-        logit_cap=logit_cap,
-        q_scale=q_scale,
-        kv_scale=kv_scale,
+        **kwargs,
     )
 
 
@@ -436,6 +467,59 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(x), torch.empty_like(residual)
+
+
+def _rocm_aiter_per_tensor_quant_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import per_tensor_quant_hip
+
+    return per_tensor_quant_hip(x, scale, quant_dtype)
+
+
+def _rocm_aiter_per_tensor_quant_fake(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x, dtype=quant_dtype), torch.empty(
+        1, dtype=torch.float32, device=x.device
+    )
+
+
+def _rocm_aiter_per_token_quant_impl(
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import dynamic_per_token_scaled_quant
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    out_shape = x.shape
+    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+    if scale is None:
+        scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
+    dynamic_per_token_scaled_quant(
+        out,
+        x,
+        scale,
+        scale_ub=None,
+        shuffle_scale=False,
+        num_rows=None,
+        num_rows_factor=1,
+    )
+    return out, scale
+
+
+def _rocm_aiter_per_token_quant_fake(
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out_shape = x.shape
+    return (
+        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
+        torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
+    )
 
 
 # Global flag to ensure ops are registered only once
@@ -636,6 +720,22 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_per_tensor_quant",
+                op_func=_rocm_aiter_per_tensor_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_per_tensor_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_per_token_quant",
+                op_func=_rocm_aiter_per_token_quant_impl,
+                mutates_args=["scale"],
+                fake_impl=_rocm_aiter_per_token_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -829,6 +929,22 @@ class rocm_aiter_ops:
             q_scale=q_scale,
             kv_scale=kv_scale,
         )
+
+    @staticmethod
+    def per_tensor_quant(
+        x: torch.Tensor,
+        quant_dtype: torch.dtype,
+        scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, quant_dtype, scale)
+
+    @staticmethod
+    def per_token_quant(
+        x: torch.Tensor,
+        quant_dtype: torch.dtype,
+        scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
     def triton_fp4_gemm_dynamic_qaunt(
