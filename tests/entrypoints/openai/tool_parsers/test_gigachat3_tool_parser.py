@@ -13,6 +13,13 @@ from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
+
+MSG_SEP_TOKEN = "<|message_sep|>\n\n"
+ROLE_SEP_TOKEN = "<|role_sep|>\n"
+EOS_TOKEN = "</s>"
+TOOL_HEADER = f"function call{ROLE_SEP_TOKEN}"
+
+
 SIMPLE_ARGS_DICT = {
     "action": "create",
     "id": "preferences",
@@ -24,7 +31,7 @@ SIMPLE_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-SIMPLE_FUNCTION_OUTPUT = "function call" + SIMPLE_FUNCTION_JSON
+SIMPLE_FUNCTION_OUTPUT = f"{MSG_SEP_TOKEN}{TOOL_HEADER}{SIMPLE_FUNCTION_JSON}"
 SIMPLE_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps(SIMPLE_ARGS_DICT, ensure_ascii=False),
@@ -38,7 +45,7 @@ PARAMETERLESS_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-PARAMETERLESS_FUNCTION_OUTPUT = "function call" + PARAMETERLESS_FUNCTION_JSON
+PARAMETERLESS_FUNCTION_OUTPUT = f"{MSG_SEP_TOKEN}{TOOL_HEADER}{PARAMETERLESS_FUNCTION_JSON}"
 PARAMETERLESS_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps({}, ensure_ascii=False),
@@ -62,17 +69,31 @@ COMPLEX_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-COMPLEX_FUNCTION_OUTPUT = "function call" + COMPLEX_FUNCTION_JSON
+COMPLEX_FUNCTION_OUTPUT = f"{MSG_SEP_TOKEN}{TOOL_HEADER}{COMPLEX_FUNCTION_JSON}"
 COMPLEX_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps(COMPLEX_ARGS_DICT, ensure_ascii=False),
 )
 
 
+CONTENT_TEXT = "I'll check that for you."
+MIXED_OUTPUT = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT}"
+
+
+@pytest.fixture(name="gigachat_tokenizer")
+def fixture_gigachat_tokenizer(default_tokenizer: TokenizerLike):
+    default_tokenizer.add_tokens([
+        MSG_SEP_TOKEN, 
+        ROLE_SEP_TOKEN,
+        EOS_TOKEN
+    ])
+    return default_tokenizer
+
+
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
+def test_no_tool_call(streaming: bool, gigachat_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
     model_output = "How can I help you today?"
     content, tool_calls = run_tool_extraction(
@@ -125,6 +146,34 @@ TEST_CASES = [
         None,
         id="complex_nonstreaming",
     ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        MIXED_OUTPUT + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_streaming_with_eos",
+    ),
+    pytest.param(
+        False,
+        MIXED_OUTPUT + EOS_TOKEN,
+        [SIMPLE_FUNCTION_CALL],
+        CONTENT_TEXT,
+        id="mixed_content_nonstreaming_with_eos",
+    ),
 ]
 
 
@@ -136,14 +185,16 @@ def test_tool_call(
     model_output: str,
     expected_tool_calls: list[FunctionCall],
     expected_content: str | None,
-    default_tokenizer: TokenizerLike,
+    gigachat_tokenizer: TokenizerLike,
 ):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming
     )
+    if content == "":
+        content = None
     assert content == expected_content
     assert len(tool_calls) == len(expected_tool_calls)
     for actual, expected in zip(tool_calls, expected_tool_calls):
@@ -154,14 +205,22 @@ def test_tool_call(
         assert actual_args == expected_args
 
 
-def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
+def test_streaming_tool_call_with_large_steps(gigachat_tokenizer: TokenizerLike):
+    """
+    Test that the closing braces are streamed correctly.
+    """
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
-        default_tokenizer
+        gigachat_tokenizer
     )
     model_output_deltas = [
-        "function call",
+        CONTENT_TEXT[:3],
+        CONTENT_TEXT[3:5],
+        CONTENT_TEXT[5:],
+        MSG_SEP_TOKEN,
+        TOOL_HEADER,
         COMPLEX_FUNCTION_JSON[:40],
-        COMPLEX_FUNCTION_JSON[40:],
+        COMPLEX_FUNCTION_JSON[40:-1],
+        COMPLEX_FUNCTION_JSON[-1]
     ]
     reconstructor = run_tool_extraction_streaming(
         tool_parser,

@@ -25,7 +25,12 @@ from vllm.tool_parsers.abstract_tool_parser import ToolParser
 logger = init_logger(__name__)
 
 REGEX_FUNCTION_CALL = re.compile(
-    r"function call(?:<\|role_sep\|>\n)?(\{.*)",
+    r"function call<\|role_sep\|>\n(.*)",
+    re.DOTALL,
+)
+
+REGEX_CONTENT_PATTERN = re.compile(
+    r"^(.*?)<\|message_sep\|>", 
     re.DOTALL,
 )
 
@@ -39,7 +44,6 @@ ARGS_REGEX = re.compile(
     re.DOTALL,
 )
 
-
 class GigaChat3ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
@@ -47,57 +51,70 @@ class GigaChat3ToolParser(ToolParser):
         self.tool_name_sent: bool = False
         self.tool_id: str | None = None
         self.prev_tool_call_arr: list[dict] = []
-        self.content_buffer: str = ""
-        self.trigger_start = "function call{"
+        self.end_content: bool = False
+        self.streamed_args_for_tool: list[str] = []
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            request.skip_special_tokens = False
+        return request
 
     def extract_tool_calls(
         self,
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        match = REGEX_FUNCTION_CALL.search(model_output)
-        if not match:
+        function_call = None
+        content = None
+        if model_output.rstrip().endswith("</s>"):
+            model_output = model_output[:model_output.rfind("</s>")]
+        m_func = REGEX_FUNCTION_CALL.search(model_output)
+        if m_func:
+            try:
+                function_call = json.loads(m_func.group(1), strict=False)
+                if isinstance(function_call, dict) and "name" in function_call and "arguments" in function_call:
+                    if not isinstance(function_call["arguments"], dict):
+                        function_call = None
+                else:
+                    function_call = None
+            except json.JSONDecodeError:
+                return ExtractedToolCallInformation(
+                    tools_called=False,
+                    tool_calls=[],
+                    content=model_output,
+                )
+        m_content = REGEX_CONTENT_PATTERN.search(model_output)
+        if m_content:
+            content = m_content.group(1)
+        else:
+            # as a fallback, everything before the first message_sep marker if present
+            if "<|message_sep|>" in model_output:
+                content = model_output.split("<|message_sep|>")[0]
+            else:
+                content = model_output
+        if not function_call:
             return ExtractedToolCallInformation(
                 tools_called=False,
                 tool_calls=[],
-                content=model_output,
+                content=content if content else None,
             )
-        json_candidate = match.group(1).strip()
-        try:
-            data = json.loads(json_candidate)
-        except json.JSONDecodeError:
-            return ExtractedToolCallInformation(
-                tools_called=False,
-                tool_calls=[],
-                content=model_output,
-            )
-        if not (isinstance(data, dict) and "name" in data and "arguments" in data):
-            return ExtractedToolCallInformation(
-                tools_called=False,
-                tool_calls=[],
-                content=model_output,
-            )
-        name = data["name"]
-        args = data["arguments"]
+        name = function_call["name"]
+        args = function_call["arguments"]
         if not isinstance(args, str):
-            args = json.dumps(args, ensure_ascii=False)
-
-        tool_calls = [
-            ToolCall(
-                type="function",
-                function=FunctionCall(
-                    name=name,
-                    arguments=args,
-                ),
-            )
-        ]
-        prefix = model_output[: match.start()]
-        content = prefix.rstrip() if prefix and prefix.strip() else None
-
+            args = json.dumps(function_call["arguments"], ensure_ascii=False)
         return ExtractedToolCallInformation(
             tools_called=True,
-            tool_calls=tool_calls,
-            content=content,
+            tool_calls=[
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=name,
+                        arguments=args,
+                    ),
+                )
+            ],
+            content=content if content else None,
         )
 
     def extract_tool_calls_streaming(
@@ -110,39 +127,41 @@ class GigaChat3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        content = None
         func_name = None
         cur_args = None
+        m_func = REGEX_FUNCTION_CALL.search(current_text)
         if not self.tool_started:
-            match = REGEX_FUNCTION_CALL.search(current_text)
-            if match:
-                self.tool_started = True
-                self.content_buffer = ""
+            m_content = REGEX_CONTENT_PATTERN.search(delta_text)
+            if m_content:
+                content = m_content.group(1)
+                self.end_content = True
             else:
-                self.content_buffer += delta_text
-                clean_buffer = self.content_buffer.lstrip()
-                is_prefix = self.trigger_start.startswith(clean_buffer)
-                starts_with_trigger = clean_buffer.startswith(self.trigger_start)
-                if is_prefix or starts_with_trigger:
-                    return None
+                if "<|message_sep|>" in delta_text:
+                    content = delta_text.split("<|message_sep|>")[0]
+                    self.end_content = True
                 else:
-                    flush_text = self.content_buffer
-                    self.content_buffer = ""
-                    return DeltaMessage(content=flush_text)
-
-        match = REGEX_FUNCTION_CALL.search(current_text)
-        if not match:
+                    if not self.end_content:
+                        content = delta_text
+            if m_func:
+                self.tool_started = True
+            if content:
+                return DeltaMessage(content=content)
+        if not m_func:
             return None
-        json_tail = match.group(1).strip()
+        json_tail = m_func.group(1).strip()
         name_match = NAME_REGEX.search(json_tail)
         if name_match:
             func_name = name_match.group(1)
         args_match = ARGS_REGEX.search(json_tail)
         if args_match:
             cur_args = args_match.group(1).strip()
+            if cur_args.endswith("</s>"):
+                cur_args = cur_args[:-len("</s>")]
             if cur_args.endswith("}"):  # last '}' end of json
                 try:
                     candidate = cur_args[:-1].strip()
-                    json.loads(candidate)
+                    json.loads(candidate, strict=False)
                     cur_args = candidate
                 except json.JSONDecodeError:
                     pass
@@ -165,20 +184,27 @@ class GigaChat3ToolParser(ToolParser):
                         ).model_dump(exclude_none=True),
                     )
                 ],
-                content=None,
             )
         if cur_args is None:
             return None
-        prev_args = self.prev_tool_call_arr[0].get("arguments", "")
+        prev_args = self.prev_tool_call_arr[0].get("arguments_str", "")
         if not prev_args:
             delta_args = cur_args
         elif cur_args.startswith(prev_args):
-            delta_args = cur_args[len(prev_args) :]
+            delta_args = cur_args[len(prev_args):]
         else:
             return None
         if not delta_args:
             return None
-        self.prev_tool_call_arr[0]["arguments"] = cur_args
+        self.prev_tool_call_arr[0]["arguments_str"] = cur_args
+        try:
+            args_dict = json.loads(cur_args, strict=False)
+            self.prev_tool_call_arr[0]["arguments"] = args_dict
+        except json.JSONDecodeError:
+            self.prev_tool_call_arr[0]["arguments"] = {}
+        if len(self.streamed_args_for_tool) <= 0:
+            self.streamed_args_for_tool.append("")
+        self.streamed_args_for_tool[0] = cur_args
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -188,5 +214,4 @@ class GigaChat3ToolParser(ToolParser):
                     ).model_dump(exclude_none=True),
                 )
             ],
-            content=None,
         )
