@@ -234,7 +234,9 @@ class PriorityRequestQueue(RequestQueue):
         return (request.priority, request.arrival_time, request.request_id)
 
 
-def create_request_queue(policy: SchedulingPolicy, *, use_sla: bool = False) -> RequestQueue:
+def create_request_queue(
+    policy: SchedulingPolicy, *, use_sla: bool = False
+) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue(use_sla=use_sla)

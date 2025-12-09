@@ -247,3 +247,18 @@ big problem.
 
 In summary, the complete config object `VllmConfig` can be treated as an
 engine-level global state that is shared among all vLLM classes.
+
+## SLA-tier scheduling (opt-in, V1 engine)
+
+- Requests can carry an `sla_tier` (`interactive`, `batch`, or `background`)
+  via `SamplingParams.sla_tier`. Behavior is unchanged unless
+  `SchedulerConfig.sla_tier_enabled` is set to `True`.
+- When enabled, the priority queue orders by SLA tier first
+  (interactive > batch > background) and then integer priority. A cap on
+  interactive tokens per step is controlled by
+  `SchedulerConfig.max_interactive_batch_tokens`.
+- Metrics surface per-tier waiting/preempted counts and interactive-token-limit
+  hits in `SchedulerStats`.
+- Limitations: full scheduler/connector suites exercise GPU/EC/KV connector
+  behavior and require a GPU-capable environment with model assets; CPU-only
+  runs cover the SLA unit tests but will not exercise GPU/EC connector flows.
