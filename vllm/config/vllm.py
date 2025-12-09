@@ -424,11 +424,41 @@ class VllmConfig:
                     )
             supported_dtypes = quant_config.get_supported_act_dtypes()
             if model_config.dtype not in supported_dtypes:
-                raise ValueError(
-                    f"{model_config.dtype} is not supported for quantization "
-                    f"method {model_config.quantization}. Supported dtypes: "
-                    f"{supported_dtypes}"
-                )
+                # Handle dtype conflict between model restrictions and
+                # quantization restrictions (e.g., Gemma3 GGUF on Blackwell
+                # where Gemma3 blocks float16 and GGUF blocks bfloat16)
+                from vllm.config.model import _is_valid_dtype
+
+                model_type = getattr(model_config.hf_config, "model_type", None)
+                compatible_dtypes = [
+                    d
+                    for d in supported_dtypes
+                    if model_type is None or _is_valid_dtype(model_type, d)
+                ]
+                if compatible_dtypes:
+                    # Prefer float16 > bfloat16 > float32 for performance
+                    import torch
+
+                    dtype_preference = [torch.float16, torch.bfloat16, torch.float32]
+                    for preferred in dtype_preference:
+                        if preferred in compatible_dtypes:
+                            logger.warning(
+                                "dtype=%s is not supported for quantization "
+                                "method %s with model type %s. "
+                                "Automatically selecting %s as compatible dtype.",
+                                model_config.dtype,
+                                model_config.quantization,
+                                model_type,
+                                preferred,
+                            )
+                            model_config.dtype = preferred
+                            break
+                else:
+                    raise ValueError(
+                        f"{model_config.dtype} is not supported for quantization "
+                        f"method {model_config.quantization}. Supported dtypes: "
+                        f"{supported_dtypes}"
+                    )
             quant_config.maybe_update_config(model_config.model)
             return quant_config
         return None
