@@ -4169,7 +4169,10 @@ class GPUModelRunner(
                         is_graph_capturing
                         and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     )
-                    or (cudagraph_runtime_mode != CUDAGraphMode.NONE)
+                    or (
+                        not is_graph_capturing
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
                 ) and not self.speculative_config.enforce_eager
 
                 # Note(gnovack) - We need to disable cudagraphs for one of the two
