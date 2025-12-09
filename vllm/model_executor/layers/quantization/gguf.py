@@ -52,6 +52,10 @@ class GGUFConfig(QuantizationConfig):
         return "gguf"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        # GGUF dequantization kernels use half precision (fp16) internally.
+        # bfloat16 may cause incorrect output on some architectures (e.g., Blackwell)
+        # but is kept for users who explicitly request it on hardware where it works.
+        # See: arg_utils.py auto-defaults to float16 for GGUF when dtype="auto"
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
