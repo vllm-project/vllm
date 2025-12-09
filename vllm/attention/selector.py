@@ -39,8 +39,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_mla={self.use_mla}, "
             f"has_sink={self.has_sink}, "
             f"use_sparse={self.use_sparse}, "
-            f"attn_type={self.attn_type})"
-        )
+            f"use_mm_prefix={self.use_mm_prefix}, "
+            f"attn_type={self.attn_type})")
 
 
 def get_attn_backend(
