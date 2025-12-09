@@ -7,6 +7,8 @@ Configs are found in configs/$MODEL.yaml
 pytest -s -v test_lm_eval_correctness.py \
     --config-list-file=configs/models-small.txt \
     --tp-size=1
+    --dp-size=1
+    --ep
 """
 
 import os
@@ -45,7 +47,7 @@ def scoped_env_vars(new_env: dict[str, str]):
             os.environ.pop(key, None)
 
 
-def launch_lm_eval(eval_config, tp_size):
+def launch_lm_eval(eval_config, tp_size, dp_size=None, ep_enable=None):
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
     batch_size = eval_config.get("batch_size", "auto")
@@ -55,6 +57,8 @@ def launch_lm_eval(eval_config, tp_size):
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
+        f"data_parallel_size={dp_size},"
+        f"enable_expert_parallel={ep_enable},"
         f"enforce_eager={enforce_eager},"
         f"kv_cache_dtype={kv_cache_dtype},"
         f"add_bos_token=true,"
@@ -84,10 +88,10 @@ def launch_lm_eval(eval_config, tp_size):
     return results
 
 
-def test_lm_eval_correctness_param(config_filename, tp_size):
+def test_lm_eval_correctness_param(config_filename, tp_size, dp_size, ep_enable):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
-    results = launch_lm_eval(eval_config, tp_size)
+    results = launch_lm_eval(eval_config, tp_size, dp_size, ep_enable)
 
     rtol = eval_config.get("rtol", DEFAULT_RTOL)
 
