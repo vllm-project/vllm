@@ -422,18 +422,8 @@ class Scheduler(SchedulerInterface):
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    logger.info(
-                        "[Scheduler] Request %s is in WAITING_FOR_REMOTE_KVS state. "
-                        "Checking if ready. finished_recving_kv_req_ids size: %d",
-                        request.request_id,
-                        len(self.finished_recving_kv_req_ids),
-                    )
                     is_ready = self._update_waiting_for_remote_kv(request)
                     if is_ready:
-                        logger.info(
-                            "[Scheduler] Request %s is ready, changing status to WAITING",
-                            request.request_id,
-                        )
                         request.status = RequestStatus.WAITING
                     else:
                         logger.info(
@@ -1375,6 +1365,12 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        # Clean up finished_recving_kv_req_ids if the request is still in it
+        # This can happen if the request finished before transitioning out of
+        # WAITING_FOR_REMOTE_KVS state
+        if request_id in self.finished_recving_kv_req_ids:
+            self.finished_recving_kv_req_ids.remove(request_id)
+
         if not delay_free_blocks:
             self._free_blocks(request)
 
@@ -1585,13 +1581,6 @@ class Scheduler(SchedulerInterface):
             )
             return False
         
-        logger.info(
-            "[Scheduler] Request %s finished receiving remote KV. "
-            "Removing from finished_recving_kv_req_ids. "
-            "Connector tracker state: %s",
-            request.request_id,
-            tracker_state if connector_has_tracker else "N/A",
-        )
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
@@ -1633,58 +1622,13 @@ class Scheduler(SchedulerInterface):
         # if finished_recving: add to state so we can
             schedule the request during the next step.
         """
-        logger.info(
-            "[Scheduler] _update_from_kv_xfer_finished called. "
-            "finished_recving: %s (size: %d), finished_sending: %s (size: %d), "
-            "current finished_recving_kv_req_ids size: %d",
-            kv_connector_output.finished_recving,
-            len(kv_connector_output.finished_recving) if kv_connector_output.finished_recving else 0,
-            kv_connector_output.finished_sending,
-            len(kv_connector_output.finished_sending) if kv_connector_output.finished_sending else 0,
-            len(self.finished_recving_kv_req_ids),
-        )
-
         if self.connector is not None:
-            logger.info(
-                "[Scheduler] Before update_connector_output. "
-                "finished_recving: %s (size: %d), finished_recving_kv_req_ids: %s",
-                kv_connector_output.finished_recving,
-                len(kv_connector_output.finished_recving) if kv_connector_output.finished_recving else 0,
-                self.finished_recving_kv_req_ids,
-            )
             self.connector.update_connector_output(kv_connector_output)
-            logger.info(
-                "[Scheduler] After update_connector_output. "
-                "finished_recving: %s (size: %d), finished_recving_kv_req_ids: %s",
-                kv_connector_output.finished_recving,
-                len(kv_connector_output.finished_recving) if kv_connector_output.finished_recving else 0,
-                self.finished_recving_kv_req_ids,
-            )
 
         # KV Connector:: update recv and send status from last step.
         finished_recving_list = list(kv_connector_output.finished_recving or ())
-        logger.info(
-            "[Scheduler] Processing %d finished_recving requests: %s",
-            len(finished_recving_list),
-            finished_recving_list,
-        )
         for req_id in finished_recving_list:
-            logger.info(
-                "[Scheduler] Finished recving KV transfer for request %s. "
-                "Adding to finished_recving_kv_req_ids. "
-                "Before: %s, After: %s",
-                req_id,
-                req_id in self.finished_recving_kv_req_ids,
-                True,
-            )
             self.finished_recving_kv_req_ids.add(req_id)
-        
-        logger.info(
-            "[Scheduler] finished_recving_kv_req_ids size after update: %d, "
-            "contents: %s",
-            len(self.finished_recving_kv_req_ids),
-            self.finished_recving_kv_req_ids,
-        )
         for req_id in kv_connector_output.finished_sending or ():
             logger.info("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
