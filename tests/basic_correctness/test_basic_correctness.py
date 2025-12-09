@@ -13,11 +13,14 @@ import pytest
 import torch
 
 from vllm import LLM
+from vllm.platforms import current_platform
 from vllm.v1.engine.llm_engine import LLMEngine
 
 from ..conftest import HfRunner, VllmRunner
 from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
+
+ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 MODELS = [
     "hmellor/tiny-random-Gemma2ForCausalLM",
@@ -57,7 +60,7 @@ def _fix_prompt_embed_outputs(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.parametrize("backend", ATTN_BACKEND)
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
