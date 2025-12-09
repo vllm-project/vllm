@@ -119,16 +119,16 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
 )
 def test_shared_storage_connector_hashes(tmp_path):
     """
-    Tests that SharedStorageConnector saves KV to the storage locations
+    Tests that ExampleConnector saves KV to the storage locations
     with proper hashes; that are unique for inputs with identical text but
     different images (same size), or same multiple images but different orders.
     """
     # Using tmp_path as the storage path to store KV
     print(f"KV storage path at: {str(tmp_path)}")
 
-    # Configure the SharedStorageConnector
+    # Configure the ExampleConnector
     kv_transfer_config = KVTransferConfig(
-        kv_connector="SharedStorageConnector",
+        kv_connector="ExampleConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
     )
