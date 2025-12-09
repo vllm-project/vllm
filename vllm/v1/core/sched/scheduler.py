@@ -83,8 +83,6 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
-        # All pending query that failed, (structured output compilation failed)
-        self.pending_error_outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
