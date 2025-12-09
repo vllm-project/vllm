@@ -1262,6 +1262,7 @@ class Qwen3XMLToolParser(ToolParser):
             tools_called=len(tool_calls) > 0,
             content=content,
         )
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
