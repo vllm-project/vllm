@@ -7,7 +7,10 @@ from vllm.config.model import LogprobsMode
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import (
+    compute_topk_logprobs,
+    compute_tracked_logprobs,
+)
 from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.penalties import apply_penalties_and_temperature
@@ -28,19 +31,30 @@ class Sampler:
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         sampled, processed_logits = self.sample(logits, sampling_metadata)
+
+        # Determine which logits to use for logprobs based on mode
+        # This applies to both regular logprobs and tracked logprobs
+        logits_for_logprobs = (
+            processed_logits if self.logprobs_mode == "processed_logprobs" else logits
+        )
+
         if sampling_metadata.max_num_logprobs is not None:
-            logits = (
-                processed_logits
-                if self.logprobs_mode == "processed_logprobs"
-                else logits
-            )
             logprobs_tensors = compute_topk_logprobs(
-                logits,
+                logits_for_logprobs,
                 sampling_metadata.max_num_logprobs,
                 sampled,
             )
         else:
             logprobs_tensors = None
+
+        # Compute tracked logprobs if requested
+        # Use the same logits as regular logprobs to ensure consistency
+        tracked_logprobs_tensors = None
+        if sampling_metadata.track_token_ids is not None:
+            tracked_logprobs_tensors = compute_tracked_logprobs(
+                logits_for_logprobs,
+                sampling_metadata.track_token_ids,
+            )
 
         # These are GPU tensors.
         sampler_output = SamplerOutput(
@@ -49,6 +63,7 @@ class Sampler:
             # token per request.
             sampled_token_ids=sampled.view(-1, 1),
             logprobs_tensors=logprobs_tensors,
+            tracked_logprobs_tensors=tracked_logprobs_tensors,
         )
         return sampler_output
 

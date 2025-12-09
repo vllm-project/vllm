@@ -238,6 +238,13 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    track_token_ids: list[int] | None = None
+    """List of token IDs to track logprobs for at every generation step.
+    These tokens will have their logprobs recorded even if they don't
+    appear in the top-k (logprobs parameter). This is useful for tasks like
+    classification where you need probabilities for specific tokens
+    (e.g., class labels) without retrieving the full vocabulary logprobs."""
+
     skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
@@ -270,6 +277,7 @@ class SamplingParams(
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
+        track_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -310,6 +318,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            track_token_ids=track_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -445,6 +454,13 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        if self.track_token_ids is not None and not all(
+            isinstance(tid, int) and tid >= 0 for tid in self.track_token_ids
+        ):
+            raise ValueError(
+                "track_token_ids must contain only non-negative integers, "
+                f"got {self.track_token_ids}."
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -577,6 +593,7 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
+            f"track_token_ids={self.track_token_ids}, "
             f"extra_args={self.extra_args})"
         )
 
