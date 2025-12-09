@@ -585,6 +585,7 @@ async def create_transcriptions(
     try:
         generator = await handler.create_transcription(audio_data, request, raw_request)
     except Exception as e:
+        logger.exception("Error in create_transcription: %s", e)
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
         ) from e

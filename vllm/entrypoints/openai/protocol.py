@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, Optional, TypeAlias
 
 import regex as re
 import torch
@@ -2148,6 +2148,32 @@ class TranscriptionRequest(OpenAIBaseModel):
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                 detail="Expected 'file' to be a file-like object, not 'str'.",
             )
+
+        # Convert string booleans from form data to actual booleans
+        if isinstance(data, dict):
+            # Handle use_beam_search
+            if "use_beam_search" in data:
+                use_beam_search = data["use_beam_search"]
+                if isinstance(use_beam_search, str):
+                    data["use_beam_search"] = use_beam_search.lower() in ("true", "1", "yes", "on")
+                elif isinstance(use_beam_search, bool):
+                    data["use_beam_search"] = use_beam_search
+                else:
+                    data["use_beam_search"] = bool(use_beam_search)
+            
+            # Handle beam_width - convert string to int
+            if "beam_width" in data and isinstance(data["beam_width"], str):
+                try:
+                    data["beam_width"] = int(data["beam_width"])
+                except (ValueError, TypeError):
+                    pass
+            
+            # Handle length_penalty - convert string to float
+            if "length_penalty" in data and isinstance(data["length_penalty"], str):
+                try:
+                    data["length_penalty"] = float(data["length_penalty"])
+                except (ValueError, TypeError):
+                    pass
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)

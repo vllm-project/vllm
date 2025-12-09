@@ -321,13 +321,23 @@ class OpenAISpeechToText(OpenAIServing):
                     return self.create_error_response(
                         "Beam search currently only supports single prompt."
                     )
-                list_result_generator = [
-                    self.engine_client.beam_search(
-                        prompts[0],
-                        f"{request_id}_0",
-                        sampling_params,
+                try:
+                    list_result_generator = [
+                        self.beam_search(
+                            prompts[0],
+                            f"{request_id}_0",
+                            sampling_params,
+                        )
+                    ]
+                except Exception as e:
+                    logger.exception(
+                        "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, error=%s",
+                        request_id,
+                        sampling_params.beam_width,
+                        sampling_params.length_penalty,
+                        e,
                     )
-                ]
+                    raise
             else:
                 list_result_generator = [
                     self.engine_client.generate(
@@ -339,8 +349,11 @@ class OpenAISpeechToText(OpenAIServing):
                     for i, prompt in enumerate(prompts)
                 ]
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
+            logger.exception("Validation error in speech_to_text: %s", e)
             return self.create_error_response(str(e))
+        except Exception as e:
+            logger.exception("Unexpected error in speech_to_text: %s", e)
+            raise
 
         if request.stream:
             return stream_generator_method(
