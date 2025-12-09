@@ -50,13 +50,53 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                 "Vec size is not matched.");
 
   int sf_m = round_up<int>(numRows, 128);
-  int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
-  int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
-  for (int row = numRows + blockIdx.x; row < sf_m; row += gridDim.x) {
-    // Each thread writes 4 uint32_t elements.
-    for (int col = sf_n_unpadded + threadIdx.x * 4; col < sf_n_int;
-         col += blockDim.x * 4) {
-      SFout[row * sf_n_int + col] = 0x00;
+  int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE; // 464 / 16 = 29 valid SFs
+  int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4; // round_up(29,4)/4 = 32/4 = 8 blocks
+  
+  // Debug: Print dimensions (only once from block 0, thread 0)
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    printf("[FP4_QUANT_DEBUG] numRows=%d, numCols=%d, sf_m=%d, sf_n_unpadded=%d, sf_n_int=%d\n",
+           numRows, numCols, sf_m, sf_n_unpadded, sf_n_int);
+    printf("[FP4_QUANT_DEBUG] Total SFs needed: %d, Blocks allocated: %d (holds %d SFs)\n",
+           sf_n_unpadded, sf_n_int, sf_n_int * 4);
+  }
+  
+  // Calculate which uint32 block contains the boundary (padding starts)
+  // sf_n_unpadded = 29 valid SFs.
+  // They occupy blocks 0-7. Block 7 contains SFs 28-31, where SFs 29-31 are EXTRA COLUMNS (padding).
+  int last_valid_block = (sf_n_unpadded - 1) / 4; // e.g., 29-1=28, 28/4=7
+  int valid_sf_in_last_block = sf_n_unpadded % 4; // e.g., 29 % 4 = 1 (only SF 28 is valid)
+
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    printf("[FP4_QUANT_DEBUG] Boundary block: %d, Valid SFs in boundary: %d (padding SFs: %d-%d)\n",
+           last_valid_block, valid_sf_in_last_block, sf_n_unpadded, sf_n_int * 4 - 1);
+  }
+
+  // Unified loop: Zero out padding for ALL rows (both valid and extra)
+  // - Extra ROWS (numRows to sf_m-1): Zero ALL blocks (0 to sf_n_int-1)
+  // - Valid ROWS (0 to numRows-1): Zero only the boundary block containing tail padding (extra columns)
+  for (int row = blockIdx.x; row < sf_m; row += gridDim.x) {
+    if (row >= numRows) { 
+      // Extra row (padding row): Zero ALL blocks
+      for (int col = threadIdx.x; col < sf_n_int; col += blockDim.x) {
+        SFout[row * sf_n_int + col] = 0x00;
+        // Debug: Print for first extra row only
+        if (row == numRows && col == 0) {
+          printf("[FP4_QUANT_DEBUG] Zeroing EXTRA ROW %d, ALL blocks (0-%d)\n", row, sf_n_int - 1);
+        }
+      }
+    } else if (valid_sf_in_last_block != 0) {
+      // Valid row: Zero only the boundary block containing tail padding (EXTRA COLUMNS)
+      // The data loop below will overwrite the valid SF (e.g., SF 28)
+      if (threadIdx.x == 0) {
+        SFout[row * sf_n_int + last_valid_block] = 0x00;
+        // Debug: Print for first valid row only
+        if (row == 0) {
+          printf("[FP4_QUANT_DEBUG] Zeroing VALID ROW %d, boundary block %d (contains SFs %d-%d, padding: %d-%d)\n",
+                 row, last_valid_block, last_valid_block * 4, last_valid_block * 4 + 3,
+                 sf_n_unpadded, last_valid_block * 4 + 3);
+        }
+      }
     }
   }
 
@@ -65,7 +105,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   // (448.f / (Alpha_A / 6.f)).
   float const global_scale = SFScale == nullptr ? 1.0f : SFScale[0];
 
-  // Input tensor row/col loops.
+  // Input tensor row/col loops - This writes REAL DATA
   for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
     for (int colIdx = threadIdx.x; colIdx < numCols / CVT_FP4_ELTS_PER_THREAD;
          colIdx += blockDim.x) {
@@ -81,8 +121,22 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, numCols, SFout);
 
+      // This function calculates the scaling factor and writes it to *sf_out
+      // For boundary block (e.g., block 7), this OVERWRITES the zero we wrote earlier
       out_pos =
           cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, global_scale, sf_out);
+      
+      // Debug: Print when we write to the boundary region (for row 0 only, to avoid spam)
+      // Each colIdx processes CVT_FP4_ELTS_PER_THREAD=8 elements, which creates 1 SF
+      // For numCols=464, we have 464/8=58 colIdx iterations per row
+      // SF index = colIdx / (CVT_FP4_ELTS_PER_THREAD / CVT_FP4_SF_VEC_SIZE) = colIdx / (8/16) = colIdx * 2
+      // Actually, cvt_warp_fp16_to_fp4 is called with groups, let me check the mapping...
+      // For simplicity, print when processing the last few column indices
+      if (rowIdx == 0 && colIdx >= (numCols / CVT_FP4_ELTS_PER_THREAD) - 2) {
+        printf("[FP4_QUANT_DEBUG] Writing REAL DATA for row %d, colIdx %d (processes elements %d-%d)\n",
+               rowIdx, colIdx, colIdx * CVT_FP4_ELTS_PER_THREAD, 
+               (colIdx + 1) * CVT_FP4_ELTS_PER_THREAD - 1);
+      }
     }
   }
 }
