@@ -53,6 +53,120 @@ PENALTY_PARAM_DEFAULTS = {
 }
 
 
+def create_warmup_decode_input_parameters(
+    max_batch_size,
+    num_gpu_blocks,
+    sample_on_device_mode,
+    data_parallel_size=1,
+):
+    """
+    Function is used in v0 and v1 to create the warmup decode input parameters
+    In v0, data_parallel_size is always 1
+    In v1, data_parallel_size can be greater than 1
+    Called from decode_warmup
+    """
+    max_batch_size = max_batch_size * data_parallel_size
+    tokens = torch.zeros(max_batch_size, 1, dtype=torch.int32)
+    start_pos = torch.zeros(max_batch_size, dtype=torch.int32)
+    page_table = torch.zeros(max_batch_size, num_gpu_blocks, dtype=torch.int32)
+    sampling_params = create_sampling_params(sample_on_device_mode,
+                                             max_batch_size)
+    return tokens, start_pos, page_table, sampling_params
+
+
+def create_sampling_params(sample_on_device_mode, max_batch_size):
+    """
+    Returns a list of sampling parameter configurations
+    that should be compiled/traced for the model based on device capabilities
+    """
+
+    if not sample_on_device_mode:
+        return [None]
+
+    sampling_configs: List[Any] = []
+
+    if TTPlatform.non_greedy_decoding_on_device:
+
+        # 1. Greedy sampling
+        sampling_configs.append(
+            TTSamplingParams(temperature=0.0, top_k=1, top_p=1.0))
+
+        # 2. Non-greedy sampling (one representative example with penalties)
+        sampling_configs.append(
+            TTSamplingParams(temperature=[1.0] * max_batch_size,
+                             top_k=[10] * max_batch_size,
+                             top_p=[0.9] * max_batch_size,
+                             presence_penalty=[1.2] * max_batch_size,
+                             frequency_penalty=[1.2] * max_batch_size,
+                             repetition_penalty=[1.5] * max_batch_size))
+
+    else:
+        # Basic on-device sampling only supports greedy
+        sampling_configs.append(
+            TTSamplingParams(temperature=0.0, top_k=1, top_p=1.0))
+
+    sampling_configs.append(None)
+
+    return sampling_configs
+
+
+def prefill_warmup(model,
+                   kv_cache,
+                   trace_prefill_mode,
+                   max_batch_size,
+                   data_parallel_size=1):
+    # NOTE: Also called from vLLM v1
+
+    sampling_params = create_sampling_params(
+        TTPlatform.sample_on_device_mode, max_batch_size * data_parallel_size)
+
+    local_kwargs = {
+        "kv_cache": kv_cache,
+        "enable_trace": trace_prefill_mode,
+        "sampling_params": sampling_params,
+    }
+
+    # it is up to the model to handle the different sampling configurations
+    logger.info("Warmup run for prefill started")
+    model.warmup_model_prefill(**local_kwargs)
+    logger.info("Warmup run for prefill finished")
+
+
+def decode_warmup(model,
+                  kv_cache,
+                  trace_decode_mode,
+                  max_batch_size,
+                  num_gpu_blocks,
+                  sample_on_device_mode,
+                  data_parallel_size=1):
+    # NOTE: Also called from vLLM v1
+
+    (tokens, start_pos, page_table,
+     sampling_params) = create_warmup_decode_input_parameters(
+         max_batch_size, num_gpu_blocks, sample_on_device_mode,
+         data_parallel_size)
+
+    local_kwargs = {
+        "tokens": tokens,
+        "start_pos": start_pos,
+        "page_table": page_table,
+        "kv_cache": kv_cache,
+        "enable_trace": trace_decode_mode,
+        "read_from_device": True,
+        "sampling_params": None,  #to be filled
+    }
+
+    for s in sampling_params:
+        local_kwargs["sampling_params"] = s
+        logger.info("Warmup run for decode started")
+        logger.info("Tokens shape: %s", str(tokens.shape))
+        logger.info("Start pos shape: %s", str(start_pos.shape))
+        logger.info("Page table shape: %s", str(page_table.shape))
+        logger.info("Sampling params used for decode warmup: %s", s)
+        model.decode_forward(**local_kwargs)
+        logger.info("Warmup run for decode finished")
+
+
 @dataclass(frozen=True)
 class TTSamplingParams:
     """
@@ -165,7 +279,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        trace_mode: bool = True,
+        trace_mode: str = "all",
+        enable_model_warmup: bool = True,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
 
@@ -181,11 +296,14 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         # whether to use ttnn tracing for model execution
         self.trace_mode = trace_mode
+        self.enable_model_warmup = enable_model_warmup
         self.sample_on_device_mode = TTPlatform.sample_on_device_mode
         logger.info(
-            "TTModelRunner: trace_mode=%s, sample_on_device_mode=%s",
+            "TTModelRunner: trace_mode=%s, "
+            "sample_on_device_mode=%s, enable_model_warmup=%s",
             self.trace_mode,
             self.sample_on_device_mode,
+            self.enable_model_warmup,
         )
 
         # If sampling on device and in decode, delay reading the token
@@ -688,7 +806,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
             # Pad block_tables to max num blocks
             # so ttnn tracing can work (requires constant shape)
-            if self.trace_mode:
+            if self.trace_mode in ["all", "decode_only"]:
                 block_tables = torch.cat([
                     block_tables,
                     torch.zeros(block_tables.shape[0],
@@ -987,6 +1105,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             **(model_input.multi_modal_kwargs or {}),
         }
         if not is_decode:
+            execute_model_kwargs["enable_trace"] = self.trace_mode in ["all"]
             execute_model_kwargs["prompt_lens"] = model_input.prompt_lens
         else:
             execute_model_kwargs["start_pos"] = model_input.input_positions
@@ -1213,9 +1332,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                 repetition_penalty=permuted_repetition,
                                 seed=permuted_seed)
 
+            enable_trace = self.trace_mode in ["all", "decode_only"]
             tt_out = self.model.decode_forward(**execute_model_kwargs,
                                                **enc_dec_kwargs,
-                                               enable_trace=self.trace_mode,
+                                               enable_trace=enable_trace,
                                                read_from_device=False)
             if use_async_out_proc:
                 # trigger output processor on host while device is executing
@@ -1280,3 +1400,14 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for seq_output in seq_group_output.samples:
                 next_token_ids.append(seq_output.output_token)
         return torch.tensor(next_token_ids, dtype=torch.int32, device="cpu")
+
+    def warmup_model(self, kv_cache) -> None:
+        trace_prefill_mode = self.trace_mode in ["all"]
+        prefill_warmup(self.model, kv_cache, trace_prefill_mode,
+                       self.scheduler_config.max_num_seqs)
+
+        trace_decode_mode = self.trace_mode in ["all", "decode_only"]
+        decode_warmup(self.model, kv_cache, trace_decode_mode,
+                      self.scheduler_config.max_num_seqs,
+                      self.cache_config.num_gpu_blocks,
+                      self.sample_on_device_mode)

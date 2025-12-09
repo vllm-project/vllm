@@ -44,11 +44,23 @@ class TTWorker(WorkerBase):
         # Whether to use ttnn tracing for model execution
         override_tt_config = self.model_config.override_tt_config
         trace_key = "trace_mode"
-        self.trace_mode = True
+        self.trace_mode = "all"
         if override_tt_config and trace_key in override_tt_config:
-            assert override_tt_config[trace_key] in [True, False], \
+            assert override_tt_config[trace_key] \
+            in ["decode_only", "all", "none"], \
                 f"Invalid {trace_key}: {override_tt_config[trace_key]}"
             self.trace_mode = override_tt_config[trace_key]
+
+        enable_model_warmup_key = "enable_model_warmup"
+        self.enable_model_warmup = True
+        if override_tt_config and enable_model_warmup_key in override_tt_config:
+            assert override_tt_config[enable_model_warmup_key] \
+                in [True, False], \
+                f"Invalid {enable_model_warmup_key}: \
+                {override_tt_config[enable_model_warmup_key]}"
+
+            self.enable_model_warmup = override_tt_config[
+                enable_model_warmup_key]
 
     def init_device(self) -> None:
         local_dp_rank = self.parallel_config.data_parallel_rank_local
@@ -70,6 +82,7 @@ class TTWorker(WorkerBase):
             vllm_config=self.vllm_config,
             mesh_device=self.mesh_device,
             trace_mode=self.trace_mode,
+            enable_model_warmup=self.enable_model_warmup,
         )
 
     def load_model(self):
@@ -149,8 +162,12 @@ class TTWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def compile_or_warm_up_model(self) -> None:
-        # Currently skip and compile/capture-trace during the first execution.
-        pass
+        if not self.enable_model_warmup:
+            logger.warning("Skipping model warmup")
+            return
+        local_rank = self.parallel_config.data_parallel_rank_local
+        if local_rank == 0:
+            self.model_runner.warmup_model()
 
     def execute_model(
         self,

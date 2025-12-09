@@ -157,15 +157,28 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Whether to use ttnn tracing for model execution
         override_tt_config = self.model_config.override_tt_config
         trace_key = "trace_mode"
-        self.trace_mode = True
+        self.trace_mode = "all"
         if override_tt_config and trace_key in override_tt_config:
-            assert override_tt_config[trace_key] in [True, False], \
+            assert override_tt_config[trace_key] \
+            in ["decode_only", "all", "none"], \
                 f"Invalid {trace_key}: {override_tt_config[trace_key]}"
             self.trace_mode = override_tt_config[trace_key]
+
+        enable_model_warmup_key = "enable_model_warmup"
+        self.enable_model_warmup = True
+        if override_tt_config and enable_model_warmup_key in override_tt_config:
+            assert override_tt_config[enable_model_warmup_key] \
+                in [True, False], \
+                f"Invalid {enable_model_warmup_key}: \
+                {override_tt_config[enable_model_warmup_key]}"
+
+            self.enable_model_warmup = override_tt_config[
+                enable_model_warmup_key]
 
         self.model_runner: TTModelRunner = TTModelRunner(
             vllm_config=vllm_config,
             trace_mode=self.trace_mode,
+            enable_model_warmup=self.enable_model_warmup,
         )
 
         self.cache_engine: TTCacheEngine
@@ -236,6 +249,11 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
         self._init_cache_engine()
+
+        if self.enable_model_warmup:
+            self.model_runner.warmup_model(self.kv_cache)
+        else:
+            logger.warning("Skipping model warmup")
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
@@ -556,7 +574,7 @@ def reset_fabric(override_tt_config, num_devices):
 def device_params_from_override_tt_config(override_tt_config, trace_mode):
     device_params = {}
 
-    if trace_mode:
+    if trace_mode in ["all", "decode_only"]:
         # Set the most common value as default, override later
         device_params["trace_region_size"] = 50000000
         if override_tt_config and "trace_region_size" in override_tt_config:

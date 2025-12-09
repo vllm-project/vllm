@@ -85,7 +85,8 @@ MESH_DEVICE=T3K python examples/offline_inference_tt.py --measure_perf
 
 **Note 1**: Custom TT options can be set using `--override_tt_config` with a json string, e.g. `--override_tt_config '{"sample_on_device_mode": "all"}'`, however these shouldn't be used unless the model supports them (most currently do not). Supported parameters are:
 - `sample_on_device_mode`: ["all", "decode_only"]
-- `trace_mode`: [true, false]
+- `trace_mode`: ["all", "decode_only", "none"], default: all (Determines if tracing will be enabled both in prefill and decode, decode only, or it won't be enabled for both prefill and decode)
+- `enable_model_warmup`: [true, false], default: true (If true, warmup the model before vLLM sends healthy signal)
 - `trace_region_size`: [default: 25000000]
 - `worker_l1_size`
 - `l1_small_size`
