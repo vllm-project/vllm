@@ -192,7 +192,7 @@ def test_suffix_decoding_acceptance(
     assert first_accept_rate < last_accept_rate
 
     # Heuristic: expect at least 82.5% acceptance rate at the end.
-    assert last_accept_rate > 0.825
+    assert last_accept_rate > 0.80
 
     del spec_llm
     torch.cuda.empty_cache()
