@@ -216,7 +216,7 @@ class ApplyRotaryEmb(CustomOp):
                 ...
             """
             interleaved = not self.is_neox_style
-            output = apply_rotary(x, cos, sin, interleaved).type_as(x)
+            output = apply_rotary(x, cos, sin, interleaved=interleaved).type_as(x)
 
             if len(origin_shape) == 3:
                 output = output.squeeze(0)
