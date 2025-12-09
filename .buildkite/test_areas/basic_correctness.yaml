@@ -1,0 +1,16 @@
+group: Basic Correctness
+depends_on: 
+  - image-build
+steps:
+- label: Basic Correctness
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/test_basic_correctness
+  - tests/basic_correctness/test_cpu_offload
+  - tests/basic_correctness/test_cumem.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/test_cumem.py
+  - pytest -v -s basic_correctness/test_basic_correctness.py
+  - pytest -v -s basic_correctness/test_cpu_offload.py
