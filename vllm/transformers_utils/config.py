@@ -26,21 +26,22 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.repo_utils import (
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+
+from .config_parser_base import ConfigParserBase
+from .gguf_utils import (
+    check_gguf_file,
+    is_gguf,
+    is_remote_gguf,
+    split_remote_gguf,
+)
+from .repo_utils import (
     _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
     list_repo_files,
     try_get_local_file,
     with_retry,
-)
-from vllm.transformers_utils.utils import (
-    check_gguf_file,
-    is_gguf,
-    is_remote_gguf,
-    parse_safetensors_file_metadata,
-    split_remote_gguf,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -88,6 +89,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_text="Step3TextConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
+    tarsier2="Tarsier2Config",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -126,6 +128,9 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            model_type = hf_overrides.get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -299,32 +304,31 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    # Patch rope_parameters differently based on Transformers version
-    if Version(version("transformers")) >= Version("5.0.0.dev0"):
-        from transformers.modeling_rope_utils import (
-            rope_config_validation,
-            standardize_rope_params,
-        )
+    from vllm.config.utils import getattr_iter
 
-        # When Transformers v5 is installed, legacy rope_theta may be present
-        # when using custom code models written for Transformers v4
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
-            standardize_rope_params(config, rope_theta=rope_theta)
-            rope_config_validation(config)
-            # Delete rope_theta to avoid confusion in downstream code
-            del config.rope_theta
-    else:
-        # When Transformers v4 is installed, legacy rope_scaling may be present
+    rope_theta_names = ("rope_theta", "rotary_emb_base")
+    rope_theta = getattr_iter(config, rope_theta_names, None)
+    if Version(version("transformers")) < Version("5.0.0.dev0"):
+        # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
-        # When Transformers v4 is installed, legacy rope_theta may be present
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+        if rope_theta is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
+        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
+        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
+        if partial_rotary_factor is not None:
+            if not hasattr(config, "rope_parameters"):
+                config.rope_parameters = {"rope_type": "default"}
+            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+    elif rope_theta is not None or hasattr(config, "rope_parameters"):
+        # Transformers v5 installed
+        config.standardize_rope_params()
+        config.validate_rope()
 
     # No RoPE parameters to patch
-    if not hasattr(config, "rope_parameters"):
+    if getattr(config, "rope_parameters", None) is None:
         return
 
     # Add original_max_position_embeddings if present
@@ -365,7 +369,10 @@ def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
         rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
     elif rope_parameters["rope_type"] == "mrope":
-        assert "mrope_section" in rope_parameters
+        if "mrope_section" not in rope_parameters:
+            raise ValueError(
+                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
+            )
         rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
@@ -598,6 +605,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
+        hf_overrides=hf_overrides_kw,
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
@@ -929,11 +937,13 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
-    if text_config is not config:
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(text_config, "num_attention_heads")
+    if text_config is not config and not hasattr(text_config, "num_attention_heads"):
+        raise ValueError(
+            "The text_config extracted from the model config does not have "
+            "`num_attention_heads` attribute. This indicates a mismatch "
+            "between the model config and vLLM's expectations. Please "
+            "ensure that the model config is compatible with vLLM."
+        )
 
     return text_config
 
@@ -944,6 +954,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,

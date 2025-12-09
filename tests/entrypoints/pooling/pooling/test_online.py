@@ -11,13 +11,14 @@ import torch
 
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import PoolingResponse
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.serial_utils import (
     EMBED_DTYPE_TO_TORCH_DTYPE,
     ENDIANNESS,
     MetadataItem,
     binary2tensor,
+    build_metadata_items,
     decode_pooling_output,
 )
 
@@ -158,11 +159,7 @@ async def test_conversation_pooling(server: RemoteOpenAIServer, model_name: str)
     chat_response.raise_for_status()
     chat_poolings = PoolingResponse.model_validate(chat_response.json())
 
-    tokenizer = get_tokenizer(
-        tokenizer_name=model_name,
-        tokenizer_mode="fast",
-        trust_remote_code=True,
-    )
+    tokenizer = get_tokenizer(tokenizer_name=model_name, trust_remote_code=True)
     prompt = tokenizer.apply_chat_template(
         messages,
         chat_template=DUMMY_CHAT_TEMPLATE,
@@ -344,6 +341,61 @@ async def test_bytes_embed_dtype_and_endianness(
             body = responses_bytes.content
             items = [MetadataItem(**x) for x in metadata["data"]]
 
+            bytes_data = decode_pooling_output(items=items, body=body)
+            bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
+
+            check_embeddings_close(
+                embeddings_0_lst=float_data,
+                embeddings_1_lst=bytes_data,
+                name_0="float_data",
+                name_1="bytes_data",
+                tol=1e-2,
+            )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_bytes_only_embed_dtype_and_endianness(
+    server: RemoteOpenAIServer, model_name: str
+):
+    input_texts = [
+        "The best thing about vLLM is that it supports many different models",
+    ] * 2
+
+    url = server.url_for("pooling")
+    float_response = requests.post(
+        url,
+        json={
+            "model": model_name,
+            "input": input_texts,
+            "encoding_format": "float",
+        },
+    )
+    responses_float = PoolingResponse.model_validate(float_response.json())
+    float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
+    n_tokens = responses_float.usage.prompt_tokens // len(input_texts)
+
+    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+        for endianness in ENDIANNESS:
+            responses_bytes = requests.post(
+                url,
+                json={
+                    "model": model_name,
+                    "input": input_texts,
+                    "encoding_format": "bytes_only",
+                    "embed_dtype": embed_dtype,
+                    "endianness": endianness,
+                },
+            )
+
+            assert "metadata" not in responses_bytes.headers
+            body = responses_bytes.content
+            items = build_metadata_items(
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+                shape=(n_tokens, 1),
+                n_request=len(input_texts),
+            )
             bytes_data = decode_pooling_output(items=items, body=body)
             bytes_data = [x.to(torch.float32).view(-1).tolist() for x in bytes_data]
 

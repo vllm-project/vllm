@@ -166,9 +166,7 @@ def _make_metadata_with_slice(
     assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
         "Token slice start outside of first request"
     )
-    assert start_locs[last_req] <= last_tok < start_locs[last_req + 1], (
-        "Token slice end outside of last request"
-    )
+    # NOTE: last token can be outside of the last request if we have CG padding.
 
     # If the "middle" request has tokens in both ubatches, we have to split it.
     # If ubatch_slice is the first ubatch then we will be splitting the last
@@ -885,11 +883,15 @@ def split_decodes_and_prefills(
         return 0, num_reqs, 0, num_tokens
 
     if require_uniform:
+        # check if we are in a padded uniform batch; this is used for full-CGs, some
+        # requests may have a query length of 0 but since they are padding its fine
+        # to treat them as decodes (ensures num_decodes matches the captured size)
+        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
+            return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
-        # 0-query len indicates a padded request; leave this at the back
-        # of the batch with the prefills
-        is_prefill = (query_lens > decode_threshold) | (query_lens == 0)
+        is_prefill = query_lens > decode_threshold
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0

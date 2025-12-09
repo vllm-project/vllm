@@ -520,6 +520,10 @@ class FusedMoE(CustomOp):
         self._init_aiter_shared_experts_topK_buffer(
             vllm_config=vllm_config, dp_size=dp_size_
         )
+        if self.use_ep and self.rocm_aiter_fmoe_enabled:
+            assert self.expert_mask is None or torch.all(
+                (expert_mask == 0) | (expert_mask == 1)
+            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -600,14 +604,20 @@ class FusedMoE(CustomOp):
             # Avoid circular import
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptFp8MoEMethod,
+                ModelOptNvFp4FusedMoE,
             )
 
             if not isinstance(
-                self.quant_method, (UnquantizedFusedMoEMethod, ModelOptFp8MoEMethod)
+                self.quant_method,
+                (
+                    UnquantizedFusedMoEMethod,
+                    ModelOptFp8MoEMethod,
+                    ModelOptNvFp4FusedMoE,
+                ),
             ):
                 raise NotImplementedError(
                     "is_act_and_mul=False is supported only for unquantized "
-                    "and ModelOpt FP8 moe for now"
+                    ", ModelOpt FP8, and ModelOpt NvFp4 checkpoints"
                 )
             if not current_platform.is_cuda():
                 raise NotImplementedError(
@@ -743,7 +753,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
-        )
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_internal_router(self) -> bool:
@@ -857,7 +867,8 @@ class FusedMoE(CustomOp):
         use_chunked_impl: bool,
     ) -> tuple[bool, torch.Tensor | None]:
         use_shared_experts_stream = (
-            has_separate_shared_experts
+            current_platform.is_cuda()
+            and has_separate_shared_experts
             and not use_chunked_impl
             and self.shared_experts_stream is not None
             and (
@@ -1277,7 +1288,7 @@ class FusedMoE(CustomOp):
                     self._load_combined_w13_weight_scale(
                         shard_dim=shard_dim,
                         loaded_weight=loaded_weight,
-                        param=param,
+                        param=expert_data,
                         tp_rank=self.tp_rank,
                     )
                     return True if return_success else None
@@ -1422,7 +1433,7 @@ class FusedMoE(CustomOp):
                 # do nothing.
                 return p
 
-            # Do not update the layer paramater as the layer's MoE operations would
+            # Do not update the layer parameter as the layer's MoE operations would
             # expect the parameter's tensor to the same shape / stride. Instead,
             # make a new torch.nn.Parameter that is used just in the context of
             # EPLB.

@@ -438,19 +438,25 @@ A = TypeVar("A")
 def use_flashinfer_prefill() -> bool:
     # For blackwell default to flashinfer prefill if it's available since
     # it is faster than FA2.
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
-        not envs.VLLM_DISABLE_FLASHINFER_PREFILL
+        not vllm_config.attention_config.disable_flashinfer_prefill
         and flashinfer_available
-        and not envs.VLLM_USE_CUDNN_PREFILL
-        and not envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and not vllm_config.attention_config.use_cudnn_prefill
+        and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability(100)
     )
 
 
 def use_cudnn_prefill() -> bool:
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
         flashinfer_available
-        and envs.VLLM_USE_CUDNN_PREFILL
+        and vllm_config.attention_config.use_cudnn_prefill
         and current_platform.is_device_capability(100)
         and has_nvidia_artifactory()
     )
@@ -458,9 +464,12 @@ def use_cudnn_prefill() -> bool:
 
 def use_trtllm_ragged_deepseek_prefill() -> bool:
     """Check if TRT-LLM ragged DeepSeek prefill should be used."""
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
     return (
         flashinfer_available
-        and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
         and current_platform.is_device_capability(100)
     )
 
@@ -2028,21 +2037,30 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             if fp8_attention:
                 ql_nope_shape = decode_ql_nope.shape
-                decode_ql_nope, _ = ops.scaled_fp8_quant(
-                    decode_ql_nope.reshape(
-                        [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
-                    ),
-                    layer._q_scale,
-                )
-                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
                 q_pe_shape = decode_q_pe.shape
-                decode_q_pe, _ = ops.scaled_fp8_quant(
-                    decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
+                assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
+                decode_q_shape = (
+                    ql_nope_shape[0],
+                    ql_nope_shape[1],
+                    ql_nope_shape[2] + q_pe_shape[2],
+                )
+                # Using empty and copy since torch.cat introduces significant overhead.
+                decode_q0 = torch.empty(
+                    decode_q_shape,
+                    device=decode_ql_nope.device,
+                    dtype=decode_ql_nope.dtype,
+                )
+                decode_q0[..., : ql_nope_shape[2]].copy_(decode_ql_nope)
+                decode_q0[..., ql_nope_shape[2] :].copy_(decode_q_pe)
+
+                decode_q, _ = ops.scaled_fp8_quant(
+                    decode_q0.view(decode_q_shape[0], -1),
                     layer._q_scale,
                 )
-                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
-
-            decode_q = (decode_ql_nope, decode_q_pe)
+                decode_q = decode_q.view(decode_q_shape)
+            else:
+                decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
                 # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
@@ -2057,7 +2075,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             # correct dcp attn_out with lse.
             if self.dcp_world_size > 1:
-                attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
+                attn_out = cp_lse_ag_out_rs(
+                    attn_out,
+                    lse,
+                    get_dcp_group(),
+                    is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
+                )
 
             # v_up projection
             self._v_up_proj(attn_out, out=output[:num_decode_tokens])

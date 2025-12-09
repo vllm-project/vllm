@@ -1000,7 +1000,7 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -1017,7 +1017,7 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
     def _parse_video_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[VideoItem],
-    ) -> ModalityDataItems[Any, Any]:
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -1292,8 +1292,6 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
 
 
 class BaseKeyeModule(nn.Module):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
