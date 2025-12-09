@@ -103,7 +103,7 @@ def ref_dynamic_per_tensor_fp8_quant(
         .clamp(fp8_traits_min, fp8_traits_max)
         .to(FP8_DTYPE)
     )
-    return ref_out, ref_scale.view((1, 1))
+    return ref_out, ref_scale.view(1)
 
 
 def native_w8a8_block_matmul(
