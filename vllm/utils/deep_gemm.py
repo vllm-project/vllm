@@ -33,18 +33,12 @@ class DeepGemmQuantScaleFMT(Enum):
     UE8M0 = 2
 
     @staticmethod
-    def from_oracle(
-        use_ue8m0: bool | None = None, is_blackwell: bool | None = None
-    ) -> "DeepGemmQuantScaleFMT":
-        if use_ue8m0 is None:
-            use_ue8m0 = is_deep_gemm_e8m0_used()
-        if is_blackwell is None:
-            is_blackwell = current_platform.is_device_capability(100)
-        if not use_ue8m0:
+    def from_oracle() -> "DeepGemmQuantScaleFMT":
+        if not is_deep_gemm_e8m0_used():
             return DeepGemmQuantScaleFMT.FLOAT32
         return (
             DeepGemmQuantScaleFMT.UE8M0
-            if is_blackwell
+            if current_platform.is_device_capability(100)
             else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
         )
 
