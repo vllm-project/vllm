@@ -597,7 +597,7 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul:
+        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda():
             # Avoid circular import
             # from vllm.model_executor.layers.quantization.modelopt import (
             #     ModelOptFp8MoEMethod,
@@ -610,10 +610,9 @@ class FusedMoE(CustomOp):
             #         "is_act_and_mul=False is supported only for unquantized "
             #         "and ModelOpt FP8 moe for now"
             #     )
-            if not current_platform.is_cuda():
-                raise NotImplementedError(
-                    "is_act_and_mul=False is supported only for CUDA for now"
-                )
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA for now"
+            )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
@@ -906,7 +905,7 @@ class FusedMoE(CustomOp):
             if self.is_gated:
                 param_data[expert_id][idx] = loaded_weight
             else:
-                param_data[expert_id] = loaded_weight   
+                param_data[expert_id] = loaded_weight
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
@@ -1324,7 +1323,9 @@ class FusedMoE(CustomOp):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.tp_rank,
-                    load_full_w2=getattr(param, "load_full_w2", False),
+                    load_full_w2=getattr(
+                        param, "load_full_w2", True
+                    ),  # TODO: this is hack only for nemotron, should be removed later
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
