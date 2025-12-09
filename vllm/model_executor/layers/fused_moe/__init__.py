@@ -4,7 +4,10 @@
 from contextlib import contextmanager
 from typing import Any
 
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -49,6 +52,7 @@ __all__ = [
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "RoutingMethodType",
     "SharedFusedMoE",
     "activation_without_mul",
     "override_config",
