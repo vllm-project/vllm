@@ -235,7 +235,13 @@ class Proxy:
                 logger.error("Unexpected error: %s", str(e))
                 raise HTTPException(status_code=500, detail=str(e)) from e
 
-    def schedule(self, cycler: itertools.cycle) -> str:
+    def schedule(self, cycler: itertools.cycle, instance_type: str) -> str:
+        instances = self.prefill_instances if instance_type == "prefill" else self.decode_instances
+        if not instances:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Service Unavailable: No {instance_type} instances available."
+            )
         return self.scheduling_policy.schedule(cycler)
 
     async def get_status(self):
@@ -254,7 +260,7 @@ class Proxy:
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
 
-            prefill_instance = self.schedule(self.prefill_cycler)
+            prefill_instance = self.schedule(self.prefill_cycler, "prefill")
             try:
                 async for _ in self.forward_request(
                     f"http://{prefill_instance}/v1/completions", kv_prepare_request
@@ -265,7 +271,7 @@ class Proxy:
                 raise http_exc
 
             # Perform kv recv and decoding stage
-            decode_instance = self.schedule(self.decode_cycler)
+            decode_instance = self.schedule(self.decode_cycler, "decode")
 
             try:
                 generator = self.forward_request(
@@ -277,8 +283,6 @@ class Proxy:
             response = StreamingResponse(generator)
             return response
         except Exception:
-            import sys
-
             exc_info = sys.exc_info()
             print("Error occurred in disagg proxy server")
             print(exc_info)
@@ -294,7 +298,7 @@ class Proxy:
                 kv_prepare_request["max_completion_tokens"] = 1
 
             # prefill stage
-            prefill_instance = self.schedule(self.prefill_cycler)
+            prefill_instance = self.schedule(self.prefill_cycler, "prefill")
             try:
                 async for _ in self.forward_request(
                     f"http://{prefill_instance}/v1/chat/completions", kv_prepare_request
@@ -304,11 +308,11 @@ class Proxy:
                 self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
             # Perform kv recv and decoding stage
-            decode_instance = self.schedule(self.decode_cycler)
+            decode_instance = self.schedule(self.decode_cycler, "decode")
 
             try:
                 generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions", request
+                    f"http://{decode_instance}/v1/chat/completions", request
                 )
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
@@ -328,9 +332,9 @@ class Proxy:
         if instance_type == "decode" and instance in self.decode_instances:
             self.decode_instances.remove(instance)
             self.decode_cycler = itertools.cycle(self.decode_instances)
-        if instance_type == "prefill" and instance in self.decode_instances:
+        if instance_type == "prefill" and instance in self.prefill_instances:
             self.prefill_instances.remove(instance)
-            self.prefill_cycler = itertools.cycle(self.decode_instances)
+            self.prefill_cycler = itertools.cycle(self.prefill_instances)
 
 
 class RoundRobinSchedulingPolicy(SchedulingPolicy):
