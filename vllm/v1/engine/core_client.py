@@ -265,6 +265,7 @@ class InprocClient(EngineCoreClient):
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, _ = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=True)
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
