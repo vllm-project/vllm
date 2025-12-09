@@ -27,6 +27,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -38,6 +39,7 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
+from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -65,7 +67,7 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise
     cudagraphs"""
     O2 = 2
     """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
@@ -83,22 +85,33 @@ IS_DENSE = False
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
-def enable_fusion(cfg: "VllmConfig") -> bool:
-    """Returns True if RMS norm or quant FP8 is enabled."""
+def enable_norm_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if either RMS norm or quant FP8 custom op is active;
+    otherwise Inductor handles fusion."""
+
     return cfg.compilation_config.is_custom_op_enabled(
         "rms_norm"
+    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+
+
+def enable_act_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if either SiLU+Mul or quant FP8 custom op is active;
+    otherwise Inductor handles fusion."""
+    return cfg.compilation_config.is_custom_op_enabled(
+        "silu_and_mul"
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": False,
-            "enable_fusion": False,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": False,
-            "enable_sequence_parallelism": False,
-            "enable_async_tp": False,
+            "eliminate_noops": False,
+            "fuse_norm_quant": False,
+            "fuse_act_quant": False,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": False,
+            "enable_sp": False,
+            "fuse_gemm_comms": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -107,12 +120,13 @@ OPTIMIZATION_LEVEL_00 = {
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": False,
-            "enable_sequence_parallelism": False,
-            "enable_async_tp": False,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": False,
+            "enable_sp": False,
+            "fuse_gemm_comms": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -121,12 +135,13 @@ OPTIMIZATION_LEVEL_01 = {
 OPTIMIZATION_LEVEL_02 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": IS_QUANTIZED,
-            "enable_sequence_parallelism": IS_DENSE,
-            "enable_async_tp": IS_DENSE,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": IS_QUANTIZED,
+            "enable_sp": IS_DENSE,
+            "fuse_gemm_comms": IS_DENSE,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -135,12 +150,13 @@ OPTIMIZATION_LEVEL_02 = {
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
         "pass_config": {
-            "enable_noop": True,
-            "enable_fusion": enable_fusion,
-            "enable_fi_allreduce_fusion": False,
-            "enable_attn_fusion": IS_QUANTIZED,
-            "enable_sequence_parallelism": IS_DENSE,
-            "enable_async_tp": IS_DENSE,
+            "eliminate_noops": True,
+            "fuse_norm_quant": enable_norm_fusion,
+            "fuse_act_quant": enable_act_fusion,
+            "fuse_allreduce_rms": False,
+            "fuse_attn_quant": IS_QUANTIZED,
+            "enable_sp": IS_DENSE,
+            "fuse_gemm_comms": IS_DENSE,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -178,6 +194,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
+    """Attention configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -201,6 +219,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
+    profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
+    """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -265,6 +285,10 @@ class VllmConfig:
             vllm_factors.append(self.load_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.attention_config:
+            vllm_factors.append(self.attention_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         else:
@@ -275,6 +299,8 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.structured_outputs_config:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
+        if self.profiler_config:
+            vllm_factors.append(self.profiler_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
@@ -565,6 +591,15 @@ class VllmConfig:
             else:
                 self.scheduler_config.async_scheduling = True
 
+        if (
+            self.scheduler_config.async_scheduling
+            and not self.parallel_config.disable_nccl_for_dp_synchronization
+        ):
+            logger.info(
+                "Disabling NCCL for DP synchronization when using async scheduling."
+            )
+            self.parallel_config.disable_nccl_for_dp_synchronization = True
+
         from vllm.platforms import current_platform
 
         if (
@@ -645,9 +680,9 @@ class VllmConfig:
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
-        if self.compilation_config.pass_config.enable_async_tp:
-            self.compilation_config.pass_config.enable_sequence_parallelism = True
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
+        if self.compilation_config.pass_config.fuse_gemm_comms:
+            self.compilation_config.pass_config.enable_sp = True
+        if self.compilation_config.pass_config.enable_sp:
             if "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
@@ -657,36 +692,22 @@ class VllmConfig:
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                # decode context parallel does not support full cudagraphs
-                if self.parallel_config.decode_context_parallel_size > 1:
+            if (
+                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                and self.model_config is not None
+            ):
+                if self.model_config.pooler_config is not None:
                     logger.warning_once(
-                        "Decode context parallel (DCP) is enabled, which is "
-                        "incompatible with full CUDA graphs. "
+                        "Pooling models do not support full cudagraphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                # prefill context parallel do not support full cudagraphs
-                elif self.parallel_config.prefill_context_parallel_size > 1:
+                elif self.model_config.is_encoder_decoder:
                     logger.warning_once(
-                        "Prefill context parallel (PCP) is enabled, which is "
-                        "incompatible with full CUDA graphs. "
+                        "Encoder-decoder models do not support full cudagraphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif self.model_config is not None:
-                    if self.model_config.pooler_config is not None:
-                        logger.warning_once(
-                            "Pooling models do not support full cudagraphs. "
-                            "Overriding cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                    elif self.model_config.is_encoder_decoder:
-                        logger.warning_once(
-                            "Encoder-decoder models do not support full cudagraphs. "
-                            "Overriding cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -718,6 +739,8 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings. "
             )
+        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
+        self._set_compile_ranges()
 
         if self.model_config and self.model_config.is_encoder_decoder:
             from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -795,9 +818,12 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=self.parallel_config.all2all_backend,
+            data_parallel_size=self.parallel_config.data_parallel_size,
+        )
 
-        if self.compilation_config.pass_config.enable_sequence_parallelism:
+        if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,
             # native rms norm tracing errors due to incorrect residual shape.
             # Use custom rms norm to unblock. In the future,
@@ -1062,7 +1088,7 @@ class VllmConfig:
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
-                and self.compilation_config.pass_config.enable_sequence_parallelism
+                and self.compilation_config.pass_config.enable_sp
             ):
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes
@@ -1118,6 +1144,52 @@ class VllmConfig:
 
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
+
+    def _set_compile_ranges(self):
+        """
+        Set the compile ranges for the compilation config.
+        """
+        compilation_config = self.compilation_config
+        computed_compile_ranges_split_points = []
+
+        # The upper bound of the compile ranges is the max_num_batched_tokens
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        if max_num_batched_tokens is not None:
+            computed_compile_ranges_split_points.append(max_num_batched_tokens)
+
+        # Add the compile ranges for flashinfer
+        if compilation_config.pass_config.fuse_allreduce_rms:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+            if max_size is not None:
+                max_token_num = max_size // (
+                    self.model_config.get_hidden_size()
+                    * self.model_config.dtype.itemsize
+                )
+                if (
+                    max_num_batched_tokens is not None
+                    and max_token_num < max_num_batched_tokens
+                ):
+                    computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below allreduce-rms fusion threshold, "
+                        "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
+
+        if compilation_config.compile_ranges_split_points is not None:
+            for x in compilation_config.compile_ranges_split_points:
+                assert isinstance(x, int)
+                assert x > 0, f"Invalid compile range split point: {x}"
+                if (
+                    max_num_batched_tokens is not None
+                    and x < max_num_batched_tokens
+                    and x > 1
+                ):
+                    computed_compile_ranges_split_points.append(x)
+        compilation_config.compile_ranges_split_points = sorted(
+            computed_compile_ranges_split_points
+        )
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config

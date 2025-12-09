@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -10,9 +12,11 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response import ToolChoice
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
@@ -22,6 +26,38 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
+from vllm.utils import random_uuid
+
+
+def make_response_output_items_from_parsable_context(
+    response_messages: list[ResponseInputOutputItem],
+) -> list[ResponseOutputItem]:
+    """Given a list of sentences, construct ResponseOutput Items."""
+    output_messages: list[ResponseOutputItem] = []
+    for message in response_messages:
+        if not isinstance(message, ResponseFunctionToolCallOutputItem):
+            output_messages.append(message)
+        else:
+            if len(output_messages) == 0:
+                raise ValueError(
+                    "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                )
+            if isinstance(output_messages[-1], ResponseFunctionToolCall):
+                mcp_message = McpCall(
+                    id=f"mcp_{random_uuid()}",
+                    arguments=output_messages[-1].arguments,
+                    name=output_messages[-1].name,
+                    server_label=output_messages[
+                        -1
+                    ].name,  # TODO: store the server label
+                    type="mcp_call",
+                    status="completed",
+                    output=message.output,
+                    # TODO: support error output
+                )
+                output_messages[-1] = mcp_message
+
+    return output_messages
 
 
 def construct_input_messages(
@@ -146,3 +182,16 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
         "type": "function",
         "function": tool,
     }
+
+
+def construct_tool_dicts(
+    tools: list[Tool], tool_choice: ToolChoice
+) -> list[dict[str, Any]] | None:
+    if tools is None or (tool_choice == "none"):
+        tool_dicts = None
+    else:
+        tool_dicts = [
+            convert_tool_responses_to_completions_format(tool.model_dump())
+            for tool in tools
+        ]
+    return tool_dicts
