@@ -1043,7 +1043,10 @@ class VllmConfig:
             )
             if max_cudagraph_capture_size is None:
                 decode_query_len = 1
-                if self.speculative_config and self.speculative_config.num_speculative_tokens:
+                if (
+                    self.speculative_config
+                    and self.speculative_config.num_speculative_tokens
+                ):
                     decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
                     self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
