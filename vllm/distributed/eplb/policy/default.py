@@ -328,7 +328,9 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             num_nodes: number of server nodes, where the intra-node network
                 (e.g, NVLink) is faster
             num_ranks: number of ranks, must be a multiple of `num_nodes`
-
+            old_global_expert_indices: [layers, num_logical_experts], the old global
+                expert indices. Used to avoid unnecessary weight copying
+                for experts moving within one rank.
         Returns:
             phy2log: [layers, num_replicas], the expert
                 index of each replica
