@@ -131,6 +131,17 @@ def main():
         default=4096,
         help="Hidden size for model configuration (default: 4096)",
     )
+    parser.add_argument(
+        "--no-trace",
+        action="store_true",
+        help="Disable GPU execution tracing (enabled by default)",
+    )
+    parser.add_argument(
+        "--trace-iterations",
+        type=int,
+        default=5,
+        help="Number of iterations to trace for each kernel (default: 5)",
+    )
     args = parser.parse_args()
 
     # List all benchmarks if requested
@@ -183,6 +194,9 @@ def main():
     print(f"Hidden size: {args.hidden_size}")
     print(f"CUDA graphs: {'DISABLED' if args.no_cudagraph else 'ENABLED'}")
     print(f"Correctness verification: {'DISABLED' if args.no_verify else 'ENABLED'}")
+    print(f"GPU execution tracing: {'DISABLED' if args.no_trace else 'ENABLED'}")
+    if not args.no_trace:
+        print(f"Trace iterations: {args.trace_iterations}")
     print(f"Iterations: {args.num_iterations}")
     print(f"Warmup: {args.warmup}")
     print()
@@ -206,6 +220,13 @@ def main():
     # Create benchmark instance with model config
     benchmark = benchmark_cls(model_config=mock_model_config)
 
+    # Create output directory early for trace files
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(
+        args.output_dir or f"/tmp/helion_benchmark_{args.benchmark}_{timestamp}"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     # Run benchmark using the standardized API
     results = benchmark.run(
         mode=args.mode,
@@ -215,6 +236,9 @@ def main():
         verify=not args.no_verify,
         atol=args.atol,
         rtol=args.rtol,
+        enable_trace=not args.no_trace,
+        trace_iterations=args.trace_iterations,
+        trace_output_dir=str(output_dir),
     )
 
     # Print results
@@ -222,19 +246,26 @@ def main():
     print_summary_statistics(results)
 
     # Save reports
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    # Use default /tmp directory if not specified
-    output_dir = Path(
-        args.output_dir or f"/tmp/helion_benchmark_{args.benchmark}_{timestamp}"
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     csv_file = output_dir / f"{args.benchmark}_{args.mode}_{timestamp}.csv"
     json_file = output_dir / f"{args.benchmark}_{args.mode}_{timestamp}.json"
 
     save_results_csv(results, str(csv_file))
     save_results_json(results, str(json_file))
+
+    # Print trace file locations if tracing was enabled
+    if not args.no_trace:
+        print("\n" + "=" * 60)
+        print("GPU Execution Traces")
+        print("=" * 60)
+        trace_files = list(output_dir.glob("*_trace.json"))
+        if trace_files:
+            for trace_file in sorted(trace_files):
+                print(f"📊 {trace_file}")
+            print(f"\nTo view traces, open Chrome and go to chrome://tracing")
+            print(f"Then load the trace files above.")
+        else:
+            print("No trace files were generated.")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
