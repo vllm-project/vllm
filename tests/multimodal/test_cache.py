@@ -51,7 +51,7 @@ def _dummy_elem(
         modality=modality,
         key=key,
         data=data,
-        field=MultiModalSharedField(1),
+        field=MultiModalSharedField(batch_size=1),
     )
 
 
