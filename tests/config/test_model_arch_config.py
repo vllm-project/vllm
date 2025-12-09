@@ -10,14 +10,17 @@ def test_model_arch_config():
     trust_remote_code_models = [
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         "XiaomiMiMo/MiMo-7B-RL",
-        # Not available online right now
+        # Excluded: Not available online right now
         # "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
         "meituan-longcat/LongCat-Flash-Chat",
     ]
     models_to_test = [
         "state-spaces/mamba-130m-hf",
         "mistralai/Mamba-Codestral-7B-v0.1",
-        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+        # Excluded: terratorch/torchgeo version mismatch in
+        # Async Engine, Inputs, Utils, Worker, Config Test (CPU) CI test environment
+        # (NonGeoDataset import error).
+        # "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         "Zyphra/Zamba2-7B-instruct",
         "mosaicml/mpt-7b",
         "databricks/dbrx-instruct",
@@ -29,7 +32,7 @@ def test_model_arch_config():
         "tiny-random/qwen3-next-moe",
         "zai-org/GLM-4.5",
         "baidu/ERNIE-4.5-21B-A3B-PT",
-        # Select some models using base convertor for testing
+        # Models using base convertor
         "lmsys/gpt-oss-20b-bf16",
         "deepseek-ai/DeepSeek-V3.2-Exp",
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -67,7 +70,7 @@ def test_model_arch_config():
         dtype = model_arch_config.torch_dtype
         assert str(dtype) == expected["dtype"]
 
-        # Test that model_config methods return expected values
+        # Ensure model_config methods return expected values
         assert model_config.architectures == expected["architectures"]
         assert model_config.get_vocab_size() == expected["vocab_size"]
         assert model_config.get_hidden_size() == expected["hidden_size"]
