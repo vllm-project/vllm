@@ -259,10 +259,10 @@ def main():
         print("=" * 60)
         trace_files = list(output_dir.glob("*_trace.json"))
         if trace_files:
-            for trace_file in sorted(trace_files):
-                print(f"📊 {trace_file}")
+            print(f"📊 Trace files saved to: {output_dir}")
+            print(f"   saved {len(trace_files)} trace file(s)")
             print("\nTo view traces, open Chrome and go to chrome://tracing")
-            print("Then load the trace files above.")
+            print("Then load the trace files from the directory above.")
         else:
             print("No trace files were generated.")
         print("=" * 60)
