@@ -2788,17 +2788,19 @@ class GPUModelRunner(
         )
 
         dispatch_cudagraph = (
-            lambda num_tokens: self.cudagraph_dispatcher.dispatch(
+            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
-                use_cascade_attn=use_cascade_attn,
                 uniform_decode=uniform_decode,
+                disable_full=disable_full,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
         )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+            num_tokens_padded, use_cascade_attn
+        )
         num_tokens_padded = batch_descriptor.num_tokens
 
         # Extra coordination when running data-parallel since we need to coordinate
@@ -2813,23 +2815,28 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            should_ubatch, num_tokens_across_dp = coordinate_batch_across_dp(
-                num_tokens_unpadded=num_tokens,
-                parallel_config=self.parallel_config,
-                allow_microbatching=allow_microbatching,
-                allow_dp_padding=allow_dp_padding,
-                num_tokens_padded=num_tokens_padded,
-                uniform_decode=uniform_decode,
-                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+                coordinate_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    parallel_config=self.parallel_config,
+                    allow_microbatching=allow_microbatching,
+                    allow_dp_padding=allow_dp_padding,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                    cudagraph_mode=cudagraph_mode.value,
+                )
             )
 
-            # Extract DP padding if there is any
+            # Extract DP-synced values
             if num_tokens_across_dp is not None:
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-
-                # Re-dispatch with DP padding
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+                # Re-dispatch with DP padding so we have the correct batch_descriptor
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
