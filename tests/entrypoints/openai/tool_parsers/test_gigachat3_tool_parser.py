@@ -13,7 +13,6 @@ from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
-
 MSG_SEP_TOKEN = "<|message_sep|>\n\n"
 ROLE_SEP_TOKEN = "<|role_sep|>\n"
 EOS_TOKEN = "</s>"
@@ -45,7 +44,9 @@ PARAMETERLESS_FUNCTION_JSON = json.dumps(
     },
     ensure_ascii=False,
 )
-PARAMETERLESS_FUNCTION_OUTPUT = f"{MSG_SEP_TOKEN}{TOOL_HEADER}{PARAMETERLESS_FUNCTION_JSON}"
+PARAMETERLESS_FUNCTION_OUTPUT = (
+    f"{MSG_SEP_TOKEN}{TOOL_HEADER}{PARAMETERLESS_FUNCTION_JSON}"
+)
 PARAMETERLESS_FUNCTION_CALL = FunctionCall(
     name="manage_user_memory",
     arguments=json.dumps({}, ensure_ascii=False),
@@ -82,11 +83,7 @@ MIXED_OUTPUT = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT}"
 
 @pytest.fixture(name="gigachat_tokenizer")
 def fixture_gigachat_tokenizer(default_tokenizer: TokenizerLike):
-    default_tokenizer.add_tokens([
-        MSG_SEP_TOKEN, 
-        ROLE_SEP_TOKEN,
-        EOS_TOKEN
-    ])
+    default_tokenizer.add_tokens([MSG_SEP_TOKEN, ROLE_SEP_TOKEN, EOS_TOKEN])
     return default_tokenizer
 
 
@@ -220,7 +217,7 @@ def test_streaming_tool_call_with_large_steps(gigachat_tokenizer: TokenizerLike)
         TOOL_HEADER,
         COMPLEX_FUNCTION_JSON[:40],
         COMPLEX_FUNCTION_JSON[40:-1],
-        COMPLEX_FUNCTION_JSON[-1]
+        COMPLEX_FUNCTION_JSON[-1],
     ]
     reconstructor = run_tool_extraction_streaming(
         tool_parser,

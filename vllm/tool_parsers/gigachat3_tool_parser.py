@@ -30,7 +30,7 @@ REGEX_FUNCTION_CALL = re.compile(
 )
 
 REGEX_CONTENT_PATTERN = re.compile(
-    r"^(.*?)<\|message_sep\|>", 
+    r"^(.*?)<\|message_sep\|>",
     re.DOTALL,
 )
 
@@ -43,6 +43,7 @@ ARGS_REGEX = re.compile(
     r'"arguments"\s*:\s*(.*)',
     re.DOTALL,
 )
+
 
 class GigaChat3ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
@@ -68,12 +69,16 @@ class GigaChat3ToolParser(ToolParser):
         function_call = None
         content = None
         if model_output.rstrip().endswith("</s>"):
-            model_output = model_output[:model_output.rfind("</s>")]
+            model_output = model_output[: model_output.rfind("</s>")]
         m_func = REGEX_FUNCTION_CALL.search(model_output)
         if m_func:
             try:
                 function_call = json.loads(m_func.group(1), strict=False)
-                if isinstance(function_call, dict) and "name" in function_call and "arguments" in function_call:
+                if (
+                    isinstance(function_call, dict)
+                    and "name" in function_call
+                    and "arguments" in function_call
+                ):
                     if not isinstance(function_call["arguments"], dict):
                         function_call = None
                 else:
@@ -157,7 +162,7 @@ class GigaChat3ToolParser(ToolParser):
         if args_match:
             cur_args = args_match.group(1).strip()
             if cur_args.endswith("</s>"):
-                cur_args = cur_args[:-len("</s>")]
+                cur_args = cur_args[: -len("</s>")]
             if cur_args.endswith("}"):  # last '}' end of json
                 try:
                     candidate = cur_args[:-1].strip()
@@ -191,7 +196,7 @@ class GigaChat3ToolParser(ToolParser):
         if not prev_args:
             delta_args = cur_args
         elif cur_args.startswith(prev_args):
-            delta_args = cur_args[len(prev_args):]
+            delta_args = cur_args[len(prev_args) :]
         else:
             return None
         if not delta_args:
