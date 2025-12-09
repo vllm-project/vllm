@@ -1532,8 +1532,7 @@ class GPUModelRunner(
         """
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
-        assert num_reqs_padded is not None
-        assert num_tokens_padded is not None
+        assert num_reqs_padded is not None and num_tokens_padded is not None
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1557,6 +1556,7 @@ class GPUModelRunner(
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
+            assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
                 blk_table_tensor = torch.zeros(
@@ -1655,6 +1655,7 @@ class GPUModelRunner(
                 )
 
             if ubid is None:
+                assert isinstance(attn_metadata, dict)
                 attn_metadata_dict = attn_metadata
             else:
                 assert isinstance(attn_metadata, list)
