@@ -134,7 +134,7 @@ class IPEXConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        if not current_platform.is_cpu() and not current_platform.is_xpu():
+        if not current_platform.is_xpu():
             return None
 
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
@@ -150,7 +150,10 @@ class IPEXConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped(
-                    prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                    prefix,
+                    self.modules_to_not_convert,
+                    self.packed_modules_mapping,
+                    skip_with_substr=True,
                 ):
                     return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)

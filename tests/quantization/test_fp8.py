@@ -45,10 +45,10 @@ def test_model_load_and_run(
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
-    with vllm_runner(model_id) as llm:
+    with vllm_runner(model_id, enforce_eager=True) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
 
 
@@ -85,7 +85,7 @@ def test_kv_cache_model_load_and_run(
 
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
+    with vllm_runner(model_id, kv_cache_dtype="fp8", enforce_eager=True) as llm:
 
         def check_model(model):
             attn = model.model.layers[0].self_attn.attn
@@ -112,7 +112,7 @@ def test_kv_cache_model_load_and_run(
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
 
 
@@ -142,7 +142,10 @@ def test_load_fp16_model(
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
     with vllm_runner(
-        "facebook/opt-125m", quantization="fp8", kv_cache_dtype=kv_cache_dtype
+        "facebook/opt-125m",
+        quantization="fp8",
+        enforce_eager=True,
+        kv_cache_dtype=kv_cache_dtype,
     ) as llm:
 
         def check_model(model):

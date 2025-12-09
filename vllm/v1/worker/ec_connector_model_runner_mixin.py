@@ -59,7 +59,7 @@ class ECConnectorModelRunnerMixin:
         )
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire EC conector lifecycle within execute_model
+    # It encapsulates the entire EC connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_ec_connector_output(

@@ -66,6 +66,18 @@ class PlotEqualTo(PlotFilterBase):
 
 
 @dataclass
+class PlotNotEqualTo(PlotFilterBase):
+    @override
+    def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        try:
+            target = float(self.target)
+        except ValueError:
+            target = self.target
+
+        return df[df[self.var] != target]
+
+
+@dataclass
 class PlotLessThan(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
@@ -96,6 +108,7 @@ class PlotGreaterThanOrEqualTo(PlotFilterBase):
 # NOTE: The ordering is important! Match longer op_keys first
 PLOT_FILTERS: dict[str, type[PlotFilterBase]] = {
     "==": PlotEqualTo,
+    "!=": PlotNotEqualTo,
     "<=": PlotLessThanOrEqualTo,
     ">=": PlotGreaterThanOrEqualTo,
     "<": PlotLessThan,
@@ -167,6 +180,27 @@ def _json_load_bytes(path: Path) -> list[dict[str, object]]:
         return json.load(f)
 
 
+def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, object]]:
+    """
+    Convert string values "inf", "-inf", and "nan" to their float equivalents.
+
+    This handles the case where JSON serialization represents inf/nan as strings.
+    """
+    converted_data = []
+    for record in data:
+        converted_record = {}
+        for key, value in record.items():
+            if isinstance(value, str):
+                if value in ["inf", "-inf", "nan"]:
+                    converted_record[key] = float(value)
+                else:
+                    converted_record[key] = value
+            else:
+                converted_record[key] = value
+        converted_data.append(converted_record)
+    return converted_data
+
+
 def _get_metric(run_data: dict[str, object], metric_key: str):
     try:
         return run_data[metric_key]
@@ -178,12 +212,15 @@ def _get_group(run_data: dict[str, object], group_keys: list[str]):
     return tuple((k, str(_get_metric(run_data, k))) for k in group_keys)
 
 
-def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...]):
+def _get_fig_path(fig_dir: Path, group: tuple[tuple[str, str], ...], fig_name: str):
     parts = list[str]()
+
+    # Start with figure name (always provided, defaults to "FIGURE")
+    parts.append(fig_name)
+
+    # Always append group data if present
     if group:
-        parts.extend(("FIGURE-", *(f"{k}={v}" for k, v in group)))
-    else:
-        parts.append("figure")
+        parts.extend(f"{k}={v}" for k, v in group)
 
     return fig_dir / sanitize_filename("-".join(parts) + ".png")
 
@@ -217,6 +254,10 @@ def _plot_fig(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
+    fig_name: str,
+    error_bars: bool,
+    fig_height: float,
+    fig_dpi: int,
 ):
     fig_group, fig_data = fig_group_data
 
@@ -230,7 +271,7 @@ def _plot_fig(
         for _, row_data in row_groups
     )
 
-    fig_path = _get_fig_path(fig_dir, fig_group)
+    fig_path = _get_fig_path(fig_dir, fig_group, fig_name)
 
     print("[BEGIN FIGURE]")
     print(f"Group: {dict(fig_group)}")
@@ -241,6 +282,8 @@ def _plot_fig(
         print("[END FIGURE]")
         return
 
+    # Convert string "inf", "-inf", and "nan" to their float equivalents
+    fig_data = _convert_inf_nan_strings(fig_data)
     df = pd.DataFrame.from_records(fig_data)
 
     if var_x not in df.columns:
@@ -275,6 +318,10 @@ def _plot_fig(
     df = filter_by.apply(df)
     df = bin_by.apply(df)
 
+    # Sort by curve_by columns alphabetically for consistent legend ordering
+    if curve_by:
+        df = df.sort_values(by=curve_by)
+
     df["row_group"] = (
         pd.concat(
             [k + "=" + df[k].astype(str) for k in row_by],
@@ -293,7 +340,7 @@ def _plot_fig(
         else "(All)"
     )
 
-    g = sns.FacetGrid(df, row="row_group", col="col_group")
+    g = sns.FacetGrid(df, row="row_group", col="col_group", height=fig_height)
 
     if row_by and col_by:
         g.set_titles("{row_name}\n{col_name}")
@@ -320,6 +367,7 @@ def _plot_fig(
             style=style,
             size=size,
             markers=True,
+            errorbar="sd" if error_bars else None,
         )
 
         g.add_legend(title=hue)
@@ -339,11 +387,12 @@ def _plot_fig(
             y=var_y,
             hue="curve_group",
             markers=True,
+            errorbar="sd" if error_bars else None,
         )
 
         g.add_legend()
 
-    g.savefig(fig_path)
+    g.savefig(fig_path, dpi=fig_dpi)
     plt.close(g.figure)
 
     print("[END FIGURE]")
@@ -364,6 +413,10 @@ def plot(
     scale_x: str | None,
     scale_y: str | None,
     dry_run: bool,
+    fig_name: str = "FIGURE",
+    error_bars: bool = True,
+    fig_height: float = 6.4,
+    fig_dpi: int = 300,
 ):
     all_data = [
         run_data
@@ -398,6 +451,10 @@ def plot(
                     scale_x=scale_x,
                     scale_y=scale_y,
                     dry_run=dry_run,
+                    fig_name=fig_name,
+                    error_bars=error_bars,
+                    fig_height=fig_height,
+                    fig_dpi=fig_dpi,
                 ),
                 fig_groups,
             )
@@ -419,6 +476,10 @@ class SweepPlotArgs:
     scale_x: str | None
     scale_y: str | None
     dry_run: bool
+    fig_name: str = "FIGURE"
+    error_bars: bool = True
+    fig_height: float = 6.4
+    fig_dpi: int = 300
 
     parser_name: ClassVar[str] = "plot"
     parser_help: ClassVar[str] = "Plot performance curves from parameter sweep results."
@@ -448,6 +509,10 @@ class SweepPlotArgs:
             scale_x=args.scale_x,
             scale_y=args.scale_y,
             dry_run=args.dry_run,
+            fig_name=args.fig_name,
+            error_bars=not args.no_error_bars,
+            fig_height=args.fig_height,
+            fig_dpi=args.fig_dpi,
         )
 
     @classmethod
@@ -542,6 +607,32 @@ class SweepPlotArgs:
             "See also: https://seaborn.pydata.org/generated/seaborn.objects.Plot.scale.html",
         )
         parser.add_argument(
+            "--fig-name",
+            type=str,
+            default="FIGURE",
+            help="Name prefix for the output figure file. "
+            "Group data is always appended when present. "
+            "Default: 'FIGURE'. Example: --fig-name my_performance_plot",
+        )
+        parser.add_argument(
+            "--no-error-bars",
+            action="store_true",
+            help="If set, disables error bars on the plot. "
+            "By default, error bars are shown.",
+        )
+        parser.add_argument(
+            "--fig-height",
+            type=float,
+            default=6.4,
+            help="Height of each subplot in inches. Default: 6.4",
+        )
+        parser.add_argument(
+            "--fig-dpi",
+            type=int,
+            default=300,
+            help="Resolution of the output figure in dots per inch. Default: 300",
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the information about each figure to plot, "
@@ -566,6 +657,10 @@ def run_main(args: SweepPlotArgs):
         scale_x=args.scale_x,
         scale_y=args.scale_y,
         dry_run=args.dry_run,
+        fig_name=args.fig_name,
+        error_bars=args.error_bars,
+        fig_height=args.fig_height,
+        fig_dpi=args.fig_dpi,
     )
 
 

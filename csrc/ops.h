@@ -52,14 +52,13 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-#ifndef USE_ROCM
 void merge_attn_states(torch::Tensor& output,
                        std::optional<torch::Tensor> output_lse,
                        const torch::Tensor& prefix_output,
                        const torch::Tensor& prefix_lse,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
-
+#ifndef USE_ROCM
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
     torch::Tensor& block_offset,     // [BATCH, N_HEADS, NUM_ROWS, NNZ_S]
@@ -128,6 +127,13 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
                                       std::optional<torch::Tensor> residual);
+
+void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor const& weight,
+                              torch::Tensor& scales, double const epsilon,
+                              std::optional<torch::Tensor> scale_ub,
+                              std::optional<torch::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
@@ -300,6 +306,14 @@ void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
                                 torch::Tensor& output_s, int64_t group_size,
                                 double eps, double int8_min, double int8_max);
+
+// Fused activation quantisation + DeepGEMM-compatible UE8M0-packed scales.
+void per_token_group_quant_8bit_packed(const torch::Tensor& input,
+                                       torch::Tensor& output_q,
+                                       torch::Tensor& output_s_packed,
+                                       int64_t group_size, double eps,
+                                       double min_8bit, double max_8bit);
+
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

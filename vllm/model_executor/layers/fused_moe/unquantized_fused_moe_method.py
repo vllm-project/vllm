@@ -108,11 +108,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return True
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
             return None
         else:
-            return super().maybe_make_prepare_finalize()
+            return super().maybe_make_prepare_finalize(routing_tables)
 
     def select_gemm_impl(
         self,
@@ -260,7 +263,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     layer.w2_weight.copy_(packed_w2_weight)
                     layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
+                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
@@ -328,7 +331,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_cuda(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         use_grouped_topk: bool,
         top_k: int,
@@ -349,31 +352,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-            global_num_experts=global_num_experts,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
         if self.rocm_aiter_moe_enabled:
@@ -412,7 +393,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
             )
 
-        if zero_expert_num != 0 and zero_expert_type is not None:
+        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )
@@ -422,7 +403,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_cpu(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         use_grouped_topk: bool,
         top_k: int,
@@ -471,7 +452,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_xpu(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         use_grouped_topk: bool,
         top_k: int,
@@ -512,7 +493,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_tpu(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         use_grouped_topk: bool,
         top_k: int,

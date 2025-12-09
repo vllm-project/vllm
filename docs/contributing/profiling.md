@@ -11,6 +11,8 @@ We support tracing vLLM workers using the `torch.profiler` module. You can enabl
 - `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
 - `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
 - `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
+- `VLLM_TORCH_PROFILER_USE_GZIP=0` to disable gzip-compressing profiling files, on by default
+- `VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL=0` to disable dumping and printing the aggregated CUDA self time table, on by default
 
 The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
 
@@ -224,6 +226,6 @@ snakeviz expensive_function.prof
 
 Leverage VLLM_GC_DEBUG environment variable to debug GC costs.
 
-- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+- VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
 - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger to log top 5
   collected objects for each gc.collect

@@ -2,12 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
-import pytest
-
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 
 
@@ -142,10 +139,6 @@ QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="Qwen2-VL dependency xformers incompatible with ROCm",
-)
 def test_qwen2vl_lora(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA"""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
@@ -156,10 +149,6 @@ def test_qwen2vl_lora(qwen2vl_lora_files):
         tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="Qwen2-VL dependency xformers incompatible with ROCm",
-)
 def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
     """Test Qwen 2.0 VL model with LoRA through beam search."""
     config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
@@ -178,10 +167,6 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
         )
 
 
-@pytest.mark.xfail(
-    current_platform.is_rocm(),
-    reason="Qwen2.5-VL dependency xformers incompatible with ROCm",
-)
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
     config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)

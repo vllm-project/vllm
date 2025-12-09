@@ -23,6 +23,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -62,6 +63,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
+    FusedMoE3DWithLoRA,
 }
 
 
@@ -166,8 +168,17 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
+def is_base_embeddding_weights(name: str) -> bool:
+    # hardcoded subfixes for input & output embedding weights
+    embedding_suffixes = (
+        ".embed_tokens.base_layer.weight",
+        ".lm_head.base_layer.weight",
+    )
+    return name.endswith(embedding_suffixes)
+
+
 def is_regex_target_modules(
-    load_modules: str | list[str], expected_lora_modules: list[str]
+    load_modules: str | list[str], expected_lora_modules: set[str]
 ) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,
@@ -183,8 +194,8 @@ def is_regex_target_modules(
         except re.error:
             return False
 
-    def is_subset(sub_list, full_list):
-        return set(sub_list).issubset(set(full_list))
+    def is_subset(sub_list, full_set):
+        return set(sub_list).issubset(full_set)
 
     # Similar to PEFT's processing logic, regex-related operations are only
     #  executed when the load_modules is a `str`.
@@ -278,10 +289,12 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-
-            packed_modules_mapping["experts"] = [
-                weight_name.rstrip(".") for _, weight_name, _, _ in moe_packed_mapping
-            ]
+            if not model.is_3d_moe_weight:
+                # 3D MoE LoRA does not need `packed_modules_mapping`
+                packed_modules_mapping["experts"] = [
+                    weight_name.rstrip(".")
+                    for _, weight_name, _, _ in moe_packed_mapping
+                ]
 
             return packed_modules_mapping
         else:
