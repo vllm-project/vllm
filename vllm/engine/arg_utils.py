@@ -1201,16 +1201,6 @@ class EngineArgs:
         # gguf file needs a specific model loader
         if is_gguf(self.model):
             self.quantization = self.load_format = "gguf"
-            # GGUF dequantization kernels use half precision (fp16) internally.
-            # bfloat16 causes incorrect output on some architectures (e.g., Blackwell).
-            # Default to float16 for safety; explicit --dtype bfloat16 still allowed
-            # for users on hardware where it works.
-            if self.dtype == "auto":
-                self.dtype = "float16"
-                logger.info(
-                    "GGUF models default to float16 (dequant kernels use fp16 "
-                    "internally). Use --dtype bfloat16 to override if needed."
-                )
 
         # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
