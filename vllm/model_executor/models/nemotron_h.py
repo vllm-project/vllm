@@ -67,6 +67,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
