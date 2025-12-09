@@ -61,7 +61,7 @@ def test_get_kv_connector_cache_layout_with_multi_connector():
         kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [
-                {"kv_connector": "SharedStorageConnector", "kv_role": "kv_both"},
+                {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
                 {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
             ]
         },

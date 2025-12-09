@@ -520,6 +520,10 @@ class FusedMoE(CustomOp):
         self._init_aiter_shared_experts_topK_buffer(
             vllm_config=vllm_config, dp_size=dp_size_
         )
+        if self.use_ep and self.rocm_aiter_fmoe_enabled:
+            assert self.expert_mask is None or torch.all(
+                (expert_mask == 0) | (expert_mask == 1)
+            ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -749,7 +753,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
-        )
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_internal_router(self) -> bool:
@@ -863,7 +867,8 @@ class FusedMoE(CustomOp):
         use_chunked_impl: bool,
     ) -> tuple[bool, torch.Tensor | None]:
         use_shared_experts_stream = (
-            has_separate_shared_experts
+            current_platform.is_cuda()
+            and has_separate_shared_experts
             and not use_chunked_impl
             and self.shared_experts_stream is not None
             and (
