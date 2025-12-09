@@ -281,7 +281,7 @@ class W8A8BlockFp8LinearOp:
             )
         else:
             assert self.deepgemm_input_quant_op is not None
-        q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
+            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,
