@@ -573,6 +573,12 @@ def make_modular_kernel(
         vllm_parallel_config=vllm_config.parallel_config,
     )
 
+    # Hybrid DeepEP needs a minimum of 128 tokens.
+    if config.prepare_finalize_type.__name__ == "DeepEPHybridPrepareFinalize":
+        min_num_tokens = 128
+    else:
+        min_num_tokens = 1
+
     moe = FusedMoEConfig(
         num_experts=config.E,
         experts_per_token=config.topk,
@@ -580,8 +586,7 @@ def make_modular_kernel(
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
-        # 128 needed for hybrid DeepEP. TODO(bnell): make this smarter
-        max_num_tokens=max(128, next_power_of_2(config.M)),
+        max_num_tokens=max(min_num_tokens, next_power_of_2(config.M)),
     )
 
     # make modular kernel

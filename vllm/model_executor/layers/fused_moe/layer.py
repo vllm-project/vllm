@@ -574,6 +574,10 @@ class FusedMoE(CustomOp):
             self.moe_config.use_flashinfer_cutlass_kernels
         )
 
+        assert (
+            not self.use_deepep_hybrid_kernels or self.moe_config.max_num_tokens > 128
+        ), "Hybrid DeepEP requires a minimum of 128 tokens"
+
         logger.debug("FusedMoE config=%s", self.moe_config)
 
         self.quant_config = quant_config
@@ -1704,10 +1708,8 @@ class FusedMoE(CustomOp):
             ctx = get_forward_context()
             max_tokens_across_dispatchers = ctx.dp_metadata.max_tokens_across_dp_cpu
             num_tokens = hidden_states.size(0)
-            print(f"CHECK PADDING {num_tokens} {max_tokens_across_dispatchers}")
             if num_tokens < max_tokens_across_dispatchers:
                 pad = max_tokens_across_dispatchers - num_tokens
-                print(f"PADDING {pad}")
                 hidden_states = F.pad(
                     hidden_states,
                     (0, 0, 0, pad),
