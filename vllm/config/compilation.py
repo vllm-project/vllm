@@ -1038,7 +1038,11 @@ class CompilationConfig:
             "vllm::moe_forward",
             "vllm::moe_forward_shared",
         ]
-        backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
+        backend = (
+            all2all_backend
+            if all2all_backend is not None
+            else "allgather_reducescatter"
+        )
         dp_size = data_parallel_size if data_parallel_size is not None else 1
         need_moe_splitting = (
             backend == "deepep_high_throughput"

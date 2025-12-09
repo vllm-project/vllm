@@ -137,8 +137,8 @@ class ParallelConfig:
         ]
         | None
     ) = None
-    """All2All backend for MoE expert parallel communication. If not set, uses
-    the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
+    """All2All backend for MoE expert parallel communication. If not set,
+    defaults to "allgather_reducescatter". Available options:
     - "naive": Naive all2all implementation using broadcasts
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "pplx": Use pplx kernels
@@ -490,20 +490,12 @@ class ParallelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
-        # Explicitly include backend affecting env factor as before
-        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set all2all_backend from env var if not specified, with deprecation warning
+        # Set default all2all_backend if not specified
         if self.all2all_backend is None:
-            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-                logger.warning_once(
-                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                    "will be removed in a future release. Please use the "
-                    "--all2all-backend command-line argument instead."
-                )
+            self.all2all_backend = "allgather_reducescatter"
 
         # Continue with the rest of the initialization
         self.world_size = (
