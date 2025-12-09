@@ -1394,9 +1394,7 @@ class EngineArgs:
             )
 
         model_config = self.create_model_config()
-        # if streaming from cloud storage, do not overwrite self.model with local dir
-        if not (is_cloud_storage(self.model) and self.load_format=="runai_streamer"):
-            self.model = model_config.model
+        self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
