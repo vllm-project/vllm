@@ -6,8 +6,11 @@ from collections.abc import Callable
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+
+logger = init_logger(__name__)
 
 
 def is_aiter_found() -> bool:
@@ -417,6 +420,72 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
+@functools.lru_cache(maxsize=1)
+def _initialize_hipblaslt():
+    from aiter import hipb_create_extension
+
+    hipb_create_extension()
+
+
+def _gemm_weight_bpreshuffle_impl(
+    input: torch.Tensor,  # [M, K]
+    weight: torch.Tensor,  # [K, N]
+    bias: torch.Tensor | None = None,  # [N]
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,  # None, (1,) or (M,1)
+    scale_b: torch.Tensor | None = None,  # None, (1,) or (1,N)
+) -> torch.Tensor:
+    _initialize_hipblaslt()
+
+    if out_dtype is None:
+        out_dtype = torch.bfloat16
+
+    assert out_dtype == torch.bfloat16, (
+        f"hip_bpreshuffle_gemm only supports bfloat16 output dtype"
+        f", you have passed in {out_dtype}"
+    )
+    if input.dim() >= 3:
+        inp_view = input.view(-1, input.size(-1))
+        batched = True
+    else:
+        inp_view = input
+        batched = False
+
+    from aiter import hipb_mm
+
+    output = hipb_mm(
+        inp_view,
+        weight,
+        solution_index=-1,
+        bias=bias,
+        out_dtype=out_dtype,
+        scaleA=scale_a,
+        scaleB=scale_b,
+        scaleOut=None,
+        bpreshuffle=True,
+    )
+
+    if batched:
+        output = output.view(*input.shape[:-1], weight.shape[1])
+
+    return output
+
+
+def _gemm_weight_bpreshuffle_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
+    scale_a: torch.Tensor | None = None,
+    scale_b: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if out_dtype is None:
+        out_dtype = torch.bfloat16
+    return torch.empty(
+        *input.shape[:-1], weight.shape[1], dtype=out_dtype, device=input.device
+    )
+
+
 def _rocm_aiter_rms_norm_impl(
     x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
@@ -474,6 +543,7 @@ _OPS_REGISTERED = False
 class rocm_aiter_ops:
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+    _LINEAR_SHUFFLE_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_SHUFFLE
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -503,6 +573,16 @@ class rocm_aiter_ops:
     def is_linear_fp8_enaled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
+
+    @classmethod
+    @if_aiter_supported
+    def is_linear_shuffle_enabled(cls) -> bool:
+        """ "Verifies device specs and availability of env variable."""
+        return (
+            cls._AITER_ENABLED
+            and cls.is_linear_enabled()
+            and cls._LINEAR_SHUFFLE_ENABLED
+        )
 
     @classmethod
     @if_aiter_supported
@@ -650,6 +730,14 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="gemm_weight_bpreshuffle",
+                op_func=_gemm_weight_bpreshuffle_impl,
+                mutates_args=[],
+                fake_impl=_gemm_weight_bpreshuffle_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rms_norm",
                 op_func=_rocm_aiter_rms_norm_impl,
                 mutates_args=[],
@@ -707,6 +795,30 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             A, B, As, Bs, output_dtype
         )
+
+    @staticmethod
+    def gemm_weight_bpreshuffle(
+        input: torch.Tensor,  # [M, K]
+        weight: torch.Tensor,  # [K, N]
+        bias: torch.Tensor | None = None,  # [N]
+        out_dtype: torch.dtype | None = None,
+        scale_a: torch.Tensor | None = None,  # None, (1,) or (M,1)
+        scale_b: torch.Tensor | None = None,  # None, (1,) or (1,N)
+    ) -> torch.Tensor:
+        return torch.ops.vllm.gemm_weight_bpreshuffle(
+            input=input,
+            weight=weight,
+            bias=bias,
+            out_dtype=out_dtype,
+            scale_a=scale_a,
+            scale_b=scale_b,
+        )
+
+    @staticmethod
+    def gemm_weight_can_shuffle(n: int, k: int, layout: tuple[int, int]) -> bool:
+        IN, IK = layout
+        BK = IK * 2
+        return (n % IN == 0) and (k % BK == 0)
 
     @staticmethod
     def fused_moe(
@@ -1014,7 +1126,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight(
-        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
 

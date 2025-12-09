@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -96,6 +97,23 @@ class QuarkW8A8Fp8(QuarkScheme):
                 weight_scale = layer.weight_scale.data
             if self.act_quant_group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
+
+            if rocm_aiter_ops.is_linear_shuffle_enabled():
+                layout = (16, 16)
+                use_swizzle_gemm = rocm_aiter_ops.gemm_weight_can_shuffle(
+                    weight.shape[0], weight.shape[1], layout=layout
+                )
+
+                if use_swizzle_gemm:
+                    weight = rocm_aiter_ops.shuffle_weight(weight, layout)
+                    weight_scale = weight_scale.t()
+
+                    self.fp8_linear = Fp8LinearOp(
+                        act_quant_static=self.is_static_input_scheme,
+                        act_quant_group_shape=self.act_quant_group_shape,
+                        rocm_aiter_weight_shuffled=True,
+                    )
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)

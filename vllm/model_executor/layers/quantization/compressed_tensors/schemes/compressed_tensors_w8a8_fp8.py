@@ -148,6 +148,30 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             weight, weight_scale, input_scale = process_fp8_weight_channel_strategy(
                 layer.weight, layer.weight_scale, getattr(layer, "input_scale", None)
             )
+
+            if (
+                self.use_aiter_and_is_supported
+                and rocm_aiter_ops.is_linear_shuffle_enabled()
+            ):
+                layout = (16, 16)
+                use_swizzle_gemm = rocm_aiter_ops.gemm_weight_can_shuffle(
+                    weight.shape[0], weight.shape[1], layout=layout
+                )
+
+                self.use_aiter_and_is_supported = (
+                    self.use_aiter_and_is_supported and use_swizzle_gemm
+                )
+
+                if self.use_aiter_and_is_supported:
+                    weight = rocm_aiter_ops.shuffle_weight(weight, layout)
+                    weight_scale = weight_scale.t()
+
+                    self.fp8_linear = Fp8LinearOp(
+                        act_quant_static=self.is_static_input_scheme,
+                        act_quant_group_shape=self.act_q_group_shape,
+                        rocm_aiter_weight_shuffled=True,
+                    )
+
             weight = weight.t()
 
         elif self.strategy == QuantizationStrategy.BLOCK:

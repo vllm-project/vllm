@@ -8,6 +8,7 @@ from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -358,8 +359,43 @@ def torch_channelwise_w8a8_scaled_mm(
     return output.to(out_dtype).view(*output_shape)
 
 
+def aiter_ptpc_w8a8_scaled_mm_bpreshuffled(
+    *,
+    qinput: torch.Tensor,
+    weight: torch.Tensor,
+    out_dtype: torch.dtype,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    bias: torch.Tensor,
+    output_shape: list,
+) -> torch.Tensor:
+    # K_size = qinput.shape[-1]
+    # if K_size == 8192:
+    #     output = rocm_aiter_ops.gemm_weight_bpreshuffle_fp8_ck(
+    #         input=qinput,
+    #         weight=weight.t(),
+    #         bias=bias,
+    #         out_dtype=out_dtype,
+    #         scale_a=scale_a,
+    #         scale_b=scale_b.t(),
+    #     )
+    #     return output.view(*output_shape)
+
+    return rocm_aiter_ops.gemm_weight_bpreshuffle(
+        input=qinput,
+        weight=weight,
+        bias=bias,
+        out_dtype=out_dtype,
+        scale_a=scale_a,
+        scale_b=scale_b,
+    ).view(*output_shape)
+
+
 def dispatch_w8a8_scaled_mm(
-    preferred_backend: str, per_tensor_weights: bool, per_tensor_activations: bool
+    preferred_backend: str,
+    per_tensor_weights: bool,
+    per_tensor_activations: bool,
+    rocm_aiter_weight_shuffled: bool = False,
 ) -> Callable[..., torch.Tensor]:
     if per_tensor_weights and per_tensor_activations:
         if preferred_backend == "rocm":
@@ -375,12 +411,11 @@ def dispatch_w8a8_scaled_mm(
         return cutlass_w8a8_scaled_mm
 
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
-    if (
-        not per_tensor_weights
-        and not per_tensor_activations
-        and USE_ROWWISE_TORCH_SCALED_MM
-    ):
-        return torch_per_token_w8a8_scaled_mm
+    if not per_tensor_weights and not per_tensor_activations:
+        if rocm_aiter_weight_shuffled:
+            return aiter_ptpc_w8a8_scaled_mm_bpreshuffled
+        if USE_ROWWISE_TORCH_SCALED_MM:
+            return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
     return torch_channelwise_w8a8_scaled_mm
@@ -401,6 +436,7 @@ class Fp8LinearOp:
         act_quant_static: bool,
         act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
         pad_output: bool | None = None,
+        rocm_aiter_weight_shuffled: bool | None = None,
     ):
         if current_platform.is_rocm():
             self.preferred_backend = "rocm"
@@ -431,6 +467,10 @@ class Fp8LinearOp:
             static=act_quant_static,
             group_shape=act_quant_group_shape,
             num_token_padding=self.output_padding,
+        )
+
+        self.rocm_aiter_weight_shuffled = (
+            False if rocm_aiter_weight_shuffled is None else rocm_aiter_weight_shuffled
         )
 
     def apply(
@@ -478,7 +518,10 @@ class Fp8LinearOp:
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.preferred_backend, per_tensor_weights, per_tensor_activations
+            self.preferred_backend,
+            per_tensor_weights,
+            per_tensor_activations,
+            self.rocm_aiter_weight_shuffled,
         )
 
         return w8a8_scaled_mm_func(

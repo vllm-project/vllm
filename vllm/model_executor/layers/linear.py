@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -225,11 +226,28 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+        self.weight_shuffled = False
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+
+        if rocm_aiter_ops.is_linear_shuffle_enabled():
+            weight = layer.weight
+            layout = (16, 16)
+
+            if rocm_aiter_ops.gemm_weight_can_shuffle(
+                weight.shape[0], weight.shape[1], layout
+            ):
+                shuffled_weight = rocm_aiter_ops.shuffle_weight(weight, layout).t()
+                self.weight_shuffled = True
+                layer.register_parameter(
+                    "weight", Parameter(shuffled_weight.data, requires_grad=False)
+                )
+
+        layer.weight_shuffled = self.weight_shuffled
 
     def apply(
         self,
@@ -237,7 +255,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return dispatch_unquantized_gemm(
+            rocm_aiter_weight_shuffled=self.weight_shuffled
+        )(layer, x, layer.weight, bias)
 
 
 class LinearBase(CustomOp):
