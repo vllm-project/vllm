@@ -248,24 +248,24 @@ SiluMulFp8Helion.register_benchmark(SiluMulFp8Benchmark)
 With the subclass implemented, developer can run a command to get a performance report. e.g.:
 
 ```
-python benchmarks/benchmark_helion.py --benchmark silu_mul_fp8_helion --mode quick --hidden-size=2048
+python benchmarks/benchmark_helion.py --benchmark silu_mul_fp8_helion --hidden-size=2048
 
 ......logs......
 
 ============================================================
 Summary Statistics
 ============================================================
-Total input shapes tested: 242
+Total configurations tested: 242
 
 Speedup:
-  Average: 1.26x
-  Median:  1.11x
-  Min:     0.71x
-  Max:     1.89x
+  Average: 1.42x
+  Median:  1.20x
+  Min:     0.60x
+  Max:     2.85x
 
 Latency (ms):
-  Baseline - Avg: 0.0532, Min: 0.0331, Max: 0.2504
-  Helion   - Avg: 0.0488, Min: 0.0452, Max: 0.1322
+  Baseline - Avg: 0.0134, Min: 0.0030, Max: 0.2139
+  Helion   - Avg: 0.0079, Min: 0.0048, Max: 0.0948
 ============================================================
 ```
 
