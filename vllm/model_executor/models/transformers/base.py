@@ -205,6 +205,9 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
+        # Eagle3 aux hidden states
+        self.aux_hidden_state_layers = tuple[int, ...]()
+
     def pipeline_parallel(self):
         """
         Apply the model's pipeline parallelization plan.
