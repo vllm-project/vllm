@@ -60,7 +60,7 @@ class MoeWNA16Config(QuantizationConfig):
 
         if self.linear_quant_method == "gptq":
             self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
-        elif self.linear_quant_method == "awq":
+        elif self.linear_quant_method in ("awq", "awq_marlin"):
             capability_tuple = current_platform.get_device_capability()
             device_capability = (
                 -1 if capability_tuple is None else capability_tuple.to_int()
@@ -107,7 +107,7 @@ class MoeWNA16Config(QuantizationConfig):
         if linear_quant_method == "gptq":
             has_zp = not cls.get_from_keys(config, ["sym"])
             modules_to_not_convert = []
-        elif linear_quant_method == "awq":
+        elif linear_quant_method in ("awq", "awq_marlin"):
             has_zp = cls.get_from_keys(config, ["zero_point"])
             modules_to_not_convert = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -184,7 +184,7 @@ class MoeWNA16Config(QuantizationConfig):
                     return GPTQConfig.from_config(self.full_config).get_quant_method(
                         layer, prefix
                     )
-            elif self.linear_quant_method == "awq":
+            elif self.linear_quant_method in ("awq", "awq_marlin"):
                 if self.use_marlin and check_marlin_supports_layer(
                     layer, self.group_size
                 ):
@@ -468,7 +468,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             shard_size = layer.intermediate_size_per_partition
 
             # convert gptq and awq weight to a standard format
-            if layer.quant_config.linear_quant_method == "awq":
+            # awq_marlin uses the same weight format as awq
+            if layer.quant_config.linear_quant_method in ("awq", "awq_marlin"):
                 assert layer.quant_config.weight_bits == 4
                 if "weight" in weight_name:
                     loaded_weight = convert_awq_tensor(loaded_weight, "qweight")
