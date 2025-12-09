@@ -31,9 +31,7 @@ def ref_dynamic_per_token_quant(
         else torch.finfo(quant_dtype)
     )
     use_fp8fnuz = (
-        current_platform.is_rocm()
-        and current_platform.is_fp8_fnuz()
-        and quant_dtype == torch.float8_e4m3fnuz
+        current_platform.is_fp8_fnuz() and quant_dtype == torch.float8_e4m3fnuz
     )
     qtype_traits_max = ROCM_FP8FNUZ_MAX if use_fp8fnuz else qtype_traits.max
     qtype_traits_min = (
