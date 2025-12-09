@@ -103,6 +103,19 @@ class FixFunctionalizationPass(VllmInductorPass):
             ]:
                 mutated_args = {1: "result"}
                 self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "flashinfer_trtllm_fused_allreduce_norm")
+                and at_target
+                == torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            ):
+                mutated_args = {
+                    1: "allreduce_in",
+                    2: "residual",
+                    3: "norm_out",
+                    4: "quant_out",
+                    5: "scale_out",
+                }
+                self.defunctionalize(graph, node, mutated_args)
             # For some reason we need to specify the args for both
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.

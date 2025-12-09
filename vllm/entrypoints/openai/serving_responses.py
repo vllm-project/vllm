@@ -64,7 +64,8 @@ from vllm.entrypoints.context import (
     SimpleContext,
     StreamingHarmonyContext,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -76,7 +77,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -86,6 +86,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseInProgressEvent,
+    ResponseInputOutputMessage,
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     ResponsesRequest,
@@ -374,7 +375,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -422,6 +423,10 @@ class OpenAIServingResponses(OpenAIServing):
                             tokenizer=tokenizer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
+                            tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
                         )
                     else:
                         context = SimpleContext()
@@ -629,8 +634,8 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        input_messages = None
-        output_messages = None
+        input_messages: ResponseInputOutputMessage | None = None
+        output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
@@ -670,12 +675,10 @@ class OpenAIServingResponses(OpenAIServing):
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
             if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
-                )
+                input_messages = context.input_messages
+                output_messages = context.output_messages
+
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
