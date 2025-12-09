@@ -48,7 +48,10 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import (
@@ -329,6 +332,7 @@ class GPUModelRunner(
         self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -1700,6 +1704,26 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
+        if self.is_mm_prefix_lm:
+            req_doc_ranges = {}
+            for req_id in self.input_batch.req_ids:
+                image_doc_ranges = []
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    image_doc_ranges.extend(img_doc_range)
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                req_doc_ranges[req_idx] = image_doc_ranges
+
+            if isinstance(attn_metadata, list):
+                for ub_metadata in attn_metadata:
+                    for _metadata in ub_metadata.values():
+                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+            else:
+                for _metadata in attn_metadata.values():
+                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
@@ -2764,17 +2788,19 @@ class GPUModelRunner(
         )
 
         dispatch_cudagraph = (
-            lambda num_tokens: self.cudagraph_dispatcher.dispatch(
+            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
-                use_cascade_attn=use_cascade_attn,
                 uniform_decode=uniform_decode,
+                disable_full=disable_full,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
         )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+            num_tokens_padded, use_cascade_attn
+        )
         num_tokens_padded = batch_descriptor.num_tokens
 
         # Extra coordination when running data-parallel since we need to coordinate
@@ -2789,23 +2815,28 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            should_ubatch, num_tokens_across_dp = coordinate_batch_across_dp(
-                num_tokens_unpadded=num_tokens,
-                parallel_config=self.parallel_config,
-                allow_microbatching=allow_microbatching,
-                allow_dp_padding=allow_dp_padding,
-                num_tokens_padded=num_tokens_padded,
-                uniform_decode=uniform_decode,
-                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+                coordinate_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    parallel_config=self.parallel_config,
+                    allow_microbatching=allow_microbatching,
+                    allow_dp_padding=allow_dp_padding,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                    cudagraph_mode=cudagraph_mode.value,
+                )
             )
 
-            # Extract DP padding if there is any
+            # Extract DP-synced values
             if num_tokens_across_dp is not None:
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-
-                # Re-dispatch with DP padding
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+                # Re-dispatch with DP padding so we have the correct batch_descriptor
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
