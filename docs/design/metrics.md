@@ -47,6 +47,7 @@ In v1, the following metrics are exposed via a Prometheus-compatible `/metrics` 
 - `vllm:request_inference_time_seconds` (Histogram) - Request inference time.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
+- `vllm:request_prefill_kv_computed_tokens` (Histogram) - Number of KV tokens computed during prefill per request, excluding cached tokens.
 
 These are documented under [Inferencing and Serving -> Production Metrics](../usage/metrics.md).
 
