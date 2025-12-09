@@ -1258,7 +1258,7 @@ class EagleProposer:
         num_tokens_padded: int,
     ) -> tuple[int, torch.Tensor]:
         # TODO(Flechman): support DBO ubatching
-        should_ubatch, num_toks_across_dp = coordinate_batch_across_dp(
+        should_ubatch, num_toks_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,

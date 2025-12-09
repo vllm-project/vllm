@@ -20,6 +20,7 @@ from vllm.beam_search import (
 from vllm.config import (
     CompilationConfig,
     PoolerConfig,
+    ProfilerConfig,
     StructuredOutputsConfig,
     is_init_field,
 )
@@ -211,6 +212,7 @@ class LLM:
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
+        profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -282,6 +284,20 @@ class LLM:
         else:
             structured_outputs_instance = StructuredOutputsConfig()
 
+        if profiler_config is not None:
+            if isinstance(profiler_config, dict):
+                profiler_config_instance = ProfilerConfig(
+                    **{
+                        k: v
+                        for k, v in profiler_config.items()
+                        if is_init_field(ProfilerConfig, k)
+                    }
+                )
+            else:
+                profiler_config_instance = profiler_config
+        else:
+            profiler_config_instance = ProfilerConfig()
+
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
@@ -324,6 +340,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
+            profiler_config=profiler_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
