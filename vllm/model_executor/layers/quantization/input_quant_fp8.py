@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -45,9 +46,12 @@ class QuantFP8(CustomOp):
         super().__init__()
         self.static = static
         self.group_shape = group_shape
+        self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.use_ue8m0 = use_ue8m0
+
+        self.use_aiter = rocm_aiter_ops.is_linear_fp8_enaled()
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
@@ -91,6 +95,33 @@ class QuantFP8(CustomOp):
             scale_ub=scale_ub,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic,
         )
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        use_aiter_quant = (
+            not self.is_group_quant
+            and self.use_aiter
+            and scale_ub is None
+            and x.is_contiguous()
+        )
+        use_aiter_per_tensor_quant = (
+            use_aiter_quant and self.group_shape == GroupShape.PER_TENSOR
+        )
+        use_aiter_per_token_quant = (
+            use_aiter_quant and self.group_shape == GroupShape.PER_TOKEN
+        )
+
+        if use_aiter_per_tensor_quant:
+            return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
+        if use_aiter_per_token_quant:
+            return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
+
+        # Fallback to CUDA implementation
+        return self.forward_cuda(x, scale, scale_ub)
 
     def forward_native(
         self,

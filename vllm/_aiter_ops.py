@@ -9,6 +9,8 @@ import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
+_FP8_DTYPE = current_platform.fp8_dtype()
+
 
 def is_aiter_found() -> bool:
     from importlib.util import find_spec
@@ -467,6 +469,59 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_aiter_per_tensor_quant_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import per_tensor_quant_hip
+
+    return per_tensor_quant_hip(x, scale, quant_dtype)
+
+
+def _rocm_aiter_per_tensor_quant_fake(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(x, dtype=quant_dtype), torch.empty(
+        1, dtype=torch.float32, device=x.device
+    )
+
+
+def _rocm_aiter_per_token_quant_impl(
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.quant import dynamic_per_token_scaled_quant
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    out_shape = x.shape
+    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+    if scale is None:
+        scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
+    dynamic_per_token_scaled_quant(
+        out,
+        x,
+        scale,
+        scale_ub=None,
+        shuffle_scale=False,
+        num_rows=None,
+        num_rows_factor=1,
+    )
+    return out, scale
+
+
+def _rocm_aiter_per_token_quant_fake(
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out_shape = x.shape
+    return (
+        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
+        torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
+    )
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -665,6 +720,22 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_per_tensor_quant",
+                op_func=_rocm_aiter_per_tensor_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_per_tensor_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_per_token_quant",
+                op_func=_rocm_aiter_per_token_quant_impl,
+                mutates_args=["scale"],
+                fake_impl=_rocm_aiter_per_token_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -858,6 +929,22 @@ class rocm_aiter_ops:
             q_scale=q_scale,
             kv_scale=kv_scale,
         )
+
+    @staticmethod
+    def per_tensor_quant(
+        x: torch.Tensor,
+        quant_dtype: torch.dtype,
+        scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, quant_dtype, scale)
+
+    @staticmethod
+    def per_token_quant(
+        x: torch.Tensor,
+        quant_dtype: torch.dtype,
+        scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
     def triton_fp4_gemm_dynamic_qaunt(
