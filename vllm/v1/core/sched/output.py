@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.v1.request import Request, AborRequest
+    from vllm.v1.request import Request, AbortRequest
 else:
     ECConnectorMetadata = object
     KVConnectorMetadata = object
@@ -208,7 +208,7 @@ class SchedulerOutput:
     ec_connector_metadata: ECConnectorMetadata | None = None
 
     # List of all abort request (cause by any errors of the backend)
-    aborted_reqs: list[AborRequest] = field(default_factory=list)
+    aborted_reqs: list[AbortRequest] = field(default_factory=list)
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

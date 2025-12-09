@@ -241,7 +241,7 @@ class Request:
             return self.request_id < other.request_id
         return id(self) < id(other)
 
-class AborRequest(BaseModel):
+class AbortRequest(BaseModel):
     client_index: int
     request_id: str
     error_message: str

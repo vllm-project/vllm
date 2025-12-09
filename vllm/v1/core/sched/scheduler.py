@@ -47,7 +47,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, AborRequest
+from vllm.v1.request import Request, RequestStatus, AbortRequest
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -220,7 +220,7 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
         # List of all abort request (cause by any errors of the backend)
-        aborted_requests: list[AborRequest] = []
+        aborted_requests: list[AbortRequest] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -447,9 +447,9 @@ class Scheduler(SchedulerInterface):
                         logger.warning(f"{error_msg} for request {request.request_id}")
 
                         # 2. Add to local list
-                        aborted_requests.append(AborRequest(client_index=request.client_index,
-                                                            request_id=request.request_id,
-                                                            error_message=error_msg))
+                        aborted_requests.append(AbortRequest(client_index=request.client_index,
+                                                             request_id=request.request_id,
+                                                             error_message=error_msg))
 
                         # 3. Finish the request (clean up resources)
                         if self.finished_req_ids_dict is None:
