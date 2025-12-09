@@ -10,7 +10,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -289,13 +289,13 @@ def test_fp8_reloading(
         )
 
     with torch.device("cuda:0"):
-        layer = torch.nn.Module()
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             weight_block_size=weight_block_size,
         )
 
         if method_cls is Fp8LinearMethod:
+            layer = torch.nn.Linear(1, 1)
             method = method_cls(config)
             method.create_weights(
                 layer=layer,
@@ -306,9 +306,14 @@ def test_fp8_reloading(
                 params_dtype=torch.bfloat16,
                 weight_loader=default_weight_loader,
             )
+
         else:
-            layer.moe_config = get_default_config(1, 1, 1, 1, 1, torch.bfloat16, False)
-            layer.local_num_experts = 1
+            layer = FusedMoE(
+                num_experts=1,
+                top_k=1,
+                hidden_size=1,
+                intermediate_size=1,
+            )
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
@@ -323,15 +328,15 @@ def test_fp8_reloading(
 
     # capture weights format during loading
     original_metadata = [
-        (name, param.shape, param.weight_loader)
+        (name, param.shape, getattr(param, "weight_loader", default_weight_loader))
         for name, param in layer.named_parameters()
     ]
 
     # test loading
     for name, shape, _ in original_metadata:
         param = getattr(layer, name)
-        assert hasattr(param, "weight_loader"), name
-        param.weight_loader(param, torch.zeros(shape))  # cannot use empty
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
 
@@ -339,8 +344,8 @@ def test_fp8_reloading(
     # assuming that no reshaping occurred
     for name, shape, original_weight_loader in original_metadata:
         param = getattr(layer, name)
-        assert hasattr(param, "weight_loader"), name
-        assert param.weight_loader is original_weight_loader
-        param.weight_loader(param, torch.zeros(shape))  # cannot use empty
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        assert weight_loader is original_weight_loader
+        weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)

@@ -110,7 +110,7 @@ def requantize_with_max_scale(
     weight: torch.Tensor, weight_scale: torch.Tensor, logical_widths: list[int]
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
-    max_w_scale = weight_scale.max()
+    max_w_scale = weight_scale.max().unsqueeze(0)
 
     # QKV / MLP is fused in the on disk checkpoint if any of the
     # weight scales are still set to the default since we initialize
