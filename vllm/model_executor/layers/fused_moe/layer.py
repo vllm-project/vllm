@@ -420,7 +420,7 @@ class FusedMoE(CustomOp):
         self.expert_mapping = expert_mapping
 
         self._is_mxfp4 = self.is_mxfp4_quant(quant_config=quant_config)
-        
+
         # Round up hidden size if needed.
         unpadded_hidden_size = hidden_size
         hidden_size = maybe_roundup_hidden_size(
