@@ -194,8 +194,6 @@ class ForwardContext:
     Set dynamically for each forward pass
     """
     attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
-    # TODO: remove after making all virtual_engines share the same kv cache
-    virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -230,7 +228,6 @@ def is_forward_context_available() -> bool:
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -238,7 +235,6 @@ def create_forward_context(
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
-        virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -266,7 +262,6 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -312,7 +307,6 @@ def set_forward_context(
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
-        virtual_engine,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,

@@ -1461,7 +1461,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.maybe_select_dummy_loras(
                 self.lora_config, np.array([num_tokens], dtype=np.int32)
             ),
-            set_forward_context(per_layer_attn_metadata, self.vllm_config, 0),
+            set_forward_context(per_layer_attn_metadata, self.vllm_config),
         ):
             out = self.model(
                 input_ids=input_ids, positions=position_ids, inputs_embeds=inputs_embeds

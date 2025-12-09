@@ -267,7 +267,6 @@ def test_forward_context_interface():
     from vllm.forward_context import ForwardContext
 
     assumes(ForwardContext, "no_compile_layers", is_instance_of=dict)
-    assumes(ForwardContext, "virtual_engine")
     assumes(ForwardContext, "attn_metadata")
 
 

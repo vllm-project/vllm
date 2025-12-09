@@ -359,7 +359,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                self_kv_cache = self.kv_cache
                 self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata, output=output
                 )
@@ -374,7 +374,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 attn_metadata = forward_context.attn_metadata
                 if isinstance(attn_metadata, dict):
                     attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                self_kv_cache = self.kv_cache
                 return self.impl.forward(
                     self, query, key, value, self_kv_cache, attn_metadata
                 )
@@ -683,7 +683,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -812,7 +812,7 @@ def get_attention_context(
         - attn_metadata: Attention metadata for this specific layer, or None if
             no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
-        - kv_cache: The KV cache tensor for current virtual engine
+        - kv_cache: The KV cache tensor
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
         extracted from the forward context.
@@ -822,7 +822,7 @@ def get_attention_context(
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    kv_cache = attn_layer.kv_cache
     return attn_metadata, attn_layer, kv_cache
 
 

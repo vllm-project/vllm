@@ -569,7 +569,7 @@ class MambaMixer2(MambaBase, CustomOp):
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]

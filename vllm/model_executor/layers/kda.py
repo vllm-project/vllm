@@ -306,7 +306,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         num_actual_tokens = attn_metadata.num_actual_tokens
-        constant_caches = self.kv_cache[forward_context.virtual_engine]
+        constant_caches = self.kv_cache
 
         q_proj_states = q_proj_states[:num_actual_tokens]
         k_proj_states = k_proj_states[:num_actual_tokens]

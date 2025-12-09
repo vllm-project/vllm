@@ -188,7 +188,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 if kv_cache_attr is None:
                     continue
 
-                kv_cache_layer = kv_cache_attr[forward_context.virtual_engine]
+                kv_cache_layer = kv_cache_attr
 
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
