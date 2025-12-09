@@ -56,6 +56,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    get_history_tool_calls_cnt,
+    make_tool_call_id,
 )
 from vllm.entrypoints.context import (
     ConversationContext,
@@ -221,6 +223,14 @@ class OpenAIServingResponses(OpenAIServing):
             )
             # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
             # We need to add them to the stop token ids.
+
+        # Set tool_call_id_type based on model type for Kimi K2 compatibility
+        if self.model_config.hf_config.model_type == "kimi_k2":
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
+
+        if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
             self.default_sampling_params["stop_token_ids"].extend(
@@ -827,6 +837,23 @@ class OpenAIServingResponses(OpenAIServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
     ) -> list[ResponseOutputItem]:
+        # CRITICAL FIX: Check for tool calls BEFORE reasoning parser
+        # Otherwise reasoning parser will capture tool markers as reasoning content
+        tool_calls_from_parser = []
+        remaining_text = final_output.text
+
+        if self.tool_parser:
+            try:
+                tool_parser_instance = self.tool_parser(tokenizer)
+                tool_extraction = tool_parser_instance.extract_tool_calls(
+                    remaining_text, request=request
+                )
+                if tool_extraction.tools_called:
+                    tool_calls_from_parser = tool_extraction.tool_calls
+                    remaining_text = tool_extraction.content or ""
+            except Exception as e:
+                logger.exception("Error in tool parser extraction: %s", e)
+
         if self.reasoning_parser:
             try:
                 reasoning_parser = self.reasoning_parser(tokenizer)
@@ -835,11 +862,11 @@ class OpenAIServingResponses(OpenAIServing):
                 raise e
 
             reasoning, content = reasoning_parser.extract_reasoning(
-                final_output.text, request=request
+                remaining_text, request=request
             )
         else:
             reasoning = None
-            content = final_output.text
+            content = remaining_text
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -871,13 +898,26 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-        tool_calls, content = self._parse_tool_calls_from_content(
-            request=request,
-            tokenizer=tokenizer,
-            content=content,
-            enable_auto_tools=self.enable_auto_tools,
-            tool_parser_cls=self.tool_parser,
-        )
+
+        # Use tool calls from parser if found, otherwise try legacy parsing
+        if tool_calls_from_parser:
+            # Convert ToolCall objects to the format expected by the rest of the code
+            tool_calls = []
+            for tc in tool_calls_from_parser:
+                class SimpleToolCall:
+                    def __init__(self, name: str, arguments: str):
+                        self.name = name
+                        self.arguments = arguments
+                tool_calls.append(SimpleToolCall(tc.function.name, tc.function.arguments))
+        else:
+            tool_calls, content = self._parse_tool_calls_from_content(
+                request=request,
+                tokenizer=tokenizer,
+                content=content,
+                enable_auto_tools=self.enable_auto_tools,
+                tool_parser_cls=self.tool_parser,
+            )
+
         if content:
             output_text = ResponseOutputText(
                 text=content,
