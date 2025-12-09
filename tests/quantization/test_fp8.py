@@ -10,10 +10,14 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
+    Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
+    Fp8MoEMethod,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -261,3 +265,87 @@ def test_scaled_fp8_quant(dtype) -> None:
             torch.narrow(y_nc_pad, 0, 0, x_nc.shape[0]), inv_scale_nc, dtype
         ),
     )
+
+
+@pytest.mark.parametrize("method_cls", [Fp8LinearMethod, Fp8MoEMethod])
+# FP8 weight reloading does not support online quantization
+@pytest.mark.parametrize("is_checkpoint_fp8_serialized", [True])  # skip False
+@pytest.mark.parametrize("weight_block_size", [None, [1, 1]])
+# any postprocessing that is applied to the weights such as padding and repacking
+# (excluding device sharding) must also be applied to the reloaded weights
+#
+# this is the case for marlin as well as per-tensor Fp8MoEMethod
+@pytest.mark.parametrize("use_marlin", [False])  # skip True
+def test_fp8_reloading(
+    method_cls, is_checkpoint_fp8_serialized, weight_block_size, use_marlin, dist_init
+):
+    if is_checkpoint_fp8_serialized is False:
+        pytest.skip("FP8 weight reloading does not support online quantization")
+
+    if method_cls is Fp8MoEMethod and weight_block_size is None:
+        pytest.skip(
+            "FP8 Tensor weight reloading does not support fusing w13_weight_scale. "
+            "If this is your use case, consider using a restore function like #26327"
+        )
+
+    with torch.device("cuda:0"):
+        config = Fp8Config(
+            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
+            weight_block_size=weight_block_size,
+        )
+
+        if method_cls is Fp8LinearMethod:
+            layer = torch.nn.Linear(1, 1)
+            method = method_cls(config)
+            method.create_weights(
+                layer=layer,
+                input_size_per_partition=1,
+                output_partition_sizes=[1],
+                input_size=1,
+                output_size=1,
+                params_dtype=torch.bfloat16,
+                weight_loader=default_weight_loader,
+            )
+
+        else:
+            layer = FusedMoE(
+                num_experts=1,
+                top_k=1,
+                hidden_size=1,
+                intermediate_size=1,
+            )
+            method = method_cls(config, layer)
+            method.create_weights(
+                layer=layer,
+                num_experts=1,
+                hidden_size=1,
+                intermediate_size_per_partition=1,
+                params_dtype=torch.bfloat16,
+                weight_loader=default_weight_loader,
+            )
+
+        method.use_marlin = use_marlin
+
+    # capture weights format during loading
+    original_metadata = [
+        (name, param.shape, getattr(param, "weight_loader", default_weight_loader))
+        for name, param in layer.named_parameters()
+    ]
+
+    # test loading
+    for name, shape, _ in original_metadata:
+        param = getattr(layer, name)
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        weight_loader(param, torch.zeros(shape))  # cannot use empty
+
+    method.process_weights_after_loading(layer)
+
+    # test reloading works after loading
+    # assuming that no reshaping occurred
+    for name, shape, original_weight_loader in original_metadata:
+        param = getattr(layer, name)
+        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+        assert weight_loader is original_weight_loader
+        weight_loader(param, torch.zeros(shape))  # cannot use empty
+
+    method.process_weights_after_loading(layer)
