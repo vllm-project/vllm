@@ -214,6 +214,7 @@ class W8A8BlockFp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
+        self.is_sm100 = current_platform.is_device_capability(100)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
 
         # Get the correct blockscale mul and input quant operations.
@@ -269,7 +270,10 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
+        if (
+            DeepGemmQuantScaleFMT.from_oracle(self.use_deep_gemm_e8m0, self.is_sm100)
+            == DeepGemmQuantScaleFMT.UE8M0
+        ):
             q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 input_2d,
                 group_size=self.act_quant_group_shape.col,
@@ -277,7 +281,7 @@ class W8A8BlockFp8LinearOp:
             )
         else:
             assert self.deepgemm_input_quant_op is not None
-            q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
+        q_input, input_scale = self.deepgemm_input_quant_op(input_2d)
         output = torch.empty(
             (q_input.shape[0], weight.shape[0]),
             dtype=torch.bfloat16,
