@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
-    fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -25,9 +24,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a4_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    use_mxfp4_aiter_moe,
-)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
@@ -45,7 +42,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -709,12 +706,14 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
                 "not implemented. Please open an issue."
             )
 
-        self.emulate = not current_platform.supports_mx() or not (use_mxfp4_aiter_moe())
+        self.emulate = not current_platform.supports_mx() or not (
+            rocm_aiter_ops.is_mxfp4_aiter_moe()
+        )
 
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={use_mxfp4_aiter_moe()}, "
+                f"use_mxfp4_aiter_moe={rocm_aiter_ops.is_mxfp4_aiter_moe()}, "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
                 "QDQ (quantize and dequantize) will be used, with the linear "
@@ -1126,9 +1125,16 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                 .view(-1, n)
             )
         else:
+            print("-------------------------------------------------")
+            print(f"{layer.w13_weight.shape=}")
+            print(f"{layer.w13_weight_scale.shape=}")
             w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
                 layer.w13_weight, layer.w13_weight_scale, num_warps
             )
+            print(f"{layer.w2_weight.shape=}")
+            print(f"{layer.w2_weight_scale.shape=}")
+            print(f"{layer.num_warps.shape=}")
+            print("-------------------------------------------------")
             w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
                 layer.w2_weight, layer.w2_weight_scale, num_warps
             )
