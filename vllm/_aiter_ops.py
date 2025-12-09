@@ -823,6 +823,30 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_fp8_group_quant",
+                op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_group_fp8_quant",
+                op_func=_rocm_aiter_group_fp8_quant_impl,
+                fake_impl=_rocm_aiter_group_fp8_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=[],
