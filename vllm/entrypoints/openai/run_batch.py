@@ -656,21 +656,22 @@ async def run_batch(
             async for request_json in stream_file_lines(args.input_file):
                 request = BatchRequestInput.model_validate_json(request_json)
 
-                async with semaphore:
-                    # Create task for this request
-                    task = await create_request_task(
-                        request=request,
-                        index=index,
-                        tracker=tracker,
-                        writer=writer,
-                        openai_serving_chat=openai_serving_chat,
-                        openai_serving_embedding=openai_serving_embedding,
-                        openai_serving_scores=openai_serving_scores,
-                    )
+                # Create task for this request
+                task = await create_request_task(
+                    request=request,
+                    index=index,
+                    tracker=tracker,
+                    writer=writer,
+                    openai_serving_chat=openai_serving_chat,
+                    openai_serving_embedding=openai_serving_embedding,
+                    openai_serving_scores=openai_serving_scores,
+                )
 
                 if task is not None:
+                    await semaphore.acquire()
                     tasks.add(task)
                     task.add_done_callback(tasks.discard)
+                    task.add_done_callback(lambda _: semaphore.release())
 
                 index += 1
 
