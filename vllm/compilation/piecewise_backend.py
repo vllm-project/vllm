@@ -53,8 +53,27 @@ class PiecewiseBackend:
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
+        # TODO: we need to generalize encoder compilation to other models
+        self.is_encoder_compilation = vllm_backend.prefix in [
+            "Qwen2_5_VisionPatchEmbed",
+            "Qwen2_5_VisionPatchMerger",
+            "Qwen2_5_VisionBlock",
+        ]
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
+        if self.is_encoder_compilation:
+            # For encoder compilation we use the max int32 value
+            # to set the upper bound of the compile ranges
+            max_int32 = 2**31 - 1
+            last_compile_range = self.compile_ranges[-1]
+            assert (
+                last_compile_range.end
+                == vllm_config.scheduler_config.max_num_batched_tokens
+            )
+            self.compile_ranges[-1] = Range(
+                start=last_compile_range.start, end=max_int32
+            )
+
         log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
