@@ -891,7 +891,6 @@ class VllmConfig:
 
         # Runtime-dependent disable of hybrid kv cache manager logic.
         if not self.scheduler_config.disable_hybrid_kv_cache_manager:
-            # Forcely disable HMA even if explicitly enabled by user (None/False).
             prev_disable_hma = self.scheduler_config.disable_hybrid_kv_cache_manager
 
             # logger should only print warning message for hybrid models. As we
