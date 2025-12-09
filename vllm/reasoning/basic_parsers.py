@@ -74,6 +74,12 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return True
         return False
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        end_token_id = self.end_token_id
+        return end_token_id in delta_ids
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens

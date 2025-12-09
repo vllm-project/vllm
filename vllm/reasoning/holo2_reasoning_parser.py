@@ -56,6 +56,11 @@ class Holo2ReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser.is_reasoning_end(input_ids)
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
 
