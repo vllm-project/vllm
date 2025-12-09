@@ -108,15 +108,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return True
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
-        if self.rocm_aiter_moe_enabled:
-            return None
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
-
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -368,6 +359,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
         elif self.flashinfer_cutlass_moe_enabled:
             return self.flashinfer_cutlass_moe(
                 hidden_states=x,
