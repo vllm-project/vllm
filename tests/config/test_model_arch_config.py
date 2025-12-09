@@ -15,6 +15,9 @@ def test_model_arch_config():
         "meituan-longcat/LongCat-Flash-Chat",
     ]
     models_to_test = [
+        "state-spaces/mamba-130m-hf",
+        "mistralai/Mamba-Codestral-7B-v0.1",
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
         "Zyphra/Zamba2-7B-instruct",
         "mosaicml/mpt-7b",
         "databricks/dbrx-instruct",

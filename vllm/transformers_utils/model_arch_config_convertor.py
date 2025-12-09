@@ -381,8 +381,7 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "mamba": MambaModelArchConfigConvertor,
-    "mamba2": MambaModelArchConfigConvertor,
-    "terratorch": TerratorchModelArchConfigConvertor,
+    "timm_wrapper": TerratorchModelArchConfigConvertor,
     "zamba2": Zamba2ModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
