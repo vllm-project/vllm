@@ -138,7 +138,9 @@ def rank_worker(
 
 
 def run(config: Config, verbose: bool):
-    assert config.is_valid()[0]
+    is_valid, reason = config.is_valid()
+    if not is_valid:
+        raise ValueError(f"Invalid config: {reason}\n{config.describe()}")
     assert not is_nyi_config(config)
 
     weights: WeightTensors = WeightTensors.make(config)
