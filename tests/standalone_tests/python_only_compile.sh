@@ -19,7 +19,7 @@ for i in {1..5}; do
     if curl --fail "$meta_json_url" > metadata.json; then
         echo "INFO: metadata.json URL is valid."
         # check whether it is valid json by python
-        if python3 -c "import json; print(json.load(open('metadata.json')))"; then
+        if python3 -m json.tool metadata.json; then
             echo "INFO: metadata.json is valid JSON. Proceeding with the test."
         else
             echo "CRITICAL: metadata.json exists but is not valid JSON, please do report in #sig-ci channel!"
