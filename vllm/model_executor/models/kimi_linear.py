@@ -248,6 +248,7 @@ class KimiMLAAttention(nn.Module):
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             rotary_emb=None,
+            indexer_rotary_emb=None,
             o_proj=self.o_proj,
             fused_qkv_a_proj=None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
