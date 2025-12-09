@@ -237,6 +237,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert layer.weight.dtype in [torch.float16, torch.float32, torch.bfloat16], (
+            "Only FP16, BF16 and FP32 UnquantizedLinearMethod is supported"
+        )
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
 
