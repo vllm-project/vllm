@@ -493,7 +493,7 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set default all2all_backend if not specified
+        # Set all2all_backend from env var if not specified, with deprecation warning
         if self.all2all_backend is None:
             self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if envs.is_set("VLLM_ALL2ALL_BACKEND"):
