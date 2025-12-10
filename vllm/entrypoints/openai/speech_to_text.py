@@ -295,17 +295,9 @@ class OpenAISpeechToText(OpenAIServing):
             # constrained by the size of the input audio, which is mapped to a
             # fixed-size log-mel-spectogram.
             default_max_tokens = self.model_config.max_model_len
-            # Check if beam search is requested (only for TranscriptionRequest)
-            use_beam_search = getattr(request, "use_beam_search", False)
-            if use_beam_search:
-                from vllm.sampling_params import BeamSearchParams
-                sampling_params = request.to_beam_search_params(
-                    default_max_tokens, self.default_sampling_params
-                )
-            else:
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens, self.default_sampling_params
-                )
+            sampling_params = request.to_sampling_params(
+                default_max_tokens, self.default_sampling_params
+            )
 
             self._log_inputs(
                 request_id,
@@ -315,45 +307,18 @@ class OpenAISpeechToText(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            if use_beam_search and isinstance(sampling_params, BeamSearchParams):
-                # Beam search: single prompt, single result generator
-                if len(prompts) != 1:
-                    return self.create_error_response(
-                        "Beam search currently only supports single prompt."
-                    )
-                try:
-                    list_result_generator = [
-                        self.beam_search(
-                            prompts[0],
-                            f"{request_id}_0",
-                            sampling_params,
-                        )
-                    ]
-                except Exception as e:
-                    logger.exception(
-                        "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, error=%s",
-                        request_id,
-                        sampling_params.beam_width,
-                        sampling_params.length_penalty,
-                        e,
-                    )
-                    raise
-            else:
-                list_result_generator = [
-                    self.engine_client.generate(
-                        prompt,
-                        sampling_params,
-                        f"{request_id}_{i}",
-                        lora_request=lora_request,
-                    )
-                    for i, prompt in enumerate(prompts)
-                ]
+            list_result_generator = [
+                self.engine_client.generate(
+                    prompt,
+                    sampling_params,
+                    f"{request_id}_{i}",
+                    lora_request=lora_request,
+                )
+                for i, prompt in enumerate(prompts)
+            ]
         except ValueError as e:
-            logger.exception("Validation error in speech_to_text: %s", e)
+            # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
-        except Exception as e:
-            logger.exception("Unexpected error in speech_to_text: %s", e)
-            raise
 
         if request.stream:
             return stream_generator_method(

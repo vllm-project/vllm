@@ -24,7 +24,6 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams
 
 logger = init_logger(__name__)
 

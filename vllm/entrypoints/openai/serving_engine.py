@@ -99,16 +99,12 @@ from vllm.entrypoints.responses_utils import (
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import (
-    ExplicitEncoderDecoderPrompt,
-    PromptType,
-    TokensPrompt as EngineTokensPrompt,
-)
+from vllm.inputs.data import PromptType
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
     is_explicit_encoder_decoder_prompt,
-    split_enc_dec_inputs,
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -375,53 +371,22 @@ class OpenAIServing:
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
-        # Handle encoder-decoder prompts (like Whisper)
-        is_enc_dec = is_explicit_encoder_decoder_prompt(prompt)
-        original_encoder_prompt = None
-        original_mm_processor_kwargs = None
-        
-        if is_enc_dec:
-            # Store the original encoder prompt for reconstruction
-            original_encoder_prompt = prompt["encoder_prompt"]  # type: ignore
-            original_mm_processor_kwargs = prompt.get("mm_processor_kwargs")  # type: ignore
-            
-            # Process the encoder-decoder prompt to extract decoder tokens
-            preprocessor = input_processor.input_preprocessor
-            processed_inputs = preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=None,
-            )
-            # Split encoder and decoder inputs
-            encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
-            
-            # For beam search, we use the decoder prompt token IDs
-            if decoder_inputs["type"] == "embeds":
-                raise NotImplementedError("Beam search with prompt embeds not supported")
-            prompt_token_ids = decoder_inputs["prompt_token_ids"]
-            prompt_text = decoder_inputs.get("prompt")
-            # Get multi_modal_data from encoder inputs (where audio is)
-            multi_modal_data = encoder_inputs.get("multi_modal_data") if encoder_inputs.get("type") == "mm" else None
-            # Use mm_processor_kwargs from encoder_inputs if available, otherwise from original prompt
-            mm_processor_kwargs = (
-                encoder_inputs.get("mm_processor_kwargs") 
-                if encoder_inputs.get("type") == "mm" 
-                else original_mm_processor_kwargs
-            )
-        else:
-            # Regular decoder-only prompt handling
-            prompt_text: str | None
-            prompt_token_ids: list[int]
-            multi_modal_data: MultiModalDataDict | None
-            if isinstance(prompt, str):
-                prompt_text = prompt
-                prompt_token_ids = []
-                multi_modal_data = None
-            else:
-                prompt_text = prompt.get("prompt")  # type: ignore
-                prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
-                multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+        if is_explicit_encoder_decoder_prompt(prompt):
+            raise NotImplementedError
 
-            mm_processor_kwargs: dict[str, Any] | None = None
+        prompt_text: str | None
+        prompt_token_ids: list[int]
+        multi_modal_data: MultiModalDataDict | None
+        if isinstance(prompt, str):
+            prompt_text = prompt
+            prompt_token_ids = []
+            multi_modal_data = None
+        else:
+            prompt_text = prompt.get("prompt")  # type: ignore
+            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
+            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+
+        mm_processor_kwargs: dict[str, Any] | None = None
 
         # This is a workaround to fix multimodal beam search; this is a
         # bandaid fix for 2 small problems:
@@ -455,37 +420,19 @@ class OpenAIServing:
         completed = []
 
         for _ in range(max_tokens):
-            # Create prompts for each beam - handle encoder-decoder structure
-            if is_enc_dec and original_encoder_prompt is not None:
-                prompts_batch, lora_req_batch = zip(
-                    *[
-                        (
-                            ExplicitEncoderDecoderPrompt(
-                                encoder_prompt=original_encoder_prompt,
-                                decoder_prompt={
-                                    "prompt_token_ids": beam.tokens,
-                                },
-                                mm_processor_kwargs=original_mm_processor_kwargs or {},
-                            ),
-                            beam.lora_request,
-                        )
-                        for beam in all_beams
-                    ]
-                )
-            else:
-                prompts_batch, lora_req_batch = zip(
-                    *[
-                        (
-                            EngineTokensPrompt(
-                                prompt_token_ids=beam.tokens,
-                                multi_modal_data=beam.multi_modal_data,
-                                mm_processor_kwargs=beam.mm_processor_kwargs,
-                            ),
-                            beam.lora_request,
-                        )
-                        for beam in all_beams
-                    ]
-                )
+            prompts_batch, lora_req_batch = zip(
+                *[
+                    (
+                        EngineTokensPrompt(
+                            prompt_token_ids=beam.tokens,
+                            multi_modal_data=beam.multi_modal_data,
+                            mm_processor_kwargs=beam.mm_processor_kwargs,
+                        ),
+                        beam.lora_request,
+                    )
+                    for beam in all_beams
+                ]
+            )
 
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
@@ -602,9 +549,6 @@ class OpenAIServing:
                 )
 
             all_beams = new_beams
-            # Exit early if all beams have completed (hit EOS)
-            if len(all_beams) == 0:
-                break
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)

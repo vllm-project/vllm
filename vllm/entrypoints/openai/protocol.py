@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, Optional, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -2047,16 +2047,6 @@ class TranscriptionRequest(OpenAIBaseModel):
     """The presence penalty to use for sampling."""
     # --8<-- [end:transcription-sampling-params]
 
-    use_beam_search: bool = False
-    """Use beam search to generate the transcription.
-    """
-
-    beam_width: int = Field(default=2)
-    """The beam width to use for beam search."""
-
-    length_penalty: float = Field(default=1.0)
-    """The length penalty to use for beam search."""
-
     # Default sampling parameters for transcription requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
@@ -2065,32 +2055,6 @@ class TranscriptionRequest(OpenAIBaseModel):
         "top_k": 0,
         "min_p": 0.0,
     }
-
-    def to_beam_search_params(
-            self,
-            default_max_tokens: int,
-            default_sampling_params: Optional[dict] = None
-    ) -> BeamSearchParams:
-        max_tokens = default_max_tokens
-
-        if default_sampling_params is None:
-            default_sampling_params = {}
-
-        if (temperature := self.temperature) is None:
-            temperature = default_sampling_params.get("temperature", 1.0)
-
-        if (beam_width := self.beam_width) is None:
-            beam_width = default_sampling_params.get("beam_width", 2)
-
-        if (length_penalty := self.length_penalty) is None:
-            length_penalty = default_sampling_params.get("length_penalty", 1.0)
-
-        return BeamSearchParams(beam_width=beam_width,
-                                max_tokens=max_tokens,
-                                ignore_eos=False,
-                                temperature=temperature,
-                                length_penalty=length_penalty,
-                                include_stop_str_in_output=False)
 
     def to_sampling_params(
         self, default_max_tokens: int, default_sampling_params: dict | None = None
@@ -2148,32 +2112,6 @@ class TranscriptionRequest(OpenAIBaseModel):
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                 detail="Expected 'file' to be a file-like object, not 'str'.",
             )
-
-        # Convert string booleans from form data to actual booleans
-        if isinstance(data, dict):
-            # Handle use_beam_search
-            if "use_beam_search" in data:
-                use_beam_search = data["use_beam_search"]
-                if isinstance(use_beam_search, str):
-                    data["use_beam_search"] = use_beam_search.lower() in ("true", "1", "yes", "on")
-                elif isinstance(use_beam_search, bool):
-                    data["use_beam_search"] = use_beam_search
-                else:
-                    data["use_beam_search"] = bool(use_beam_search)
-            
-            # Handle beam_width - convert string to int
-            if "beam_width" in data and isinstance(data["beam_width"], str):
-                try:
-                    data["beam_width"] = int(data["beam_width"])
-                except (ValueError, TypeError):
-                    pass
-            
-            # Handle length_penalty - convert string to float
-            if "length_penalty" in data and isinstance(data["length_penalty"], str):
-                try:
-                    data["length_penalty"] = float(data["length_penalty"])
-                except (ValueError, TypeError):
-                    pass
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
