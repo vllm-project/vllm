@@ -134,6 +134,11 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+@dataclass
+class RunnerStats:
+    timings: dict[str, list[float]]
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -172,6 +177,8 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    runner_stats: RunnerStats | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

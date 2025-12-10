@@ -4,9 +4,9 @@
 import gc
 import itertools
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
@@ -132,6 +132,7 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
+    RunnerStats,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
@@ -248,6 +249,30 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._logprobs_tensors_cpu:
             output.logprobs = self._logprobs_tensors_cpu.tolists(cu_num_tokens)
         return output
+
+
+class GPURunnerTimer:
+    def __init__(self):
+        self._events: deque[tuple[str, torch.Event, torch.Event]] = deque()
+
+    def track(self, name: str) -> AbstractContextManager[None]:
+        @contextmanager
+        def _track():
+            start_event = torch.Event(enable_timing=True)
+            end_event = torch.Event(enable_timing=True)
+            start_event.record()
+            yield
+            end_event.record()
+            self._events.append((name, start_event, end_event))
+
+        return _track()
+
+    def collect_timings(self) -> dict[str, list[float]]:
+        timings: dict[str, list[float]] = defaultdict(list)
+        while len(self._events) > 0 and self._events[0][-1].query():
+            name, start_event, end_event = self._events.popleft()
+            timings[name].append(start_event.elapsed_time(end_event) / 1000)
+        return timings
 
 
 class ExecuteModelState(NamedTuple):
@@ -605,6 +630,9 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
+
+        # Timing events for profiling.
+        self.timer = GPURunnerTimer()
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -2929,7 +2957,7 @@ class GPUModelRunner(
             scheduler_output = deepcopy(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        with record_function_or_nullcontext("gpu_model_runner: preprocess"):
+        with self._record_context("gpu_model_runner: preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
@@ -3079,7 +3107,7 @@ class GPUModelRunner(
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
             ),
-            record_function_or_nullcontext("gpu_model_runner: forward"),
+            self._record_context("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
             model_output = self._model_forward(
@@ -3090,7 +3118,7 @@ class GPUModelRunner(
                 **model_kwargs,
             )
 
-        with record_function_or_nullcontext("gpu_model_runner: postprocess"):
+        with self._record_context("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -3204,14 +3232,14 @@ class GPUModelRunner(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
-        with record_function_or_nullcontext("gpu_model_runner: sample"):
+        with self._record_context("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("gpu_model_runner: draft"):
+            with self._record_context("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -3267,7 +3295,7 @@ class GPUModelRunner(
                     next_token_ids, valid_sampled_tokens_count
                 )
 
-        with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
+        with self._record_context("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -3294,9 +3322,9 @@ class GPUModelRunner(
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("gpu_model_runner: eplb"):
+        with self._record_context("gpu_model_runner: eplb"):
             self.eplb_step()
-        with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+        with self._record_context("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
@@ -3310,13 +3338,12 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                runner_stats=RunnerStats(timings=self.timer.collect_timings()),
             )
 
         if not self.use_async_scheduling:
             return output
-        with record_function_or_nullcontext(
-            "gpu_model_runner: AsyncGPUModelRunnerOutput"
-        ):
+        with self._record_context("gpu_model_runner: AsyncGPUModelRunnerOutput"):
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
@@ -3325,9 +3352,7 @@ class GPUModelRunner(
                 async_output_copy_stream=self.async_output_copy_stream,
                 vocab_size=self.input_batch.vocab_size,
             )
-        with record_function_or_nullcontext(
-            "gpu_model_runner: set_async_sampled_token_ids"
-        ):
+        with self._record_context("gpu_model_runner: set_async_sampled_token_ids"):
             # Save ref of sampled_token_ids CPU tensor if the batch contains
             # any requests with sampling params that require output ids.
             self.input_batch.set_async_sampled_token_ids(
@@ -5465,3 +5490,11 @@ class GPUModelRunner(
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
+
+    def _record_context(self, name: str) -> AbstractContextManager[None]:
+        @contextmanager
+        def f():
+            with self.timer.track(name), record_function_or_nullcontext(name):
+                yield
+
+        return f()
