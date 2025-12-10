@@ -495,7 +495,13 @@ class ParallelConfig:
     def __post_init__(self) -> None:
         # Set default all2all_backend if not specified
         if self.all2all_backend is None:
-            self.all2all_backend = "allgather_reducescatter"
+            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
+                logger.warning_once(
+                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
+                    "will be removed in v0.14.0. Please use the "
+                    "--all2all-backend command-line argument instead."
+                )
 
         # Continue with the rest of the initialization
         self.world_size = (
