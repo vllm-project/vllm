@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
-from typing import Callable
+import os
+from collections.abc import Callable
 
 import pytest
-import os
-
 import torch
 
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -164,7 +160,7 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     num_generated_tokens = 4000
     num_prompt_tokens = 500
     sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
-    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt", "r").read()
+    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
     monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
     fake_sample_fn = get_fake_sample_fn()
@@ -197,7 +193,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     sampling_params = SamplingParams(temperature=0.0, max_tokens=30)
 
-    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt", "r").read()
+    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
     fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
