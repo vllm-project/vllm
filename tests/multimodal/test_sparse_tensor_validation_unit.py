@@ -4,7 +4,7 @@
 Unit tests for CVE-2025-62164 sparse tensor validation.
 
 Simple, fast unit tests that can run without server fixtures.
-Run with: pytest tests/test_sparse_tensor_validation_unit.py -v
+Run with: pytest tests/multimodal/test_sparse_tensor_validation_unit.py -v
 """
 
 import io
