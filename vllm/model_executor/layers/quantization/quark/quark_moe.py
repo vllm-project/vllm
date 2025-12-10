@@ -832,8 +832,6 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
@@ -1125,16 +1123,9 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                 .view(-1, n)
             )
         else:
-            print("-------------------------------------------------")
-            print(f"{layer.w13_weight.shape=}")
-            print(f"{layer.w13_weight_scale.shape=}")
             w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
                 layer.w13_weight, layer.w13_weight_scale, num_warps
             )
-            print(f"{layer.w2_weight.shape=}")
-            print(f"{layer.w2_weight_scale.shape=}")
-            print(f"{layer.num_warps.shape=}")
-            print("-------------------------------------------------")
             w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
                 layer.w2_weight, layer.w2_weight_scale, num_warps
             )
@@ -1234,8 +1225,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
