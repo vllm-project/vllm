@@ -496,7 +496,7 @@ class NemotronHAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             is_neox_style=True,
-            dtype=torch.get_default_dtype(),
+            dtype=model_config.dtype if model_config else torch.get_default_dtype(),
         )
 
     def forward(
