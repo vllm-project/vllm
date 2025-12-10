@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import _print_warning_once
@@ -233,6 +233,70 @@ def test_splitting_ops_dynamic():
     # use_inductor_graph_partition=True, and cudagraph_mode
     # is unchanged.
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
+def test_moe_splitting_ops_deepep_ht_piecewise():
+    # Non-inductor, non-attn-fusion case: DeepEP HT with dp>1
+    # should add MoE ops to splitting_ops on top of attention ops.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+        ),
+    )
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops is not None
+    assert "vllm::moe_forward" in splitting_ops
+    assert "vllm::moe_forward_shared" in splitting_ops
+
+
+def test_moe_splitting_ops_deepep_ht_inductor_partition():
+    # Inductor partition case: user-provided splitting_ops should be
+    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=[
+                "vllm::unified_attention",
+                "vllm::moe_forward",
+                "vllm::moe_forward_shared",
+            ],
+        ),
+    )
+    splitting_ops = config.compilation_config.splitting_ops
+    assert splitting_ops == [
+        "vllm::unified_attention",
+        "vllm::moe_forward",
+        "vllm::moe_forward_shared",
+    ]
+
+
+def test_moe_splitting_ops_deepep_ht_attn_fusion_no_inductor():
+    # Pure attn-fusion case without inductor partition: even with
+    # DeepEP HT and dp>1, we should not re-enable piecewise compilation
+    # or add MoE ops into splitting_ops.
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="deepep_high_throughput",
+            data_parallel_size=8,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            custom_ops=["+quant_fp8"],
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        ),
+    )
+    assert config.compilation_config.splitting_ops == []
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
 
 def test_should_split():

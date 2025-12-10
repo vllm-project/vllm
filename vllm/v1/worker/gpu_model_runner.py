@@ -48,7 +48,10 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import (
@@ -88,6 +91,7 @@ from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
+from vllm.utils.nvtx_pytorch_hooks import PytHooks
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
     get_dtype_size,
@@ -328,6 +332,7 @@ class GPUModelRunner(
         self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -599,6 +604,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self.layerwise_nvtx_hooks_registered = False
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -1095,7 +1101,6 @@ class GPUModelRunner(
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1699,6 +1704,26 @@ class GPUModelRunner(
                     for layer_name in attn_group.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
+        if self.is_mm_prefix_lm:
+            req_doc_ranges = {}
+            for req_id in self.input_batch.req_ids:
+                image_doc_ranges = []
+                req_state = self.requests[req_id]
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    img_doc_range = pos_info.extract_embeds_range()
+                    image_doc_ranges.extend(img_doc_range)
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                req_doc_ranges[req_idx] = image_doc_ranges
+
+            if isinstance(attn_metadata, list):
+                for ub_metadata in attn_metadata:
+                    for _metadata in ub_metadata.values():
+                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+            else:
+                for _metadata in attn_metadata.values():
+                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
@@ -2107,7 +2132,6 @@ class GPUModelRunner(
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             curr_group_outputs: list[torch.Tensor] = []
 
@@ -2133,7 +2157,6 @@ class GPUModelRunner(
                             [video_mm_kwargs_item],
                             device=self.device,
                             pin_memory=self.pin_memory,
-                            multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
 
@@ -2765,17 +2788,19 @@ class GPUModelRunner(
         )
 
         dispatch_cudagraph = (
-            lambda num_tokens: self.cudagraph_dispatcher.dispatch(
+            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
-                use_cascade_attn=use_cascade_attn,
                 uniform_decode=uniform_decode,
+                disable_full=disable_full,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
         )
 
-        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+            num_tokens_padded, use_cascade_attn
+        )
         num_tokens_padded = batch_descriptor.num_tokens
 
         # Extra coordination when running data-parallel since we need to coordinate
@@ -2790,23 +2815,28 @@ class GPUModelRunner(
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
 
-            should_ubatch, num_tokens_across_dp = coordinate_batch_across_dp(
-                num_tokens_unpadded=num_tokens,
-                parallel_config=self.parallel_config,
-                allow_microbatching=allow_microbatching,
-                allow_dp_padding=allow_dp_padding,
-                num_tokens_padded=num_tokens_padded,
-                uniform_decode=uniform_decode,
-                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+                coordinate_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    parallel_config=self.parallel_config,
+                    allow_microbatching=allow_microbatching,
+                    allow_dp_padding=allow_dp_padding,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                    cudagraph_mode=cudagraph_mode.value,
+                )
             )
 
-            # Extract DP padding if there is any
+            # Extract DP-synced values
             if num_tokens_across_dp is not None:
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-
-                # Re-dispatch with DP padding
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+                # Re-dispatch with DP padding so we have the correct batch_descriptor
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                    num_tokens_padded,
+                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                )
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
@@ -2827,6 +2857,42 @@ class GPUModelRunner(
             num_tokens_across_dp,
             cudagraph_stats,
         )
+
+    def _register_layerwise_nvtx_hooks(self) -> None:
+        """
+        Register layerwise NVTX hooks if --enable-layerwise-nvtx-tracing is enabled
+        to trace detailed information of each layer or module in the model.
+        """
+
+        if (
+            self.vllm_config.observability_config.enable_layerwise_nvtx_tracing
+            and not self.layerwise_nvtx_hooks_registered
+        ):
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                logger.debug_once(
+                    "layerwise NVTX tracing is not supported when CUDA graph is "
+                    "turned off; you may observe part or all of the model "
+                    "missing NVTX markers"
+                )
+
+            # In STOCK_TORCH_COMPILE mode, after registering hooks here,
+            # the __call__ function of nn.module will be recompiled with
+            # fullgraph=True. Since nvtx.range_push/pop are not traceable
+            # by torch dynamo, we can't register hook functions here
+            # because hook functions will also be traced by torch dynamo.
+            if (
+                self.vllm_config.compilation_config.mode
+                == CompilationMode.STOCK_TORCH_COMPILE
+            ):
+                logger.debug_once(
+                    "layerwise NVTX tracing is not supported when "
+                    "CompilationMode is STOCK_TORCH_COMPILE, skipping "
+                    "function hooks registration"
+                )
+            else:
+                pyt_hooks = PytHooks()
+                pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
+                self.layerwise_nvtx_hooks_registered = True
 
     @torch.inference_mode()
     def execute_model(
@@ -3849,14 +3915,12 @@ class GPUModelRunner(
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
-        model = cast(SupportsMultiModal, self.model)
         return next(
             mm_kwargs_group
             for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 
@@ -4104,10 +4168,19 @@ class GPUModelRunner(
 
             if self.speculative_config and self.speculative_config.use_eagle():
                 assert isinstance(self.drafter, EagleProposer)
+                # Eagle currently only supports PIECEWISE cudagraphs.
+                # Therefore only use cudagraphs if the main model uses PIECEWISE
+                # NOTE(lucas): this is a hack, need to clean up.
                 use_cudagraphs = (
-                    cudagraph_runtime_mode.has_mode(CUDAGraphMode.PIECEWISE)
-                    and not self.speculative_config.enforce_eager
-                )
+                    (
+                        is_graph_capturing
+                        and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+                    )
+                    or (
+                        not is_graph_capturing
+                        and cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    )
+                ) and not self.speculative_config.enforce_eager
 
                 # Note(gnovack) - We need to disable cudagraphs for one of the two
                 # lora cases when cudagraph_specialize_lora is enabled. This is a
@@ -4121,6 +4194,17 @@ class GPUModelRunner(
                     use_cudagraphs=use_cudagraphs,
                     is_graph_capturing=is_graph_capturing,
                 )
+
+        # We register layerwise NVTX hooks here after the first dynamo tracing is
+        # done to avoid nvtx operations in hook functions being traced by
+        # torch dynamo and causing graph breaks.
+        # Note that for DYNAMO_ONCE and VLLM_COMPILE mode,
+        # compiled model's dynamo tracing is only done once and the compiled model's
+        # __call__ function is replaced by calling the compiled function.
+        # So it's safe to register hooks here. Hooks will be registered to
+        # both compiled and uncompiled models but they will never
+        # be called on the compiled model execution path.
+        self._register_layerwise_nvtx_hooks()
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
