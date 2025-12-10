@@ -484,6 +484,17 @@ class ModelConfig:
         )
 
         self.hf_config = hf_config
+
+        # Ensure Gemma2 configs have hidden_act for backward compatibility.
+        # GGUF configs may only have hidden_activation; model code expects both.
+        if (
+            hasattr(hf_config, "model_type")
+            and hf_config.model_type == "gemma2"
+            and not hasattr(hf_config, "hidden_act")
+            and hasattr(hf_config, "hidden_activation")
+        ):
+            hf_config.hidden_act = hf_config.hidden_activation
+
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
