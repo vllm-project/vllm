@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -400,17 +401,19 @@ class TestParseOutputMessage:
         assert output_items[0].arguments == '{"location": "San Francisco"}'
         assert output_items[1].arguments == '{"location": "New York"}'
 
-    def test_commentary_with_unknown_recipient_raises_error(self):
-        """Test that commentary with unknown recipient raises ValueError."""
-        message = Message.from_role_and_content(Role.ASSISTANT, "some content")
+    def test_commentary_with_unknown_recipient_creates_mcp_call(self):
+        """Test that commentary with unknown recipient creates MCP call."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
         message = message.with_channel("commentary")
-        message = message.with_recipient("unknown_recipient")
+        message = message.with_recipient("custom_tool")
 
-        try:
-            parse_output_message(message)
-            raise AssertionError("Expected ValueError to be raised")
-        except ValueError as e:
-            assert "Unknown recipient: unknown_recipient" in str(e)
+        output_items = parse_output_message(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], McpCall)
+        assert output_items[0].type == "mcp_call"
+        assert output_items[0].name == "custom_tool"
+        assert output_items[0].server_label == "custom_tool"
 
     def test_analysis_channel_creates_reasoning(self):
         """Test that analysis channel creates reasoning items."""
@@ -451,3 +454,167 @@ def test_has_custom_tools() -> None:
     assert has_custom_tools(
         {"web_search_preview", "code_interpreter", "container", "others"}
     )
+
+
+def test_parse_mcp_call_basic() -> None:
+    """Test that MCP calls are parsed with correct type and server_label."""
+    message = Message.from_role_and_content(Role.ASSISTANT, '{"path": "/tmp"}')
+    message = message.with_recipient("filesystem")
+    message = message.with_channel("commentary")
+
+    output_items = parse_output_message(message)
+
+    assert len(output_items) == 1
+    assert isinstance(output_items[0], McpCall)
+    assert output_items[0].type == "mcp_call"
+    assert output_items[0].name == "filesystem"
+    assert output_items[0].server_label == "filesystem"
+    assert output_items[0].arguments == '{"path": "/tmp"}'
+    assert output_items[0].status == "completed"
+
+
+def test_parse_mcp_call_dotted_recipient() -> None:
+    """Test that dotted recipients extract the tool name correctly."""
+    message = Message.from_role_and_content(Role.ASSISTANT, '{"cmd": "ls"}')
+    message = message.with_recipient("repo_browser.list")
+    message = message.with_channel("commentary")
+
+    output_items = parse_output_message(message)
+
+    assert len(output_items) == 1
+    assert isinstance(output_items[0], McpCall)
+    assert output_items[0].name == "list"
+    assert output_items[0].server_label == "repo_browser"
+
+
+def test_mcp_vs_function_call() -> None:
+    """Test that function calls are not parsed as MCP calls."""
+    func_message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
+    func_message = func_message.with_recipient("functions.my_tool")
+    func_message = func_message.with_channel("commentary")
+
+    func_items = parse_output_message(func_message)
+
+    assert len(func_items) == 1
+    assert not isinstance(func_items[0], McpCall)
+    assert func_items[0].type == "function_call"
+
+
+def test_mcp_vs_builtin_tools() -> None:
+    """Test that built-in tools (python, container) are not parsed as MCP calls."""
+    # Test python (built-in tool) - should be reasoning, not MCP
+    python_message = Message.from_role_and_content(Role.ASSISTANT, "print('hello')")
+    python_message = python_message.with_recipient("python")
+    python_message = python_message.with_channel("commentary")
+
+    python_items = parse_output_message(python_message)
+
+    assert len(python_items) == 1
+    assert not isinstance(python_items[0], McpCall)
+    assert python_items[0].type == "reasoning"
+
+
+def test_parse_remaining_state_commentary_channel() -> None:
+    """Test parse_remaining_state with commentary channel and various recipients."""
+    from unittest.mock import Mock
+
+    from vllm.entrypoints.openai.parser.harmony_utils import parse_remaining_state
+
+    # Test 1: functions.* recipient → should return function tool call
+    parser_func = Mock()
+    parser_func.current_content = '{"arg": "value"}'
+    parser_func.current_role = Role.ASSISTANT
+    parser_func.current_channel = "commentary"
+    parser_func.current_recipient = "functions.my_tool"
+
+    func_items = parse_remaining_state(parser_func)
+
+    assert len(func_items) == 1
+    assert not isinstance(func_items[0], McpCall)
+    assert func_items[0].type == "function_call"
+    assert func_items[0].name == "my_tool"
+    assert func_items[0].status == "in_progress"
+
+    # Test 2: MCP tool (not builtin) → should return MCP call
+    parser_mcp = Mock()
+    parser_mcp.current_content = '{"path": "/tmp"}'
+    parser_mcp.current_role = Role.ASSISTANT
+    parser_mcp.current_channel = "commentary"
+    parser_mcp.current_recipient = "filesystem"
+
+    mcp_items = parse_remaining_state(parser_mcp)
+
+    assert len(mcp_items) == 1
+    assert isinstance(mcp_items[0], McpCall)
+    assert mcp_items[0].type == "mcp_call"
+    assert mcp_items[0].name == "filesystem"
+    assert mcp_items[0].server_label == "filesystem"
+    assert mcp_items[0].status == "in_progress"
+
+    # Test 3: Built-in tool (python)
+    # should NOT return MCP call, falls through to reasoning
+    parser_builtin = Mock()
+    parser_builtin.current_content = "print('hello')"
+    parser_builtin.current_role = Role.ASSISTANT
+    parser_builtin.current_channel = "commentary"
+    parser_builtin.current_recipient = "python"
+
+    builtin_items = parse_remaining_state(parser_builtin)
+
+    # Should fall through to reasoning logic
+    assert len(builtin_items) == 1
+    assert not isinstance(builtin_items[0], McpCall)
+    assert builtin_items[0].type == "reasoning"
+
+
+def test_parse_remaining_state_analysis_channel() -> None:
+    """Test parse_remaining_state with analysis channel and various recipients."""
+    from unittest.mock import Mock
+
+    from vllm.entrypoints.openai.parser.harmony_utils import parse_remaining_state
+
+    # Test 1: functions.* recipient → should return function tool call
+    parser_func = Mock()
+    parser_func.current_content = '{"arg": "value"}'
+    parser_func.current_role = Role.ASSISTANT
+    parser_func.current_channel = "analysis"
+    parser_func.current_recipient = "functions.my_tool"
+
+    func_items = parse_remaining_state(parser_func)
+
+    assert len(func_items) == 1
+    assert not isinstance(func_items[0], McpCall)
+    assert func_items[0].type == "function_call"
+    assert func_items[0].name == "my_tool"
+    assert func_items[0].status == "in_progress"
+
+    # Test 2: MCP tool (not builtin) → should return MCP call
+    parser_mcp = Mock()
+    parser_mcp.current_content = '{"query": "test"}'
+    parser_mcp.current_role = Role.ASSISTANT
+    parser_mcp.current_channel = "analysis"
+    parser_mcp.current_recipient = "database"
+
+    mcp_items = parse_remaining_state(parser_mcp)
+
+    assert len(mcp_items) == 1
+    assert isinstance(mcp_items[0], McpCall)
+    assert mcp_items[0].type == "mcp_call"
+    assert mcp_items[0].name == "database"
+    assert mcp_items[0].server_label == "database"
+    assert mcp_items[0].status == "in_progress"
+
+    # Test 3: Built-in tool (container)
+    # should NOT return MCP call, falls through to reasoning
+    parser_builtin = Mock()
+    parser_builtin.current_content = "docker run"
+    parser_builtin.current_role = Role.ASSISTANT
+    parser_builtin.current_channel = "analysis"
+    parser_builtin.current_recipient = "container"
+
+    builtin_items = parse_remaining_state(parser_builtin)
+
+    # Should fall through to reasoning logic
+    assert len(builtin_items) == 1
+    assert not isinstance(builtin_items[0], McpCall)
+    assert builtin_items[0].type == "reasoning"

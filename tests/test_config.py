@@ -97,7 +97,7 @@ def test_update_config():
         ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "embed"),
         ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )

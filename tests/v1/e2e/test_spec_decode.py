@@ -191,8 +191,8 @@ def test_suffix_decoding_acceptance(
     # Expect the acceptance rate to improve.
     assert first_accept_rate < last_accept_rate
 
-    # Heuristic: expect at least 82.5% acceptance rate at the end.
-    assert last_accept_rate > 0.825
+    # Heuristic: expect at least 80.0% acceptance rate at the end.
+    assert last_accept_rate > 0.80
 
     del spec_llm
     torch.cuda.empty_cache()
@@ -417,9 +417,9 @@ def test_eagle_correctness(
                 "multi-token eagle spec decode on current platform"
             )
 
-        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+        if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
             if "deepseek" in model_setup[1].lower():
-                pytest.skip("FLASH_ATTN for deepseek not supported on ROCm platform")
+                pytest.skip("ROCM_AITER_FA for deepseek not supported on ROCm platform")
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 

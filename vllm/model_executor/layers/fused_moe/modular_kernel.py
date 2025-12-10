@@ -367,7 +367,7 @@ class FusedMoEPrepareAndFinalize(ABC):
 class FusedMoEPermuteExpertsUnpermute(ABC):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
-    above.
+        above.
     """
 
     def __init__(

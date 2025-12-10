@@ -145,7 +145,7 @@ class CudagraphDispatcher:
         num_tokens: int,
         uniform_decode: bool,
         has_lora: bool,
-        use_cascade_attn: bool = False,
+        disable_full: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
@@ -165,7 +165,7 @@ class CudagraphDispatcher:
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
-        if not use_cascade_attn:
+        if not disable_full:
             # check if key exists for full cudagraph
             if batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc
