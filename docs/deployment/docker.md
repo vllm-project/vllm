@@ -115,7 +115,6 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
     --build-arg max_jobs=256 \
     --build-arg nvcc_threads=2 \
     --build-arg RUN_WHEEL_CHECK=false \
-    --build-arg FLASHINFER_AOT_COMPILE=true \
     --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
     --platform "linux/arm64" \
     --tag vllm/vllm-gb300-openai:latest  \
