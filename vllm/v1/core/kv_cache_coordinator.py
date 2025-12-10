@@ -84,7 +84,10 @@ class KVCacheCoordinator(ABC):
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_tokens, new_computed_blocks[i], num_tokens_target_model
+                    request_id,
+                    num_tokens,
+                    new_computed_blocks[i],
+                    num_tokens_target_model,
                 )
         return num_blocks_to_allocate
 
@@ -103,7 +106,11 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_target_model: int, num_encoder_tokens: int = 0
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_tokens_target_model: int,
+        num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
