@@ -438,6 +438,44 @@ if has_flashinfer():
             A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
         )
 
+    @torch.library.custom_op(
+        "vllm::flashinfer_fp8_blockscale_gemm",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_fp8_blockscale_gemm(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        input_scale: torch.Tensor | None,
+        weight_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        from flashinfer.gemm import (
+            fp8_blockscale_gemm_sm90 as fp8_blockscale_gemm_sm90_,
+        )
+
+        return fp8_blockscale_gemm_sm90_(
+            input=input,
+            weight=weight,
+            input_scale=input_scale,
+            weight_scale=weight_scale,
+            out_dtype=out_dtype,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_fp8_blockscale_gemm",
+    )
+    def flashinfer_fp8_blockscale_gemm_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        input_scale: torch.Tensor | None,
+        weight_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.empty(
+            input.shape[0], weight.shape[0], dtype=out_dtype, device=input.device
+        )
+
 
 def flashinfer_scaled_fp4_mm(
     a: torch.Tensor,
@@ -498,27 +536,17 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+flashinfer_fp8_blockscale_gemm = _lazy_import_wrapper(
+    "flashinfer.gemm", "fp8_blockscale_gemm_sm90"
+)
+
+
 @functools.cache
-def has_flashinfer_block_gemm() -> bool:
-    """Return `True` if FlashInfer FP8 block-scale GEMM is available."""
-    if not has_flashinfer():
-        return False
-    if not current_platform.is_cuda():
-        return False
-    # Only SM90+ (Hopper) supports this kernel
-    if not current_platform.is_device_capability(90):
-        return False
-
-    try:
-        import flashinfer
-
-        # Check if the module has the required binding
-        return hasattr(flashinfer, "Fp8BlockScaleGemmRunner")
-    except (ImportError, AttributeError):
-        logger.debug_once(
-            "FlashInfer block-scale GEMM not available: module or binding not found"
-        )
-        return False
+def has_flashinfer_fp8_blockscale_gemm() -> bool:
+    """Return `True` if FlashInfer block-scale FP8 GEMM is available."""
+    return has_flashinfer() and hasattr(
+        _get_submodule("flashinfer.gemm"), "fp8_blockscale_gemm_sm90"
+    )
 
 
 __all__ = [
@@ -537,11 +565,12 @@ __all__ = [
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
-    "has_flashinfer_block_gemm",
+    "flashinfer_fp8_blockscale_gemm",
 ]

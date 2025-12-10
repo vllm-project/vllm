@@ -12,9 +12,6 @@ from tests.kernels.quant_utils import (
     native_w8a8_block_matmul,
 )
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.quantization.utils.flashinfer_block_gemm import (
-    flashinfer_block_gemm,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     cutlass_scaled_mm,
     per_token_group_quant_fp8,
@@ -27,7 +24,7 @@ from vllm.utils.deep_gemm import (
     per_block_cast_to_fp8,
     should_use_deepgemm_for_fp8_linear,
 )
-from vllm.utils.flashinfer import has_flashinfer_block_gemm
+from vllm.utils.flashinfer import has_flashinfer_fp8_blockscale_gemm
 from vllm.utils.import_utils import has_deep_gemm
 
 if current_platform.get_device_capability() < (9, 0):
@@ -217,7 +214,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 )
 @torch.inference_mode()
 def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
-    if not has_flashinfer_block_gemm():
+    if not has_flashinfer_fp8_blockscale_gemm():
         pytest.skip(
             "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
         )
@@ -249,11 +246,11 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
     )
 
-    out = flashinfer_block_gemm(
+    out = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
         input=A_fp8,
         weight=B_fp8,
-        scales_a=As_fp8,
-        scales_b=Bs_fp8,
+        input_scale=As_fp8,
+        weight_scale=Bs_fp8,
         out_dtype=out_dtype,
     )
 

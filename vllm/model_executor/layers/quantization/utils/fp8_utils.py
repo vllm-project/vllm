@@ -37,7 +37,7 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
     transform_sf_into_required_layout,
 )
-from vllm.utils.flashinfer import has_flashinfer_block_gemm
+from vllm.utils.flashinfer import has_flashinfer_fp8_blockscale_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -250,6 +250,7 @@ class W8A8BlockFp8LinearOp:
         self.is_hopper = current_platform.is_device_capability(90)
         self.is_blackwell = current_platform.is_device_capability(100)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
+        self.is_flashinfer_supported = has_flashinfer_fp8_blockscale_gemm()
 
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
@@ -426,9 +427,6 @@ class W8A8BlockFp8LinearOp:
         This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
         and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
         """
-        from vllm.model_executor.layers.quantization.utils.flashinfer_block_gemm import (
-            flashinfer_block_gemm,
-        )
 
         # Quantize input dynamically if not pre-quantized (same as CUTLASS)
         assert input_scale is None
@@ -436,11 +434,11 @@ class W8A8BlockFp8LinearOp:
         q_input, input_scale = self.input_quant_op(input_2d)
 
         # Now call FlashInfer with FP8 input + FP8 weight (W8A8)
-        return flashinfer_block_gemm(
+        return torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
             input=q_input,  # FP8 quantized input
             weight=weight,  # FP8 weight
-            scales_a=input_scale,  # Input scales (computed dynamically)
-            scales_b=weight_scale,  # Weight scales
+            input_scale=input_scale,  # Input scales (computed dynamically)
+            weight_scale=weight_scale,  # Weight scales
             out_dtype=input_2d.dtype,
         )
 
@@ -462,7 +460,7 @@ class W8A8BlockFp8LinearOp:
     ]:
         # Prefer FlashInfer on SM90+ if available (Hopper optimized)
         if (
-            has_flashinfer_block_gemm()
+            self.is_flashinfer_supported
             and envs.VLLM_USE_FLASHINFER_FP8_LINEAR
             and not use_aiter_and_is_supported
         ):
