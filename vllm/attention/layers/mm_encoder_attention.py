@@ -3,9 +3,7 @@
 
 from collections.abc import Callable
 
-import einops
 import torch
-import torch.nn.functional as F
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.vit_attn_wrappers import (
@@ -269,29 +267,15 @@ class MMEncoderAttention(CustomOp):
             f"MMEncoderAttention on TPU only supports PALLAS backend, "
             f"but got {self.attn_backend}."
         )
-        assert cu_seqlens
+        if cu_seqlens is None:
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            from torch_xla.experimental.custom_kernel import flash_attention
 
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
-
-        query, key, value = self.reshape_qkv_to_4d(
-            query, key, value, bsz, q_len, kv_len
+            out = flash_attention(query, key, value, sm_scale=self.scale)
+            out = out.transpose(1, 2)
+            return out
+        logger.warning_once(
+            "PALLAS backend with cu_seqlens is not supported for ViT yet. ",
+            "Falling back to SDPA implementation.",
         )
-
-        outputs = []
-        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        q_chunks = torch.split(query, lens, dim=1)
-        k_chunks = torch.split(key, lens, dim=1)
-        v_chunks = torch.split(value, lens, dim=1)
-
-        for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-            q_i, k_i, v_i = (
-                einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-            )
-            output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-            output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
-            outputs.append(output_i)
-
-        out = torch.cat(outputs, dim=1)
-        out = einops.rearrange(out, "b s h d -> s b (h d)").contiguous()
-        return out
+        return self._forward_sdpa(query, key, value, cu_seqlens)
