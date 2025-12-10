@@ -52,9 +52,12 @@ class MambaBase(AttentionLayerBase):
             raise NotImplementedError(
                 "Mamba with speculative decoding is not supported yet."
             )
-        mamba_block_size = (vllm_config.cache_config.mamba_block_size 
-                            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                            else vllm_config.cache_config.block_size)
+        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            mamba_block_size = vllm_config.cache_config.mamba_block_size
+        elif vllm_config.cache_config.enable_prefix_caching:
+            mamba_block_size = vllm_config.cache_config.block_size
+        else:
+            mamba_block_size = vllm_config.model_config.max_model_len
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
         return MambaSpec(
             shapes=self.get_state_shape(),
