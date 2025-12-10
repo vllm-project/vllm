@@ -63,7 +63,7 @@ class ARCOffloadingManager(OffloadingManager):
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
         self.cache_capacity: int = self.backend.get_num_free_blocks()
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
         for block_hash in block_hashes:
             block = self.t1.get(block_hash) or self.t2.get(block_hash)
