@@ -27,7 +27,7 @@ from .inputs import MultiModalKwargsItem
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Event
 
-    from vllm.config import MultiModalConfig, VllmConfig
+    from vllm.config import VllmConfig
 
     from .cache import MultiModalProcessorCacheInItem, MultiModalProcessorCacheOutItem
 
@@ -151,10 +151,7 @@ class LmdbMultiModalCache:
         cache_id = envs.VLLM_MM_LMDB_CACHE_ID
         assert cache_id is not None, "LMDB cache ID must be set."
 
-        mm_config = cast(
-            "MultiModalConfig", vllm_config.model_config.get_multimodal_config()
-        )
-
+        mm_config = vllm_config.model_config.get_multimodal_config()
         return cls(
             cache_dir=os.path.join(cls.CACHES_DIR, cache_id),
             cache_size=int(
