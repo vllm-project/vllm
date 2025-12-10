@@ -74,8 +74,12 @@ class ImageMediaIO(MediaIO[Image.Image]):
             )
         self.rgba_background_color = rgba_bg
 
-    def _convert_image_mode(self, image: Image.Image) -> Image.Image:
+    def _convert_image_mode(
+        self, image: Image.Image | MediaWithBytes[Image.Image]
+    ) -> Image.Image:
         """Convert image mode with custom background color."""
+        if isinstance(image, MediaWithBytes):
+            image = image.media
         if image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":
@@ -85,21 +89,16 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         image = Image.open(BytesIO(data))
-        image.load()
-        return MediaWithBytes(
-            media=self._convert_image_mode(image),
-            original_bytes=data,
-        )
+        return MediaWithBytes(self._convert_image_mode(image), data)
 
-    def load_base64(
-        self, media_type: str, data: str
-    ) -> MediaWithBytes[Image.Image]:
+    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path) -> Image.Image:
-        image = Image.open(filepath)
-        image.load()
-        return self._convert_image_mode(image)
+    def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
+        with open(filepath, "rb") as f:
+            data = f.read()
+        image = Image.open(BytesIO(data))
+        return MediaWithBytes(self._convert_image_mode(image), data)
 
     def encode_base64(
         self,
