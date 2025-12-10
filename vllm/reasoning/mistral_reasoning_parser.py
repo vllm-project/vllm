@@ -25,7 +25,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
     A valid reasoning trace should always start with a `[THINK]` token and end with
     a `[/THINK]` token.
 
-    If `[THINK]` token is not generated, then this parser only return content.
+    If `[THINK]` token is not generated, then this parser only returns content.
     """
 
     def __init__(self, tokenizer: MistralTokenizer, *args, **kwargs):
