@@ -238,7 +238,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
-            remote_request_id=kv_transfer_params["remote_request_id"],
+            remote_request_id=kv_transfer_params.get("remote_request_id", ""),
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
@@ -602,7 +602,6 @@ class NixlConnectorScheduler:
             num_external_tokens,
             params,
         )
-
         if not params:
             return
 
