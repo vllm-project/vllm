@@ -76,6 +76,12 @@ def sample_json_schema():
         },
         "required": ["name", "age", "skills", "grade", "email", "work_history"],
         "additionalProperties": False,
+        "minProperties": 1,
+        "maxProperties": 10,
+        "propertyNames": {"pattern": "^*$"},
+        "patternProperties": {
+            "^grade$": {"type": "string"},
+        },
     }
 
 
