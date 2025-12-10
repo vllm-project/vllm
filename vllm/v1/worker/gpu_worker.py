@@ -38,7 +38,7 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.gpu_profiler import CudaProfilerWrapper, TorchProfilerWrapper
+from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -79,6 +79,10 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        # configure float32 matmul precision according to vLLM env.
+        precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
+        torch.set_float32_matmul_precision(precision)
+
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils.import_utils import init_cached_hf_modules
@@ -88,17 +92,19 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Torch/CUDA profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        # VLLM_TORCH_CUDA_PROFILE=1
+        # Torch/CUDA profiler. Enabled and configured through profiler_config.
         self.profiler: Any | None = None
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        profiler_config = vllm_config.profiler_config
+        if profiler_config.profiler == "torch":
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
             self.profiler = TorchProfilerWrapper(
-                worker_name=worker_name, local_rank=self.local_rank
+                profiler_config,
+                worker_name=worker_name,
+                local_rank=self.local_rank,
+                activities=["CPU", "CUDA"],
             )
-        elif envs.VLLM_TORCH_CUDA_PROFILE:
-            self.profiler = CudaProfilerWrapper()
+        elif profiler_config.profiler == "cuda":
+            self.profiler = CudaProfilerWrapper(profiler_config)
         else:
             self.profiler = None
 
