@@ -199,6 +199,67 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     return config
 
 
+def extract_softcap_from_gguf(model: str) -> dict[str, float]:
+    """Extract attention and final logit softcap values from GGUF metadata.
+
+    Reads softcap parameters from GGUF metadata using arch-specific keys.
+    These parameters are critical for models like Gemma2 where attention
+    logit softcapping prevents numerical instability.
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        Dictionary with 'attn_logit_softcapping' and/or 'final_logit_softcapping'
+        keys if found in GGUF metadata, empty dict otherwise
+    """
+    if not model.endswith(".gguf"):
+        return {}
+
+    try:
+        model_path = Path(model)
+        if not model_path.is_file():
+            return {}
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        # Get architecture name to build arch-specific keys
+        arch_field = reader.get_field(Keys.General.ARCHITECTURE)
+        if arch_field is None:
+            logger.debug("No architecture field found in GGUF metadata")
+            return {}
+
+        arch = bytes(arch_field.parts[-1]).decode("utf-8")
+
+        result = {}
+
+        # Extract attention logit softcapping
+        attn_key = Keys.LLM.ATTN_LOGIT_SOFTCAPPING.format(arch=arch)
+        attn_field = reader.get_field(attn_key)
+        if attn_field is not None:
+            result["attn_logit_softcapping"] = float(attn_field.parts[-1])
+            logger.info(
+                "Extracted attn_logit_softcapping=%.2f from GGUF metadata",
+                result["attn_logit_softcapping"],
+            )
+
+        # Extract final logit softcapping
+        final_key = Keys.LLM.FINAL_LOGIT_SOFTCAPPING.format(arch=arch)
+        final_field = reader.get_field(final_key)
+        if final_field is not None:
+            result["final_logit_softcapping"] = float(final_field.parts[-1])
+            logger.info(
+                "Extracted final_logit_softcapping=%.2f from GGUF metadata",
+                result["final_logit_softcapping"],
+            )
+
+        return result
+
+    except Exception as e:
+        logger.debug("Error extracting softcap from GGUF: %s", e)
+        return {}
+
+
 def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,
@@ -207,7 +268,8 @@ def maybe_patch_hf_config_from_gguf(
 
     Applies GGUF-specific patches to HuggingFace config:
     1. For multimodal models: patches architecture and vision config
-    2. For all GGUF models: overrides vocab_size from embedding tensor
+    2. For models with softcap (e.g., Gemma2): patches attention/logit softcapping
+    3. For all GGUF models: overrides vocab_size from embedding tensor
 
     This ensures compatibility with GGUF models that have extended
     vocabularies (e.g., Unsloth) where the GGUF file contains more
@@ -235,6 +297,15 @@ def maybe_patch_hf_config_from_gguf(
                 architectures=["Gemma3ForConditionalGeneration"],
             )
             hf_config = new_hf_config
+
+    # Patch softcap parameters from GGUF metadata
+    # Critical for models like Gemma2 where attention softcapping
+    # prevents numerical instability and ensures correct output
+    softcap_params = extract_softcap_from_gguf(model)
+    if "attn_logit_softcapping" in softcap_params:
+        hf_config.attn_logit_softcapping = softcap_params["attn_logit_softcapping"]
+    if "final_logit_softcapping" in softcap_params:
+        hf_config.final_logit_softcapping = softcap_params["final_logit_softcapping"]
 
     return hf_config
 
