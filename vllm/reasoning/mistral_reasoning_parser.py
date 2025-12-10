@@ -66,11 +66,11 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         has_eot_token = False
 
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == self.start_token_id:
+        for id in input_ids[::-1]:
+            if id == self.start_token_id:
                 # Reasoning ends only if a BOT token is found before a EOT token.
                 return has_eot_token
-            if input_ids[i] == self.end_token_id:
+            elif id == self.end_token_id:
                 has_eot_token = True
         return False
 
