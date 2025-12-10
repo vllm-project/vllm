@@ -1562,6 +1562,7 @@ class GPUModelRunner(
             self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
+
         def _get_block_table_and_slot_mapping(kv_cache_gid: int):
             assert num_reqs_padded is not None and num_tokens_padded is not None
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
@@ -1628,7 +1629,13 @@ class GPUModelRunner(
             )
 
         # Cache attention metadata builds across hybrid KV-cache groups
-        cached_attn_metadata: dict[tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata] = {}
+        # The only thing that changes between different hybrid KV-cache groups when the
+        # same metadata builder and KVCacheSpec is the same is the block table, so we
+        # can cache the attention metadata builds and just update the block table using
+        # `builder.update_block_table` if the builder supports it.
+        cached_attn_metadata: dict[
+            tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
+        ] = {}
 
         def _build_attn_group_metadata(
             kv_cache_gid: int,
@@ -1637,15 +1644,15 @@ class GPUModelRunner(
             ubid: int | None = None,
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
+            builder = attn_group.get_metadata_builder(ubid or 0)
             cache_key = (kv_cache_groups[kv_cache_gid].kv_cache_spec, type(builder))
-            
+
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
                 if cascade_attn_prefix_lens
                 else 0
             )
 
-            builder = attn_group.get_metadata_builder(ubid or 0)
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                 assert ubid is None, "UBatching not supported with GDN yet"
@@ -1660,7 +1667,10 @@ class GPUModelRunner(
                 attn_metadata_i = builder.build_for_cudagraph_capture(
                     common_attn_metadata
                 )
-            elif cache_key in cached_attn_metadata and builder.supports_update_block_table:
+            elif (
+                cache_key in cached_attn_metadata
+                and builder.supports_update_block_table
+            ):
                 attn_metadata_i = builder.update_block_table(
                     cached_attn_metadata[cache_key],
                     common_attn_metadata.block_table_tensor,
