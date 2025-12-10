@@ -29,6 +29,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -363,6 +364,9 @@ def _test_deepep_deepgemm_moe(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
     current_platform.seed_everything(pgi.rank)
 
     w1 = w1.to(device=torch.cuda.current_device())
