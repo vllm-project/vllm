@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import pytest
 import torch
@@ -16,7 +17,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_mamba_groups
 
-num_speculative_tokens = 2
+num_speculative_tokens = 3
 
 num_accepted_tokens = 1
 prompt_token_ids = []
@@ -184,15 +185,36 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     print(
         f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
     )
-    print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict}")
+    print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
     torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
+
+
+def check_mamba_state_equal(mamba_state_ref: dict, mamba_state_new: dict):
+    for key in mamba_state_new:
+        # mamba state new is a subset of mamba state ref
+        for i, (ref, new) in enumerate(zip(mamba_state_ref[key], mamba_state_new[key])):
+            if not torch.allclose(ref, new[: ref.shape[0]]):
+                raise ValueError(
+                    f"Mamba state is not equal for key: {key} at index {i}"
+                )
+    return True
+
+
+@dataclass
+class TestConfig:
+    num_prompt_tokens: int
+    num_generated_tokens: int
+    num_accepted_tokens: int
+    expect_schedule_tokens: list[int] | None
+    expect_block_table: list[int] | None
 
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_LIGHTER_MAMBA_CACHE", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=30)
-
+    num_generated_tokens = 1000
+    num_prompt_tokens = 500
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
     full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
@@ -200,6 +222,8 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
     )
+    fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
+    monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
@@ -218,7 +242,20 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     print(f"Token IDs length: {len(prompt_token_ids)}")
 
     outputs = engine.generate(
-        [TokensPrompt(prompt_token_ids=prompt_token_ids[:2000])], sampling_params
+        [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
+        sampling_params,
     )
     print(f"Generated text: {outputs[0].outputs[0].token_ids}")
-    print(f"expect token ids: {prompt_token_ids[2000 : 2000 + 30]}")
+    print(
+        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
+    )
+
+    torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict_new.pth")
+    mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
+    check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict)
+
+
+def test_check_mamba_state_equal():
+    mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
+    mamba_state_new = torch.load("mamba_kv_cache_dict_new.pth")
+    check_mamba_state_equal(mamba_state_ref, mamba_state_new)
