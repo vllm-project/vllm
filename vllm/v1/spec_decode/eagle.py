@@ -416,9 +416,9 @@ class EagleProposer:
         # (i.e., not the first proposal).
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            # TODO: remove seq_lens_cpu adjustment once
-            # https://github.com/vllm-project/vllm/pull/29624 lands
-            common_attn_metadata.seq_lens_cpu -= num_rejected_tokens_gpu.to("cpu")
+            # Invalidate the CPU-side shadows to avoid H<>D sync.
+            common_attn_metadata._seq_lens_cpu = None
+            common_attn_metadata._num_computed_tokens_cpu = None
 
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
