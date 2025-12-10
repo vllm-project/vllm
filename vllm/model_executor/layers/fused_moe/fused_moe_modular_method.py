@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 
@@ -97,23 +96,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
@@ -127,10 +109,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=self.allow_inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=None if self.disable_expert_map else expert_map,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            expert_map=None if self.disable_expert_map else layer.expert_map,
         )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
