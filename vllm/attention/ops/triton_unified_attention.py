@@ -87,7 +87,7 @@ def kernel_unified_attention_2d(
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
     USE_MM_PREFIX: tl.constexpr,  # bool
-    mm_prefix_ranges: tl.int64,  # [num_seqs] - prefix length for each sequence
+    mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -168,7 +168,7 @@ def kernel_unified_attention_2d(
     context_len = seq_len - cur_batch_query_len
 
     # prefix length for PrefixLM (bidirectional attention in prefix region)
-    prefix_len = tl.load(mm_prefix_ranges + seq_idx) if USE_MM_PREFIX else 0
+    prefix_len = tl.load(mm_prefix_range_ptr + seq_idx) if USE_MM_PREFIX else 0
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -415,8 +415,8 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
-    USE_PREFIX_LM: tl.constexpr,  # bool
-    prefix_lens_ptr,  # [num_seqs] - prefix length for each sequence
+    USE_MM_PREFIX: tl.constexpr,  # bool
+    mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -493,7 +493,7 @@ def kernel_unified_attention_3d(
     context_len = seq_len - cur_batch_query_len
 
     # prefix length for PrefixLM (bidirectional attention in prefix region)
-    prefix_len = tl.load(prefix_lens_ptr + seq_idx) if USE_PREFIX_LM else 0
+    prefix_len = tl.load(mm_prefix_range_ptr + seq_idx) if USE_MM_PREFIX else 0
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -584,7 +584,7 @@ def kernel_unified_attention_3d(
         # Compute attention mask
         # For PrefixLM: prefix region uses bidirectional attention,
         # suffix region uses causal attention
-        if USE_PREFIX_LM:
+        if USE_MM_PREFIX:
             # Key positions in the prefix region are always visible
             is_key_in_prefix = seq_offset[None, :] < prefix_len
             # For keys outside prefix, use causal masking
@@ -789,7 +789,7 @@ def unified_attention(
     # Optional tensor for sinks
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
-    prefix_lens=None,
+    mm_prefix_range=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -799,12 +799,6 @@ def unified_attention(
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
-    use_prefix_lm = prefix_lens is not None
-
-    if use_prefix_lm:
-        assert prefix_lens.shape[0] == len(seqused_k), (
-            "prefix_lens must have one entry per sequence"
-        )
 
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
@@ -873,6 +867,8 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
+            USE_MM_PREFIX=(mm_prefix_range is not None),
+            mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
@@ -887,8 +883,6 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
-            USE_PREFIX_LM=use_prefix_lm,
-            prefix_lens_ptr=prefix_lens,
         )
     else:
         # for initial version, NUM_SEGMENTS = 16 is chosen as a default
@@ -948,6 +942,8 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
+            USE_MM_PREFIX=(mm_prefix_range is not None),
+            mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
@@ -962,8 +958,6 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
-            USE_PREFIX_LM=use_prefix_lm,
-            prefix_lens_ptr=prefix_lens,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
