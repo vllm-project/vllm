@@ -156,7 +156,8 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert cu_seqlens
+        # TODO(Isotr0py): Migrate MultiHeadAttention
+        assert cu_seqlens is not None
 
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
@@ -184,7 +185,8 @@ class MMEncoderAttention(CustomOp):
         assert self.flash_attn_varlen_func is not None, (
             "Flash attention function is not set."
         )
-        assert cu_seqlens, max_seqlen
+        # # TODO(Isotr0py): Migrate MultiHeadAttention
+        assert cu_seqlens is not None and max_seqlen is not None
 
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
