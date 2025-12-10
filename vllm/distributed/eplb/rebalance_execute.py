@@ -393,7 +393,9 @@ def rearrange_expert_weights_inplace(
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    expert_weights_buffer = [torch.empty_like(w).to(torch.cuda.current_device()) for w in expert_weights[0]]
+    expert_weights_buffer = [
+        torch.empty_like(w).to(torch.cuda.current_device()) for w in expert_weights[0]
+    ]
 
     if is_profile:
         # Maximum send size is to send all local experts to all ranks,

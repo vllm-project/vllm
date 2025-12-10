@@ -1534,8 +1534,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x=x,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
-                top_k=top_k,
-                global_num_experts=global_num_experts,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
             )
 
         if self.use_marlin:
