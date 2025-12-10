@@ -126,7 +126,10 @@ class UBatchWrapper:
         comm_sms: int = envs.VLLM_DBO_COMM_SMS
 
         set_comm_sms = lambda sms: None
-        if vllm_config.parallel_config.enable_expert_parallel:
+        if (
+            vllm_config.parallel_config.enable_expert_parallel
+            and not vllm_config.afd_config
+        ):
             # Currently only DeepEP highthroughput supports SM control so this
             # only affects that case.
             ep_group = get_ep_group()
@@ -304,6 +307,7 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        afd_metadata,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
@@ -319,6 +323,7 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
+                    afd_metadata=afd_metadata,
                 )
             )
 
@@ -390,6 +395,7 @@ class UBatchWrapper:
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        afd_metadata = forward_context.afd_metadata
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
@@ -453,6 +459,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                afd_metadata=afd_metadata,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.model)
@@ -476,6 +483,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                afd_metadata=afd_metadata,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.model)

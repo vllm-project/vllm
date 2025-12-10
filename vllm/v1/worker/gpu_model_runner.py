@@ -31,6 +31,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
+from vllm.distributed.afd_transfer import AFDConnectorFactory
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -39,11 +40,13 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
     get_tp_group,
+    get_world_group,
     graph_capture,
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import (
+    AFDMetadata,
     BatchDescriptor,
     set_forward_context,
 )
@@ -638,6 +641,16 @@ class GPUModelRunner(
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+
+        # init AFD config
+        self.afd_config = vllm_config.afd_config
+        if self.afd_config and self.afd_config.afd_role == "attention":
+            self.afd_connector = AFDConnectorFactory.create_connector(
+                get_world_group().rank, get_world_group().local_rank, vllm_config
+            )
+            self.afd_connector.init_afd_connector()
+            self.num_stages = self.afd_config.num_afd_stages
+
         self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
 
         self.kv_sharing_fast_prefill_logits_indices = None
@@ -709,6 +722,25 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
+
+        profile_dir = (
+            "./profiler_logs/attn"
+            if self.afd_config is not None and self.afd_config.afd_role == "attention"
+            else "./profiler_logs/normal"
+        )
+        self.profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=6000 + 4000, warmup=1, active=30, repeat=1
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_dir),
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+        )
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -1468,7 +1500,7 @@ class GPUModelRunner(
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-
+        logger.info(f"nums_reqs: {num_reqs}")
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
@@ -3153,6 +3185,7 @@ class GPUModelRunner(
             # decoder.
             allow_dp_padding = (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                or self.afd_config is not None
             )
 
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -3307,6 +3340,38 @@ class GPUModelRunner(
             return slot_mappings_by_gid, result
 
         return slot_mappings_by_gid, slot_mappings_by_layer
+
+    def _build_afd_metadata(
+        self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
+    ):
+        afd_metadata = None
+        if self.afd_config:
+            # For prefill, compute tokens per stage based on actual token
+            # counts
+            afd_tokens_start_loc = [0]
+            afd_tokens_lens = []
+            if ubatch_slices and len(ubatch_slices) > 1:
+                afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
+                afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
+                logger.info(
+                    f"afd_tokens_start_loc: {afd_tokens_start_loc} "
+                    f"afd_reqs_start_loc: {afd_reqs_start_loc} "
+                    f"ubatch_slices: {ubatch_slices}"
+                )
+                afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
+            else:
+                afd_tokens_start_loc = [0]
+                afd_reqs_start_loc = [0]
+                afd_tokens_lens = [num_tokens_unpadded]
+            afd_metadata = AFDMetadata(
+                afd_tokens_start_loc=afd_tokens_start_loc,
+                afd_reqs_start_loc=afd_reqs_start_loc,
+                afd_stage_idx=0,
+                afd_connector=self.afd_connector,
+                afd_tokens_lens=afd_tokens_lens,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+            )
+        return afd_metadata
 
     @torch.inference_mode()
     def execute_model(
@@ -3518,6 +3583,9 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+
+        self.profiler.step()
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -3531,10 +3599,14 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                afd_metadata=afd_metadata,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
+            logger.info(f"input_ids: {input_ids.shape}")
+            if inputs_embeds:
+                logger.info(f"inputs_embeds: {inputs_embeds.shape}")
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4850,6 +4922,8 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -4861,6 +4935,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    afd_metadata=afd_metadata,
                 ),
             ):
                 outputs = self.model(
@@ -5388,7 +5463,6 @@ class GPUModelRunner(
                     kv_cache_spec,
                     kv_cache_group_id,
                 )
-
                 attn_groups.append(attn_group)
             return attn_groups
 
@@ -6126,6 +6200,11 @@ class GPUModelRunner(
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
+
+    def initialize_afd_connector(self) -> None:
+        """Initialize AFD connector if available."""
+        if hasattr(self, "afd_connector") and self.afd_connector:
+            self.afd_connector.init_afd_connector()
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
