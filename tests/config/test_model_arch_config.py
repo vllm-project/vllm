@@ -3,10 +3,10 @@
 import json
 from pathlib import Path
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, SpeculativeConfig, ParallelConfig
 
 
-def test_model_arch_config():
+def test_basic():
     trust_remote_code_models = [
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         "XiaomiMiMo/MiMo-7B-RL",
@@ -38,7 +38,7 @@ def test_model_arch_config():
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     ] + trust_remote_code_models
 
-    groundtruth_path = Path(__file__).parent / "model_arch_groundtruth.json"
+    groundtruth_path = Path(__file__).parent / "base_model_arch_groundtruth.json"
     with open(groundtruth_path) as f:
         model_arch_groundtruth = json.load(f)
 
@@ -81,3 +81,71 @@ def test_model_arch_config():
             model_config.get_total_num_hidden_layers()
             == expected["total_num_hidden_layers"]
         )
+
+
+def test_draft_models():
+    speculative_models = [
+        ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", False),
+        ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
+        ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
+        ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
+        ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    ]
+
+    groundtruth_path = Path(__file__).parent / "draft_model_arch_groundtruth.json"
+    with open(groundtruth_path) as f:
+        model_arch_groundtruth = json.load(f)
+
+    for target_model, draft_model, trust_remote_code in speculative_models:
+        print(f"testing {target_model=} {draft_model=}")
+        target_model_config = ModelConfig(
+            target_model, trust_remote_code=trust_remote_code
+        )
+        speculative_config = {
+            "model": draft_model,
+            "num_speculative_tokens": 1,
+            "target_model_config": target_model_config,
+            "target_parallel_config": ParallelConfig(),
+        }
+
+        speculative_config =  SpeculativeConfig(**speculative_config)
+        model_config = speculative_config.draft_model_config
+
+        model_arch_config = model_config.model_arch_config
+        expected = model_arch_groundtruth[draft_model]
+        assert model_arch_config.architectures == expected["architectures"]
+        assert model_arch_config.model_type == expected["model_type"]
+        assert model_arch_config.text_model_type == expected["text_model_type"]
+        assert model_arch_config.hidden_size == expected["hidden_size"]
+        assert (
+            model_arch_config.total_num_hidden_layers
+            == expected["total_num_hidden_layers"]
+        )
+        assert (
+            model_arch_config.total_num_attention_heads
+            == expected["total_num_attention_heads"]
+        )
+
+        assert model_arch_config.vocab_size == expected["vocab_size"]
+        assert model_arch_config.total_num_kv_heads == expected["total_num_kv_heads"]
+        assert model_arch_config.num_experts == expected["num_experts"]
+        assert model_arch_config.is_deepseek_mla == expected["is_deepseek_mla"]
+        dtype = model_arch_config.torch_dtype
+        assert str(dtype) == expected["dtype"]
+
+        # Ensure model_config methods return expected values
+        assert model_config.architectures == expected["architectures"]
+        assert model_config.get_vocab_size() == expected["vocab_size"]
+        assert model_config.get_hidden_size() == expected["hidden_size"]
+        assert model_config.get_total_num_kv_heads() == expected["total_num_kv_heads"]
+        assert model_config.get_num_experts() == expected["num_experts"]
+        assert (
+            model_config.get_total_num_hidden_layers()
+            == expected["total_num_hidden_layers"]
+        )
+
+        if isinstance(expected["head_size"], int):
+            # Before model_arch_config is introduced, get_head_size() for medusa 
+            # model config will throw out `integer division or modulo by zero` error.
+            assert model_arch_config.head_size == expected["head_size"]
+            assert model_config.get_head_size() == expected["head_size"]

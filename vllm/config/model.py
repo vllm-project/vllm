@@ -716,7 +716,7 @@ class ModelConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config)
+        convertor = convertor_cls(self.hf_config, self.hf_text_config)
         return convertor.convert(self.model, self.revision)
 
     @field_validator("tokenizer_mode", mode="after")

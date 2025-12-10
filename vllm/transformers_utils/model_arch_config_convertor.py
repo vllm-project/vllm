@@ -14,7 +14,6 @@ from vllm.config.model_arch import (
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
-    get_hf_text_config,
     try_get_safetensors_metadata,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
@@ -23,9 +22,9 @@ logger = init_logger(__name__)
 
 
 class ModelArchConfigConvertorBase:
-    def __init__(self, hf_config: PretrainedConfig):
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
         self.hf_config = hf_config
-        self.hf_text_config = get_hf_text_config(hf_config)
+        self.hf_text_config = hf_text_config
 
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
