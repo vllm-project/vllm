@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
-from vllm.profiler.gpu_profiler import TorchProfilerWrapper
+from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
@@ -39,8 +39,7 @@ class CPUWorker(Worker):
 
         self.parallel_config.disable_custom_all_reduce = True
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        # Torch profiler. Enabled and configured through profiler_config.
         self.profiler: Any | None = None
         if envs.VLLM_TORCH_PROFILER_DIR:
             worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
