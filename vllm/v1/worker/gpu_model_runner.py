@@ -253,10 +253,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 
 class GPURunnerTimer:
-    def __init__(self):
+    def __init__(self, max_buffer_size: int = 1000):
         # Setting maxlen to ensure this will never cause a memory leak.
         self._events: deque[tuple[RunnerEvent, torch.Event, torch.Event]] = deque(
-            maxlen=1000
+            maxlen=max_buffer_size
         )
 
     def track(self, event: RunnerEvent) -> AbstractContextManager[None]:
@@ -267,6 +267,12 @@ class GPURunnerTimer:
             start_event.record()
             yield
             end_event.record()
+            if len(self._events) == self._events.maxlen:
+                logger.warning_once(
+                    "GPURunnerTimer event queue is full. "
+                    "Oldest timing event is being dropped. "
+                    "Ensure runners are collecting metrics properly."
+                )
             self._events.append((event, start_event, end_event))
 
         return _track()
