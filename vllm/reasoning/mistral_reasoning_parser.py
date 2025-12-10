@@ -84,7 +84,9 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
         eot_token_index = -1
         # One for loop instead of multiple lookups
         for i, token_id in enumerate(input_ids):
-            if token_id == self.start_token_id:
+            # We filter that we have multiple BOT tokens which should not
+            # happen for a well prompted trained model
+            if token_id == self.start_token_id and not has_bot_token:
                 has_bot_token = True
                 bot_token_index = i
             elif token_id == self.end_token_id:
