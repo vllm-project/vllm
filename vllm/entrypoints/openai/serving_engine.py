@@ -1234,6 +1234,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
+                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(
