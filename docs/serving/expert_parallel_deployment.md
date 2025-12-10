@@ -83,7 +83,7 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size-local 8 \           # Local DP size on this node (8 GPUs per node)
     --data-parallel-address 192.168.1.100 \  # Replace with actual IP of Node 1
     --data-parallel-rpc-port 13345 \         # RPC communication port, can be any port as long as reachable by all nodes
-    --api-server-count=8                     # Number of API servers for load handling (scaling this out to total ranks are recommended)
+    --api-server-count=8                     # Number of API servers for load handling (scaling this out to # local ranks is recommended)
 
 # Node 2 (Secondary - headless mode, no API server)
 vllm serve deepseek-ai/DeepSeek-V3-0324 \
@@ -184,6 +184,26 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
 
 For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
 
+## Advanced Configuration
+
+### Performance Optimization
+
+- **DeepEP kernels**: The `high_throughput` and `low_latency` kernels are optimized for disaggregated serving and may show poor performance for mixed workloads
+- **Dual Batch Overlap**: Use `--enable-dbo` to overlap all-to-all communication with compute. See [Dual Batch Overlap](../design/dbo.md) for more details.
+- **Async scheduling (experimental)**: Try `--async-scheduling` to overlap scheduling with model execution.
+
+### Troubleshooting
+
+- **`non-zero status: 7 cannot register cq buf`**: When using Infiniband/RoCE, make sure host VM and pods show `ulimit -l` "unlimited".
+- **`init failed for transport: IBGDA`**: The InfiniBand GDA kernel modules are missing. Run `tools/ep_kernels/configure_system_drivers.sh` on each GPU node and reboot. Also fixes error `NVSHMEM API called before NVSHMEM initialization has completed`.
+- **NVSHMEM peer disconnect**: Usually a networking misconfiguration. If deploying via Kubernetes, verify that every pod runs with `hostNetwork: true`, `securityContext.privileged: true` to access Infiniband.
+
+### Benchmarking
+
+- Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
+
+- Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
+
 ## Disaggregated Serving (Prefill/Decode Split)
 
 For production deployments requiring strict SLA guarantees for time-to-first-token and inter-token latency, disaggregated serving allows independent scaling of prefill and decode operations.
@@ -274,3 +294,9 @@ except Exception as e:
     print(f"❌ Error during disaggregated serving: {e}")
     print("Check that both prefill and decode instances are running and accessible")
 ```
+
+### Benchmarking
+
+- To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation.
+
+- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.
