@@ -881,7 +881,7 @@ class FusedMoE(CustomOp):
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone
             # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
-            # NOTE: We dont need shared_output.record_stream(current_stream())
+            # NOTE: We don't need shared_output.record_stream(current_stream())
             # because we synch the streams before using shared_output.
             hidden_states_clone.record_stream(self.shared_experts_stream)
 

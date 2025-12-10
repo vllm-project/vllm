@@ -186,7 +186,7 @@ struct AttentionMetadata {
 //  - Intermediate outputs: q_tile_size * head_dim * output_buffer_elem_size + 2
 //  * q_tile_size * 4, partial output, max + sum (float)
 // Reduction scratchpad contains:
-//  - flags: bool array to indicate wether the split is finished
+//  - flags: bool array to indicate whether the split is finished
 //  - outputs: split_num * q_tile_size * head_dim * output_buffer_elem_size
 //  - max, sum: 2 * split_num * q_tile_size * 4
 class AttentionScratchPad {
