@@ -19,6 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -539,6 +540,7 @@ class WhisperEncoder(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(dynamic_arg_dims={"input_ids": 0, "positions": -1})
 class WhisperDecoder(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
