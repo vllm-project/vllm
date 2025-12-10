@@ -185,7 +185,10 @@ class EagleProposer:
 
                 rocm_types.append(MLACommonMetadata)
             except ImportError:
-                pass
+                logger.debug(
+                    "Could not import MLACommonMetadata. MLA backend "
+                    "for speculative decoding will be unavailable."
+                )
 
             self.allowed_attn_types = tuple(rocm_types)
 
