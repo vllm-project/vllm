@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for CVE-2025-62164 sparse tensor validation.
+Unit tests for sparse tensor validation.
 
 Simple, fast unit tests that can run without server fixtures.
 Run with: pytest tests/multimodal/test_sparse_tensor_validation_unit.py -v

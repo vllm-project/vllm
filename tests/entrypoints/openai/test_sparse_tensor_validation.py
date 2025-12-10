@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Security tests for CVE-2025-62164: Sparse tensor validation in embedding APIs.
+Sparse tensor validation in embedding APIs.
 
 Tests verify that malicious sparse tensors are rejected before they can trigger
 out-of-bounds memory writes during to_dense() operations.
@@ -243,10 +243,8 @@ class TestAudioEmbedsValidation:
             io_handler.load_bytes(buffer.read())
 
 
-class TestCVE202562164Integration:
-    """
-    Integration tests for CVE-2025-62164 fix.
-    
+class TestSparseTensorValidationIntegration:
+    """    
     These tests verify the complete attack chain is blocked at all entry points.
     """
     

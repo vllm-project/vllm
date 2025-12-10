@@ -170,7 +170,7 @@ class BaseRenderer(ABC):
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
             # Enable sparse tensor integrity checks to prevent out-of-bounds
-            # writes from maliciously crafted tensors (CVE-2025-62164)
+            # writes from maliciously crafted tensors
             with torch.sparse.check_sparse_tensor_invariants():
                 tensor = torch.load(
                     io.BytesIO(pybase64.b64decode(embed, validate=True)),
