@@ -8,14 +8,20 @@ This script discovers all registered Helion kernels via @register_kernel decorat
 and runs autotuning to generate optimized configurations for different input shapes.
 
 Usage:
-    # Autotune all Helion kernels
+    # Autotune all Helion kernels (default behavior)
     python scripts/autotune_helion_kernels.py
 
+    # Explicitly autotune all Helion kernels
+    python scripts/autotune_helion_kernels.py --kernels all
+
     # Autotune specific kernel by name
-    python scripts/autotune_helion_kernels.py --kernel silu_mul_fp8
+    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8
+
+    # Autotune multiple specific kernels
+    python scripts/autotune_helion_kernels.py --kernels silu_mul_fp8 rms_norm_fp8
 
     # Autotune with custom output directory
-    python scripts/autotune_helion_kernels.py --output-dir ./my_configs
+    python scripts/autotune_helion_kernels.py --kernels all --output-dir ./my_configs
 
     # List available Helion kernels
     python scripts/autotune_helion_kernels.py --list
@@ -250,7 +256,9 @@ def main():
     )
 
     parser.add_argument(
-        "--kernel", type=str, help="Specific kernel to autotune (default: all kernels)"
+        "--kernels",
+        nargs="+",
+        help="Kernel(s) to autotune. Can specify individual kernel names or 'all' (default: all kernels)"
     )
 
     parser.add_argument(
@@ -309,14 +317,32 @@ def main():
         logger.error("No Helion kernels found in registry")
         sys.exit(1)
 
-    # Filter to specific kernel if requested
-    if args.kernel:
-        if args.kernel not in helion_kernels:
-            logger.error("Kernel '%s' not found. Available kernels:", args.kernel)
-            for name in helion_kernels:
-                logger.error("  - %s", name)
-            sys.exit(1)
-        helion_kernels = {args.kernel: helion_kernels[args.kernel]}
+    # Filter to specific kernels if requested
+    if args.kernels:
+        # Handle 'all' as a special case
+        if len(args.kernels) == 1 and args.kernels[0].lower() == 'all':
+            # Keep all kernels - no filtering needed
+            logger.info("Autotuning all %d kernels", len(helion_kernels))
+        else:
+            # Filter to specified kernels
+            filtered_kernels = {}
+            missing_kernels = []
+
+            for kernel_name in args.kernels:
+                if kernel_name in helion_kernels:
+                    filtered_kernels[kernel_name] = helion_kernels[kernel_name]
+                else:
+                    missing_kernels.append(kernel_name)
+
+            if missing_kernels:
+                logger.error("Kernel(s) not found: %s", missing_kernels)
+                logger.error("Available kernels:")
+                for name in helion_kernels:
+                    logger.error("  - %s", name)
+                sys.exit(1)
+
+            helion_kernels = filtered_kernels
+            logger.info("Selected %d kernel(s): %s", len(helion_kernels), list(helion_kernels.keys()))
 
     # Determine output directory
     output_dir = args.output_dir if args.output_dir else get_default_config_dir()
