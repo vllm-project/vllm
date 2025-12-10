@@ -1575,6 +1575,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Enable experimental slab-based LoRA tensor optimization.
+    # When enabled, uses optimized GPU memory management with tensor slabs,
+    # persistent caching, and bulk operations for improved LoRA performance.
+    # When disabled, falls back to the original LoRA tensor processing method.
+    # Default: disabled (0) for compatibility, enable with SLAB_OPTIMIZATION=1
+    "SLAB_OPTIMIZATION": lambda: bool(int(os.getenv("SLAB_OPTIMIZATION", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

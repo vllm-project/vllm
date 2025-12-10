@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TypeVar, Optional
 
 import regex as re
 import torch
@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig, ModelConfig
+from vllm.envs import SLAB_OPTIMIZATION
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -38,6 +39,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.worker.utils import MultiModalBudget
+from vllm.lora.slab_helper import process_slab_activation_loop
 
 logger = init_logger(__name__)
 
@@ -251,30 +253,86 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
-        for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
-                module.reset_lora(index)
-                continue
-
-            module.set_lora(
-                index,
-                module_lora.lora_a,
-                module_lora.lora_b,
+        if SLAB_OPTIMIZATION:            
+            # Check for cached CPU slab and metadata from LoRAModel
+            has_cpu_slab = hasattr(lora_model, '_cached_cpu_slab')
+            has_gpu_slab = hasattr(lora_model, '_cached_gpu_slab')
+            has_metadata = hasattr(lora_model, '_cached_metadata')
+            
+            if has_cpu_slab and has_metadata:
+                # MEMORY EFFICIENT: Create GPU slab only during activation (respects max_loras constraint)
+                cpu_slab = lora_model._cached_cpu_slab
+                metadata = lora_model._cached_metadata
+                loras_dict = getattr(lora_model, '_loras_dict', {})
+                
+                # Transfer to GPU only when activated
+                gpu_slab = cpu_slab.to(device="cuda", non_blocking=True)
+                
+                # Cache GPU slab for this activation (will be cleaned up when deactivated)
+                lora_model._cached_gpu_slab = gpu_slab
+                logger.info(f"[ON_DEMAND_GPU] Created GPU slab during activation - respects max_loras constraint")
+            
+            elif has_gpu_slab and has_metadata:
+                gpu_slab = lora_model._cached_gpu_slab
+                metadata = lora_model._cached_metadata
+            
+            else:
+                # No slab available - skip slab optimization
+                logger.warning(f"[SLAB_ACTIVATION] No slab data available for LoRA {lora_model.id}")
+                return False
+            
+            # Use helper function for the full activation loop with all optimizations
+            process_slab_activation_loop(
+                self.modules, 
+                lora_model, 
+                self._get_lora_layer_weights, 
+                self.lora_config, 
+                gpu_slab, 
+                metadata, 
+                index
             )
+            
+            return True
+        else:
+            for module_name, module in self.modules.items():
+                module_lora = self._get_lora_layer_weights(lora_model, module_name)
+                if not module_lora:
+                    module.reset_lora(index)
+                    continue
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                )
 
-        return True
+            return True
 
     def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
+            
+            # MEMORY CLEANUP: Free GPU slab when deactivating to respect max_loras constraint
+            if SLAB_OPTIMIZATION and lora_id in self._registered_adapters:
+                lora_model = self._registered_adapters[lora_id]
+                if hasattr(lora_model, '_cached_gpu_slab'):
+                    # Free GPU slab to make room for other LoRAs
+                    del lora_model._cached_gpu_slab
+                    torch.cuda.empty_cache()  # Force GPU memory cleanup
+                    logger.info(f"[MEMORY_CLEANUP] Freed GPU slab for LoRA {lora_id} - respects max_loras constraint")
+            
         except ValueError:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
-        self._create_merged_loras_inplace(lora)
-        self._registered_adapters[lora.id] = lora
+        if not SLAB_OPTIMIZATION:
+            # Traditional approach: use CPU packing for packed modules
+            self._create_merged_loras_inplace(lora)
+            self._registered_adapters[lora.id] = lora
+        else:
+            # Slab optimization: slab is already built with target modules in from_lora_tensors
+            logger.debug(f"[SLAB_OPTIMIZATION] Registering LoRA {lora.id} - slab already built with target modules")
+            self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
         """Pin a LoRAModel in the manager cache."""
