@@ -1244,6 +1244,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     if self.disable_expert_map
                     else layer.expert_map,  # ???
                     quant_config=self.moe_quant_config,
+                    moe_parallel_config=getattr(layer, "moe_parallel_config", None),
                 )
             else:
                 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -1286,6 +1287,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
+                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
             )
 
     @property
@@ -1424,6 +1426,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
+            moe_parallel_config=getattr(layer, "moe_parallel_config", None),
         )
 
 
@@ -2012,6 +2015,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
+            moe_parallel_config=getattr(layer, "moe_parallel_config", None),
         )
 
     @property

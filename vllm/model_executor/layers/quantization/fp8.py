@@ -1376,6 +1376,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 allow_cutlass_block_scaled_grouped_gemm=(
                     self.allow_cutlass_block_scaled_grouped_gemm
                 ),
+                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
             )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:

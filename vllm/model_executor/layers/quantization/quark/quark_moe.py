@@ -393,6 +393,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
+                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
             )
 
 
@@ -617,6 +618,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
+                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
             )
 
         return out

@@ -6,6 +6,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
@@ -293,7 +294,8 @@ def deep_gemm_moe_fp8(
     expert_map: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
-    apply_router_weight_on_input=False,
+    apply_router_weight_on_input: bool = False,
+    moe_parallel_config: FusedMoEParallelConfig | None = None,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -343,6 +345,7 @@ def deep_gemm_moe_fp8(
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
         DeepGemmExperts(quant_config),
+        moe_parallel_config=moe_parallel_config,
     )
     return fn(
         hidden_states,

@@ -159,6 +159,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
+            moe_parallel_config=getattr(layer, "moe_parallel_config", None),
         )
 
     @staticmethod
