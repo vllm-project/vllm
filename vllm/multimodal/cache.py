@@ -882,7 +882,7 @@ class _LmdbWorkerTransaction(BaseMultiModalReceiverCache, AbstractContextManager
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        return self._txn.get_and_update_item(mm_item)
+        return self._txn.get_item(mm_hash) if mm_item is None else mm_item
 
     @override
     def touch_receiver_cache_item(

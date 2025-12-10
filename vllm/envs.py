@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_MM_LMDB_CACHE_ID: str | None = None
 
 
 def get_default_cache_root():
@@ -1565,6 +1566,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
+    # The LMDB multimodal cache ID to use.
+    # N.B. This is automatically assigned on configuration load if not set.
+    "VLLM_MM_LMDB_CACHE_ID": lambda: os.getenv("VLLM_MM_LMDB_CACHE_ID"),
 }
 
 # --8<-- [end:env-vars-definition]

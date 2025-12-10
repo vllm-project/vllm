@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import filelock
 import lmdb
-from typing_extensions import Buffer
+from typing_extensions import Buffer, Self
 
 from vllm import envs
 from vllm.distributed.device_communicators.shm_object_storage import MsgpackSerde
@@ -22,7 +22,7 @@ from vllm.multimodal.processing import ResolvedPromptUpdate
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 from vllm.utils.system_utils import decorate_logs, get_mp_context, set_process_title
 
-from .inputs import MultiModalBatchedField, MultiModalFieldElem, MultiModalKwargsItem
+from .inputs import MultiModalKwargsItem
 
 if TYPE_CHECKING:
     from multiprocessing.synchronize import Event
@@ -37,7 +37,6 @@ logger = init_logger(__name__)
 class LmdbMultiModalCache:
     """LMDB-based multi-modal processor cache."""
 
-    VLLM_LMDB_CACHE_ID_ENV = "VLLM_LMDB_CACHE_ID"
     CACHES_DIR = os.path.join(envs.VLLM_CACHE_ROOT, "mm_caches")
     OPEN_ENVS_LOCK = threading.Lock()
     OPEN_ENVS = dict[str, lmdb.Environment]()
@@ -47,10 +46,20 @@ class LmdbMultiModalCache:
     DB_HASH_TO_OBJECT = b"hash_to_object"
     DB_HASH_TO_PROMPT_UPDATES = b"hash_to_prompt_updates"
 
+    MAP_SIZE_MULTIPLIER = 2
+    MINIMUM_MAP_SIZE = GiB_bytes
+
     INT_SIZE = 4  # Used for both timestamps (seconds) and chunk indices
     LMDB_PAGE_HEADER_SIZE = 16
     LMDB_PAGE_ID_SIZE = 8
     HASH_ITEM_KEY = "lmdb_mm_hash"
+
+    EVICTOR_READER_CHECK_INTERVAL = 60.0  # seconds
+    EVICTOR_BATCH_SIZE_FRACTION = 0.6  # Relative to the max page ids per page
+    EVICTOR_MIN_UTILIZATION = 0.5  # Start evicting at 50% utilization
+    EVICTOR_MAX_UTILIZATION = 1.0  # Reach maximum duty cycle at 100% utilization
+    EVICTOR_MAX_INTERVAL = 15.0  # seconds
+    EVICTOR_MAX_DUTY_CYCLE = 0.1  # 10%
 
     def __init__(
         self,
@@ -67,28 +76,32 @@ class LmdbMultiModalCache:
         self._min_eviction_age = min_eviction_age
         self._max_object_size = max_object_size
 
-        with LmdbMultiModalCache.OPEN_ENVS_LOCK:
+        with self.OPEN_ENVS_LOCK:
             # A given LMDB environment can only be opened once per process,
             # and not across forks.
-            if existing_env := LmdbMultiModalCache.OPEN_ENVS.get(cache_dir):
+            if existing_env := self.OPEN_ENVS.get(cache_dir):
                 logger.debug("Reusing existing LMDB environment at %s", cache_dir)
                 self.lmdb_env = existing_env
             else:
+                # LMDB can require additional space beyond the maximum amoun of data
+                # we're storing, so allocate extra space. (Once the map size is
+                # exhausted, even eviction is liable to fail.)
+                map_size = max(
+                    self._cache_size * self.MAP_SIZE_MULTIPLIER, self.MINIMUM_MAP_SIZE
+                )
                 self.lmdb_env = lmdb.Environment(
                     path=cache_dir,
-                    map_size=max(self._cache_size * 2, GiB_bytes),
+                    map_size=map_size,
                     max_dbs=4,
                     writemap=True,
                     map_async=True,
                 )
 
-                LmdbMultiModalCache.OPEN_ENVS[cache_dir] = self.lmdb_env
+                self.OPEN_ENVS[cache_dir] = self.lmdb_env
 
                 # Ensure that the LMDB environment is closed/removed on fork.
                 os.register_at_fork(
-                    after_in_child=lambda: LmdbMultiModalCache.OPEN_ENVS.pop(
-                        cache_dir
-                    ).close()
+                    after_in_child=lambda: self.OPEN_ENVS.pop(cache_dir).close()
                 )
 
         # Large objects are stored in chunks to fit within LMDB page size limits and
@@ -128,16 +141,15 @@ class LmdbMultiModalCache:
 
     @classmethod
     def ensure_cache_id(cls):
-        if not (cache_id := os.getenv(cls.VLLM_LMDB_CACHE_ID_ENV)):
-            cache_id = uuid4().hex
-            os.environ[cls.VLLM_LMDB_CACHE_ID_ENV] = cache_id
-
-        return cache_id
+        if envs.VLLM_MM_LMDB_CACHE_ID is None:
+            os.environ["VLLM_MM_LMDB_CACHE_ID"] = uuid4().hex
+            assert envs.VLLM_MM_LMDB_CACHE_ID is not None, "Cache ID must be set now."
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: "VllmConfig") -> "LmdbMultiModalCache":
+    def from_vllm_config(cls, vllm_config: "VllmConfig") -> Self:
         # The cache ID must be set by now.
-        cache_id = os.environ[cls.VLLM_LMDB_CACHE_ID_ENV]
+        cache_id = envs.VLLM_MM_LMDB_CACHE_ID
+        assert cache_id is not None, "LMDB cache ID must be set."
 
         mm_config = cast(
             "MultiModalConfig", vllm_config.model_config.get_multimodal_config()
@@ -165,25 +177,6 @@ class LmdbMultiModalCache:
                 stats["branch_pages"] + stats["leaf_pages"] + stats["overflow_pages"]
             )
         return database_size / self._cache_size
-
-    @classmethod
-    def hash_to_item(cls, mm_hash: str, modality: str) -> MultiModalKwargsItem:
-        hash_elem = MultiModalFieldElem(
-            modality=modality,
-            key=cls.HASH_ITEM_KEY,
-            data=mm_hash.encode("utf-8"),
-            field=MultiModalBatchedField(),
-        )
-        mm_item = MultiModalKwargsItem.from_elems([hash_elem])
-        return mm_item
-
-    @classmethod
-    def item_to_hash(cls, mm_item: MultiModalKwargsItem) -> bytes | None:
-        return (
-            bytes(mm_item[cls.HASH_ITEM_KEY].data)
-            if cls.HASH_ITEM_KEY in mm_item
-            else None
-        )
 
     def int2bytes(self, value: int) -> bytes:
         # Use big-endian to ensure lexicographical ordering
@@ -364,7 +357,7 @@ class LmdbMultiModalCache:
                 stale_readers = cache.lmdb_env.reader_check()
                 if stale_readers > 0:
                     logger.warning("Removed %d stale LMDB readers.", stale_readers)
-                next_reader_check = time.monotonic() + 60.0
+                next_reader_check = time.monotonic() + cls.EVICTOR_READER_CHECK_INTERVAL
 
             if got_signal:
                 items, delay = cache.evict_once(min_utilization=0.0)
@@ -382,17 +375,19 @@ class LmdbMultiModalCache:
     def evict_once(
         self,
         batch_size: int = 0,
-        min_utilization: float = 0.5,
-        max_utilization: float = 1.0,
-        max_interval: float = 15.0,
-        max_duty_cycle: float = 0.1,
+        min_utilization: float = EVICTOR_MIN_UTILIZATION,
+        max_utilization: float = EVICTOR_MAX_UTILIZATION,
+        max_interval: float = EVICTOR_MAX_INTERVAL,
+        max_duty_cycle: float = EVICTOR_MAX_DUTY_CYCLE,
     ) -> tuple[int, float]:
         """Evict items from the cache."""
 
         # By default, try to keep all the evicted pages within a single overflow page.
         # (Since this is the lower bound of the batch size, leave margin for items as
         # well as any DB pages the transaction touches.)
-        batch_size = batch_size or int(self._max_page_ids_per_page * 0.6)
+        batch_size = batch_size or int(
+            self._max_page_ids_per_page * self.EVICTOR_BATCH_SIZE_FRACTION
+        )
         with self.lmdb_env.begin(write=False) as txn:
             utilization = self.utilization(txn)
 
@@ -400,7 +395,7 @@ class LmdbMultiModalCache:
         delay = max_interval
 
         if utilization >= min_utilization:
-            current_timestamp = int(time.monotonic())
+            current_timestamp = int(time.time())
 
             with self.lmdb_env.begin(write=True) as txn:
                 evict_start = time.perf_counter()
@@ -538,13 +533,12 @@ class LmdbWriteTransaction(AbstractContextManager):
             # Item is cached, so just update the timestamps for the hash.
             self._write_queue.append((mm_hash_key, None))
 
-            cached_item = self._cache.hash_to_item(mm_hash, modality)
             cached_prompt_updates = self._cache.get_chunked_object(
                 self._cache.hash_to_prompt_updates, self._read_txn, mm_hash_key
             )
 
             with memoryview(cached_prompt_updates) as mv:
-                return cached_item, cast(
+                return None, cast(
                     Sequence[ResolvedPromptUpdate],
                     self._cache.deserialize(mv),
                 )
@@ -563,7 +557,7 @@ class LmdbWriteTransaction(AbstractContextManager):
         self._write_queue.append(
             (mm_hash_key, (serialized_object, serialized_prompt_updates))
         )
-        return self._cache.hash_to_item(mm_hash, modality), mm_item[1]
+        return None, mm_item[1]
 
     def _process_writes(self):
         if not self._write_queue:
@@ -576,7 +570,7 @@ class LmdbWriteTransaction(AbstractContextManager):
                 db=self._cache.hash_to_timestamp
             ) as hash_to_timestamp_cursor,
         ):
-            current_timestamp_bytes = self._cache.int2bytes(int(time.monotonic()))
+            current_timestamp_bytes = self._cache.int2bytes(int(time.time()))
             for mm_hash_key, serialized_pair in self._write_queue:
                 if hash_to_timestamp_cursor.set_key(mm_hash_key):
                     # The item is already in the cache, delete the old (timestamp, hash)
@@ -651,24 +645,16 @@ class LmdbReadTransaction(AbstractContextManager):
         self._txn.abort()
 
     def is_cached_item(self, mm_hash: str) -> bool:
-        mm_hash_bytes = self._cache.item_to_hash(self._cache.hash_to_item(mm_hash, ""))
+        mm_hash_bytes = mm_hash.encode("utf-8")
 
         return (
             self._txn.get(mm_hash_bytes, db=self._cache.hash_to_timestamp) is not None
         )
 
-    def get_and_update_item(
-        self, mm_item: MultiModalKwargsItem | None
-    ) -> MultiModalKwargsItem:
-        mm_hash_bytes = self._cache.item_to_hash(mm_item)
-        if mm_hash_bytes is None:
-            return mm_item
-
+    def get_item(self, mm_hash: str) -> MultiModalKwargsItem:
+        mm_hash_bytes = mm_hash.encode("utf-8")
         item = self._cache.get_chunked_object(
             self._cache.hash_to_object, self._txn, mm_hash_bytes
         )
-        if item is None:
-            raise ValueError(f"Expected cached item for {mm_hash_bytes=}")
-
         with memoryview(item) as item_view:
-            return self._cache.deserialize(item_view)
+            return cast(MultiModalKwargsItem, self._cache.deserialize(item_view))
