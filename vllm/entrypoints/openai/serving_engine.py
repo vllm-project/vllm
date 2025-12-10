@@ -1339,6 +1339,7 @@ class OpenAIServing:
                 )
                 engine_prompt = engine_prompts[0]
                 request_prompt = request_prompts[0]
+                prompt_text, _, _ = self._get_prompt_components(request_prompt)
 
             # Update the sampling params.
             sampling_params.max_tokens = self.max_model_len - len(
