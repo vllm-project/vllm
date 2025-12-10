@@ -63,7 +63,7 @@ class XgrammarBackend(StructuredOutputBackend):
             max_id = max(vocab_dict.values())
             tokenizer_vocab_size = max(len(vocab_dict), max_id + 1)
 
-            vocab_size = self.vocab_size or tokenizer_vocab_size
+            vocab_size = self.tokenizer.vocab_size or tokenizer_vocab_size
             # maintain tokenizer's indexing
             encoded_vocab = [""] * vocab_size
             for token, idx in vocab_dict.items():
