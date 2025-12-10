@@ -8,6 +8,10 @@ import torch
 import torch.nn.functional as F
 
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.ops.vit_attn_wrappers import (
+    vit_flash_attn_wrapper,
+    vit_torch_sdpa_wrapper,
+)
 from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -163,23 +167,13 @@ class MMEncoderAttention(CustomOp):
             query, key, value, bsz, q_len, kv_len
         )
 
-        outputs = []
-        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        q_chunks = torch.split(query, lens, dim=1)
-        k_chunks = torch.split(key, lens, dim=1)
-        v_chunks = torch.split(value, lens, dim=1)
-
-        for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-            q_i, k_i, v_i = (
-                einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-            )
-            output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-            output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
-            outputs.append(output_i)
-
-        out = torch.cat(outputs, dim=1)
-        out = einops.rearrange(out, "b s h d -> s b (h d)").contiguous()
-        return out
+        output = vit_torch_sdpa_wrapper(
+            q=query,
+            k=key,
+            v=value,
+            cu_seqlens=cu_seqlens,
+        )
+        return output
 
     def _forward_fa(
         self,
@@ -201,19 +195,15 @@ class MMEncoderAttention(CustomOp):
             query, key, value, bsz, q_len, kv_len
         )
 
-        max_seqlen = max_seqlen.item() if max_seqlen else None
-
-        output = self.flash_attn_varlen_func(
-            query,
-            key,
-            value,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
+        output = vit_flash_attn_wrapper(
+            q=query,
+            k=key,
+            v=value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            bsz=bsz,
+            is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
         )
-
-        output = einops.rearrange(output, "(b s) h d -> s b (h d)", b=bsz).contiguous()
         return output
 
     def forward_native(
