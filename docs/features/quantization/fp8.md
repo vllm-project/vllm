@@ -60,7 +60,7 @@ Since simple RTN does not require data for weight quantization and the activatio
 ??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import QuantizationModifier
 
     # Configure the simple PTQ quantization

@@ -60,12 +60,17 @@ class IntermediateTensors:
     tensors: dict[str, torch.Tensor]
     kv_connector_output: KVConnectorOutput | None
 
-    def __init__(self, tensors):
+    def __init__(
+        self,
+        tensors: dict[str, torch.Tensor],
+        kv_connector_output: KVConnectorOutput | None = None,
+    ) -> None:
         # manually define this function, so that
         # Dynamo knows `IntermediateTensors()` comes from this file.
         # Otherwise, dataclass will generate this function by evaluating
         # a string, and we will lose the information about the source file.
         self.tensors = tensors
+        self.kv_connector_output = kv_connector_output
 
     def __getitem__(self, key: str | slice):
         if isinstance(key, str):

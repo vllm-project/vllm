@@ -93,7 +93,12 @@ class Request:
             if self.prompt_token_ids is not None
             else [0] * self.num_prompt_tokens
         )
-        self.num_output_placeholders = 0  # Used in async scheduling.
+
+        # Used in async scheduling.
+        self.num_output_placeholders = 0
+        # Used in forced preemption (reset_prefix_cache) with async scheduling.
+        self.discard_latest_async_tokens = False
+
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
@@ -121,11 +126,16 @@ class Request:
         # The number of requests being preempted by the scheduler
         self.num_preemptions = 0
 
+        # The number of tokens that have been computed remotely.
+        self.num_external_computed_tokens = 0
+
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
         if block_hasher is not None:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
+
+        self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
     @classmethod
     def from_engine_core_request(
@@ -180,6 +190,19 @@ class Request:
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
 
+    def get_skip_reading_prefix_cache(self) -> bool:
+        if (
+            self.sampling_params is not None
+            and self.sampling_params.skip_reading_prefix_cache is not None
+        ):
+            return self.sampling_params.skip_reading_prefix_cache
+        elif (
+            self.pooling_params is not None
+            and self.pooling_params.skip_reading_prefix_cache is not None
+        ):
+            return self.pooling_params.skip_reading_prefix_cache
+        return False
+
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
@@ -203,6 +226,19 @@ class Request:
             return None
         events, self.events = self.events, []
         return events
+
+    def __lt__(self, other: "Request") -> bool:
+        """
+        Compare two requests based on priority, arrival time, and request ID.
+        Used in priority scheduling.
+        """
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        if self.arrival_time != other.arrival_time:
+            return self.arrival_time < other.arrival_time
+        if self.request_id != other.request_id:
+            return self.request_id < other.request_id
+        return id(self) < id(other)
 
 
 class RequestStatus(enum.IntEnum):

@@ -50,7 +50,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -84,6 +83,7 @@ class NemotronHMLP(nn.Module):
     def __init__(
         self,
         config: NemotronHConfig,
+        hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -94,7 +94,7 @@ class NemotronHMLP(nn.Module):
         super().__init__()
 
         self.up_proj = ColumnParallelLinear(
-            input_size=config.hidden_size,
+            input_size=hidden_size,
             output_size=intermediate_size,
             bias=bias,
             quant_config=quant_config,
@@ -103,7 +103,7 @@ class NemotronHMLP(nn.Module):
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
-            output_size=config.hidden_size,
+            output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
@@ -136,6 +136,10 @@ class NemotronHMoE(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
+        self.use_latent_moe: bool = getattr(config, "moe_latent_size", None) is not None
+        self.moe_hidden_size: int = (
+            config.moe_latent_size if self.use_latent_moe else config.hidden_size
+        )
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
@@ -173,6 +177,7 @@ class NemotronHMoE(nn.Module):
 
             self.shared_experts = NemotronHMLP(
                 config=config,
+                hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 quant_config=quant_config,
                 reduce_results=False,
@@ -181,10 +186,12 @@ class NemotronHMoE(nn.Module):
             )
 
         self.experts = SharedFusedMoE(
-            shared_experts=self.shared_experts,
+            # TODO: make it possible for shared experts to have
+            # different input in SharedFusedMoE
+            shared_experts=self.shared_experts if not self.use_latent_moe else None,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
+            hidden_size=self.moe_hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
             renormalize=config.norm_topk_prob,
@@ -202,6 +209,32 @@ class NemotronHMoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
+        if self.use_latent_moe:
+            # TODO: check if using ReplicatedLinear is better than
+            # ColumnParallelLinear + all_gather
+            self.fc1_latent_proj = ColumnParallelLinear(
+                input_size=config.hidden_size,
+                output_size=self.moe_hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                # We need to gather the output to prepare input for moe
+                gather_output=True,
+                prefix=f"{prefix}.fc1_latent_proj",
+            )
+            self.fc2_latent_proj = ReplicatedLinear(
+                input_size=self.moe_hidden_size,
+                output_size=config.hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc2_latent_proj",
+            )
+
+        else:
+            self.fc1_latent_proj = None
+            self.fc2_latent_proj = None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -211,12 +244,20 @@ class NemotronHMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
+        shared_output = None
+        if self.use_latent_moe:
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(hidden_states)
+            hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
         fused_moe_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        shared_output, final_hidden_states = fused_moe_out
+        if self.use_latent_moe:
+            _, final_hidden_states = fused_moe_out
+        else:
+            shared_output, final_hidden_states = fused_moe_out
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
@@ -225,6 +266,13 @@ class NemotronHMoE(nn.Module):
         elif self.shared_experts is not None:
             assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor
+
+        # TODO: currently latent up_proj is done before all-reduce for simplicity.
+        #  if and when shared experts will be part of SharedFusedMoE,
+        #  we should do the up_proj after all-reduce,
+        #  to have the all-reduce in the smaller latent dimension.
+        if self.use_latent_moe:
+            final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)
 
         if self.shared_experts is not None:
             assert shared_output is not None
@@ -269,6 +317,7 @@ class NemotronHMLPDecoderLayer(nn.Module):
 
         self.mixer = NemotronHMLP(
             config,
+            hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
             quant_config=quant_config,
             bias=config.mlp_bias,
@@ -377,8 +426,7 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        output = torch.empty_like(hidden_states)
-        self.mixer(hidden_states, output)
+        output = self.mixer(hidden_states)
         return output, residual
 
 
@@ -513,21 +561,14 @@ class NemotronHModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
@@ -556,7 +597,7 @@ class NemotronHModel(nn.Module):
 
         self.norm_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -570,7 +611,7 @@ class NemotronHModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -722,7 +763,6 @@ class NemotronHForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -768,7 +808,7 @@ class NemotronHForCausalLM(
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         self.quant_config = vllm_config.quant_config
@@ -779,24 +819,14 @@ class NemotronHForCausalLM(
         self.model = NemotronHModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -841,8 +871,8 @@ class NemotronHForCausalLM(
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -866,5 +896,5 @@ class NemotronHForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["mtp"])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

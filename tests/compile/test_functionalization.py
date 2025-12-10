@@ -137,7 +137,7 @@ class TestRotaryEmbedding(torch.nn.Module):
             self.head_dim,
             rotary_dim=self.rotary_dim,
             max_position=max_position,
-            base=base,
+            rope_parameters={"rope_type": "default", "rope_theta": base},
         )
 
     def forward(self, positions, q, k):
@@ -172,7 +172,7 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=base,
+            rope_parameters={"rope_type": "default", "rope_theta": base},
         )
 
     def forward(self, positions, hidden_states):
@@ -223,7 +223,11 @@ def test_fix_functionalization(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
-            pass_config=PassConfig(enable_fusion=do_fusion, enable_noop=True),
+            pass_config=PassConfig(
+                fuse_norm_quant=do_fusion,
+                fuse_act_quant=do_fusion,
+                eliminate_noops=True,
+            ),
         ),
     )
 

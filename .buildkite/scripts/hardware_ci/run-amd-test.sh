@@ -59,7 +59,7 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
+echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
@@ -78,17 +78,13 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 
-if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"pytest -v -s basic_correctness/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
   commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
 fi
 
-if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"pytest -v -s compile/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s lora"* ]]; then
   commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
@@ -181,13 +177,13 @@ if [[ -z "$render_gid" ]]; then
   exit 1
 fi
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs.
 if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used   
-  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+  # assign job count as the number of shards used
+  commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     # assign shard-id for each shard
-    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
+    commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
     echo "Shard ${GPU} commands:$commands_gpu"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
