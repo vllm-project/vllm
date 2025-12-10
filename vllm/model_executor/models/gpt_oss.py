@@ -7,7 +7,8 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -646,8 +647,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_start,
                 ep_rank_end,
+                ep_rank_start,
                 heads_per_rank,
                 head_start,
                 weights,

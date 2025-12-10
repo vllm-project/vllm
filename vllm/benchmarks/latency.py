@@ -12,7 +12,6 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
@@ -79,14 +78,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.profile and not (
-        envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE
-    ):
-        raise OSError(
-            "Profiling is enabled but the profiler environment variables"
-            " are not set. Please set either VLLM_TORCH_PROFILER_DIR or"
-            " VLLM_TORCH_CUDA_PROFILE."
-        )
     engine_args = EngineArgs.from_cli_args(args)
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
@@ -147,13 +138,14 @@ def main(args: argparse.Namespace):
         run_to_completion(do_profile=False)
 
     if args.profile:
-        if envs.VLLM_TORCH_PROFILER_DIR:
+        profiler_config = engine_args.profiler_config
+        if profiler_config.profiler == "torch":
             print(
                 "Profiling with torch profiler (results will be saved to"
-                f" {envs.VLLM_TORCH_PROFILER_DIR})..."
+                f" {profiler_config.torch_profiler_dir})..."
             )
-        elif envs.VLLM_TORCH_CUDA_PROFILE:
-            print("Profiling with nsys ...")
+        elif profiler_config.profiler == "cuda":
+            print("Profiling with cuda profiler ...")
         run_to_completion(do_profile=True)
         return
 

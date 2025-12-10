@@ -30,7 +30,7 @@ async def _async_serving_models_init() -> OpenAIServingModels:
     mock_model_config = MagicMock(spec=ModelConfig)
     mock_model_config.max_model_len = 2048
     mock_engine_client.model_config = mock_model_config
-    mock_engine_client.processor = MagicMock()
+    mock_engine_client.input_processor = MagicMock()
     mock_engine_client.io_processor = MagicMock()
 
     serving_models = OpenAIServingModels(

@@ -3,13 +3,10 @@
 """Base class for attention-like layers."""
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.kv_cache_interface import KVCacheSpec
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 
 class AttentionLayerBase(ABC):
@@ -22,7 +19,7 @@ class AttentionLayerBase(ABC):
     """
 
     @abstractmethod
-    def get_attn_backend(self) -> type["AttentionBackend"]:
+    def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this layer."""
         pass
 

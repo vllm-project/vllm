@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import importlib
 import json
 import time
 
@@ -35,6 +35,10 @@ GET_WEATHER_SCHEMA = {
 
 @pytest.fixture(scope="module")
 def server():
+    assert importlib.util.find_spec("gpt_oss") is not None, (
+        "Harmony tests require gpt_oss package to be installed"
+    )
+
     args = ["--enforce-eager", "--tool-server", "demo", "--max_model_len", "5000"]
     env_dict = dict(
         VLLM_ENABLE_RESPONSES_API_STORE="1",
@@ -722,7 +726,7 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
-    from vllm.entrypoints.harmony_utils import get_system_message
+    from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
     # Test with custom tools enabled - commentary channel should be available
     sys_msg = get_system_message(with_custom_tools=True)
