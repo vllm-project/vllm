@@ -104,7 +104,7 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
     --build-arg RUN_WHEEL_CHECK=false
     ```
 
-For (G)B300, we recommend to use CUDA13.
+For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
 ??? console "Command"
 
