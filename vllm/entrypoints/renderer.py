@@ -12,6 +12,7 @@ import torch
 from pydantic import Field
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.protocol import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -164,8 +165,9 @@ class BaseRenderer(ABC):
     ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
         if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            raise VLLMValidationError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`.",
+                parameter="prompt_embeds",
             )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
@@ -395,10 +397,12 @@ class CompletionRenderer(BaseRenderer):
     ) -> EngineTokensPrompt:
         """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"This model's maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
-                "Please reduce the length of the input messages."
+                "Please reduce the length of the input messages.",
+                parameter="input_tokens",
+                value=len(token_ids),
             )
 
         tokens_prompt = EngineTokensPrompt(prompt_token_ids=token_ids)

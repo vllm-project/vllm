@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -133,6 +134,9 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_embeds=request.prompt_embeds,
                 config=self._build_render_config(request),
             )
+        except VLLMValidationError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e), param=e.parameter)
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -241,9 +245,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     )
 
                 generators.append(generator)
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e), param=e.parameter)
 
         result_generator = merge_async_iterators(*generators)
 
@@ -300,9 +303,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        except VLLMValidationError as e:
+            return self.create_error_response(str(e), param=e.parameter)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -498,8 +500,10 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except VLLMValidationError as e:
+            data = self.create_streaming_error_response(str(e), param=e.parameter)
+            yield f"data: {data}\n\n"
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
@@ -646,8 +650,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     token = f"token_id:{token_id}"
                 else:
                     if tokenizer is None:
-                        raise ValueError(
-                            "Unable to get tokenizer because `skip_tokenizer_init=True`"
+                        raise VLLMValidationError(
+                            "Unable to get tokenizer because "
+                            "`skip_tokenizer_init=True`",
+                            parameter="skip_tokenizer_init",
+                            value=True,
                         )
 
                     token = tokenizer.decode(token_id)
@@ -706,6 +713,15 @@ class OpenAIServingCompletion(OpenAIServing):
         request: CompletionRequest,
         max_input_length: int | None = None,
     ) -> RenderConfig:
+        # Validate max_tokens before using it
+        if request.max_tokens is not None and request.max_tokens > self.max_model_len:
+            raise VLLMValidationError(
+                f"'max_tokens' ({request.max_tokens}) cannot be greater than "
+                f"the model's maximum context length ({self.max_model_len}).",
+                parameter="max_tokens",
+                value=request.max_tokens,
+            )
+
         max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
         return RenderConfig(
             max_length=max_input_tokens_len,

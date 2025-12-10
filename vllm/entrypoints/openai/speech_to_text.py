@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
     UsageInfo,
+    VLLMValidationError,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -134,7 +135,11 @@ class OpenAISpeechToText(OpenAIServing):
         )
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
-            raise ValueError("Maximum file size exceeded.")
+            raise VLLMValidationError(
+                "Maximum file size exceeded",
+                parameter="audio_filesize_mb",
+                value=len(audio_data) / 1024**2,
+            )
 
         with io.BytesIO(audio_data) as bytes_:
             # NOTE resample to model SR here for efficiency. This is also a
@@ -162,12 +167,18 @@ class OpenAISpeechToText(OpenAIServing):
             )
             if request.response_format == "verbose_json":
                 if not isinstance(prompt, dict):
-                    raise ValueError(f"Expected prompt to be a dict,got {type(prompt)}")
+                    raise VLLMValidationError(
+                        "Expected prompt to be a dict",
+                        parameter="prompt",
+                        value=type(prompt).__name__,
+                    )
                 prompt_dict = cast(dict, prompt)
                 decoder_prompt = prompt.get("decoder_prompt")
                 if not isinstance(decoder_prompt, str):
-                    raise ValueError(
-                        f"Expected decoder_prompt to bestr, got {type(decoder_prompt)}"
+                    raise VLLMValidationError(
+                        "Expected decoder_prompt to be str",
+                        parameter="decoder_prompt",
+                        value=type(decoder_prompt).__name__,
                     )
                 prompt_dict["decoder_prompt"] = decoder_prompt.replace(
                     "<|notimestamps|>", "<|0.00|>"
@@ -285,9 +296,12 @@ class OpenAISpeechToText(OpenAIServing):
                 audio_data=audio_data,
             )
 
-        except ValueError as e:
+        except VLLMValidationError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(
+                str(e),
+                param=e.parameter,
+            )
 
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:
@@ -316,9 +330,11 @@ class OpenAISpeechToText(OpenAIServing):
                 )
                 for i, prompt in enumerate(prompts)
             ]
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        except VLLMValidationError as e:
+            return self.create_error_response(
+                str(e),
+                param=e.parameter,
+            )
 
         if request.stream:
             return stream_generator_method(
@@ -391,9 +407,11 @@ class OpenAISpeechToText(OpenAIServing):
             return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        except VLLMValidationError as e:
+            return self.create_error_response(
+                str(e),
+                param=e.parameter,
+            )
 
     async def _speech_to_text_stream_generator(
         self,
@@ -502,9 +520,12 @@ class OpenAISpeechToText(OpenAIServing):
                 total_tokens=num_prompt_tokens + completion_tokens,
             )
 
-        except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
+        except VLLMValidationError as e:
             logger.exception("Error in %s stream generator.", self.task_type)
+            data = self.create_streaming_error_response(str(e), param=e.parameter)
+            yield f"data: {data}\n\n"
+        except Exception as e:
+            logger.exception("Unexpected error in %s stream generator.", self.task_type)
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
