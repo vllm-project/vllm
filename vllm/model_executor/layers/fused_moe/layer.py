@@ -1559,10 +1559,24 @@ class FusedMoE(CustomOp):
         def valid_grouping() -> bool:
             # Check if num_experts is greater than num_expert_group
             # and is divisible by num_expert_group
+
+            # This is a workaround for ROCm MTP correctness with DeepSeek
+            if not current_platform.is_rocm():
+                return True
+
             num_experts = router_logits.shape[-1]
             if num_experts <= self.num_expert_group:
-                return False
-            return num_experts % self.num_expert_group == 0
+                is_valid_grouping = False
+            else:
+                is_valid_grouping = num_experts % self.num_expert_group == 0
+
+            if not is_valid_grouping:
+                logger.warning_once(
+                    f"Invalid expert grouping: num_experts={num_experts}, "
+                    f"num_expert_group={self.num_expert_group}. "
+                    "Falling back to standard top-k routing."
+                )
+            return is_valid_grouping
 
         indices_type = self.quant_method.topk_indices_dtype
 
