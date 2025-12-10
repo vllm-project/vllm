@@ -84,7 +84,7 @@ Total input tokens:                      1369
 Total generated tokens:                  2212
 Request throughput (req/s):              1.73
 Output token throughput (tok/s):         382.89
-Total Token throughput (tok/s):          619.85
+Total token throughput (tok/s):          619.85
 ---------------Time to First Token----------------
 Mean TTFT (ms):                          71.54
 Median TTFT (ms):                        73.88

@@ -175,6 +175,31 @@ class PlaceholderRange:
 
         return int(self.is_embed.sum().item())
 
+    def extract_embeds_range(self) -> list[tuple[int, int]]:
+        """Extract the start and end indices of the embedded region in prompt.
+
+        For example, given `PlaceholderRange(offset=2, length=5)` and
+        `is_embed = [False, True, False, True, True]`, the output is
+        `[(1 + offset, 1 + offset), (3 + offset, 4 + offset)]`.
+
+        Returns:
+            A tuple `(start, end)` representing the start and end
+            indices (inclusive) of the embedded region.
+            Returns full placeholder range if `is_embed` is `None`.
+        """
+        if self.is_embed is None:
+            return [(self.offset, self.offset + self.length)]
+
+        mask_i = self.is_embed.int()
+        starts = torch.nonzero(
+            torch.diff(mask_i, prepend=mask_i.new_zeros(1)) == 1
+        ).flatten()
+        ends = torch.nonzero(
+            torch.diff(mask_i, append=mask_i.new_zeros(1)) == -1
+        ).flatten()
+        ranges = torch.stack((starts, ends), dim=1) + self.offset
+        return [tuple(x) for x in ranges.tolist()]
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
@@ -929,7 +954,7 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.13.")
+@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
 class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
@@ -939,7 +964,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_hf_inputs` and "
         "access the tensor data using `.get_data()`."
     )
@@ -952,7 +977,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_seq` and "
         "access the tensor data using `.get_data()`."
     )

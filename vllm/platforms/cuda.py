@@ -182,8 +182,8 @@ class CudaPlatformBase(Platform):
 
             if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability(100):
-                    # Blackwell => Force CutlassMLA.
+                if cls.is_device_capability(100) and not use_sparse:
+                    # Blackwell => Force CutlassMLA (unless sparse, i.e. DSv3.2).
                     use_cutlass_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
@@ -232,44 +232,20 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
-        # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
 
-        compilation_config = vllm_config.compilation_config
-        if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
-                logger.warning_once(
-                    "Decode context parallel (DCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-            # prefill context parallel do not support full cudagraphs
-            elif parallel_config.prefill_context_parallel_size > 1:
-                logger.warning_once(
-                    "Prefill context parallel (PCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
         if (
-            parallel_config.all2all_backend == "deepep_high_throughput"
-            and parallel_config.data_parallel_size > 1
-            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
         ):
-            # TODO: Piecewise Cuda graph might be enabled
-            # if torch compile cache key issue fixed
-            # See https://github.com/vllm-project/vllm/pull/25093
-            logger.info(
-                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
-                "kernels are optimized for prefill and are incompatible with "
-                "CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+            logger.warning(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def get_current_memory_usage(
@@ -306,6 +282,7 @@ class CudaPlatformBase(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        use_mm_prefix,
         device_capability,
         attn_type,
     ) -> tuple[
@@ -327,6 +304,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
+                    use_mm_prefix,
                     device_capability,
                     attn_type,
                 )
@@ -350,6 +328,7 @@ class CudaPlatformBase(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         if attn_type is None:
@@ -370,6 +349,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
+                    use_mm_prefix,
                     device_capability,
                     attn_type,
                 )
@@ -394,6 +374,7 @@ class CudaPlatformBase(Platform):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
             attn_type,
         )

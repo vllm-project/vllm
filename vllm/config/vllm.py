@@ -39,6 +39,7 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
+from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -66,7 +67,7 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise
     cudagraphs"""
     O2 = 2
     """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
@@ -218,6 +219,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
+    profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
+    """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -296,6 +299,8 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.structured_outputs_config:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
+        if self.profiler_config:
+            vllm_factors.append(self.profiler_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
@@ -661,8 +666,9 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
         if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(
@@ -687,22 +693,29 @@ class VllmConfig:
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-            ):
-                if self.model_config.pooler_config is not None:
+            if model_config := self.model_config:
+                if (
+                    self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    and model_config.pooler_config is not None
+                ):
                     logger.warning_once(
                         "Pooling models do not support full cudagraphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif self.model_config.is_encoder_decoder:
-                    logger.warning_once(
-                        "Encoder-decoder models do not support full cudagraphs. "
-                        "Overriding cudagraph_mode to PIECEWISE."
+                elif (
+                    model_config.is_encoder_decoder
+                    and self.compilation_config.cudagraph_mode
+                    not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+                ):
+                    logger.info_once(
+                        "Encoder-decoder models do not support %s. "
+                        "Overriding cudagraph_mode to FULL_DECODE_ONLY.",
+                        self.compilation_config.cudagraph_mode.name,
                     )
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    self.compilation_config.cudagraph_mode = (
+                        CUDAGraphMode.FULL_DECODE_ONLY
+                    )
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -813,7 +826,10 @@ class VllmConfig:
         ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
-        self.compilation_config.set_splitting_ops_for_v1()
+        self.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=self.parallel_config.all2all_backend,
+            data_parallel_size=self.parallel_config.data_parallel_size,
+        )
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,
@@ -1039,8 +1055,14 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
+                decode_query_len = 1
+                if (
+                    self.speculative_config
+                    and self.speculative_config.num_speculative_tokens
+                ):
+                    decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
