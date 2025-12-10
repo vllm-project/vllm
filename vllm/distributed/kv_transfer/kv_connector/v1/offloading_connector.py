@@ -40,6 +40,7 @@ logger = init_logger(__name__)
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     reqs_to_load: dict[ReqId, TransferSpec]
     reqs_to_store: dict[ReqId, TransferSpec]
+    reqs_to_flush: set[ReqId] | None
 
 
 class OffloadingConnector(KVConnectorBase_V1):
@@ -343,8 +344,18 @@ class OffloadingConnectorScheduler:
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
+            reqs_to_flush=scheduler_output.preempted_req_ids,
         )
         self._reqs_to_load = {}
+
+        # NOTE (orozery): we should move this logic to update_connector_output
+        # once KVConnectorOutput allows us to report completed transfers
+        for req_id in meta.reqs_to_flush or ():
+            block_hashes = self._reqs_being_stored.get(req_id)
+            if block_hashes:
+                self.manager.complete_store(block_hashes)
+                block_hashes.clear()
+
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -461,6 +472,11 @@ class OffloadingConnectorWorker:
         self._register_handlers(kv_caches, attn_backends)
 
     def start_load_kv(self, metadata: OffloadingConnectorMetadata):
+        for req_id in metadata.reqs_to_flush or ():
+            job_ids = self._store_jobs.get(req_id)
+            if job_ids:
+                self.worker.wait(job_ids)
+
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, False)
