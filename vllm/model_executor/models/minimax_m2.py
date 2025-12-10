@@ -148,7 +148,6 @@ class MiniMaxM2Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rotary_dim: int,
         rope_parameters: dict[str, Any] | None = None,
         attn_window_size: int | None = None,
         max_position_embeddings: int = 8192,
@@ -201,7 +200,6 @@ class MiniMaxM2Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -263,7 +261,6 @@ class MiniMaxM2DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rotary_dim=config.rotary_dim,
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,

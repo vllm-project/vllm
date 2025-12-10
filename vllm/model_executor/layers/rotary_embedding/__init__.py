@@ -53,9 +53,13 @@ def get_rope(
     else:
         dual_chunk_attention_args = None
 
+    base = 10000
     partial_rotary_factor = 1.0
     if rope_parameters is not None:
-        partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
+        if "partial_rotary_factor" in rope_parameters:
+            partial_rotary_factor = rope_parameters["partial_rotary_factor"]
+        if "rope_theta" in rope_parameters:
+            base = rope_parameters["rope_theta"]
 
     rotary_dim = head_size
     if partial_rotary_factor < 1.0:
@@ -73,7 +77,6 @@ def get_rope(
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
-    base = rope_parameters["rope_theta"] if rope_parameters else 10000
     if dual_chunk_attention_config is not None:
         extra_kwargs = {
             k: v

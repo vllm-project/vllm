@@ -79,7 +79,6 @@ def test_fused_qk_norm_rope_matches_reference(
 
     rope = RotaryEmbedding(
         head_size=head_dim,
-        rotary_dim=head_dim,
         max_position_embeddings=4096,
         base=10000.0,
         is_neox_style=is_neox,
