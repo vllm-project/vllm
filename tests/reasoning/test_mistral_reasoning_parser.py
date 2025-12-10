@@ -324,7 +324,7 @@ def test_mistral_reasoning(
     # Test extract_content
     if param_dict["content"] is not None:
         # Handle the case where there are tokens outputted before Thinking.
-        # This should not occure if the model is well trained and prompted.
+        # This should not occur if the model is well trained and prompted.
         if "[THINK]" in param_dict["output"] and not param_dict["output"].startswith(
             "[THINK]"
         ):
