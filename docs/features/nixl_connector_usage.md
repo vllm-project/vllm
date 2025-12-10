@@ -22,7 +22,7 @@ python tools/install_nixl_from_source_ubuntu.py
 NixlConnector uses NIXL library for underlying communication, which supports multiple transport backends. UCX (Unified Communication X) is the primary default transport library used by NIXL. Configure transport environment variables:
 
 ```bash
-# Example UCX configuration, adjust according to your enviroment
+# Example UCX configuration, adjust according to your environment
 export UCX_TLS=all  # or specify specific transports like "rc,ud,sm,^cuda_ipc" ..etc
 export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1"
 ```
