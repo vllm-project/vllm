@@ -26,6 +26,7 @@ from vllm.lora.utils import (
     from_layer_logits_processor,
     get_supported_lora_modules,
     is_moe_model,
+    process_packed_modules_mapping,
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -33,7 +34,6 @@ from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.model_executor.utils import get_packed_modules_mapping
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -102,7 +102,7 @@ class LoRAModelManager:
         assert self.supported_lora_modules, "No supported LoRA modules found in"
         f" {self.model.__class__.__name__}."
 
-        self.packed_modules_mapping = get_packed_modules_mapping(self.model)
+        self.packed_modules_mapping = process_packed_modules_mapping(self.model)
         self._init_multimodal_config(vllm_config)
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
