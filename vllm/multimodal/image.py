@@ -88,9 +88,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         image.load()
         return self._convert_image_mode(image)
 
-    def load_base64(
-        self, media_type: str, data: str
-    ) -> MediaWithBytes[Image.Image]:
+    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         raw_bytes = pybase64.b64decode(data, validate=True)
         image = self.load_bytes(raw_bytes)
         return MediaWithBytes(media=image, original_bytes=raw_bytes)
