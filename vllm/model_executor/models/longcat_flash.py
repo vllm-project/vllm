@@ -430,6 +430,7 @@ class FlashDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -440,6 +441,7 @@ class FlashDecoderLayer(nn.Module):
         hidden_states = self.self_attn[0](
             positions=positions,
             hidden_states=hidden_states,
+            llama_4_scaling=llama_4_scaling,
         )
 
         hidden_states, residual = self.post_attention_layernorm[0](
@@ -459,6 +461,7 @@ class FlashDecoderLayer(nn.Module):
         hidden_states = self.self_attn[1](
             positions=positions,
             hidden_states=hidden_states,
+            llama_4_scaling=llama_4_scaling,
         )
         hidden_states, residual = self.post_attention_layernorm[1](
             hidden_states, residual
@@ -534,11 +537,13 @@ class FlashModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # LongCat Flash doesn't use llama_4_scaling, pass None to satisfy interface
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
+                None,  # llama_4_scaling
             )
 
         if not get_pp_group().is_last_rank:
