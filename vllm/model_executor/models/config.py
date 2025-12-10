@@ -387,11 +387,16 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             model_config=model_config,
         )
 
+        if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            and cache_config.enable_prefix_caching):
+            block_size = cache_config.block_size
+        else:
+            block_size = model_config.max_model_len
         # get mamba page size
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=model_config.max_model_len if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE else cache_config.block_size,
+            block_size=block_size,
             enable_caching=cache_config.enable_prefix_caching,
         ).page_size_bytes
 
