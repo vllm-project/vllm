@@ -147,6 +147,11 @@ class GGUFModelLoader(BaseModelLoader):
                     )
                 )
 
+        # For models with tied word embeddings, lm_head.weight is initialized
+        # from embed_tokens and doesn't need to be mapped from GGUF file
+        if getattr(config, "tie_word_embeddings", False):
+            sideload_params.append(re.compile(r"lm_head\.weight"))
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
