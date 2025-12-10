@@ -1041,7 +1041,7 @@ class CompilationConfig:
         backend = (
             all2all_backend
             if all2all_backend is not None
-            else "allgather_reducescatter"
+            else envs.VLLM_ALL2ALL_BACKEND
         )
         dp_size = data_parallel_size if data_parallel_size is not None else 1
         need_moe_splitting = (
