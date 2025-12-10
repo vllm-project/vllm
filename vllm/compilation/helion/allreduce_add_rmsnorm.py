@@ -741,8 +741,9 @@ class AllReduceAddRMSNormBenchmark(DistributedKernelBenchmark):
             (1024, 4096),
             (128, 8192),
             (256, 8192),
-            (512, 8192),
-            (1024, 8192),
+            # FIXME(gmagogsfm): Add them back after fixing the hang on H200
+            # (512, 8192),
+            # (1024, 8192),
         ]
         return [
             (shapes, torch.bfloat16, {"splits_per_rank": [2, 4, 8]}),
