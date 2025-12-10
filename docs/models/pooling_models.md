@@ -33,8 +33,8 @@ shown in the table below.
 | Architecture                                    | `--convert` | Supported pooling tasks               |
 |-------------------------------------------------|-------------|---------------------------------------|
 | `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
+| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
 | `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
-| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `token_classify`                      |
 
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
@@ -70,7 +70,6 @@ the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type | Normalization | Softmax |
 |------------|--------------|---------------|---------|
-| `reward`   | `ALL`        | ❌            | ❌     |
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
@@ -318,3 +317,10 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 ### Remove softmax from PoolingParams
 
 We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### as_reward_model
+
+Pooling models now default support all pooling, you can use it without any settings.
+
+- Extracting hidden states prefers using `token_embed` task.
+- Reward models prefers using `token_classify` task.

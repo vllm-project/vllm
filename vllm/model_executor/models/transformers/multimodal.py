@@ -264,7 +264,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     supports_multimodal_raw_input_only = True
-    merge_by_field_config = True
+
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
     hf_to_vllm_mapper = WeightsMapper(

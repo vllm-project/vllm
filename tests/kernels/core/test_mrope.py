@@ -113,12 +113,10 @@ def test_mrope(
     is_neox_style = True
 
     max_position = config.max_position_embeddings
-    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=rotary_dim,
+        rotary_dim=head_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=config.rope_parameters,
@@ -184,12 +182,10 @@ def test_mrope_torch_compile_tracing(
     )
     is_neox_style = True
     max_position = config.max_position_embeddings
-    partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-    rotary_dim = int(head_dim * partial_rotary_factor)
 
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=rotary_dim,
+        rotary_dim=head_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=config.rope_parameters,

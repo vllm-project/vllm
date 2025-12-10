@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.harmony_utils import parse_chat_output
+from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
@@ -145,7 +145,7 @@ class GptOssReasoningParser(ReasoningParser):
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
         self, original_tag: str | None, tool_server: ToolServer | None
-    ) -> str:
+    ) -> str | None:
         if original_tag is None:
             if tool_server is None:
                 return json.dumps(no_func_reaonsing_tag)
