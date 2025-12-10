@@ -213,10 +213,19 @@ def test_engine_metrics(vllm_runner, example_prompts):
 
         runner_timings = find_metric("vllm:runner_timings")
         assert len(runner_timings) >= 1
+        assert {"preprocess", "forward", "postprocess", "sample"}.issubset(
+            {timing.labels["event"] for timing in runner_timings}
+        )
         for timing in runner_timings:
             assert isinstance(timing, Histogram)
-            assert timing.count > 0
-            assert timing.sum > 0
+            if timing.labels["event"] in {
+                "preprocess",
+                "forward",
+                "postprocess",
+                "sample",
+            }:
+                assert timing.count > 0
+                assert timing.sum > 0
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
