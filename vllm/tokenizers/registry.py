@@ -183,7 +183,7 @@ def get_tokenizer(
             "`tokenizer_mode='custom'` when initializing vLLM.",
             tokenizer_args,
             str(tokenizer_kwargs),
-            tokenizer_mode,
+            tokenizer_name,
         )
 
         tokenizer_mode = str(tokenizer_name)

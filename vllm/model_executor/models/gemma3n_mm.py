@@ -463,7 +463,6 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 class Gemma3nForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsTranscription
 ):
-    merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {

@@ -59,6 +59,7 @@ nav:
   - CLI Reference: cli
   - Community:
     - community/*
+    - Governance: governance
     - Blog: https://blog.vllm.ai
     - Forum: https://discuss.vllm.ai
     - Slack: https://slack.vllm.ai

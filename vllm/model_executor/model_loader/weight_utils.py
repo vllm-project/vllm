@@ -641,7 +641,6 @@ def safetensors_weights_iterator(
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
-    state_dict = {}
     leftover_state_dict: dict[str, torch.Tensor] = {}
 
     for st_file in tqdm(
@@ -667,6 +666,7 @@ def safetensors_weights_iterator(
             )
 
             with safe_open(st_file, framework="pt") as f:
+                state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
 

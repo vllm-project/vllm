@@ -149,8 +149,6 @@ class LlamaAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -265,7 +263,6 @@ class LlamaAttention(nn.Module):
             max_position=self.max_position_embeddings,
             rope_parameters=getattr(config, "rope_parameters", None),
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 

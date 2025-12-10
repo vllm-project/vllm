@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import pytest
 from transformers import SiglipModel
 
@@ -35,7 +37,11 @@ def _run_test(
     model: str,
     *,
     dtype: str,
+    tokenization_kwargs: dict[str, Any] | None = None,
 ) -> None:
+    if tokenization_kwargs is None:
+        tokenization_kwargs = {}
+
     with vllm_runner(
         model,
         runner="pooling",
@@ -44,10 +50,14 @@ def _run_test(
         max_model_len=64,
         gpu_memory_utilization=0.7,
     ) as vllm_model:
-        vllm_outputs = vllm_model.embed(input_texts, images=input_images)
+        vllm_outputs = vllm_model.embed(
+            input_texts, images=input_images, tokenization_kwargs=tokenization_kwargs
+        )
 
     with hf_runner(model, dtype=dtype, auto_cls=SiglipModel) as hf_model:
-        all_inputs = hf_model.get_inputs(input_texts, images=input_images)
+        all_inputs = hf_model.get_inputs(
+            input_texts, images=input_images, tokenization_kwargs=tokenization_kwargs
+        )
 
         all_outputs = []
         for inputs in all_inputs:
@@ -94,6 +104,10 @@ def test_models_text(
         input_images,  # type: ignore
         model,
         dtype=dtype,
+        tokenization_kwargs={
+            "padding": "max_length",
+            "max_length": 64,
+        },  # siglip2 was trained with this padding setting.
     )
 
 
