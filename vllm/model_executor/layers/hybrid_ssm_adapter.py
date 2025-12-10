@@ -442,6 +442,12 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             full_out[:num_actual_tokens] = out
             return full_out
         
+        if self.ssm_mode == "benchmark":
+            # Run the full Mamba computation but zero the output.
+            # This allows benchmarking the computational and memory cost of the
+            # SSM branch without needing trained weights.
+            return torch.zeros_like(out)
+
         return out
 
     def forward_history_branch_decode(
@@ -635,6 +641,9 @@ class HybridSSMAdapter(nn.Module, AttentionLayerBase):
             state_batch_indices=real_indices,
         )
         
-        return self.out_proj(out)
-
-
+        out = self.out_proj(out)
+        
+        if self.ssm_mode == "benchmark":
+            return torch.zeros_like(out)
+            
+        return out
