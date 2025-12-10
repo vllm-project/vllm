@@ -40,9 +40,11 @@ EP_SIZE = TP_SIZE × DP_SIZE
 
 Where:
 
-- `TP_SIZE`: Tensor parallel size (always 1 for now)
+- `TP_SIZE`: Tensor parallel size
 - `DP_SIZE`: Data parallel size
 - `EP_SIZE`: Expert parallel size (computed automatically)
+
+When EP is enabled, MoE layers use expert parallelism instead of tensor parallelism, while attention layers continue to use tensor parallelism if `TP_SIZE > 1`.
 
 ### Example Command
 
@@ -119,9 +121,6 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 Enable EPLB with the `--enable-eplb` flag.
 
-!!! note "Model Support"
-    Currently only DeepSeek V3 architecture is supported.
-
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
 ### EPLB Parameters
@@ -134,6 +133,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
+| `policy` | The policy type for expert parallel load balancing | `"default"` |
 
 For example:
 
