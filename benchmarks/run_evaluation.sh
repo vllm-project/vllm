@@ -50,6 +50,7 @@ python -m benchmarks.streaming_video_benchmark \
     --num-frames 64 \
     --compare-modes \
     --output-file "$OUTPUT_DIR/exp1_memory_scaling.json" \
+    --frame-batch-size 1 \
     --gpu-memory-utilization 0.9
 
 echo ""
@@ -64,6 +65,7 @@ python -m benchmarks.streaming_video_benchmark \
     --scenario multi-query \
     --use-hybrid-attention \
     --num-frames 32 \
+    --frame-batch-size 1 \
     --output-file "$OUTPUT_DIR/exp2_throughput_hybrid.json"
 
 # Run baseline for comparison
@@ -71,6 +73,7 @@ python -m benchmarks.streaming_video_benchmark \
     --model "$MODEL_PATH" \
     --scenario multi-query \
     --num-frames 32 \
+    --frame-batch-size 1 \
     --output-file "$OUTPUT_DIR/exp2_throughput_standard.json"
 
 
@@ -86,6 +89,7 @@ python -m benchmarks.streaming_video_benchmark \
     --scenario long-video \
     --use-hybrid-attention \
     --num-frames 128 \
+    --frame-batch-size 1 \
     --output-file "$OUTPUT_DIR/exp3_stability.json"
 
 echo ""
