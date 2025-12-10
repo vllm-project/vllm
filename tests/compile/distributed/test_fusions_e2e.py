@@ -142,7 +142,8 @@ def has_cuda_graph_wrapper_metadata() -> bool:
     from importlib import import_module
 
     try:
-        import_module("torch._inductor.utils").CUDAGraphWrapperMetadata
+        module = import_module("torch._inductor.utils")
+        module.CUDAGraphWrapperMetadata  # noqa B018
     except AttributeError:
         return False
     return True
