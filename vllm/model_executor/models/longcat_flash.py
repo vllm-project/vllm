@@ -179,7 +179,7 @@ class FlashConfig(PretrainedConfig):
         self.intermediate_size = (
             self.ffn_hidden_size
             if hasattr(self, "ffn_hidden_size")
-            else self.intermediate_size
+            else intermediate_size
         )
         if hasattr(self, "moe_intermediate_size"):
             self.moe_intermediate_size = self.moe_intermediate_size
