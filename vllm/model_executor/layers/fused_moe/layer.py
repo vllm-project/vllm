@@ -282,7 +282,9 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and quant_config.get_name() == "mxfp4":
+    if quant_config and (
+        quant_config.get_name() == "mxfp4" or quant_config.get_name() == "quark"
+    ):
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -1119,7 +1121,7 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self._is_mxfp4:
+        if self._is_mxfp4 and self.quant_config is not None:
             if self.quant_config.get_name() == "mxfp4":
                 # (FIXME) for gpt-oss all experts are combined
                 if "bias" in weight_name:
@@ -1138,12 +1140,14 @@ class FusedMoE(CustomOp):
                     expert_data.data.copy_(loaded_weight)
                     return True if return_success else None
 
-                shard_dim = 0 if shard_id in (
-                    "w1", "w3") or "bias" in weight_name else 1
+                shard_dim = (
+                    0 if shard_id in ("w1", "w3") or "bias" in weight_name else 1
+                )
                 if shard_id == "w2":
                     shard_size = loaded_weight.shape[shard_dim] // self.tp_size
                     loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * self.tp_rank, shard_size)
+                        shard_dim, shard_size * self.tp_rank, shard_size
+                    )
                     if "bias" in weight_name:
                         dim1 = loaded_weight.shape[0]
                         expert_data.data[:dim1].copy_(loaded_weight)
@@ -2124,21 +2128,20 @@ class FusedMoE(CustomOp):
 
         return s
 
-    def is_mxfp4_quant(self,
-                       quant_config: QuantizationConfig | None
-                       ) -> bool:
+    def is_mxfp4_quant(self, quant_config: QuantizationConfig) -> bool:
         name = quant_config.get_name() if quant_config else None
         if name == "mxfp4":
             return True
         elif name == "quark":
             from vllm.config import get_current_vllm_config
+
             vllm_config = get_current_vllm_config()
-            model_type = getattr(vllm_config.model_config.hf_config,
-                                 "model_type", None)
+            model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
             # Padding for triton kernel only is enabled when it is gpt_oss
             return quant_config.is_global_mxfp4 and model_type == "gpt_oss"
-        else:
-            return False
+
+        return False
+
 
 def moe_forward(
     hidden_states: torch.Tensor,
