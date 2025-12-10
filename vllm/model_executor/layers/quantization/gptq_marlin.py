@@ -829,6 +829,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                 "Modular kernels are only used for LoRA support."
             )
 
+        # The modular marlin kernels do not support 8-bit weights.
+        if self.quant_config.weight_bits == 8:
+            raise NotImplementedError(
+                "GPTQ-Marlin kernel does not support 8-bit weights."
+            )
+
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
         from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
             BatchedMarlinExperts,
@@ -839,6 +845,23 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         assert self.moe_quant_config is not None, (
             "moe_quant_config must be initialized before select_gemm_impl"
         )
+        
+        kwargs_experts = {
+            "quant_config": self.moe_quant_config,
+            "w13_g_idx": getattr(layer, "w13_g_idx", None)
+            if self.quant_config.desc_act
+            else None,
+            "w2_g_idx": getattr(layer, "w2_g_idx", None)
+            if self.quant_config.desc_act
+            else None,
+            "w13_g_idx_sort_indices": getattr(layer, "w13_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None,
+            "w2_g_idx_sort_indices": getattr(layer, "w2_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None,
+            "is_k_full": self.is_k_full,
+        }
 
         # Check if using batched expert format (for Expert Parallelism)
         if (
@@ -851,38 +874,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
-                w13_g_idx=getattr(layer, "w13_g_idx", None)
-                if self.quant_config.desc_act
-                else None,
-                w2_g_idx=getattr(layer, "w2_g_idx", None)
-                if self.quant_config.desc_act
-                else None,
-                w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None)
-                if self.quant_config.desc_act
-                else None,
-                w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None)
-                if self.quant_config.desc_act
-                else None,
-                is_k_full=self.is_k_full,
+                **kwargs_experts
             )
         else:
             # Standard Marlin experts for GPTQ
             return MarlinExperts(
-                quant_config=self.moe_quant_config,
-                w13_g_idx=getattr(layer, "w13_g_idx", None)
-                if self.quant_config.desc_act
-                else None,
-                w2_g_idx=getattr(layer, "w2_g_idx", None)
-                if self.quant_config.desc_act
-                else None,
-                w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None)
-                if self.quant_config.desc_act
-                else None,
-                w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None)
-                if self.quant_config.desc_act
-                else None,
-                is_k_full=self.is_k_full,
+                **kwargs_experts
             )
 
     def apply(
