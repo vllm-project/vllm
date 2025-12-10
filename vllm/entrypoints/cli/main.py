@@ -18,6 +18,7 @@ def main():
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.launch
+    import vllm.entrypoints.cli.fserver
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
@@ -28,6 +29,7 @@ def main():
         vllm.entrypoints.cli.openai,
         vllm.entrypoints.cli.serve,
         vllm.entrypoints.cli.launch,
+        vllm.entrypoints.cli.fserver,
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
