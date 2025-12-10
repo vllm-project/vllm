@@ -58,18 +58,17 @@ def memory_fence():
     any subsequent reads. This is critical for lock-free producer-consumer
     patterns using shared memory.
 
-    Implementation acquires and immediately releases a lock. On POSIX systems,
-    pthread_mutex_lock/unlock have full memory barrier semantics (sequentially
-    consistent). This is a lightweight operation (~20ns) that guarantees:
+    Implementation acquires and immediately releases a lock. Python's
+    threading.Lock provides sequentially consistent memory barrier semantics
+    across all major platforms (POSIX, Windows). This is a lightweight
+    operation (~20ns) that guarantees:
     - All stores before the barrier are visible to other threads/processes
     - All loads after the barrier see the latest values
-
-    Reference: POSIX.1-2008 specifies that mutex operations synchronize memory.
     """
-    # Lock acquire/release provides full memory barrier semantics on POSIX
-    # This flushes CPU store buffers and invalidates stale cache lines
-    _memory_fence_lock.acquire()
-    _memory_fence_lock.release()
+    # Lock acquire/release provides full memory barrier semantics.
+    # Using context manager ensures lock release even on exceptions.
+    with _memory_fence_lock:
+        pass
 
 
 def to_bytes_big(value: int, size: int) -> bytes:
