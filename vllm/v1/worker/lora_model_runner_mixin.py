@@ -43,6 +43,7 @@ class LoRAModelRunnerMixin:
             vllm_config,
             device,
             model.embedding_modules,
+            getattr(model, 'embedding_padding_modules', []),
         )
         return self.lora_manager.create_lora_manager(model)
 
