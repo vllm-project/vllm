@@ -122,7 +122,6 @@ class DeciLMAttention(LlamaAttention):
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -387,7 +386,6 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints

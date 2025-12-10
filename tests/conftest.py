@@ -27,7 +27,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -59,12 +59,21 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.base import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
+
+from torch._inductor.utils import fresh_cache
+
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers.generation.utils import GenerateOutput
+
 
 logger = init_logger(__name__)
 
@@ -201,10 +210,7 @@ def dynamo_reset():
 
 @pytest.fixture
 def example_prompts() -> list[str]:
-    prompts = []
-    for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture
@@ -223,10 +229,7 @@ class DecoderPromptType(Enum):
 
 @pytest.fixture
 def example_long_prompts() -> list[str]:
-    prompts = []
-    for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -352,10 +355,13 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
-            model = auto_cls.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
-                **model_kwargs,
+            model = cast(
+                nn.Module,
+                auto_cls.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                    **model_kwargs,
+                ),
             )
 
             # in case some unquantized custom models are not in same dtype
@@ -373,10 +379,12 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
+            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+                AutoTokenizer.from_pretrained(
+                    model_name,
+                    dtype=dtype,
+                    trust_remote_code=trust_remote_code,
+                )
             )
 
         # don't put this import at the top level
@@ -397,6 +405,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -410,10 +419,18 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
-                processor_kwargs: dict[str, Any] = {
-                    "text": prompt,
-                    "return_tensors": "pt",
-                }
+                # Create a copy to avoid modifying the original dict
+                processor_kwargs = (
+                    tokenization_kwargs.copy()
+                    if tokenization_kwargs is not None
+                    else {}
+                )
+                processor_kwargs.update(
+                    {
+                        "text": prompt,
+                        "return_tensors": "pt",
+                    }
+                )
                 if images is not None and (image := images[i]) is not None:
                     processor_kwargs["images"] = image
                 if videos is not None and (video := videos[i]) is not None:
@@ -459,14 +476,17 @@ class HfRunner:
             embeddings.append(embedding)
         return embeddings
 
-    def classify(self, prompts: list[str]) -> list[str]:
+    def classify(self, prompts: list[str]) -> list[list[float]]:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
-        outputs = []
+        outputs: list[list[float]] = []
         problem_type = getattr(self.config, "problem_type", "")
 
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
+
+            assert isinstance(output.logits, torch.Tensor)
+
             if problem_type == "regression":
                 logits = output.logits[0].tolist()
             elif problem_type == "multi_label_classification":
@@ -491,7 +511,7 @@ class HfRunner:
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
-            output_ids = self.model.generate(
+            output_ids: torch.Tensor = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
@@ -501,8 +521,7 @@ class HfRunner:
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
-            output_ids = output_ids.cpu().tolist()
-            outputs.append((output_ids, output_str))
+            outputs.append((output_ids.cpu().tolist(), output_str))
         return outputs
 
     def generate_greedy(
@@ -570,7 +589,7 @@ class HfRunner:
 
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
@@ -652,7 +671,7 @@ class HfRunner:
         all_output_strs: list[str] = []
 
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
@@ -1171,6 +1190,7 @@ def caplog_mp_spawn(tmp_path, monkeypatch):
             "level": level,
             "filename": log_path.as_posix(),
         }
+        config["loggers"]["vllm"]["level"] = level
 
         config_path.write_text(json.dumps(config))
 
@@ -1385,7 +1405,11 @@ class LocalAssetServer:
         return f"{self.base_url}/{name}"
 
     def get_image_asset(self, name: str) -> Image.Image:
-        return fetch_image(self.url_for(name))
+        image = fetch_image(self.url_for(name))
+        # Unwrap MediaWithBytes if present
+        if isinstance(image, MediaWithBytes):
+            image = image.media
+        return image
 
 
 @pytest.fixture(scope="session")
@@ -1424,3 +1448,43 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def clean_gpu_memory_between_tests():
+    if os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") != "1":
+        yield
+        return
+
+    # Wait for GPU memory to be cleared before starting the test
+    import gc
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 0:
+        try:
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)),
+                threshold_ratio=0.1,
+            )
+        except ValueError as e:
+            logger.info("Failed to clean GPU memory: %s", e)
+
+    yield
+
+    # Clean up GPU memory after the test
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
+@pytest.fixture
+def use_fresh_inductor_cache():
+    """
+    Use a fresh inductor cache for the test.
+    This is useful to ensure that the test is not affected by the
+    previous test calls.
+    """
+    with fresh_cache():
+        yield

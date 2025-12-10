@@ -33,8 +33,8 @@ shown in the table below.
 | Architecture                                    | `--convert` | Supported pooling tasks               |
 |-------------------------------------------------|-------------|---------------------------------------|
 | `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `token_embed`, `embed`                |
+| `*ForRewardModeling`, `*RewardModel`            | `embed`     | `token_embed`, `embed`                |
 | `*For*Classification`, `*ClassificationModel`   | `classify`  | `token_classify`, `classify`, `score` |
-| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `token_classify`                      |
 
 !!! tip
     You can explicitly set `--convert <type>` to specify how to convert the model.
@@ -70,7 +70,6 @@ the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type | Normalization | Softmax |
 |------------|--------------|---------------|---------|
-| `reward`   | `ALL`        | ❌            | ❌     |
 | `embed`    | `LAST`       | ✅︎            | ❌      |
 | `classify` | `LAST`       | ❌            | ✅︎      |
 
@@ -274,7 +273,7 @@ outputs = llm.embed(
 print(outputs[0].outputs)
 ```
 
-A code example can be found here: [examples/offline_inference/pooling/embed_matryoshka_fy.py](../../examples/offline_inference/pooling/embed_matryoshka_fy.py)
+A code example can be found here: [examples/pooling/embed/embed_matryoshka_fy.py](../../examples/pooling/embed/embed_matryoshka_fy.py)
 
 ### Online Inference
 
@@ -304,7 +303,7 @@ Expected output:
 {"id":"embd-5c21fc9a5c9d4384a1b021daccaf9f64","object":"list","created":1745476417,"model":"jinaai/jina-embeddings-v3","data":[{"index":0,"object":"embedding","embedding":[-0.3828125,-0.1357421875,0.03759765625,0.125,0.21875,0.09521484375,-0.003662109375,0.1591796875,-0.130859375,-0.0869140625,-0.1982421875,0.1689453125,-0.220703125,0.1728515625,-0.2275390625,-0.0712890625,-0.162109375,-0.283203125,-0.055419921875,-0.0693359375,0.031982421875,-0.04052734375,-0.2734375,0.1826171875,-0.091796875,0.220703125,0.37890625,-0.0888671875,-0.12890625,-0.021484375,-0.0091552734375,0.23046875]}],"usage":{"prompt_tokens":8,"total_tokens":8,"completion_tokens":0,"prompt_tokens_details":null}}
 ```
 
-An OpenAI client example can be found here: [examples/online_serving/pooling/openai_embedding_matryoshka_fy.py](../../examples/online_serving/pooling/openai_embedding_matryoshka_fy.py)
+An OpenAI client example can be found here: [examples/pooling/embed/openai_embedding_matryoshka_fy.py](../../examples/pooling/embed/openai_embedding_matryoshka_fy.py)
 
 ## Deprecated Features
 
@@ -318,3 +317,10 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 ### Remove softmax from PoolingParams
 
 We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### as_reward_model
+
+Pooling models now default support all pooling, you can use it without any settings.
+
+- Extracting hidden states prefers using `token_embed` task.
+- Reward models prefers using `token_classify` task.

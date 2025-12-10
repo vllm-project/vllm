@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
@@ -149,6 +148,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -171,7 +172,7 @@ class CudaPlatformBase(Platform):
             and cache_config.block_size is not None
         ):
             use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
-            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # If `--attention-config.backend` is not set and we are using MLA,
             # then we default to FlashMLA backend for non-blackwell GPUs,
             # else we default to CutlassMLA. For each case, we force the
             # required block_size.
@@ -179,23 +180,25 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
-            if envs.VLLM_ATTENTION_BACKEND is None:
+            if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability(100):
-                    # Blackwell => Force CutlassMLA.
+                if cls.is_device_capability(100) and not use_sparse:
+                    # Blackwell => Force CutlassMLA (unless sparse, i.e. DSv3.2).
                     use_cutlass_mla = True
-                    # TODO: This does not work, because the
-                    # global_force_attn_backend_context_manager is not set.
-                    # See vllm/attention/selector.py:_cached_get_attn_backend
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.CUTLASS_MLA
+                    )
                 else:
                     # Not Blackwell
                     use_flashmla = True
             else:
                 # Forced case
-                use_flashmla = envs.VLLM_ATTENTION_BACKEND == "FLASHMLA"
-                use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
-                use_flashinfer_mla = envs.VLLM_ATTENTION_BACKEND == "FLASHINFER_MLA"
+                backend = vllm_config.attention_config.backend
+                use_flashmla = backend == AttentionBackendEnum.FLASHMLA
+                use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
+                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
@@ -229,27 +232,20 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
-        # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
 
-        compilation_config = vllm_config.compilation_config
+        scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
         if (
-            parallel_config.all2all_backend == "deepep_high_throughput"
-            and parallel_config.data_parallel_size > 1
-            and compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
         ):
-            # TODO: Piecewise Cuda graph might be enabled
-            # if torch compile cache key issue fixed
-            # See https://github.com/vllm-project/vllm/pull/25093
-            logger.info(
-                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
-                "kernels are optimized for prefill and are incompatible with "
-                "CUDA Graphs. "
-                "In order to use CUDA Graphs for decode-optimized workloads, "
-                "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+            logger.warning(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
             )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def get_current_memory_usage(
@@ -286,6 +282,7 @@ class CudaPlatformBase(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        use_mm_prefix,
         device_capability,
         attn_type,
     ) -> tuple[
@@ -307,6 +304,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
+                    use_mm_prefix,
                     device_capability,
                     attn_type,
                 )
@@ -330,6 +328,7 @@ class CudaPlatformBase(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         if attn_type is None:
@@ -350,6 +349,7 @@ class CudaPlatformBase(Platform):
                     use_mla,
                     has_sink,
                     use_sparse,
+                    use_mm_prefix,
                     device_capability,
                     attn_type,
                 )
@@ -374,6 +374,7 @@ class CudaPlatformBase(Platform):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
             attn_type,
         )
