@@ -203,7 +203,7 @@ steps:
         key: "rocm-upload-wheels"
         default: "true"
         options:
-          - label: "No - Build only (nightly/dev)"
+          - label: "No - Build only"
             value: "false"
           - label: "Yes - Upload to S3 (release)"
             value: "true"
@@ -461,7 +461,7 @@ steps:
 
         # Skip upload if not enabled
         if [ "$${ROCM_UPLOAD_WHEELS}" != "true" ]; then
-          echo "Skipping S3 upload (ROCM_UPLOAD_WHEELS != true, NIGHTLY != 1, not a release branch)"
+          echo "Skipping S3 upload (ROCM_UPLOAD_WHEELS != true)"
           echo "To enable upload, set 'Upload Wheels to S3' to 'Yes' in the build configuration"
           exit 0
         fi
