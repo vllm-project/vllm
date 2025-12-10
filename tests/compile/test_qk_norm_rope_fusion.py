@@ -49,6 +49,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         self.head_dim = head_dim
         self.q_size = num_heads * head_dim
         self.kv_size = num_kv_heads * head_dim
+        self.rotary_dim = head_dim
         self.eps = eps
         self.dtype = dtype
 
@@ -67,6 +68,7 @@ class QKNormRoPETestModel(torch.nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=self.eps)
         self.rotary_emb = RotaryEmbedding(
             self.head_dim,
+            rotary_dim=self.rotary_dim,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
