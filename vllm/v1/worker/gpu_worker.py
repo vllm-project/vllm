@@ -403,7 +403,6 @@ class Worker(WorkerBase):
         to match the engine's decision.
         """
         self.model_config.max_model_len = max_model_len
-        self.vllm_config.model_config.max_model_len = max_model_len
         if self.model_runner is not None:
             self.model_runner.max_model_len = max_model_len
         logger.debug("Updated max_model_len to %d", max_model_len)
