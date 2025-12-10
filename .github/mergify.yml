@@ -35,6 +35,20 @@ pull_request_rules:
 
         For future commits, `pre-commit` will run automatically on changed files before each commit.
 
+        > [!TIP]
+        > <details>
+        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <br/>
+        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        >
+        > ```bash
+        > # For mypy (substitute "3.10" with the failing version if needed)
+        > pre-commit run --hook-stage manual mypy-3.10
+        > # For markdownlint
+        > pre-commit run --hook-stage manual markdownlint
+        > ```
+        > </details>
+
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
   conditions:
