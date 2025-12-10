@@ -128,6 +128,11 @@ def _maybe_force_spawn():
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
         reasons.append("In a Ray actor and can only be spawned")
 
+    # Force spawn if NUMA binding is enabled via --numa-node argument
+    # NUMA binding uses executable hijacking which requires spawn
+    if "--numa-node" in sys.argv:
+        reasons.append("NUMA binding requires spawn method")
+
     if cuda_is_initialized():
         reasons.append("CUDA is initialized")
     elif xpu_is_initialized():

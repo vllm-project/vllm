@@ -235,8 +235,12 @@ class ParallelConfig:
     """distributed node rank for multi-node distributed 
     inference when distributed_executor_backend is mp."""
     nnodes: int = 1
-    """num of nodes for multi-node distributed 
+    """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+    numa_node: list[int] | None = None
+    """NUMA node for each local GPU. Example: [0, 0, 1, 1] for 4 GPUs
+    on a 2-socket system with GPUs 0-1 on node 0 and GPUs 2-3 on node 1.
+    Use 'nvidia-smi topo -m' to determine GPU-to-NUMA topology."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
