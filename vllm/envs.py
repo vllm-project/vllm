@@ -1264,9 +1264,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
     # all2all backend for vllm's expert parallel communication
-    # DEPRECATED: This environment variable is deprecated and will be removed
-    # in a future release. Use the --all2all-backend command-line argument
-    # instead. This is kept for backward compatibility only.
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
     # - "allgather_reducescatter": all2all implementation based on allgather and
