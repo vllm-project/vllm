@@ -10,10 +10,13 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     count_expert_num_tokens,
@@ -716,7 +719,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
         shared_experts_stream: torch.cuda.Stream | None = None,
-        parallel_config: ParallelConfig | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
@@ -724,16 +727,22 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.shared_experts = shared_experts
         self.shared_experts_stream = shared_experts_stream
 
-        # NOTE:
-        # - Callers that have access to a VllmConfig (e.g. MoE layers / quant methods)
-        #   should prefer to pass an explicit ParallelConfig.
-        # - The None fallback to get_current_vllm_config().parallel_config is intended
-        #   for low-level tests and helpers that run under set_current_vllm_config().
-        if parallel_config is None:
-            parallel_config = get_current_vllm_config().parallel_config
+        # prefer an explicit FusedMoEParallelConfig when available
+        # (from FusedMoE layers / tests), otherwise derive one from the
+        # current vLLM config.
+        if moe_parallel_config is None:
+            vllm_config = get_current_vllm_config()
+            parallel_config = vllm_config.parallel_config
+            moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=parallel_config.tensor_parallel_size,
+                pcp_size_=parallel_config.pipeline_parallel_size,
+                dp_size_=parallel_config.data_parallel_size,
+                vllm_parallel_config=parallel_config,
+            )
+
+        self.moe_parallel_config: FusedMoEParallelConfig = moe_parallel_config
         self.is_dp_ep = (
-            parallel_config.data_parallel_size > 1
-            and parallel_config.enable_expert_parallel
+            self.moe_parallel_config.dp_size > 1 and self.moe_parallel_config.use_ep
         )
 
         self._post_init_setup()
