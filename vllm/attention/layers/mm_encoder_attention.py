@@ -12,7 +12,6 @@ from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -26,17 +25,10 @@ def maybe_get_vit_flash_attn_backend(
     # so we don't need to override backend here.
     # Just return the attn_backend and flash_attn_varlen_func.
 
-    if (
-        attn_backend == AttentionBackendEnum.FLASH_ATTN
-        and current_platform.is_cuda_alike()
-    ):
-        from flash_attn import flash_attn_varlen_func
-    elif attn_backend == AttentionBackendEnum.FLASH_ATTN and current_platform.is_xpu():
+    if attn_backend == AttentionBackendEnum.FLASH_ATTN:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     elif attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
         from aiter import flash_attn_varlen_func
-    else:
-        flash_attn_varlen_func = None
 
     # if attn_backend is TORCH_SDPA,
     # it will reach here and the flash_attn_varlen_func will be None.
