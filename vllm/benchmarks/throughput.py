@@ -655,8 +655,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--profile",
         action="store_true",
         default=False,
-        help="Use Torch Profiler. The env variable "
-        "VLLM_TORCH_PROFILER_DIR must be set to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
 
     # prefix repetition dataset
