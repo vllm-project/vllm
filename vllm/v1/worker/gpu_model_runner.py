@@ -3423,6 +3423,7 @@ class GPUModelRunner(
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
         activate_lora: bool = False,
+        cpu_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3446,7 +3447,39 @@ class GPUModelRunner(
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             activate_lora: If False, dummy_run is performed without LoRAs.
+            cpu_only: If True (for masked ranks with broken GPU), skip all GPU
+                     operations and only perform EPLB synchronization. Used when
+                     GPU is broken but rank must stay synchronized with others.
         """
+        
+        # NEW: CPU-only path for masked ranks
+        if cpu_only:
+            logger.info(
+                "[FT_DEBUG] _dummy_run: cpu_only=True - "
+                "Skipping GPU operations, only EPLB sync"
+            )
+            
+            # Skip ALL GPU operations (lines below)
+            # Only do EPLB sync to maintain collective synchronization
+            if not skip_eplb:
+                logger.debug("[FT_DEBUG] About to call eplb_step(is_dummy=True)")
+                try:
+                    self.eplb_step(is_dummy=True, is_profile=is_profile)
+                    logger.debug("[FT_DEBUG] eplb_step completed successfully")
+                except Exception as e:
+                    logger.error(
+                        "[FT_DEBUG] eplb_step FAILED in cpu_only mode: %s",
+                        e, exc_info=True
+                    )
+                    raise
+            
+            # Return dummy CPU tensors (won't be used)
+            logger.debug("[FT_DEBUG] Returning dummy CPU tensors")
+            dummy_hidden = torch.zeros(1, 1, dtype=self.dtype, device='cpu')
+            dummy_logits = torch.zeros(1, 1, dtype=self.dtype, device='cpu')
+            return dummy_hidden, dummy_logits
+        
+        # Normal path: Full dummy run with GPU
         assert (
             cudagraph_runtime_mode is None
             or cudagraph_runtime_mode.valid_runtime_modes()

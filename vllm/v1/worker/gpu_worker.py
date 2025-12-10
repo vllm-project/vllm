@@ -605,8 +605,15 @@ class Worker(WorkerBase):
                     self.profiler.key_averages().table(sort_by="self_cuda_time_total")
                 )
 
-    def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
+        """
+        Execute dummy batch.
+        
+        Args:
+            cpu_only: If True, skip GPU operations (for masked ranks).
+                     Only performs EPLB synchronization.
+        """
+        self.model_runner._dummy_run(1, uniform_decode=True, cpu_only=cpu_only)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

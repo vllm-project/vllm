@@ -225,8 +225,14 @@ class Executor(ABC):
         )
         return output[0]
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch")
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
+        """
+        Execute dummy batch on all workers.
+        
+        Args:
+            cpu_only: If True, skip GPU operations (for masked ranks).
+        """
+        self.collective_rpc("execute_dummy_batch", args=(cpu_only,))
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")

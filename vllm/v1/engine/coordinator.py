@@ -266,6 +266,34 @@ class DPCoordinatorProc:
                                 new_engine_count,
                             )
                         continue  # Skip normal engine notification processing
+                    
+                    if (
+                        isinstance(decoded, (list, tuple))
+                        and len(decoded) == 2
+                        and decoded[0] == "FT_RANK_DIED"
+                    ):
+                        # Handle fault tolerance: rank failure
+                        failed_rank = decoded[1]
+                        logger.error(
+                            "[FT] Coordinator: Rank %d reported failure, "
+                            "broadcasting scale-down to surviving ranks",
+                            failed_rank
+                        )
+                        
+                        # Broadcast FT_SCALE_DOWN to all engines
+                        self._broadcast_ft_scale_down(
+                            failed_rank=failed_rank,
+                            publish_back=publish_back
+                        )
+                        
+                        # Update coordinator state
+                        self.engines.pop(failed_rank)
+                        
+                        logger.info(
+                            "[FT] Coordinator: Scaled down from %d to %d engines",
+                            len(self.engines) + 1, len(self.engines)
+                        )
+                        continue  # Skip normal processing
 
                     # We received a message on the front-end XPUB socket,
                     # from an API server sending a new request while the
@@ -399,3 +427,52 @@ class DPCoordinatorProc:
     def _get_masked_ranks(self) -> list[int]:
         """Return list of masked rank indices."""
         return [i for i, e in enumerate(self.engines) if e.is_masked]
+    
+    def _broadcast_ft_scale_down(
+        self, 
+        failed_rank: int,
+        publish_back: zmq.Socket
+    ):
+        """
+        Broadcast FT_SCALE_DOWN message to all surviving engines.
+        
+        Message format:
+            (EngineCoreRequestType.FT_SCALE_DOWN, 
+             {failed_rank, new_size, rank_mapping, new_master_port})
+        """
+        from vllm.utils.network_utils import get_open_port
+        from vllm.v1.engine import EngineCoreRequestType
+        
+        cur_size = len(self.engines) + 1  # +1 because we haven't removed yet
+        new_size = cur_size - 1
+        
+        # Build rank_mapping
+        rank_mapping = {}
+        new_rank = 0
+        for old_rank in range(cur_size):
+            if old_rank == failed_rank:
+                rank_mapping[old_rank] = -1  # Removed
+            else:
+                rank_mapping[old_rank] = new_rank
+                new_rank += 1
+        
+        # Get new master port for reinitialization
+        new_master_port = get_open_port()
+        
+        # Broadcast to all engines
+        scale_down_msg = msgspec.msgpack.encode({
+            'failed_rank': failed_rank,
+            'new_size': new_size,
+            'rank_mapping': rank_mapping,
+            'new_master_port': new_master_port,
+        })
+        
+        publish_back.send_multipart((
+            EngineCoreRequestType.FT_SCALE_DOWN.value,
+            scale_down_msg
+        ))
+        
+        logger.info(
+            "[FT] Coordinator: Broadcasted FT_SCALE_DOWN: %d→%d, rank_mapping=%s",
+            cur_size, new_size, rank_mapping
+        )

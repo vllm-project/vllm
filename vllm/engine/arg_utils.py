@@ -826,6 +826,10 @@ class EngineArgs:
         parallel_group.add_argument("--enable-eplb", **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config", **parallel_kwargs["eplb_config"])
         parallel_group.add_argument(
+            "--fault-tolerance",
+            **parallel_kwargs["fault_tolerance"]
+        )
+        parallel_group.add_argument(
             "--expert-placement-strategy",
             **parallel_kwargs["expert_placement_strategy"],
         )

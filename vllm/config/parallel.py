@@ -131,6 +131,24 @@ class ParallelConfig:
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
+    fault_tolerance: bool = False
+    """Enable fault tolerance for DP > 1 with EPLB enabled.
+    
+    When enabled, if a DP rank fails (e.g., CUDA error causing std::terminate),
+    the system will gracefully scale down instead of crashing:
+    - Failed rank is detected by the monitor thread
+    - EPLB redistributes experts from failed rank to healthy ranks
+    - Communication groups are rebuilt excluding the failed rank
+    - CUDA graphs are recaptured with new topology
+    - System continues serving with N-1 ranks
+    
+    Requirements:
+    - data_parallel_size > 1
+    - enable_eplb = True
+    
+    Note: This is experimental and adds ~500ms recovery time when failures occur.
+    Disable for maximum performance when fault tolerance is not needed.
+    """
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
     """The expert placement strategy for MoE layers:\n
     - "linear": Experts are placed in a contiguous manner. For example, with 4

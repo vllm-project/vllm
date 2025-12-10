@@ -225,8 +225,18 @@ class MultiprocExecutor(Executor):
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
-    def execute_dummy_batch(self) -> None:
-        self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
+        """
+        Execute dummy batch on all workers.
+        
+        Args:
+            cpu_only: If True, skip GPU operations (for masked ranks).
+        """
+        self.collective_rpc(
+            "execute_dummy_batch",
+            args=(cpu_only,),
+            unique_reply_rank=self.output_rank
+        )
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)

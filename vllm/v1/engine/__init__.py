@@ -175,6 +175,9 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
+    
+    # Fault tolerance: set to True when an engine rank fails
+    fault_tolerance_failure: bool = False
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -193,6 +196,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Fault tolerance: scale down after rank failure
+    FT_SCALE_DOWN = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -201,6 +206,11 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+    
+    # Fault tolerance: maps old_rank → new_rank (-1 means removed)
+    rank_mapping: dict[int, int] | None = None
+    # Fault tolerance: True if triggered by rank failure
+    is_fault_tolerance: bool = False
 
 
 class ReconfigureRankType(enum.IntEnum):

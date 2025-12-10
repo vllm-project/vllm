@@ -504,8 +504,15 @@ class EngineCore:
     def is_sleeping(self) -> bool:
         return self.model_executor.is_sleeping
 
-    def execute_dummy_batch(self):
-        self.model_executor.execute_dummy_batch()
+    def execute_dummy_batch(self, cpu_only: bool = False):
+        """
+        Execute dummy batch to maintain synchronization.
+        
+        Args:
+            cpu_only: If True, skip GPU operations (for masked ranks with broken GPU).
+                     Only performs EPLB synchronization without GPU forward pass.
+        """
+        self.model_executor.execute_dummy_batch(cpu_only=cpu_only)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -1238,10 +1245,177 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             return False
     
+    def _clear_local_requests_for_ft(self):
+        """
+        Clear all local requests when GPU fails in fault tolerance mode.
+        
+        Since this rank's GPU is broken, these requests cannot be completed.
+        Clear them from the scheduler so that:
+        1. local_unfinished_reqs becomes False
+        2. Rank doesn't try to process them
+        3. Client will abort them when it detects failure
+        
+        Called after marking rank as masked with fault_tolerance enabled.
+        """
+        from vllm.v1.core.sched.scheduler import RequestStatus
+        
+        # Get all request IDs from local scheduler
+        local_request_ids = list(self.scheduler.requests.keys())
+        
+        logger.info(
+            "[FT_DEBUG] Rank %d: _clear_local_requests_for_ft called. "
+            "Found %d requests before clearing.",
+            self.dp_rank, len(local_request_ids)
+        )
+        
+        if not local_request_ids:
+            logger.debug("[FT] Rank %d: No local requests to clear", self.dp_rank)
+            return
+        
+        logger.warning(
+            "[FT] Rank %d: Clearing %d local requests due to GPU failure: %s. "
+            "Client will handle abortion and user notification.",
+            self.dp_rank,
+            len(local_request_ids),
+            local_request_ids
+        )
+        
+        # Clear from scheduler (mark as aborted)
+        self.scheduler.finish_requests(
+            local_request_ids,
+            RequestStatus.FINISHED_ABORTED
+        )
+        
+        # Verify cleared
+        remaining = len(self.scheduler.requests)
+        logger.info(
+            "[FT_DEBUG] Rank %d: After clearing - "
+            "remaining requests=%d, has_unfinished=%s",
+            self.dp_rank,
+            remaining,
+            self.scheduler.has_unfinished_requests()
+        )
+    
     def shutdown(self):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
+    
+    def _execute_ft_reconfiguration(self, scale_down_info: dict):
+        """
+        Execute fault tolerance reconfiguration after rank failure.
+        
+        Steps:
+        1. Update EPLB state (clear masked_ranks)
+        2. Destroy old communication groups
+        3. Rebuild new communication groups (without failed rank)
+        4. Redistribute experts with new groups
+        5. Recapture CUDA graphs
+        """
+        import torch
+        
+        failed_rank = scale_down_info['failed_rank']
+        new_size = scale_down_info['new_size']
+        rank_mapping = scale_down_info['rank_mapping']
+        new_master_port = scale_down_info['new_master_port']
+        my_new_rank = rank_mapping[self.dp_rank]
+        
+        logger.info(
+            "[FT] Rank %d→%d: Starting FT reconfiguration "
+            "(failed_rank=%d, new_size=%d)",
+            self.dp_rank, my_new_rank, failed_rank, new_size
+        )
+        
+        try:
+            # ===== STEP 1: Update EPLB State =====
+            if self.model_executor and hasattr(self.model_executor, 'driver_worker'):
+                worker = self.model_executor.driver_worker
+                if hasattr(worker, 'model_runner') and worker.model_runner.eplb_state:
+                    eplb_state = worker.model_runner.eplb_state
+                    
+                    # Clear masked_ranks (failed rank is being removed)
+                    eplb_state.masked_ranks.clear()
+                    eplb_state.newly_masked_from_external.clear()
+                    
+                    logger.info("[FT] Rank %d: Cleared EPLB masked_ranks", self.dp_rank)
+            
+            # ===== STEP 2: Destroy Old Communication Groups =====
+            from vllm.distributed.parallel_state import destroy_distributed_environment
+            
+            logger.info("[FT] Rank %d: Destroying old comm groups", self.dp_rank)
+            destroy_distributed_environment()
+            
+            # ===== STEP 3: Rebuild New Communication Groups =====
+            logger.info(
+                "[FT] Rank %d→%d: Rebuilding comm groups (size=%d)",
+                self.dp_rank, my_new_rank, new_size
+            )
+            
+            from vllm.distributed.parallel_state import init_distributed_environment
+            
+            # Get master IP from vllm_config
+            master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
+            
+            init_distributed_environment(
+                world_size=new_size,
+                rank=my_new_rank,
+                distributed_init_method=f"tcp://{master_ip}:{new_master_port}",
+                backend="nccl",
+                local_rank=my_new_rank,  # Simplified for now
+            )
+            
+            # Update self.dp_rank
+            old_dp_rank = self.dp_rank
+            self.dp_rank = my_new_rank
+            self.engine_index = my_new_rank
+            
+            logger.info(
+                "[FT] Rank %d→%d: Communication groups rebuilt",
+                old_dp_rank, my_new_rank
+            )
+            
+            # ===== STEP 4: Redistribute Experts (with NEW groups) =====
+            if self.model_executor and hasattr(self.model_executor, 'driver_worker'):
+                worker = self.model_executor.driver_worker
+                if hasattr(worker, 'model_runner') and worker.model_runner.eplb_state:
+                    logger.info("[FT] Rank %d: Redistributing experts", self.dp_rank)
+                    
+                    eplb_state = worker.model_runner.eplb_state
+                    eplb_state.rearrange(
+                        rank_mapping=rank_mapping,
+                        is_health_masking=False,  # Actual scale-down
+                        execute_shuffle=True       # AllToAll with NEW groups
+                    )
+                    
+                    torch.cuda.synchronize()
+                    
+                    logger.info("[FT] Rank %d: Expert redistribution complete", self.dp_rank)
+            
+            # ===== STEP 5: Recapture CUDA Graphs =====
+            logger.info("[FT] Rank %d: Recapturing CUDA graphs", self.dp_rank)
+            
+            if self.model_runner:
+                self.model_runner.clear_cuda_graphs()
+                self.model_runner.capture_model()
+            
+            logger.info("[FT] Rank %d: CUDA graph recapture complete", self.dp_rank)
+            
+            # Update config
+            self.vllm_config.parallel_config.data_parallel_size = new_size
+            
+            logger.info(
+                "[FT] Rank %d: Reconfiguration complete! Ready to serve.",
+                self.dp_rank
+            )
+            
+        except Exception as e:
+            logger.error(
+                "[FT] Rank %d: Reconfiguration failed: %s",
+                self.dp_rank, e, exc_info=True
+            )
+            # Mark as failed
+            self.has_exception = True
+            raise
 
     def add_request(self, request: Request, request_wave: int = 0):
         if self.has_coordinator and request_wave != self.current_wave:
@@ -1268,6 +1442,14 @@ class DPEngineCoreProc(EngineCoreProc):
                 if not self.engines_running:
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
+        elif request_type == EngineCoreRequestType.FT_SCALE_DOWN:
+            # Fault tolerance: handle scale-down after rank failure
+            scale_down_info = request
+            logger.info(
+                "[FT] Rank %d: Received FT_SCALE_DOWN message",
+                self.dp_rank
+            )
+            self._execute_ft_reconfiguration(scale_down_info)
         else:
             super()._handle_client_request(request_type, request)
 
@@ -1318,23 +1500,50 @@ class DPEngineCoreProc(EngineCoreProc):
             try:
                 # 1) Poll the input queue until there is work to do.
                 self._process_input_queue()
+                
+                # 2) Check if masked (GPU broken)
+                is_masked = self.check_if_masked_by_eplb()
+                
+                # NEW: Debug log for iteration start
+                if is_masked:
+                    logger.debug(
+                        "[FT_DEBUG] Rank %d: Loop iteration START - "
+                        "is_masked=True, has_exception=%s",
+                        self.dp_rank, self.has_exception
+                    )
 
-                # 2) Step the engine core.
-                executed = self._process_engine_step()
-                self._maybe_publish_request_counts()
+                # 3) Step the engine core (skip if masked).
+                if not is_masked:
+                    executed = self._process_engine_step()
+                    self._maybe_publish_request_counts()
+                else:
+                    logger.debug(
+                        "[FT_DEBUG] Rank %d: Skipping _process_engine_step (masked)",
+                        self.dp_rank
+                    )
 
                 local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-                if not executed:
+                
+                # 4) Execute dummy batch if needed
+                if is_masked or not executed:
                     if not local_unfinished_reqs and not self.engines_running:
                         # All engines are idle.
                         continue
+                    
+                    # NEW: Debug log before dummy batch
+                    if is_masked:
+                        logger.debug(
+                            "[FT_DEBUG] Rank %d: Calling execute_dummy_batch(cpu_only=True). "
+                            "local_unfinished=%s, engines_running=%s",
+                            self.dp_rank, local_unfinished_reqs, self.engines_running
+                        )
 
                     # We are in a running state and so must execute a dummy pass
                     # if the model didn't execute any ready requests.
-                    # Masked ranks also run dummy to maintain EPLB state synchronization.
-                    self.execute_dummy_batch()
+                    # Use cpu_only mode for masked ranks (skip GPU ops, only EPLB sync)
+                    self.execute_dummy_batch(cpu_only=is_masked)
 
-                # 3) All-reduce operation to determine global unfinished reqs.
+                # 5) All-reduce operation to determine global unfinished reqs.
                 # ALL ranks must participate in this CPU all-reduce!
                 self.engines_running = self._has_global_unfinished_reqs(
                     local_unfinished_reqs
@@ -1401,6 +1610,16 @@ class DPEngineCoreProc(EngineCoreProc):
                     
                     # Trigger full EPLB masking (expert redistribution)
                     self.trigger_eplb_masking()
+                    
+                    # If fault tolerance enabled, clear local requests
+                    if getattr(self.vllm_config.parallel_config, 'fault_tolerance', False):
+                        logger.info(
+                            "[FT] Rank %d: Fault tolerance enabled. "
+                            "Clearing local requests and continuing in CPU-only mode.",
+                            self.dp_rank
+                        )
+                        self._clear_local_requests_for_ft()
+                        # Continue loop with cpu_only mode (next iteration uses cpu_only=True)
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:

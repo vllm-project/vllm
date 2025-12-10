@@ -266,6 +266,23 @@ class EplbState:
         Checked each step and triggers immediate rearrangement.
         """
         self.newly_masked_from_external: set[int] = set()
+    
+    def _is_current_rank_masked(self) -> bool:
+        """
+        Check if the current EP rank is masked (GPU unhealthy).
+        
+        Used to skip GPU operations on masked ranks during EPLB synchronization.
+        
+        Returns:
+            True if current rank is in masked_ranks, False otherwise.
+        """
+        try:
+            ep_rank = get_ep_group().device_group.rank()
+            is_masked = ep_rank in self.masked_ranks
+            return is_masked
+        except Exception:
+            # Can't determine rank or EP group not initialized
+            return False
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -569,11 +586,30 @@ class EplbState:
         if is_profile:
             self.rearrange(is_profile=True)
             return
+        
+        is_masked = self._is_current_rank_masked()
+        
+        # NEW: Debug log when rank is masked
+        if is_masked:
+            ep_rank = get_ep_group().device_group.rank()
+            logger.info(
+                "[FT_DEBUG] eplb_state.step: Rank %d is MASKED. "
+                "masked_ranks=%s, is_dummy=%s. Will skip GPU operations.",
+                ep_rank, sorted(self.masked_ranks), is_dummy
+            )
 
         if is_dummy:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_pass.zero_()
+                # Skip GPU operation if this rank is masked
+                if not is_masked:
+                    eplb_model_state.expert_load_pass.zero_()
+                else:
+                    # Masked rank: Skip GPU tensor operation
+                    logger.debug(
+                        "[FT] Masked rank: Skipping expert_load_pass.zero_() "
+                        "(GPU operation, GPU broken)"
+                    )
 
         if log_stats:
             # Sync the expert load pass for each model (main and drafter).
@@ -644,33 +680,41 @@ class EplbState:
 
         # Record expert latencies for each model
         if not is_dummy:
-            for eplb_model_state in self.model_states.values():
-                if eplb_model_state.expert_latency_window is not None:
-                    # FIRST: Trigger deferred measurement for this model
-                    # (synchronizes and updates latency views)
-                    for layer in eplb_model_state.moe_layer_instances:
-                        if hasattr(layer, "measure_and_update_latency"):
-                            layer.measure_and_update_latency()
+            # NEW: Skip GPU operations for masked ranks
+            if not is_masked:
+                for eplb_model_state in self.model_states.values():
+                    if eplb_model_state.expert_latency_window is not None:
+                        # FIRST: Trigger deferred measurement for this model
+                        # (synchronizes and updates latency views)
+                        for layer in eplb_model_state.moe_layer_instances:
+                            if hasattr(layer, "measure_and_update_latency"):
+                                layer.measure_and_update_latency()
 
-                    # THEN: Read the measured values for this model
-                    expert_latency_pass = eplb_model_state.model.get_expert_latencies()
-                    if expert_latency_pass is not None:
-                        # Update health mask BEFORE overwriting window
-                        self._update_health_mask(
-                            eplb_model_state, expert_latency_pass, log_stats
-                        )
-                        eplb_model_state.expert_latency_window[
-                            self.expert_load_window_step
-                        ] = expert_latency_pass.clone()
-                        # Reset for next pass
-                        expert_latency_pass.zero_()
+                        # THEN: Read the measured values for this model
+                        expert_latency_pass = eplb_model_state.model.get_expert_latencies()
+                        if expert_latency_pass is not None:
+                            # Update health mask BEFORE overwriting window
+                            self._update_health_mask(
+                                eplb_model_state, expert_latency_pass, log_stats
+                            )
+                            eplb_model_state.expert_latency_window[
+                                self.expert_load_window_step
+                            ] = expert_latency_pass.clone()
+                            # Reset for next pass
+                            expert_latency_pass.zero_()
 
-            # Update the expert load sliding window
-            for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_window[self.expert_load_window_step] = (
-                    eplb_model_state.expert_load_pass.clone()
+                # Update the expert load sliding window
+                for eplb_model_state in self.model_states.values():
+                    eplb_model_state.expert_load_window[self.expert_load_window_step] = (
+                        eplb_model_state.expert_load_pass.clone()
+                    )
+                    eplb_model_state.expert_load_pass.zero_()
+            else:
+                # Masked rank: Skip GPU tensor operations
+                logger.debug(
+                    "[FT] Masked rank: Skipping expert load/latency updates "
+                    "(GPU operations, GPU broken)"
                 )
-                eplb_model_state.expert_load_pass.zero_()
 
             self.expert_load_window_step += 1
             if self.expert_load_window_step >= self.expert_load_window_size:

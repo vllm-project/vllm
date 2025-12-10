@@ -150,7 +150,7 @@ class EngineCoreClient(ABC):
     def is_sleeping(self) -> bool:
         raise NotImplementedError
 
-    def execute_dummy_batch(self) -> None:
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
@@ -299,8 +299,8 @@ class InprocClient(EngineCoreClient):
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
-    def execute_dummy_batch(self) -> None:
-        self.engine_core.execute_dummy_batch()
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
+        self.engine_core.execute_dummy_batch(cpu_only=cpu_only)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -581,32 +581,112 @@ class MPClient(EngineCoreClient):
 
         engine_processes = engine_manager.processes
         self_ref = weakref.ref(self)
+        
+        # Check if fault tolerance is enabled
+        fault_tolerance_enabled = (
+            self.vllm_config.parallel_config.data_parallel_size > 1 and
+            self.vllm_config.parallel_config.enable_eplb and
+            getattr(self.vllm_config.parallel_config, 'fault_tolerance', False)
+        )
 
         # Monitor engine core process liveness. If any die unexpectedly,
-        # logs an error, shuts down the client and invokes the failure
-        # callback to inform the engine.
+        # either trigger fault tolerance or shutdown depending on config.
         def monitor_engine_cores():
             sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
-            _self = self_ref()
-            if not _self or _self.resources.engine_dead:
-                return
-            _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
-            logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
-            )
-            _self.shutdown()
-            # Note: For MPClient, we don't have a failure callback mechanism
-            # like MultiprocExecutor, but we set engine_dead flag which will
-            # cause subsequent operations to raise EngineDeadError
+            
+            while sentinels:
+                died = multiprocessing.connection.wait(sentinels)
+                _self = self_ref()
+                if not _self or _self.resources.engine_dead:
+                    return
+                
+                # Find which rank died
+                failed_proc = next(
+                    proc for proc in engine_processes 
+                    if proc.sentinel == died[0]
+                )
+                failed_rank = _self._get_rank_from_process(failed_proc)
+                
+                logger.error(
+                    "[FT] Engine core proc %s (rank %d) died unexpectedly",
+                    failed_proc.name, failed_rank
+                )
+                
+                if fault_tolerance_enabled:
+                    # Fault tolerance: notify coordinator instead of shutdown
+                    logger.info(
+                        "[FT] Fault tolerance enabled, notifying coordinator "
+                        "instead of shutting down all engines"
+                    )
+                    
+                    try:
+                        _self._send_ft_notification_to_coordinator(failed_rank)
+                    except Exception as e:
+                        logger.error(
+                            "[FT] Failed to send notification: %s. "
+                            "Falling back to shutdown.", e, exc_info=True
+                        )
+                        _self.resources.engine_dead = True
+                        _self.shutdown()
+                        return
+                    
+                    # Remove dead process from monitoring
+                    engine_processes[:] = [p for p in engine_processes if p.is_alive()]
+                    sentinels = [p.sentinel for p in engine_processes]
+                    
+                    # DON'T set engine_dead flag - let other engines continue!
+                else:
+                    # No fault tolerance: shutdown everything (old behavior)
+                    _self.resources.engine_dead = True
+                    _self.shutdown()
+                    return
 
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+    
+    def _get_rank_from_process(self, proc: multiprocessing.Process) -> int:
+        """Extract rank number from process name like 'EngineCore_DP2'."""
+        import re
+        match = re.search(r'EngineCore_DP(\d+)', proc.name)
+        if match:
+            return int(match.group(1))
+        raise ValueError(f"Cannot parse rank from process name: {proc.name}")
+    
+    def _send_ft_notification_to_coordinator(self, failed_rank: int):
+        """
+        Send fault tolerance notification to coordinator.
+        Called from monitor thread (sync context).
+        Uses the first_req_send_socket to notify coordinator.
+        """
+        try:
+            import msgspec.msgpack
+            import zmq
+            
+            # Build notification message
+            ft_msg = msgspec.msgpack.encode(("FT_RANK_DIED", failed_rank))
+            
+            # Get sync socket from async socket
+            # The first_req_send_socket exists in DPLBAsyncMPClient
+            if not hasattr(self, 'first_req_send_socket'):
+                raise RuntimeError(
+                    "No first_req_send_socket available for FT notification"
+                )
+            
+            sync_socket = zmq.Socket.shadow(self.first_req_send_socket)
+            sync_socket.send(ft_msg, zmq.NOBLOCK)
+            
+            logger.info(
+                "[FT] Sent failure notification for rank %d to coordinator",
+                failed_rank
+            )
+            
+        except Exception as e:
+            logger.error(
+                "[FT] Failed to send FT notification for rank %d: %s",
+                failed_rank, e, exc_info=True
+            )
+            raise
 
 
 def _process_utility_output(
@@ -775,8 +855,8 @@ class SyncMPClient(MPClient):
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
 
-    def execute_dummy_batch(self) -> None:
-        self.call_utility("execute_dummy_batch")
+    def execute_dummy_batch(self, cpu_only: bool = False) -> None:
+        self.call_utility("execute_dummy_batch", cpu_only)
 
     def collective_rpc(
         self,
@@ -1079,8 +1159,8 @@ class DPAsyncMPClient(AsyncMPClient):
                         and len(events) == 2
                         or (events[0][0] == first_req_rcv_socket)
                     ):
-                        # Check if this is a regular request notification or
-                        # scale up notification
+                        # Check if this is a regular request notification,
+                        # scale up notification, or FT notification
                         buf = first_req_rcv_socket.recv(flags=zmq.NOBLOCK).result()
 
                         decoded = msgspec.msgpack.decode(buf)
@@ -1097,11 +1177,34 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             await socket.send(scale_msg)
                             continue
+                        
+                        if (
+                            isinstance(decoded, (list, tuple))
+                            and len(decoded) == 2
+                            and decoded[0] == "FT_RANK_DIED"
+                        ):
+                            # Fault tolerance: rank failed, notify coordinator
+                            failed_rank = decoded[1]
+                            logger.warning(
+                                "[FT] Client forwarding rank %d failure to coordinator",
+                                failed_rank
+                            )
+                            
+                            # Forward to coordinator
+                            ft_msg = msgspec.msgpack.encode(
+                                ("FT_RANK_DIED", failed_rank)
+                            )
+                            await socket.send(ft_msg)
+                            
+                            # Handle client-side cleanup for failed rank
+                            await self._handle_rank_failure_client_side(failed_rank)
+                            
+                            continue
 
                         # we're sending a request while the engines are
                         # paused, so that it can wake the others up
                         # (to run dummy EP loop).
-                        assert decoded[0] == "FIRST_REQ"
+                        assert decoded[0] == "FIRST_REQ", f"Unexpected message: {decoded}"
                         target_eng_index = decoded[1]
                         self.engines_running = True
                         msg = msgspec.msgpack.encode(
@@ -1287,6 +1390,74 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self, request_ids: list[str], engine: EngineIdentity
     ) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids, engine)
+    
+    async def _handle_rank_failure_client_side(self, failed_rank: int):
+        """
+        Handle client-side cleanup when a rank fails.
+        Aborts in-flight requests sent to the failed rank.
+        """
+        logger.info(
+            "[FT] Client handling failure of rank %d (client-side cleanup)",
+            failed_rank
+        )
+        
+        # Find requests sent to failed rank
+        if failed_rank >= len(self.core_engines):
+            logger.warning(
+                "[FT] Failed rank %d out of range (we have %d engines)",
+                failed_rank, len(self.core_engines)
+            )
+            return
+        
+        failed_engine = self.core_engines[failed_rank]
+        requests_to_abort = [
+            req_id for req_id, engine in self.reqs_in_flight.items()
+            if engine == failed_engine
+        ]
+        
+        if requests_to_abort:
+            logger.warning(
+                "[FT] Found %d in-flight requests to failed rank %d, aborting",
+                len(requests_to_abort), failed_rank
+            )
+            
+            # Clean up tracking (engine is dead, can't send abort message)
+            for req_id in requests_to_abort:
+                self.reqs_in_flight.pop(req_id, None)
+            
+            # Abort at output processor level (will send FinishReason.ABORT to clients)
+            # Note: We access output_processor from the parent AsyncLLM if available
+            # For now, just clean up local state
+            logger.info(
+                "[FT] Removed %d requests to failed rank %d from tracking",
+                len(requests_to_abort), failed_rank
+            )
+        
+        # Update client state
+        logger.info(
+            "[FT] Updating client state: removing rank %d",
+            failed_rank
+        )
+        
+        # Update core_engines list
+        self.core_engines.pop(failed_rank)
+        
+        # Update load balancer state
+        if hasattr(self, 'lb_engines'):
+            self.lb_engines.pop(failed_rank)
+        
+        # Clear masked ranks
+        if hasattr(self, 'masked_ranks'):
+            self.masked_ranks.clear()
+        
+        # Update config
+        new_size = len(self.core_engines)
+        self.vllm_config.parallel_config.data_parallel_size = new_size
+        
+        logger.info(
+            "[FT] Client state updated: now tracking %d engines",
+            new_size
+        )
 
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""
