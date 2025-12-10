@@ -82,6 +82,9 @@ RUN mkdir -p /install
 # COPY ensures Docker cache is invalidated when wheels change
 # .keep file ensures directory always exists for COPY to work
 COPY docker/context/base-wheels/ /tmp/base-wheels/
+# This is how we know if we are building for a wheel release or not.
+# If there are not wheels found there, we are not building for a wheel release. 
+# So we exit with an error. To skip this stage.
 RUN if [ -n "$(ls /tmp/base-wheels/*.whl 2>/dev/null)" ]; then \
         echo "Found custom wheels - copying to /install"; \
         cp /tmp/base-wheels/*.whl /install/ && \
