@@ -27,6 +27,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -195,6 +196,39 @@ direct_register_custom_op(
 )
 
 
+def _triton_per_token_group_quant_fp8_impl(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return per_token_group_quant_fp8(
+        x, group_size, column_major_scales=False, use_ue8m0=False
+    )
+
+
+def _triton_per_token_group_quant_fp8_fake(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    x_fp8 = torch.empty((M, N), dtype=current_platform.fp8_dtype(), device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
+direct_register_custom_op(
+    "triton_per_token_group_quant_fp8",
+    _triton_per_token_group_quant_fp8_impl,
+    fake_impl=_triton_per_token_group_quant_fp8_fake,
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -340,17 +374,15 @@ class W8A8BlockFp8LinearOp:
 
         if input_scale is not None:
             q_input = input_2d
-        # MI350 case uses triton kernel
         elif use_triton:
-            q_input, input_scale = per_token_group_quant_fp8(
+            q_input, input_scale = torch.ops.vllm.triton_per_token_group_quant_fp8(
                 input_2d,
                 self.act_quant_group_shape.col,
-                column_major_scales=False,
-                use_ue8m0=False,
             )
-        # MI300 uses tuned AITER ASM/C++ kernel
         else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
+                input_2d, self.act_quant_group_shape.col
+            )
 
         return gemm_a8w8_blockscale_op(
             q_input,
@@ -1404,12 +1436,12 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     if should_use_deepgemm:
         dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
             wq=layer.weight.data,
-            ws=layer.weight_scale.data,
+            ws=layer.weight_scale_inv.data,
             quant_block_shape=tuple(layer.weight_block_size),
             use_e8m0=is_deep_gemm_e8m0_used(),
         )
-        layer.weight = torch.nn.Parameter(dg_weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(dg_weight_scale, requires_grad=False)
+        replace_parameter(layer, "weight", dg_weight)
+        replace_parameter(layer, "weight_scale_inv", dg_weight_scale)
 
 
 def expert_weight_is_col_major(x: torch.Tensor) -> bool:
