@@ -6,7 +6,7 @@ import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
@@ -254,7 +254,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 class GPURunnerTimer:
     def __init__(self):
-        self._events: deque[tuple[RunnerEvent, torch.Event, torch.Event]] = deque()
+        # Setting maxlen to ensure this will never cause a memory leak.
+        self._events: deque[tuple[RunnerEvent, torch.Event, torch.Event]] = deque(
+            maxlen=1000
+        )
 
     def track(self, event: RunnerEvent) -> AbstractContextManager[None]:
         @contextmanager
@@ -5495,8 +5498,12 @@ class GPUModelRunner(
     def _record_context(self, event: RunnerEvent) -> AbstractContextManager[None]:
         @contextmanager
         def f():
+            # Only record timings on the last pp rank since metrics are only collected
+            # in `sample_tokens()` calls.
             with (
-                self.timer.track(event),
+                self.timer.track(event)
+                if get_pp_group().is_last_rank
+                else nullcontext(),
                 record_function_or_nullcontext(f"gpu_model_runner: {event.name}"),
             ):
                 yield

@@ -1097,9 +1097,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
             if scheduler_stats.runner_stats is not None:
-                for event, durations in scheduler_stats.runner_stats.timings.items():
+                for (
+                    runner_event,
+                    durations,
+                ) in scheduler_stats.runner_stats.timings.items():
                     for duration in durations:
-                        self.histogram_runner_timings[event][engine_idx].observe(
+                        self.histogram_runner_timings[runner_event][engine_idx].observe(
                             duration
                         )
 
