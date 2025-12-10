@@ -1,2 +1,2 @@
-lmcache
+lmcache >= 0.3.10.post1
 nixl >= 0.7.1 # Required for disaggregated prefill
