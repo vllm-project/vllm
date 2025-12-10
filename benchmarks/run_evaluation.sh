@@ -21,6 +21,8 @@ mkdir -p "$OUTPUT_DIR"
 
 # Enable the benchmark mode for Zero-Init inference
 export VLLM_HYBRID_SSM_MODE="benchmark"
+# Fix import path for benchmarks module
+export PYTHONPATH=$PYTHONPATH:.
 
 echo "================================================================="
 echo "Starting Hybrid Architecture Evaluation"
@@ -42,7 +44,7 @@ echo "Comparison: Standard Attention vs. Hybrid (SSM+SW)"
 echo "Hypothesis: Hybrid memory growth should be near-zero per frame."
 echo "-----------------------------------------------------------------"
 
-python benchmarks/streaming_video_benchmark.py \
+python -m benchmarks.streaming_video_benchmark \
     --model "$MODEL_PATH" \
     --scenario memory-scaling \
     --num-frames 64 \
@@ -57,7 +59,7 @@ echo "Scenario: 5 concurrent queries on a 32-frame video"
 echo "Hypothesis: Shared SSM state enables high throughput."
 echo "-----------------------------------------------------------------"
 
-python benchmarks/streaming_video_benchmark.py \
+python -m benchmarks.streaming_video_benchmark \
     --model "$MODEL_PATH" \
     --scenario multi-query \
     --use-hybrid-attention \
@@ -65,7 +67,7 @@ python benchmarks/streaming_video_benchmark.py \
     --output-file "$OUTPUT_DIR/exp2_throughput_hybrid.json"
 
 # Run baseline for comparison
-python benchmarks/streaming_video_benchmark.py \
+python -m benchmarks.streaming_video_benchmark \
     --model "$MODEL_PATH" \
     --scenario multi-query \
     --num-frames 32 \
@@ -79,7 +81,7 @@ echo "Scenario: 128 frames (simulated long context)"
 echo "Hypothesis: Successful completion without OOM."
 echo "-----------------------------------------------------------------"
 
-python benchmarks/streaming_video_benchmark.py \
+python -m benchmarks.streaming_video_benchmark \
     --model "$MODEL_PATH" \
     --scenario long-video \
     --use-hybrid-attention \
