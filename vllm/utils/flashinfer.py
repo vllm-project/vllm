@@ -269,6 +269,8 @@ def supports_trtllm_attention() -> bool:
 
 def force_use_trtllm_attention() -> bool | None:
     """
+    This function should only be called during initialization stage when vllm config
+    is set.
     Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
@@ -296,11 +298,12 @@ def use_trtllm_attention(
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
+    # None means auto-detection, True means force on, False means force off
+    force_use_trtllm: bool | None = None,
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
-    force_use_trtllm = force_use_trtllm_attention()
 
     # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
