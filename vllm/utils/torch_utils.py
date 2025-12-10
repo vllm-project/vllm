@@ -210,9 +210,9 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
 def kv_cache_dtype_str_to_dtype(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> torch.dtype:
+    # Model config may not be specified for unit tests, default to float16
     dtype = model_config.dtype if model_config else torch.half
     if kv_cache_dtype == "auto":
-        # Model config may not be specified for unit tests, default to float16
         hf_cfg = getattr(model_config, "hf_config", None)
         if hf_cfg is not None:
             quant_cfg = getattr(hf_cfg, "quantization_config", None)
