@@ -192,7 +192,7 @@ class AsyncLLM(EngineClient):
     @property
     @deprecated(
         "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
