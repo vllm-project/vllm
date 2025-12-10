@@ -87,6 +87,7 @@ def kernel_unified_attention_2d(
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
     USE_MM_PREFIX: tl.constexpr,  # bool
+    MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
@@ -166,9 +167,6 @@ def kernel_unified_attention_2d(
 
     # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
-
-    # prefix length for PrefixLM (bidirectional attention in prefix region)
-    prefix_len = tl.load(mm_prefix_range_ptr + seq_idx) if USE_MM_PREFIX else 0
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -276,18 +274,37 @@ def kernel_unified_attention_2d(
             V = V_load
 
         # Compute attention mask
+        query_abs_pos = context_len + query_pos[:, None]
+        # Standard causal mask
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+
         # For PrefixLM: prefix region uses bidirectional attention,
         # suffix region uses causal attention
         if USE_MM_PREFIX:
-            # Key positions in the prefix region are always visible
-            is_key_in_prefix = seq_offset[None, :] < prefix_len
-            # For keys outside prefix, use causal masking
-            query_abs_pos = context_len + query_pos[:, None]
-            is_causal_valid = seq_offset[None, :] <= query_abs_pos
-            seq_mask = is_key_in_prefix | is_causal_valid
-        else:
             # Standard causal mask
-            seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+            seq_mask = seq_offset[None, :] <= query_abs_pos
+
+            # Add full attention ranges
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+
+                # Check if query is in range
+                q_in_range = (query_abs_pos >= range_start) & (
+                    query_abs_pos < range_end
+                )
+
+                # Check if key is in range
+                k_in_range = (seq_offset[None, :] >= range_start) & (
+                    seq_offset[None, :] < range_end
+                )
+
+                # If both in range, allow attention
+                seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -416,6 +433,7 @@ def kernel_unified_attention_3d(
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
     USE_MM_PREFIX: tl.constexpr,  # bool
+    MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
 ):
     q_block_global_idx = tl.program_id(0)
@@ -491,9 +509,6 @@ def kernel_unified_attention_3d(
 
     # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
-
-    # prefix length for PrefixLM (bidirectional attention in prefix region)
-    prefix_len = tl.load(mm_prefix_range_ptr + seq_idx) if USE_MM_PREFIX else 0
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -582,18 +597,37 @@ def kernel_unified_attention_3d(
             V = V_load
 
         # Compute attention mask
+        query_abs_pos = context_len + query_pos[:, None]
+        # Standard causal mask
+        seq_mask = seq_offset[None, :] < query_abs_pos + 1
+
         # For PrefixLM: prefix region uses bidirectional attention,
         # suffix region uses causal attention
         if USE_MM_PREFIX:
-            # Key positions in the prefix region are always visible
-            is_key_in_prefix = seq_offset[None, :] < prefix_len
-            # For keys outside prefix, use causal masking
-            query_abs_pos = context_len + query_pos[:, None]
-            is_causal_valid = seq_offset[None, :] <= query_abs_pos
-            seq_mask = is_key_in_prefix | is_causal_valid
-        else:
             # Standard causal mask
-            seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+            seq_mask = seq_offset[None, :] <= query_abs_pos
+
+            # Add full attention ranges
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+
+                # Check if query is in range
+                q_in_range = (query_abs_pos >= range_start) & (
+                    query_abs_pos < range_end
+                )
+
+                # Check if key is in range
+                k_in_range = (seq_offset[None, :] >= range_start) & (
+                    seq_offset[None, :] < range_end
+                )
+
+                # If both in range, allow attention
+                seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -797,6 +831,17 @@ def unified_attention(
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
+    use_mm_prefix = False
+    max_mm_ranges = 0
+    if mm_prefix_range is not None:
+        if mm_prefix_range.ndim == 3:
+            use_mm_prefix = True
+            max_mm_ranges = mm_prefix_range.shape[1]
+        else:
+            raise ValueError(
+                f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
+            )
+
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
 
@@ -867,7 +912,8 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
-            USE_MM_PREFIX=(mm_prefix_range is not None),
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
             mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
@@ -942,7 +988,8 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
-            USE_MM_PREFIX=(mm_prefix_range is not None),
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
             mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),

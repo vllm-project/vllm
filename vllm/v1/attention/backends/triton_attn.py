@@ -64,6 +64,23 @@ class TritonAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+
+    @property
+    def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+        if self.mm_prefix_range is None:
+            return None
+        mm_prefix_range_tensor = torch.nested.nested_tensor(
+            [
+                torch.tensor(
+                    self.mm_prefix_range[i],
+                    dtype=torch.int32,
+                    device=self.seq_lens.device,
+                )
+                for i in range(len(self.mm_prefix_range))
+            ]
+        ).to_padded_tensor(0)
+        return mm_prefix_range_tensor
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -354,6 +371,7 @@ class TritonAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -375,6 +393,7 @@ class TritonAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale.expand(descale_shape),
             sinks=self.sinks,
             output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range_tensor,
         )
 
         return output
