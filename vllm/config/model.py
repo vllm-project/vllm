@@ -784,6 +784,7 @@ class ModelConfig:
                 model, allow_pattern=["*.model", "*.py", "*.json"]
             )
             self.model_weights = model
+            self.model = model
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
