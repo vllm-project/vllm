@@ -48,7 +48,14 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    cutlass_block_fp8_supported,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -1368,3 +1375,44 @@ class TestFP8Layer(torch.nn.Module):
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(self, y, bias)
+
+
+class TestBlockFP8Layer:
+    """
+    Test wrapper for W8A8BlockFp8LinearOp to match TestFP8Layer interface.
+
+    This is a workaround until W8A8BlockFp8LinearOp has a similar API to
+    FP8ScaledMMLinearKernel (i.e., a kernel abstraction for blockwise quantization).
+    """
+
+    def __init__(
+        self,
+        group_shape: GroupShape,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        input_scale: torch.Tensor,
+    ):
+        self.kernel = None  # For compatibility with TestFP8Layer interface
+        self.linear_op = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
+            act_quant_group_shape=group_shape,
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
+            use_aiter_and_is_supported=False,
+        )
+        self.weight = weight
+        self.weight_scale = weight_scale
+        self.input_scale = input_scale
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.linear_op.apply(
+            input=y,
+            weight=self.weight,
+            weight_scale=self.weight_scale,
+            input_scale=self.input_scale,
+            bias=bias,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.linear_op.input_quant_op.enabled()

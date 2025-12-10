@@ -177,6 +177,13 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
+        if c.out_dtype == torch.float16:
+            # hipblaslt rowwise _scaled_mm only supports BFloat16
+            return (
+                False,
+                "RowWiseTorchScaledMMLinearKernel only supports BFloat16.",
+            )
+
         if per_tensor_activation_scales or per_tensor_weight_scales:
             return (
                 False,
