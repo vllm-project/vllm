@@ -135,7 +135,7 @@ class AttentionGroup:
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
-    # so that if they use internal persistant buffers for cudagraphs, and they
+    # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
