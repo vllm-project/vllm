@@ -315,7 +315,10 @@ class KVCacheManager:
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_tokens_target_model, num_encoder_tokens
+            request.request_id,
+            num_tokens_need_slot,
+            num_tokens_target_model,
+            num_encoder_tokens,
         )
 
         # P/D: delay caching blocks if we have to recv from

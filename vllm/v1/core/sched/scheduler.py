@@ -189,18 +189,29 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-        print(f">>> [DEBUG] Scheduler: init enable_prefix_caching={self.cache_config.enable_prefix_caching} block_size={self.block_size} kv_cache_config={self.kv_cache_config}")
+        print(
+            f">>> [DEBUG] Scheduler: init enable_prefix_caching={self.cache_config.enable_prefix_caching} block_size={self.block_size} kv_cache_config={self.kv_cache_config}"
+        )
 
     def _has_mamba_spec(self) -> bool:
-        has_mamba: bool = any(isinstance(spec.kv_cache_spec, MambaSpec) 
-                              for spec in self.kv_cache_config.kv_cache_groups)
+        has_mamba: bool = any(
+            isinstance(spec.kv_cache_spec, MambaSpec)
+            for spec in self.kv_cache_config.kv_cache_groups
+        )
         assert not has_mamba or self.vllm_config.model_config.is_hybrid
         return has_mamba
-    
-    def _mamba_block_aligned_split(self, request: Request, num_new_tokens: int, num_new_local_computed_tokens: int=0, num_external_computed_tokens: int=0) -> int:
-        assert num_external_computed_tokens == 0, "External KV connector is not verified yet"
-        if (self.cache_config.enable_prefix_caching 
-            and self._has_mamba_spec()):
+
+    def _mamba_block_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        assert num_external_computed_tokens == 0, (
+            "External KV connector is not verified yet"
+        )
+        if self.cache_config.enable_prefix_caching and self._has_mamba_spec():
             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
             # must be a multiple of `block_size`.
             # As an exception, if `num_new_tokens` is less than `block_size`, the
@@ -209,17 +220,27 @@ class Scheduler(SchedulerInterface):
             # matching block. To prevent this from causing a Mamba cache miss, the
             # last chunk must be larger than `block_size`.
             block_size = self.cache_config.block_size
-            if request.num_output_tokens == 0: # prefill
-                last_cache_position = request.num_prompt_tokens - request.num_prompt_tokens % block_size
+            if request.num_output_tokens == 0:  # prefill
+                last_cache_position = (
+                    request.num_prompt_tokens - request.num_prompt_tokens % block_size
+                )
                 # eagle prune
                 if self.use_eagle:
                     last_cache_position = max(last_cache_position - block_size, 0)
-                num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+                num_computed_tokens = (
+                    request.num_computed_tokens
+                    + num_new_local_computed_tokens
+                    + num_external_computed_tokens
+                )
                 num_computed_tokens_after_prefill = num_computed_tokens + num_new_tokens
                 if num_computed_tokens_after_prefill < last_cache_position:
                     # align to block_size
                     num_new_tokens = num_new_tokens // block_size * block_size
-                elif num_computed_tokens < last_cache_position < num_computed_tokens_after_prefill:
+                elif (
+                    num_computed_tokens
+                    < last_cache_position
+                    < num_computed_tokens_after_prefill
+                ):
                     # force to cache the last chunk
                     num_new_tokens = last_cache_position - num_computed_tokens
                 else:
@@ -230,7 +251,9 @@ class Scheduler(SchedulerInterface):
     def schedule(self) -> SchedulerOutput:
         print(f">>> [DEBUG] Scheduler: schidule new step")
         for req in self.requests.values():
-            print(f">>> [DEBUG] Scheduler: request {req.request_id} num_computed_tokens={req.num_computed_tokens} num_tokens={req.num_tokens} num_tokens_with_spec={req.num_tokens_with_spec}")
+            print(
+                f">>> [DEBUG] Scheduler: request {req.request_id} num_computed_tokens={req.num_computed_tokens} num_tokens={req.num_tokens} num_tokens_with_spec={req.num_tokens_with_spec}"
+            )
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -264,27 +287,33 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            logger.info(f'>>> [DEBUG] Scheduler: schedule RUNING: req_id={request.request_id}, '
-                        f'num_prompt_tokens={request.num_prompt_tokens=}')
-            # Ensure new tokens for a request in the prefill phase do not contain 
-            # sps tokens, especially in the last prefill chunk. For a hybrid-model, 
+            logger.info(
+                f">>> [DEBUG] Scheduler: schedule RUNING: req_id={request.request_id}, "
+                f"num_prompt_tokens={request.num_prompt_tokens=}"
+            )
+            # Ensure new tokens for a request in the prefill phase do not contain
+            # sps tokens, especially in the last prefill chunk. For a hybrid-model,
             # extra sps tokens would corrupt the generated Mamba state.
             # TODO: This logic does not yet handle resumed requests.
             if request.num_computed_tokens < request.num_prompt_tokens:
-                num_new_tokens = min(request.num_tokens_with_spec 
-                                     + request.num_output_placeholders, 
-                                     request.num_prompt_tokens) - request.num_computed_tokens
-            else:
-                num_new_tokens = (request.num_tokens_with_spec +
-                                  request.num_output_placeholders -
-                                  request.num_computed_tokens)
-
-            if (0 < self.scheduler_config.long_prefill_token_threshold <
-                    num_new_tokens):
                 num_new_tokens = (
-                    self.scheduler_config.long_prefill_token_threshold)
+                    min(
+                        request.num_tokens_with_spec + request.num_output_placeholders,
+                        request.num_prompt_tokens,
+                    )
+                    - request.num_computed_tokens
+                )
+            else:
+                num_new_tokens = (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                )
 
-            num_new_tokens = min(num_new_tokens, token_budget)         
+            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
+
+            num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len or
             # request's max_tokens.
@@ -315,7 +344,8 @@ class Scheduler(SchedulerInterface):
 
             if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
                 num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens)
+                    request, num_new_tokens
+                )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -327,7 +357,7 @@ class Scheduler(SchedulerInterface):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
-                # 4. Insufficient budget for a block-aligned chunk in hybrid 
+                # 4. Insufficient budget for a block-aligned chunk in hybrid
                 #    models with lighter mamba prefix caching.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
@@ -380,7 +410,9 @@ class Scheduler(SchedulerInterface):
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
-                    print(f">>> [DEBUG] Scheduler: preempted request {preempted_req.request_id}")
+                    print(
+                        f">>> [DEBUG] Scheduler: preempted request {preempted_req.request_id}"
+                    )
 
                     self.kv_cache_manager.free(preempted_req)
                     self.encoder_cache_manager.free(preempted_req)
@@ -463,8 +495,10 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting.peek_request()
-                logger.info(f'>>> [DEBUG] Scheduler: schedule WAITING: req_id={request.request_id}, '
-                            f'num_prompt_tokens={request.num_prompt_tokens=}')
+                logger.info(
+                    f">>> [DEBUG] Scheduler: schedule WAITING: req_id={request.request_id}, "
+                    f"num_prompt_tokens={request.num_prompt_tokens=}"
+                )
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -515,8 +549,10 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
-                    logger.info(f'>>> [DEBUG] Scheduler: get_computed_blk: req_id={request.request_id},'
-                               f'{num_new_local_computed_tokens=}')
+                    logger.info(
+                        f">>> [DEBUG] Scheduler: get_computed_blk: req_id={request.request_id},"
+                        f"{num_new_local_computed_tokens=}"
+                    )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -598,7 +634,11 @@ class Scheduler(SchedulerInterface):
 
                 if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
                     num_new_tokens = self._mamba_block_aligned_split(
-                        request, num_new_tokens, num_new_local_computed_tokens, num_external_computed_tokens)
+                        request,
+                        num_new_tokens,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
                     if num_new_tokens == 0:
                         break
 
@@ -762,10 +802,14 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        logger.info('>>> [DEBUG] Scheduler: new_reqs:'
-                    f'{[(reqdata.req_id, reqdata.block_ids) for reqdata in new_reqs_data]}')
-        logger.info('>>> [DEBUG] Scheduler: cached_reqs:'
-                    f'{[(req_id, cached_reqs_data.new_block_ids[i]) for i, req_id in enumerate(cached_reqs_data.req_ids)]}')
+        logger.info(
+            ">>> [DEBUG] Scheduler: new_reqs:"
+            f"{[(reqdata.req_id, reqdata.block_ids) for reqdata in new_reqs_data]}"
+        )
+        logger.info(
+            ">>> [DEBUG] Scheduler: cached_reqs:"
+            f"{[(req_id, cached_reqs_data.new_block_ids[i]) for i, req_id in enumerate(cached_reqs_data.req_ids)]}"
+        )
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -803,7 +847,7 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        logger.info(f'>>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}')
+        logger.info(f">>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}")
         return scheduler_output
 
     def _update_after_schedule(
