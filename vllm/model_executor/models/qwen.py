@@ -36,6 +36,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -149,6 +150,7 @@ class QWenBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        set_default_rope_theta(config, default_theta=10000)
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         self.attn = QWenAttention(
