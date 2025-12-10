@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -73,7 +73,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -366,16 +365,6 @@ class LLM:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
-
-    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
-        if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer = tokenizer
-        else:
-            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
