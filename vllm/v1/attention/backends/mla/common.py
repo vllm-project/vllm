@@ -1139,7 +1139,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
-        self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_fp4bmm_enabled()
+        # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
+        self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_enabled() and \
+            self.kv_b_proj.weight.dtype == torch.bfloat16
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1595,7 +1597,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return layer.weight
 
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj)
-
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         if self.is_aiter_triton_fp4_bmm_enabled:
             from vllm.model_executor.layers.quantization.quark.utils import quark_post_load_weights
@@ -2020,7 +2021,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
-            decode_q_nope = decode_q_nope.transpose(0, 1)
 
             if self.q_pad_num_heads is not None:
                 B, N, L = decode_q_pe.shape
@@ -2031,10 +2031,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-                x = decode_q_nope.transpose(0, 1)
+                decode_q_nope = decode_q_nope.transpose(0, 1)
                 decode_ql_nope = None
                 decode_ql_nope = batched_gemm_a16wfp4(
-                    x,
+                    decode_q_nope,
                     self.W_K,
                     self.W_K_scale,
                     y=decode_ql_nope,
