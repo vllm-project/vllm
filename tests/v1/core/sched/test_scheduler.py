@@ -3,8 +3,8 @@
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.request_queue import PriorityRequestQueue
-from vllm.v1.request import Request
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.request import Request
 
 
 def _make_request(req_id: str, sla_tier: str, priority: int = 0, arrival: float = 0.0):
@@ -91,4 +91,3 @@ def test_interactive_budget_skip_condition():
         and bg_req.sla_tier == "interactive"
     )
     assert should_skip_bg is False
-

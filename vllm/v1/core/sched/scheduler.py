@@ -149,9 +149,7 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(
-            self.policy, use_sla=self.sla_tier_enabled
-        )
+        self.waiting = create_request_queue(self.policy, use_sla=self.sla_tier_enabled)
         self.running: list[Request] = []
         self.last_preempted_tier_counts: dict[str, int] = {}
         self.last_interactive_limit_hits: int = 0
@@ -331,6 +329,7 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
+
                         def _preempt_key(r: Request):
                             if self.sla_tier_enabled:
                                 return (

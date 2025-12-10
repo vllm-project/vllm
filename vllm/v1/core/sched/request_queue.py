@@ -200,9 +200,7 @@ class PriorityRequestQueue(RequestQueue):
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = requests if isinstance(requests, set) else set(requests)
-        self._heap = [
-            item for item in self._heap if item[1] not in requests_to_remove
-        ]
+        self._heap = [item for item in self._heap if item[1] not in requests_to_remove]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
@@ -234,7 +232,9 @@ class PriorityRequestQueue(RequestQueue):
         return (request.priority, request.arrival_time, request.request_id)
 
 
-def create_request_queue(policy: SchedulingPolicy, *, use_sla: bool = False) -> RequestQueue:
+def create_request_queue(
+    policy: SchedulingPolicy, *, use_sla: bool = False
+) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue(use_sla=use_sla)
