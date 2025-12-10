@@ -224,7 +224,7 @@ steps:
       - step: input-rocm-config
         allow_failure: true  # Allow failure so non-UI builds can proceed (input step is skipped)
     agents:
-      queue: vllm-rocm-wheel
+      queue: cpu_queue_postmerge
     timeout_in_minutes: 240
     commands:
       # Set configuration and check cache
@@ -360,7 +360,7 @@ steps:
       - step: build-rocm-base-wheels
         allow_failure: false
     agents:
-      queue: vllm-rocm-wheel
+      queue: cpu_queue_postmerge
     timeout_in_minutes: 120
     commands:
       # Download artifacts and prepare Docker image
@@ -439,7 +439,7 @@ steps:
       - step: build-rocm-vllm-wheel
         allow_failure: false
     agents:
-      queue: vllm-rocm-wheel
+      queue: cpu_queue_postmerge
     timeout_in_minutes: 60
     commands:
       # Download all wheel artifacts and run upload
@@ -487,7 +487,7 @@ steps:
       - step: upload-rocm-wheels
         allow_failure: true
     agents:
-      queue: vllm-rocm-wheel
+      queue: cpu_queue_postmerge
     commands:
       - "bash .buildkite/scripts/annotate-rocm-release.sh"
     env:
