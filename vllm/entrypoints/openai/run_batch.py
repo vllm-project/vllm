@@ -286,10 +286,13 @@ class OrderedStreamingWriter(AbstractAsyncContextManager):
     than total batch size.
     """
 
-    def __init__(self, output_path: str) -> None:
+    def __init__(self, output_path: str, max_buffer_size: int) -> None:
         self.output_path = output_path
+        self.max_buffer_size = max_buffer_size
         self.next_to_write = 0
         self.buffer: dict[int, BatchRequestOutput] = {}
+        self.skipped_indices: set[int] = set()
+        self.out_of_order_count = 0
         self.file_handle: AsyncTextIOWrapper | None = None
         self._lock = asyncio.Lock()
         self._is_url = False
@@ -334,11 +337,51 @@ class OrderedStreamingWriter(AbstractAsyncContextManager):
 
                 os.unlink(self._temp_path)
 
+        if self.out_of_order_count > 0:
+            logger.warning(
+                "Batch completed with %d out-of-order writes due to slow requests.",
+                self.out_of_order_count,
+            )
+
     async def add_result(self, index: int, result: BatchRequestOutput) -> None:
         """Add a result and flush any ready results to disk."""
         async with self._lock:
+            if index in self.skipped_indices:
+                logger.info(
+                    "Late arrival for skipped index %d, writing out of order", index
+                )
+                self.skipped_indices.discard(index)
+                await self._write_single(result)
+                self.out_of_order_count += 1
+                return
+
             self.buffer[index] = result
             await self._flush()
+
+            # If buffer is too large, skip blocking requests
+            while len(self.buffer) > self.max_buffer_size:
+                await self._skip_blocking()
+
+    async def _skip_blocking(self) -> None:
+        """Skip the blocking index and flush everything we can."""
+        blocking_index = self.next_to_write
+        logger.warning(
+            "Buffer size %d exceeds max %d. Index %d is blocking - skipping.",
+            len(self.buffer),
+            self.max_buffer_size,
+            blocking_index,
+        )
+        self.skipped_indices.add(blocking_index)
+        self.next_to_write += 1
+        await self._flush()
+
+    async def _write_single(self, result: BatchRequestOutput) -> None:
+        """Write a single result to the file."""
+        if self.file_handle is None:
+            raise Exception("Cannot write without entering context")
+
+        await self.file_handle.write(result.model_dump_json() + "\n")
+        await self.file_handle.flush()
 
     async def _flush(self) -> None:
         """Write all consecutive ready results starting from next_to_write."""
@@ -645,7 +688,10 @@ async def run_batch(
     tracker = StreamingBatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
-    async with OrderedStreamingWriter(args.output_file) as writer:
+    async with OrderedStreamingWriter(
+        args.output_file,
+        max_buffer_size=engine_client.vllm_config.scheduler_config.max_num_seqs * 10,
+    ) as writer:
         tasks: set[asyncio.Task] = set()
 
         max_num_seqs = engine_client.vllm_config.scheduler_config.max_num_seqs
