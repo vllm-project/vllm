@@ -65,8 +65,8 @@ class LoRAModelManager:
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        vllm_config: VllmConfig,
         device: torch.device,
+        vllm_config: VllmConfig | None = None,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -114,7 +114,7 @@ class LoRAModelManager:
 
         self.model.lora_manager = self
 
-    def _init_multimodal_config(self, vllm_config: VllmConfig):
+    def _init_multimodal_config(self, vllm_config: VllmConfig | None = None):
         # Used to indicate whether the model is a multimodal model
         self.supports_mm: bool = (
             supports_multimodal(self.model)
@@ -125,7 +125,7 @@ class LoRAModelManager:
 
         self.supports_mm_lora = False
 
-        if self.supports_mm:
+        if self.supports_mm and vllm_config is not None:
             model_config: ModelConfig = vllm_config.model_config
             self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
             if self.lora_config.enable_mm_lora:
@@ -708,8 +708,8 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
-        vllm_config: VllmConfig,
         device: torch.device,
+        vllm_config: VllmConfig | None = None,
     ):
         super().__init__(
             model,
@@ -717,8 +717,8 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             max_num_batched_tokens,
             vocab_size,
             lora_config,
-            vllm_config,
             device,
+            vllm_config,
         )
         self._registered_adapters: LoRALRUCache = LoRALRUCache(
             self.capacity, self.deactivate_adapter
