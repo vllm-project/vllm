@@ -358,10 +358,6 @@ class LLMEngine:
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
 
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
-
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
             raise ValueError(
