@@ -1184,7 +1184,8 @@ class DPEngineCoreProc(EngineCoreProc):
         This causes expert redistribution at next EPLB step.
         """
         try:
-            eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+            # Access EPLB state - handle different executor types
+            eplb_state = self._get_eplb_state()
             if eplb_state is None:
                 return
             
@@ -1204,6 +1205,23 @@ class DPEngineCoreProc(EngineCoreProc):
                 "DP rank %d: Cannot trigger EPLB masking: %s",
                 self.dp_rank, e
             )
+    
+    def _get_eplb_state(self):
+        """
+        Get EPLB state from model executor.
+        
+        Handles different executor types (UniProcExecutor, MultiprocExecutor, etc.)
+        """
+        # Try driver_worker first (UniProcExecutor)
+        if hasattr(self.model_executor, 'driver_worker'):
+            return self.model_executor.driver_worker.model_runner.eplb_state
+        
+        # Try workers[0] (MultiprocExecutor)
+        if hasattr(self.model_executor, 'workers') and self.model_executor.workers:
+            # For MultiprocExecutor, use first worker (they share EPLB state)
+            return self.model_executor.workers[0].model_runner.eplb_state
+        
+        return None
     
     def check_if_masked_by_eplb(self) -> bool:
         """
@@ -1225,9 +1243,8 @@ class DPEngineCoreProc(EngineCoreProc):
             return True
         
         try:
-            # Access EPLB state through model_executor
-            # Path: model_executor -> driver_worker -> model_runner -> eplb_state
-            eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+            # Access EPLB state (handles different executor types)
+            eplb_state = self._get_eplb_state()
             
             if eplb_state is None:
                 return False
@@ -1328,16 +1345,13 @@ class DPEngineCoreProc(EngineCoreProc):
         
         try:
             # ===== STEP 1: Update EPLB State =====
-            if self.model_executor and hasattr(self.model_executor, 'driver_worker'):
-                worker = self.model_executor.driver_worker
-                if hasattr(worker, 'model_runner') and worker.model_runner.eplb_state:
-                    eplb_state = worker.model_runner.eplb_state
-                    
-                    # Clear masked_ranks (failed rank is being removed)
-                    eplb_state.masked_ranks.clear()
-                    eplb_state.newly_masked_from_external.clear()
-                    
-                    logger.info("[FT] Rank %d: Cleared EPLB masked_ranks", self.dp_rank)
+            eplb_state = self._get_eplb_state()
+            if eplb_state:
+                # Clear masked_ranks (failed rank is being removed)
+                eplb_state.masked_ranks.clear()
+                eplb_state.newly_masked_from_external.clear()
+                
+                logger.info("[FT] Rank %d: Cleared EPLB masked_ranks", self.dp_rank)
             
             # ===== STEP 2: Destroy Old Communication Groups =====
             from vllm.distributed.parallel_state import destroy_distributed_environment
@@ -1375,21 +1389,19 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             
             # ===== STEP 4: Redistribute Experts (with NEW groups) =====
-            if self.model_executor and hasattr(self.model_executor, 'driver_worker'):
-                worker = self.model_executor.driver_worker
-                if hasattr(worker, 'model_runner') and worker.model_runner.eplb_state:
-                    logger.info("[FT] Rank %d: Redistributing experts", self.dp_rank)
-                    
-                    eplb_state = worker.model_runner.eplb_state
-                    eplb_state.rearrange(
-                        rank_mapping=rank_mapping,
-                        is_health_masking=False,  # Actual scale-down
-                        execute_shuffle=True       # AllToAll with NEW groups
-                    )
-                    
-                    torch.cuda.synchronize()
-                    
-                    logger.info("[FT] Rank %d: Expert redistribution complete", self.dp_rank)
+            eplb_state = self._get_eplb_state()
+            if eplb_state:
+                logger.info("[FT] Rank %d: Redistributing experts", self.dp_rank)
+                
+                eplb_state.rearrange(
+                    rank_mapping=rank_mapping,
+                    is_health_masking=False,  # Actual scale-down
+                    execute_shuffle=True       # AllToAll with NEW groups
+                )
+                
+                torch.cuda.synchronize()
+                
+                logger.info("[FT] Rank %d: Expert redistribution complete", self.dp_rank)
             
             # ===== STEP 5: Recapture CUDA Graphs =====
             logger.info("[FT] Rank %d: Recapturing CUDA graphs", self.dp_rank)
@@ -1558,7 +1570,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     
                     # Get global_step from EPLB (consistent with mask_out_gpu_after)
                     try:
-                        eplb_state = self.model_executor.driver_worker.model_runner.eplb_state
+                        eplb_state = self._get_eplb_state()
                         current_global_step = eplb_state.global_step if eplb_state else 0
                     except:
                         current_global_step = 0
