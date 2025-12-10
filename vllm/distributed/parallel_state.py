@@ -1586,6 +1586,8 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Reset environment variable cache
+    envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 
