@@ -141,6 +141,16 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    # SLA-tiered scheduling (opt-in).
+    sla_tier_enabled: bool = False
+    """Enable SLA-tiered scheduling for requests."""
+
+    max_interactive_batch_tokens: int = Field(default=0, ge=0)
+    """Cap on tokens from 'interactive' tier per scheduling step.
+
+    If 0, defaults to max_num_batched_tokens.
+    """
+
     @staticmethod
     def default_factory(**kwargs):
         """
@@ -223,6 +233,9 @@ class SchedulerConfig:
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
+
+        if self.max_interactive_batch_tokens == 0:
+            self.max_interactive_batch_tokens = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(

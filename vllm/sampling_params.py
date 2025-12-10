@@ -6,7 +6,7 @@ import copy
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -212,6 +212,8 @@ class SamplingParams(
     (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
 
+    sla_tier: Literal["interactive", "batch", "background"] | None = "batch"
+
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
@@ -266,6 +268,7 @@ class SamplingParams(
         logits_processors: list[LogitsProcessor] | None = None,
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        sla_tier: Literal["interactive", "batch", "background"] | None = "batch",
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
@@ -306,6 +309,7 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
+            sla_tier=sla_tier,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
@@ -365,6 +369,13 @@ class SamplingParams(
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+
+        if self.sla_tier is None:
+            self.sla_tier = "batch"
+        elif self.sla_tier not in ("interactive", "batch", "background"):
+            raise ValueError(
+                "sla_tier must be one of 'interactive', 'batch', or 'background'"
+            )
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
@@ -577,6 +588,7 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
+            f"sla_tier={self.sla_tier}, "
             f"extra_args={self.extra_args})"
         )
 

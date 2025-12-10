@@ -133,6 +133,17 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         return super().__reversed__()
 
 
+def _sla_rank(tier: str | None) -> int:
+    # Lower rank = higher priority for scheduling.
+    if tier == "interactive":
+        return 0
+    if tier == "batch":
+        return 1
+    if tier == "background":
+        return 2
+    return 1
+
+
 class PriorityRequestQueue(RequestQueue):
     """
     A priority queue that supports heap operations.
@@ -143,24 +154,25 @@ class PriorityRequestQueue(RequestQueue):
     `arrival_time` is processed first.
     """
 
-    def __init__(self) -> None:
-        self._heap: list[Request] = []
+    def __init__(self, use_sla: bool = False) -> None:
+        self._heap: list[tuple[tuple, Request]] = []
+        self.use_sla = use_sla
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
-        heapq.heappush(self._heap, request)
+        heapq.heappush(self._heap, (self._make_key(request), request))
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
         if not self._heap:
             raise IndexError("pop from empty heap")
-        return heapq.heappop(self._heap)
+        return heapq.heappop(self._heap)[1]
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
         if not self._heap:
             raise IndexError("peek from empty heap")
-        return self._heap[0]
+        return self._heap[0][1]
 
     def prepend_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy.
@@ -179,13 +191,16 @@ class PriorityRequestQueue(RequestQueue):
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
-        self._heap.remove(request)
+        for idx, (_, req) in enumerate(self._heap):
+            if req is request:
+                self._heap.pop(idx)
+                break
         heapq.heapify(self._heap)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = requests if isinstance(requests, set) else set(requests)
-        self._heap = [r for r in self._heap if r not in requests_to_remove]
+        self._heap = [item for item in self._heap if item[1] not in requests_to_remove]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
@@ -200,17 +215,29 @@ class PriorityRequestQueue(RequestQueue):
         """Iterate over the queue according to priority policy."""
         heap_copy = self._heap[:]
         while heap_copy:
-            yield heapq.heappop(heap_copy)
+            yield heapq.heappop(heap_copy)[1]
 
     def __reversed__(self) -> Iterator[Request]:
         """Iterate over the queue in reverse priority order."""
         return reversed(list(self))
 
+    def _make_key(self, request: Request) -> tuple:
+        if self.use_sla:
+            return (
+                _sla_rank(getattr(request, "sla_tier", None)),
+                request.priority,
+                request.arrival_time,
+                request.request_id,
+            )
+        return (request.priority, request.arrival_time, request.request_id)
 
-def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
+
+def create_request_queue(
+    policy: SchedulingPolicy, *, use_sla: bool = False
+) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
-        return PriorityRequestQueue()
+        return PriorityRequestQueue(use_sla=use_sla)
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
     else:
