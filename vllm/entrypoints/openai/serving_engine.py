@@ -18,6 +18,16 @@ from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.context import (
+    HarmonyContext,
+    ParsableContext,
+    StreamingHarmonyContext,
+)
+from vllm.entrypoints.openai.protocol import (
+    FunctionCall,
+    ResponseInputOutputItem,
+    ResponsesRequest,
+)
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -39,6 +49,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -72,9 +83,7 @@ from vllm.entrypoints.openai.protocol import (
     DetokenizeRequest,
     ErrorInfo,
     ErrorResponse,
-    FunctionCall,
     FunctionDefinition,
-    ResponsesRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
@@ -85,6 +94,9 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.responses_utils import (
+    construct_input_messages,
+)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
@@ -120,6 +132,15 @@ from vllm.utils.async_utils import (
 )
 from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
+
+
+class GenerationError(Exception):
+    """raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
 
 logger = init_logger(__name__)
 
@@ -444,6 +465,29 @@ class OpenAIServing:
             # Iterate through all beam inference results
             for i, result in enumerate(output):
                 current_beam = all_beams[i]
+
+                # check for error finish reason and abort beam search
+                if result.outputs[0].finish_reason == "error":
+                    # yield error output and terminate beam search
+                    yield RequestOutput(
+                        request_id=request_id,
+                        prompt=prompt_text,
+                        outputs=[
+                            CompletionOutput(
+                                index=0,
+                                text="",
+                                token_ids=[],
+                                cumulative_logprob=None,
+                                logprobs=None,
+                                finish_reason="error",
+                            )
+                        ],
+                        finished=True,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_logprobs=None,
+                    )
+                    return
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     all_beams_token_id.extend(list(logprobs.keys()))
@@ -767,6 +811,35 @@ class OpenAIServing:
             ).model_dump()
         )
         return json_str
+
+    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+        """Raise GenerationError if finish_reason indicates an error."""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            raise GenerationError("Internal server error")
+
+    def _convert_generation_error_to_response(
+        self, e: GenerationError
+    ) -> ErrorResponse:
+        """Convert GenerationError to ErrorResponse."""
+        return self.create_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
+
+    def _convert_generation_error_to_streaming_response(
+        self, e: GenerationError
+    ) -> str:
+        """Convert GenerationError to streaming error response."""
+        return self.create_streaming_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
 
     async def _check_model(
         self,
@@ -1224,6 +1297,31 @@ class OpenAIServing:
         )
         return engine_request, tokenization_kwargs
 
+    async def _render_next_turn(
+        self,
+        request: ResponsesRequest,
+        tokenizer: AnyTokenizer,
+        messages: list[ResponseInputOutputItem],
+        tool_dicts: list[dict[str, Any]] | None,
+        tool_parser,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ):
+        new_messages = construct_input_messages(
+            request_input=messages,
+        )
+
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            new_messages,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+        )
+        return request_prompts, engine_prompts
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -1286,11 +1384,28 @@ class OpenAIServing:
 
             # Create inputs for the next turn.
             # Render the next prompt token ids.
-            prompt_token_ids = context.render_for_completion()
-            engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
-            request_prompt = prompt_token_ids
+            if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
+                prompt_token_ids = context.render_for_completion()
+                engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+                request_prompt = prompt_token_ids
+            elif isinstance(context, ParsableContext):
+                request_prompts, engine_prompts = await self._render_next_turn(
+                    context.request,
+                    context.tokenizer,
+                    context.parser.response_messages,
+                    context.tool_dicts,
+                    context.tool_parser_cls,
+                    context.chat_template,
+                    context.chat_template_content_format,
+                )
+                engine_prompt = engine_prompts[0]
+                request_prompt = request_prompts[0]
+                prompt_text, _, _ = self._get_prompt_components(request_prompt)
+
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
+            sampling_params.max_tokens = self.max_model_len - len(
+                engine_prompt["prompt_token_ids"]
+            )
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1

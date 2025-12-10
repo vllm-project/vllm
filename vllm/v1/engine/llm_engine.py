@@ -139,7 +139,7 @@ class LLMEngine:
     @property
     @deprecated(
         "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
@@ -328,8 +328,12 @@ class LLMEngine:
         self.input_processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, reset_running_requests: bool = False) -> bool:
-        return self.engine_core.reset_prefix_cache(reset_running_requests)
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
@@ -353,10 +357,6 @@ class LLMEngine:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
