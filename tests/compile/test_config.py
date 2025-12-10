@@ -288,7 +288,7 @@ def test_moe_splitting_ops_deepep_ht_attn_fusion_no_inductor():
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            pass_config={"fuse_attn_quant ": True, "eliminate_noops": True},
+            pass_config={"fuse_attn_quant": True, "eliminate_noops": True},
             custom_ops=["+quant_fp8"],
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         ),
