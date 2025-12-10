@@ -117,7 +117,7 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
     --build-arg RUN_WHEEL_CHECK=false \
     --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
     --platform "linux/arm64" \
-    --tag vllm/vllm-gb300-openai:latest  \
+    --tag vllm/vllm-gb300-openai:latest \
     --target vllm-openai \
     -f docker/Dockerfile \
     .
