@@ -189,3 +189,9 @@ class CpuGpuOffloadingHandler(OffloadingHandler):
         for job_id, _ in results:
             del self.transfer_events[job_id]
         return results
+
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            event = self.transfer_events.get(job_id)
+            if event:
+                event.synchronize()
