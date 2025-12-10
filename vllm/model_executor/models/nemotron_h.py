@@ -51,6 +51,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -427,6 +428,7 @@ class NemotronHAttention(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
+        max_position_embeddings: int,
         model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -487,13 +489,25 @@ class NemotronHAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
         )
 
+        # Rotary embeddings for positional encoding
+        self.max_position_embeddings = max_position_embeddings
+        self.rotary_emb = get_rope(
+            head_size=self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            is_neox_style=True,
+            dtype=torch.get_default_dtype(),
+        )
+
     def forward(
         self,
+        positions: torch.Tensor,
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -519,9 +533,10 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         self.mixer = NemotronHAttention(
             layer_config,
             layer_idx,
-            model_config,
-            cache_config,
-            quant_config,
+            max_position_embeddings=config.max_position_embeddings,
+            model_config=model_config,
+            cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mixer",
         )
 
@@ -540,7 +555,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states=hidden_states)
+        hidden_states = self.mixer(positions=positions, hidden_states=hidden_states)
         return hidden_states, residual
 
 
@@ -693,6 +708,10 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # Skip rotary embeddings - they are computed dynamically
+            if "rotary_emb.inv_freq" in name:
+                continue
+
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
