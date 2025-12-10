@@ -363,7 +363,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 kernel_block_alignment_size = cache_config.block_size
             else:
                 kernel_block_alignment_size = 16
-            
+
             if (
                 current_platform.is_device_capability(100)
                 and model_config.get_head_size() == 256

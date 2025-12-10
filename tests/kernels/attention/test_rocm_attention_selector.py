@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
+from vllm.attention.selector import get_attn_backend
 from vllm.platforms.rocm import RocmPlatform
 
 
@@ -12,6 +12,7 @@ from vllm.platforms.rocm import RocmPlatform
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     pass
+
 
 @pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):

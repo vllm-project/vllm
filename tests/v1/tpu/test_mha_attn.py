@@ -13,7 +13,6 @@ import torch_xla.core
 import torch_xla.core.xla_model
 
 from vllm.attention.layer import MultiHeadAttention
-from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
 
 
@@ -21,6 +20,7 @@ from vllm.platforms import current_platform
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     pass
+
 
 def ref_attention(
     query: torch.Tensor,

@@ -35,9 +35,9 @@ elif current_platform.is_rocm():
 
 # Functions copied from vllm/vllm_flash_attn/flash_attn_interface.py
 # Modified to use current_platform.get_device_capability() instead of
-# torch.cuda.get_device_capability(device) because current_platform.get_device_capability()
-# does not initialize CUDA.
-def _is_fa2_supported(device=None) -> Tuple[bool, Optional[str]]:
+# torch.cuda.get_device_capability(device) because
+# current_platform.get_device_capability() does not initialize CUDA.
+def _is_fa2_supported(device=None) -> tuple[bool, str | None]:
     if not FA2_AVAILABLE:
         return False, f"FA2 is unavaible due to: {FA2_UNAVAILABLE_REASON}"
     device_capability = current_platform.get_device_capability()
@@ -49,7 +49,7 @@ def _is_fa2_supported(device=None) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
-def _is_fa3_supported(device=None) -> Tuple[bool, Optional[str]]:
+def _is_fa3_supported(device=None) -> tuple[bool, str | None]:
     if not FA3_AVAILABLE:
         return False, f"FA3 is unavaible due to: {FA3_UNAVAILABLE_REASON}"
     device_capability = current_platform.get_device_capability()
@@ -73,14 +73,18 @@ def is_fa_version_supported(fa_version: int, device=None) -> bool:
         return _is_fa2_supported(device)[0]
     elif fa_version == 3:
         return _is_fa3_supported(device)[0]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
-def fa_version_unsupported_reason(fa_version: int, device=None) -> Optional[str]:
+def fa_version_unsupported_reason(fa_version: int, device=None) -> str | None:
     assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[1]
     elif fa_version == 3:
         return _is_fa3_supported(device)[1]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
