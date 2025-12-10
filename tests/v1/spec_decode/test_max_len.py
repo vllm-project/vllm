@@ -82,7 +82,7 @@ def test_eagle_max_len(
                 len(o.prompt_token_ids)
                 < 80
                 < len(o.prompt_token_ids) + len(o.outputs[0].token_ids)
-                < 200
+                <= 200
             ), (
                 "This test is only meaningful if the output "
                 "is longer than the eagle max length"
