@@ -57,6 +57,8 @@ class XgrammarBackend(StructuredOutputBackend):
                 add_prefix_space=True,
             )
         elif isinstance(self.tokenizer, DeepseekV32Tokenizer):
+            # copy from xgr.TokenizerInfo.from_huggingface()
+            # because we are using a custom tokenizer wrapper here.
             vocab_dict = self.tokenizer.get_vocab()
             max_id = max(vocab_dict.values())
             tokenizer_vocab_size = max(len(vocab_dict), max_id + 1)
