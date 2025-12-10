@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PoolerConfig,
+    SchedulerConfig,
     VllmConfig,
     update_config,
 )
@@ -95,7 +97,7 @@ def test_update_config():
         ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "embed"),
         ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )
@@ -603,6 +605,244 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 
 
 @pytest.mark.parametrize(
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
+    [
+        # pooling models
+        (
+            "jason9693/Qwen2.5-1.5B-apeach",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support chunked prefill.",
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support chunked prefill.",
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with step pooling does not support chunked prefill.",
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            True,
+            "Pooling models with causal attn and all pooling support chunked prefill.",
+        ),
+        (
+            "BAAI/bge-base-en",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        (
+            "papluca/xlm-roberta-base-language-detection",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        (
+            "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        (
+            "intfloat/e5-small",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support chunked prefill.",
+        ),
+        (
+            "google/siglip-base-patch16-224",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support chunked prefill.",
+        ),
+        # generate models
+        (
+            "Qwen/Qwen3-0.6B",
+            "decoder",
+            True,
+            "Generative models support chunked prefill.",
+        ),
+        (
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            "hybrid",
+            True,
+            "Generative models support chunked prefill.",
+        ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            "hybrid",
+            True,
+            "Generative models support chunked prefill.",
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
+            "attention_free",
+            True,
+            "Generative models support chunked prefill.",
+        ),
+        # encoder_decoder models
+        (
+            "openai/whisper-small",
+            "encoder_decoder",
+            False,
+            "Encoder decoder models does not support chunked prefill.",
+        ),
+    ],
+)
+def test_is_chunked_prefill_supported(
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
+):
+    model_config = ModelConfig(model_id, trust_remote_code=True)
+    assert model_config.attn_type == expected_attn_type
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
+        assert model_config.is_chunked_prefill_supported == expected_result
+    assert reason in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
+    [
+        # pooling models
+        (
+            "jason9693/Qwen2.5-1.5B-apeach",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support prefix caching.",
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support prefix caching.",
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with step pooling does not support prefix caching.",
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            True,
+            "Pooling models with causal attn and all pooling support prefix caching.",
+        ),
+        (
+            "BAAI/bge-base-en",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        (
+            "papluca/xlm-roberta-base-language-detection",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        (
+            "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        (
+            "intfloat/e5-small",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            "decoder",
+            True,
+            "Pooling models with causal attn and last pooling support prefix caching.",
+        ),
+        (
+            "google/siglip-base-patch16-224",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn does not support prefix caching.",
+        ),
+        # generate models
+        (
+            "Qwen/Qwen3-0.6B",
+            "decoder",
+            True,
+            "Generative models support prefix caching.",
+        ),
+        (
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            "hybrid",
+            False,
+            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+        ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            "hybrid",
+            False,
+            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
+            "attention_free",
+            False,
+            "Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+        ),
+        # encoder_decoder models
+        (
+            "openai/whisper-small",
+            "encoder_decoder",
+            False,
+            "Encoder decoder models does not support prefix caching.",
+        ),
+    ],
+)
+def test_is_prefix_caching_supported(
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
+):
+    model_config = ModelConfig(model_id, trust_remote_code=True)
+    assert model_config.attn_type == expected_attn_type
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
+        assert model_config.is_prefix_caching_supported == expected_result
+    assert reason in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
     ("backend", "custom_ops", "expected"),
     [
         ("eager", [], True),
@@ -783,17 +1023,17 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
     # Explicit pass config flags to override defaults
-    pass_config = PassConfig(enable_noop=True, enable_attn_fusion=True)
+    pass_config = PassConfig(eliminate_noops=True, fuse_attn_quant=True)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
         optimization_level=OptimizationLevel.O0,
         compilation_config=compilation_config,
     )
-    assert config.compilation_config.pass_config.enable_noop is True
-    assert config.compilation_config.pass_config.enable_attn_fusion is True
+    assert config.compilation_config.pass_config.eliminate_noops is True
+    assert config.compilation_config.pass_config.fuse_attn_quant is True
 
     # Explicit cudagraph mode override on quantized model at O2
-    pass_config = PassConfig(enable_async_tp=True)
+    pass_config = PassConfig(fuse_gemm_comms=True)
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
     )
@@ -803,7 +1043,7 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_async_tp is True
+    assert config.compilation_config.pass_config.fuse_gemm_comms is True
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
@@ -853,7 +1093,18 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     # Explicit override should be respected
-    assert config.compilation_config.pass_config.enable_noop is False
+    assert config.compilation_config.pass_config.eliminate_noops is False
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_scheduler_config_init():
+    with pytest.raises(ValidationError):
+        # Positional InitVars missing
+        # (InitVars cannot have defaults otherwise they will become attributes)
+        SchedulerConfig()
+
+    with pytest.raises(AttributeError):
+        # InitVar does not become an attribute
+        print(SchedulerConfig.default_factory().max_model_len)

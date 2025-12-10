@@ -1,30 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import fnmatch
-import json
 import os
-import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, TypeVar
+from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 from huggingface_hub import (
     get_safetensors_metadata,
-    hf_hub_download,
-    try_to_load_from_cache,
-)
-from huggingface_hub import list_repo_files as hf_list_repo_files
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    LocalEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
 )
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
@@ -39,13 +26,22 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config_parser_base import ConfigParserBase
-from vllm.transformers_utils.utils import (
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+
+from .config_parser_base import ConfigParserBase
+from .gguf_utils import (
     check_gguf_file,
     is_gguf,
     is_remote_gguf,
-    parse_safetensors_file_metadata,
     split_remote_gguf,
+)
+from .repo_utils import (
+    _get_hf_token,
+    file_or_path_exists,
+    get_hf_file_to_dict,
+    list_repo_files,
+    try_get_local_file,
+    with_retry,
 )
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -56,21 +52,6 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
-
-
-def _get_hf_token() -> str | None:
-    """
-    Get the HuggingFace token from environment variable.
-
-    Returns None if the token is not set, is an empty string,
-    or contains only whitespace.
-    This follows the same pattern as huggingface_hub library which
-    treats empty string tokens as None to avoid authentication errors.
-    """
-    token = os.getenv("HF_TOKEN")
-    if token and token.strip():
-        return token
-    return None
 
 
 class LazyConfigDict(dict):
@@ -108,6 +89,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3_text="Step3TextConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
+    tarsier2="Tarsier2Config",
 )
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
@@ -146,6 +128,9 @@ class HFConfigParser(ConfigParserBase):
                 if config_dict.get("speculators_config") is not None
                 else model_type
             )
+        # Allow hf_overrides to override model_type before checking _CONFIG_REGISTRY
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            model_type = hf_overrides.get("model_type", model_type)
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -308,143 +293,6 @@ def register_config_parser(config_format: str):
     return _wrapper
 
 
-_R = TypeVar("_R")
-
-
-def with_retry(
-    func: Callable[[], _R],
-    log_msg: str,
-    max_retries: int = 2,
-    retry_delay: int = 2,
-) -> _R:
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as e:
-            if attempt == max_retries - 1:
-                logger.error("%s: %s", log_msg, e)
-                raise
-            logger.error(
-                "%s: %s, retrying %d of %d", log_msg, e, attempt + 1, max_retries
-            )
-            time.sleep(retry_delay)
-            retry_delay *= 2
-
-    raise AssertionError("Should not be reached")
-
-
-# @cache doesn't cache exceptions
-@cache
-def list_repo_files(
-    repo_id: str,
-    *,
-    revision: str | None = None,
-    repo_type: str | None = None,
-    token: str | bool | None = None,
-) -> list[str]:
-    def lookup_files() -> list[str]:
-        # directly list files if model is local
-        if (local_path := Path(repo_id)).exists():
-            return [
-                str(file.relative_to(local_path))
-                for file in local_path.rglob("*")
-                if file.is_file()
-            ]
-        # if model is remote, use hf_hub api to list files
-        try:
-            if envs.VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import modelscope_list_repo_files
-
-                return modelscope_list_repo_files(
-                    repo_id,
-                    revision=revision,
-                    token=os.getenv("MODELSCOPE_API_TOKEN", None),
-                )
-            return hf_list_repo_files(
-                repo_id, revision=revision, repo_type=repo_type, token=token
-            )
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            # Don't raise in offline mode,
-            # all we know is that we don't have this
-            # file cached.
-            return []
-
-    return with_retry(lookup_files, "Error retrieving file list")
-
-
-def list_filtered_repo_files(
-    model_name_or_path: str,
-    allow_patterns: list[str],
-    revision: str | None = None,
-    repo_type: str | None = None,
-    token: str | bool | None = None,
-) -> list[str]:
-    try:
-        all_files = list_repo_files(
-            repo_id=model_name_or_path,
-            revision=revision,
-            token=token,
-            repo_type=repo_type,
-        )
-    except Exception:
-        logger.error(
-            "Error retrieving file list. Please ensure your `model_name_or_path`"
-            "`repo_type`, `token` and `revision` arguments are correctly set. "
-            "Returning an empty list."
-        )
-        return []
-
-    file_list = []
-    # Filter patterns on filenames
-    for pattern in allow_patterns:
-        file_list.extend(
-            [
-                file
-                for file in all_files
-                if fnmatch.fnmatch(os.path.basename(file), pattern)
-            ]
-        )
-    return file_list
-
-
-def file_exists(
-    repo_id: str,
-    file_name: str,
-    *,
-    repo_type: str | None = None,
-    revision: str | None = None,
-    token: str | bool | None = None,
-) -> bool:
-    file_list = list_repo_files(
-        repo_id, repo_type=repo_type, revision=revision, token=token
-    )
-    return file_name in file_list
-
-
-# In offline mode the result can be a false negative
-def file_or_path_exists(
-    model: str | Path, config_name: str, revision: str | None
-) -> bool:
-    if (local_path := Path(model)).exists():
-        return (local_path / config_name).is_file()
-
-    # Offline mode support: Check if config file is cached already
-    cached_filepath = try_to_load_from_cache(
-        repo_id=model, filename=config_name, revision=revision
-    )
-    if isinstance(cached_filepath, str):
-        # The config file exists in cache- we can continue trying to load
-        return True
-
-    # NB: file_exists will only check for the existence of the config file on
-    # hf_hub. This will fail in offline mode.
-
-    # Call HF to check if the file exists
-    return file_exists(
-        str(model), config_name, revision=revision, token=_get_hf_token()
-    )
-
-
 def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
     """Some models may have no rope_theta in their config but still use RoPE.
     This function sets a default rope_theta if it's missing."""
@@ -456,32 +304,31 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    # Patch rope_parameters differently based on Transformers version
-    if Version(version("transformers")) >= Version("5.0.0.dev0"):
-        from transformers.modeling_rope_utils import (
-            rope_config_validation,
-            standardize_rope_params,
-        )
+    from vllm.config.utils import getattr_iter
 
-        # When Transformers v5 is installed, legacy rope_theta may be present
-        # when using custom code models written for Transformers v4
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
-            standardize_rope_params(config, rope_theta=rope_theta)
-            rope_config_validation(config)
-            # Delete rope_theta to avoid confusion in downstream code
-            del config.rope_theta
-    else:
-        # When Transformers v4 is installed, legacy rope_scaling may be present
+    rope_theta_names = ("rope_theta", "rotary_emb_base")
+    rope_theta = getattr_iter(config, rope_theta_names, None)
+    if Version(version("transformers")) < Version("5.0.0.dev0"):
+        # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
-        # When Transformers v4 is installed, legacy rope_theta may be present
-        if (rope_theta := getattr(config, "rope_theta", None)) is not None:
+        if rope_theta is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
+        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
+        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
+        if partial_rotary_factor is not None:
+            if not hasattr(config, "rope_parameters"):
+                config.rope_parameters = {"rope_type": "default"}
+            config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+    elif rope_theta is not None or hasattr(config, "rope_parameters"):
+        # Transformers v5 installed
+        config.standardize_rope_params()
+        config.validate_rope()
 
     # No RoPE parameters to patch
-    if not hasattr(config, "rope_parameters"):
+    if getattr(config, "rope_parameters", None) is None:
         return
 
     # Add original_max_position_embeddings if present
@@ -522,7 +369,10 @@ def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
         rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
     elif rope_parameters["rope_type"] == "mrope":
-        assert "mrope_section" in rope_parameters
+        if "mrope_section" not in rope_parameters:
+            raise ValueError(
+                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
+            )
         rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
@@ -614,12 +464,12 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
 
 def maybe_override_with_speculators(
     model: str,
-    tokenizer: str,
+    tokenizer: str | None,
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
     **kwargs,
-) -> tuple[str, str, dict[str, Any] | None]:
+) -> tuple[str, str | None, dict[str, Any] | None]:
     """
     Resolve model configuration when speculators are detected.
 
@@ -755,6 +605,7 @@ def get_config(
         trust_remote_code=trust_remote_code,
         revision=revision,
         code_revision=code_revision,
+        hf_overrides=hf_overrides_kw,
         **kwargs,
     )
     # Special architecture mapping check for GGUF models
@@ -834,72 +685,6 @@ def get_config(
         maybe_register_config_serialize_by_value()
 
     return config
-
-
-def try_get_local_file(
-    model: str | Path, file_name: str, revision: str | None = "main"
-) -> Path | None:
-    file_path = Path(model) / file_name
-    if file_path.is_file():
-        return file_path
-    else:
-        try:
-            cached_filepath = try_to_load_from_cache(
-                repo_id=model, filename=file_name, revision=revision
-            )
-            if isinstance(cached_filepath, str):
-                return Path(cached_filepath)
-        except ValueError:
-            ...
-    return None
-
-
-def get_hf_file_to_dict(
-    file_name: str, model: str | Path, revision: str | None = "main"
-):
-    """
-    Downloads a file from the Hugging Face Hub and returns
-    its contents as a dictionary.
-
-    Parameters:
-    - file_name (str): The name of the file to download.
-    - model (str): The name of the model on the Hugging Face Hub.
-    - revision (str): The specific version of the model.
-
-    Returns:
-    - config_dict (dict): A dictionary containing
-    the contents of the downloaded file.
-    """
-
-    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
-
-    if file_path is None:
-        try:
-            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            return None
-        except (
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-            EntryNotFoundError,
-            LocalEntryNotFoundError,
-        ) as e:
-            logger.debug("File or repository not found in hf_hub_download", e)
-            return None
-        except HfHubHTTPError as e:
-            logger.warning(
-                "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
-                file_name,
-                exc_info=e,
-            )
-            return None
-        file_path = Path(hf_hub_file)
-
-    if file_path is not None and file_path.is_file():
-        with open(file_path) as file:
-            return json.load(file)
-
-    return None
 
 
 @cache
@@ -1152,11 +937,13 @@ def get_hf_text_config(config: PretrainedConfig):
     """
     text_config = config.get_text_config()
 
-    if text_config is not config:
-        # The code operates under the assumption that text_config should have
-        # `num_attention_heads` (among others). Assert here to fail early
-        # if transformers config doesn't align with this assumption.
-        assert hasattr(text_config, "num_attention_heads")
+    if text_config is not config and not hasattr(text_config, "num_attention_heads"):
+        raise ValueError(
+            "The text_config extracted from the model config does not have "
+            "`num_attention_heads` attribute. This indicates a mismatch "
+            "between the model config and vLLM's expectations. Please "
+            "ensure that the model config is compatible with vLLM."
+        )
 
     return text_config
 
@@ -1167,6 +954,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,
@@ -1316,41 +1110,3 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
         )
 
     return max_position_embeddings
-
-
-def get_model_path(model: str | Path, revision: str | None = None):
-    if os.path.exists(model):
-        return model
-    assert huggingface_hub.constants.HF_HUB_OFFLINE
-    common_kwargs = {
-        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
-        "revision": revision,
-    }
-
-    if envs.VLLM_USE_MODELSCOPE:
-        from modelscope.hub.snapshot_download import snapshot_download
-
-        return snapshot_download(model_id=model, **common_kwargs)
-
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(repo_id=model, **common_kwargs)
-
-
-def get_hf_file_bytes(
-    file_name: str, model: str | Path, revision: str | None = "main"
-) -> bytes | None:
-    """Get file contents from HuggingFace repository as bytes."""
-    file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
-
-    if file_path is None:
-        hf_hub_file = hf_hub_download(
-            model, file_name, revision=revision, token=_get_hf_token()
-        )
-        file_path = Path(hf_hub_file)
-
-    if file_path is not None and file_path.is_file():
-        with open(file_path, "rb") as file:
-            return file.read()
-
-    return None

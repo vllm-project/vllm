@@ -57,14 +57,15 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
-  timeout_in_minutes: 10
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
+  timeout_in_minutes: 20
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -73,6 +74,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s tokenizers_
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -276,21 +278,18 @@ steps:
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: Engine Test # 25min
-  timeout_in_minutes: 40
+- label: Engine Test # 9min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
   - tests/engine
-  - tests/tokenization
   - tests/test_sequence
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
-  # OOM in the CI unless we run this separately
-  - pytest -v -s tokenization
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
@@ -351,7 +350,8 @@ steps:
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
-    - vllm/
+    - vllm/v1/attention
+    - vllm/model_executor/layers
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -388,23 +388,28 @@ steps:
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
+    # for basic
+    - python3 offline_inference/basic/chat.py
     - python3 offline_inference/basic/generate.py --model facebook/opt-125m
     - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
-    - python3 offline_inference/basic/chat.py
-    - python3 offline_inference/prefix_caching.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 offline_inference/audio_language.py --seed 0
-    - python3 offline_inference/vision_language.py --seed 0
-    - python3 offline_inference/vision_language_pooling.py --seed 0
-    - python3 offline_inference/vision_language_multi_image.py --seed 0
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
-    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
+    # for multi-modal models
+    - python3 offline_inference/audio_language.py --seed 0
+    - python3 offline_inference/vision_language.py --seed 0
+    - python3 offline_inference/vision_language_multi_image.py --seed 0
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
+    # for pooling models
+    - python3 pooling/pooling/vision_language_pooling.py --seed 0
+    # for features demo
+    - python3 offline_inference/prefix_caching.py
+    - python3 offline_inference/llm_engine_example.py
+    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
@@ -463,7 +468,9 @@ steps:
   # tests covered elsewhere.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -477,7 +484,9 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/fullgraph -maxdepth 1 -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
@@ -820,14 +829,24 @@ steps:
   commands:
     - pytest -v -s models/language/pooling_mteb_test
 
-- label: Multi-Modal Processor Test # 44min
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  no_gpu: true
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+
+- label: Multi-Modal Processor Test
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Models Test (Standard) # 60min
   timeout_in_minutes: 80
@@ -1303,11 +1322,11 @@ steps:
   working_dir: "/vllm-workspace/"
   num_gpus: 2
   commands:
-    - pytest -v -s tests/compile/distributed/test_async_tp.py
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - "pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
-    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - "VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -1361,3 +1380,21 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+
+- label: DeepSeek V2-Lite Async EPLB Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
+
+- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
