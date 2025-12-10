@@ -10,7 +10,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
-from typing import Any
+from typing import Any, Literal, overload
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -254,7 +254,90 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     return f"{scheme}://{host}:{port}"
 
 
+def is_wildcard_addr(addr: str) -> bool:
+    """Check if an address is a TCP wildcard address requiring late binding.
+
+    Args:
+        addr: Address string to check
+
+    Returns:
+        True if the address is a TCP wildcard (e.g., "tcp://*:0")
+    """
+    return addr.startswith("tcp://") and ":0" in addr
+
+
+def bind_zmq_socket_and_get_address(
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    wildcard_addr: str,
+    socket_type: Any,
+    **socket_opts: Any,
+) -> tuple[zmq.Socket | zmq.asyncio.Socket, str]:  # type: ignore[name-defined]
+    """
+    Bind a ZMQ socket to an address and return the actual bound address.
+
+    For TCP wildcard addresses like "tcp://*:0", binds to let the OS assign
+    a port, then discovers the actual port via socket.last_endpoint.
+
+    For IPC addresses, binds directly without modification.
+
+    This eliminates port race conditions by binding immediately and discovering
+    the actual assigned port, rather than pre-allocating a port that could be
+    stolen before binding.
+
+    Note: This is a convenience wrapper around make_zmq_socket() with
+    return_address=True. Prefer using make_zmq_socket() directly for new code.
+
+    Args:
+        ctx: ZMQ context (async or sync)
+        wildcard_addr: Address to bind (e.g., "tcp://*:0" or "ipc:///tmp/path")
+        socket_type: ZMQ socket type constant (zmq.ROUTER, zmq.PULL, etc.)
+        **socket_opts: Additional options passed to make_zmq_socket
+                      (identity, linger, etc.)
+
+    Returns:
+        (socket, actual_address) tuple where:
+        - socket: The bound ZMQ socket (caller must keep alive)
+        - actual_address: Real address with OS-assigned port
+
+    Example:
+        >>> ctx = zmq.Context()
+        >>> sock, addr = bind_zmq_socket_and_get_address(ctx, "tcp://*:0", zmq.ROUTER)
+        >>> print(addr)  # "tcp://127.0.0.1:54321"
+    """
+    # Use make_zmq_socket with return_address=True to handle both wildcard
+    # and non-wildcard addresses uniformly
+    return make_zmq_socket(
+        ctx, wildcard_addr, socket_type, bind=True, return_address=True, **socket_opts
+    )
+
+
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
+@overload
+def make_zmq_socket(
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    path: str,
+    socket_type: Any,
+    bind: bool | None = ...,
+    identity: bytes | None = ...,
+    linger: int | None = ...,
+    *,
+    return_address: Literal[True],
+) -> tuple[zmq.Socket | zmq.asyncio.Socket, str]: ...  # type: ignore[name-defined]
+
+
+@overload
+def make_zmq_socket(
+    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    path: str,
+    socket_type: Any,
+    bind: bool | None = ...,
+    identity: bytes | None = ...,
+    linger: int | None = ...,
+    *,
+    return_address: Literal[False] = ...,
+) -> zmq.Socket | zmq.asyncio.Socket: ...  # type: ignore[name-defined]
+
+
 def make_zmq_socket(
     ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
     path: str,
@@ -262,9 +345,25 @@ def make_zmq_socket(
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
-) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
-    """Make a ZMQ socket with the proper bind/connect semantics."""
+    return_address: bool = False,
+) -> zmq.Socket | zmq.asyncio.Socket | tuple[zmq.Socket | zmq.asyncio.Socket, str]:  # type: ignore[name-defined]
+    """Make a ZMQ socket with the proper bind/connect semantics.
 
+    Args:
+        ctx: ZMQ context
+        path: Socket path/address to bind or connect to
+        socket_type: ZMQ socket type
+        bind: Whether to bind (True) or connect (False). If None, auto-determined.
+        identity: Optional socket identity
+        linger: Optional linger value
+        return_address: If True, return (socket, actual_address) tuple.
+                       For wildcard addresses, returns the discovered address.
+                       For non-wildcard addresses, returns the input path.
+
+    Returns:
+        Socket if return_address=False (default for backward compatibility)
+        (socket, actual_address) tuple if return_address=True
+    """
     mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
 
@@ -305,10 +404,20 @@ def make_zmq_socket(
 
     if bind:
         socket.bind(path)
+        # For wildcard addresses, discover the actual bound address.
+        if return_address and is_wildcard_addr(path):
+            actual_endpoint = socket.last_endpoint.decode("utf-8")
+            # Extract port and construct proper address.
+            port_str = actual_endpoint.split(":")[-1]
+            host = get_loopback_ip()
+            actual_address = get_tcp_uri(host, int(port_str))
+        else:
+            actual_address = path
     else:
         socket.connect(path)
+        actual_address = path
 
-    return socket
+    return (socket, actual_address) if return_address else socket
 
 
 @contextlib.contextmanager
