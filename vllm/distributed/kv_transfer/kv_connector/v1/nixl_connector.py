@@ -74,6 +74,7 @@ ReqId = str
 #   2: Add remote_request_id to kv_transfer_params
 #
 NIXL_CONNECTOR_VERSION: int = 2
+CROSS_LAYERS: bool = True
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -186,6 +187,7 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
+        "cross_layers": CROSS_LAYERS,
     }
 
     compat_hash = hash_factors(factors)
