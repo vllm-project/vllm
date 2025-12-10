@@ -400,6 +400,8 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enaled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -419,8 +421,6 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
-
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
 
@@ -433,6 +433,9 @@ class RocmPlatform(Platform):
             and "-rms_norm" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+rms_norm")
+
+        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+quant_fp8")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
