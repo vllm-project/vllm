@@ -269,11 +269,11 @@ class MambaSpec(KVCacheSpec):
             max_model_len = vllm_config.model_config.max_model_len
             return cdiv(max_model_len, self.block_size) * self.page_size_bytes
         else:
-            # NOTE: We allocate 1 block per request by default. With prefix
-            # caching enabled, up to 2 additional blocks are required: one 
-            # for reading the matched prefix and one for caching the current 
-            # state. 
-            return self.page_size_bytes * (3 if self.enable_caching else 1)
+            # NOTE: We allocate 1+sps block per request by default. With prefix
+            # caching enabled, one additional blocks are required which is saved
+            # last state for copying. 
+            return self.page_size_bytes * (1 + self.num_speculative_blocks
+                                           + self.enable_caching)
 
 
 
