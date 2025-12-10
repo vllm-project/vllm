@@ -83,15 +83,18 @@ class ImageMediaIO(MediaIO[Image.Image]):
         else:
             return convert_image_mode(image, self.image_mode)
 
-    def load_bytes(self, data: bytes) -> Image.Image:
+    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         image = Image.open(BytesIO(data))
         image.load()
-        return self._convert_image_mode(image)
+        return MediaWithBytes(
+            media=self._convert_image_mode(image),
+            original_bytes=data,
+        )
 
-    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
-        raw_bytes = pybase64.b64decode(data, validate=True)
-        image = self.load_bytes(raw_bytes)
-        return MediaWithBytes(media=image, original_bytes=raw_bytes)
+    def load_base64(
+        self, media_type: str, data: str
+    ) -> MediaWithBytes[Image.Image]:
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> Image.Image:
         image = Image.open(filepath)
