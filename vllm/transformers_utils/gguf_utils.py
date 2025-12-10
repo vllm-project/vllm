@@ -220,6 +220,46 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     return config
 
 
+def extract_eos_token_id_from_gguf(model: str) -> int | None:
+    """Extract EOS token ID from GGUF metadata.
+
+    GGUF files store the EOS token ID in tokenizer.ggml.eos_token_id field.
+    This may differ from HuggingFace's tokenizer config (e.g., Gemma models
+    use <end_of_turn> token ID 106 as EOS in GGUF, but HF tokenizer reports
+    <eos> token ID 1).
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        EOS token ID from GGUF metadata, or None if not found
+    """
+    if not model.endswith(".gguf"):
+        return None
+
+    try:
+        model_path = Path(model)
+        if not model_path.is_file():
+            return None
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        eos_field = reader.get_field(Keys.Tokenizer.EOS_ID)
+        if eos_field is not None:
+            eos_token_id = int(eos_field.parts[-1][0])
+            logger.debug(
+                "Extracted eos_token_id=%d from GGUF metadata",
+                eos_token_id,
+            )
+            return eos_token_id
+
+        return None
+
+    except Exception as e:
+        logger.debug("Error extracting EOS token ID from GGUF: %s", e)
+        return None
+
+
 def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,
