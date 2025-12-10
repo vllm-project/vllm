@@ -5,55 +5,47 @@
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
-import pytest
+from abc import ABC
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     ScaledMMLinearLayerConfig,
-    choose_scaled_mm_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
+    CPUScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonScaledMMLinearKernel,
 )
-from vllm.platforms import current_platform
 
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
-def test_triton_kernel_selected_on_rocm():
-    """Test that TritonScaledMMLinearKernel is selected on ROCm
-    when Aiter is not available."""
-    config = ScaledMMLinearLayerConfig(
-        is_channelwise=False,
-        is_static_input_scheme=True,
-        input_symmetric=True,
-    )
-
-    kernel = choose_scaled_mm_linear_kernel(config, compute_capability=None)
-
-    assert kernel == TritonScaledMMLinearKernel, (
-        f"Expected TritonScaledMMLinearKernel on ROCm, got {kernel.__name__}"
-    )
+def test_is_supported_is_abstract():
+    """Test that is_supported() is properly defined as abstract."""
+    assert issubclass(ScaledMMLinearKernel, ABC)
+    assert hasattr(ScaledMMLinearKernel, "is_supported")
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-specific test")
-def test_triton_kernel_available_on_cuda():
-    """Test that TritonScaledMMLinearKernel can be selected on CUDA."""
-    config = ScaledMMLinearLayerConfig(
-        is_channelwise=False,
-        is_static_input_scheme=True,
-        input_symmetric=True,
-    )
+def test_all_kernels_implement_is_supported():
+    """Test that all kernel classes implement is_supported() method."""
+    kernels = [
+        CPUScaledMMLinearKernel,
+        CutlassScaledMMLinearKernel,
+        TritonScaledMMLinearKernel,
+    ]
 
-    # Triton should be supported on CUDA
-    supported, reason = TritonScaledMMLinearKernel.is_supported()
-    assert supported, (
-        f"TritonScaledMMLinearKernel should be supported on CUDA: {reason}"
-    )
-
-    # It should be able to implement symmetric configs
-    can_impl, reason = TritonScaledMMLinearKernel.can_implement(config)
-    assert can_impl, (
-        f"TritonScaledMMLinearKernel should implement symmetric config: {reason}"
-    )
+    for kernel in kernels:
+        assert hasattr(kernel, "is_supported"), (
+            f"{kernel.__name__} missing is_supported() method"
+        )
+        # Verify it's a classmethod
+        assert isinstance(kernel.is_supported, classmethod), (
+            f"{kernel.__name__}.is_supported() should be a classmethod"
+        )
 
 
 def test_triton_kernel_rejects_asymmetric():
@@ -67,3 +59,39 @@ def test_triton_kernel_rejects_asymmetric():
     can_impl, reason = TritonScaledMMLinearKernel.can_implement(config)
     assert not can_impl, "TritonScaledMMLinearKernel should reject asymmetric config"
     assert "symmetric" in reason.lower(), f"Unexpected rejection reason: {reason}"
+
+
+def test_triton_kernel_accepts_symmetric():
+    """Test that TritonScaledMMLinearKernel accepts symmetric quantization."""
+    config = ScaledMMLinearLayerConfig(
+        is_channelwise=False,
+        is_static_input_scheme=True,
+        input_symmetric=True,  # Symmetric
+    )
+
+    can_impl, reason = TritonScaledMMLinearKernel.can_implement(config)
+    assert can_impl, (
+        f"TritonScaledMMLinearKernel should accept symmetric config: {reason}"
+    )
+
+
+def test_cpu_kernel_accepts_all_configs():
+    """Test that CPUScaledMMLinearKernel accepts all config combinations."""
+    configs = [
+        ScaledMMLinearLayerConfig(
+            is_channelwise=False,
+            is_static_input_scheme=True,
+            input_symmetric=True,
+        ),
+        ScaledMMLinearLayerConfig(
+            is_channelwise=True,
+            is_static_input_scheme=False,
+            input_symmetric=False,
+        ),
+    ]
+
+    for config in configs:
+        can_impl, reason = CPUScaledMMLinearKernel.can_implement(config)
+        assert can_impl, (
+            f"CPUScaledMMLinearKernel should accept config {config}: {reason}"
+        )

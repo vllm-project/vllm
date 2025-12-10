@@ -19,10 +19,6 @@ from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfi
 
 class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
-
-    @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:

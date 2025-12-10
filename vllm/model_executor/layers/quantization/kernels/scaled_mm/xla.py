@@ -25,10 +25,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError("TPU does not have compute capability.")
-
-    @classmethod
     def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
