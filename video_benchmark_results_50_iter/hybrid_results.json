@@ -1,0 +1,91 @@
+{
+  "benchmark_type": "video_inference",
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "num_frames": 16,
+  "question": "Describe what is happening in this video in detail.",
+  "results": [
+    {
+      "config": "hybrid_attention",
+      "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "num_frames": 16,
+      "num_iterations": 50,
+      "total_input_tokens": 121150,
+      "total_output_tokens": 6400,
+      "avg_latency_seconds": 1.7445963741466404,
+      "min_latency_seconds": 1.742894908413291,
+      "max_latency_seconds": 1.7465736251324415,
+      "p50_latency_seconds": 1.7447327617555857,
+      "p90_latency_seconds": 1.7454595379531384,
+      "p99_latency_seconds": 1.7461224383674563,
+      "throughput_tokens_per_second": 1462.2293372859997,
+      "generation_tokens_per_second": 73.36940618291179,
+      "all_latencies": [
+        1.7454556934535503,
+        1.7447517961263657,
+        1.744450030848384,
+        1.7442330680787563,
+        1.745652835816145,
+        1.7442794777452946,
+        1.7439591102302074,
+        1.7429239954799414,
+        1.743525505065918,
+        1.7440769001841545,
+        1.745349444448948,
+        1.744628183543682,
+        1.7442895900458097,
+        1.7442841120064259,
+        1.7444718666374683,
+        1.7447739765048027,
+        1.744841817766428,
+        1.7447931990027428,
+        1.743361746892333,
+        1.7455483134835958,
+        1.7451145127415657,
+        1.7441575564444065,
+        1.742894908413291,
+        1.7433960065245628,
+        1.7465736251324415,
+        1.7452876642346382,
+        1.7437223847955465,
+        1.7432891689240932,
+        1.7439699415117502,
+        1.7447766959667206,
+        1.7451835162937641,
+        1.7445207331329584,
+        1.7450983840972185,
+        1.7450960651040077,
+        1.7449270747601986,
+        1.7447853200137615,
+        1.744677823036909,
+        1.7438140455633402,
+        1.7450825739651918,
+        1.7444822881370783,
+        1.7444473393261433,
+        1.7448458466678858,
+        1.74387183226645,
+        1.7447137273848057,
+        1.7454941384494305,
+        1.7453926838934422,
+        1.7447590455412865,
+        1.744766242802143,
+        1.7456008028239012,
+        1.745426096022129
+      ],
+      "memory": {
+        "post_init": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        },
+        "baseline": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        },
+        "post_benchmark": {
+          "available": false,
+          "error": "CUDA error: CUDA-capable device(s) is/are busy or unavailable\nSearch for `cudaErrorDevicesUnavailable' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html for more information.\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n"
+        }
+      },
+      "error": null
+    }
+  ]
+}
