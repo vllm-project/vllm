@@ -47,7 +47,6 @@ class MetricExtractor(ast.NodeVisitor):
                         "name": name,
                         "type": metric_type,
                         "documentation": documentation or "",
-                        "file": self.filepath,
                     }
                 )
 
@@ -89,8 +88,7 @@ def extract_metrics_from_file(filepath: Path) -> list[dict[str, str]]:
         extractor.visit(tree)
         return extractor.metrics
     except Exception as e:
-        logger.warning("Failed to parse %s: %s", filepath, e)
-        return []
+        raise RuntimeError(f"Failed to parse {filepath}: {e}") from e
 
 
 def generate_markdown_table(metrics: list[dict[str, str]]) -> str:
@@ -129,8 +127,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
 
         filepath = ROOT_DIR / source_path
         if not filepath.exists():
-            logger.warning("Metrics source file not found: %s", filepath)
-            continue
+            raise FileNotFoundError(f"Metrics source file not found: {filepath}")
 
         logger.debug("Extracting metrics from: %s", source_path)
         metrics = extract_metrics_from_file(filepath)
