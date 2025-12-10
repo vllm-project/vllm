@@ -13,16 +13,14 @@ GENERATED_METRICS_DIR = DOCS_DIR / "generated" / "metrics"
 
 # Files to scan for metric definitions - each will generate a separate table
 METRIC_SOURCE_FILES = [
-    {"path": "vllm/v1/metrics/loggers.py", "output": "general.md", "name": "general"},
+    {"path": "vllm/v1/metrics/loggers.py", "output": "general.md"},
     {
         "path": "vllm/v1/spec_decode/metrics.py",
         "output": "spec_decode.md",
-        "name": "spec_decode",
     },
     {
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py",
         "output": "nixl_connector.md",
-        "name": "nixl_connector",
     },
 ]
 
@@ -30,8 +28,7 @@ METRIC_SOURCE_FILES = [
 class MetricExtractor(ast.NodeVisitor):
     """AST visitor to extract metric definitions."""
 
-    def __init__(self, filepath: str):
-        self.filepath = filepath
+    def __init__(self):
         self.metrics: list[dict[str, str]] = []
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -84,7 +81,7 @@ def extract_metrics_from_file(filepath: Path) -> list[dict[str, str]]:
             source = f.read()
 
         tree = ast.parse(source, filename=str(filepath))
-        extractor = MetricExtractor(str(filepath))
+        extractor = MetricExtractor()
         extractor.visit(tree)
         return extractor.metrics
     except Exception as e:
@@ -123,7 +120,6 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     for source_config in METRIC_SOURCE_FILES:
         source_path = source_config["path"]
         output_file = source_config["output"]
-        source_name = source_config["name"]
 
         filepath = ROOT_DIR / source_path
         if not filepath.exists():
@@ -141,8 +137,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
 
         total_metrics += len(metrics)
         logger.info(
-            "Generated %s metrics table: %s (%d metrics)",
-            source_name,
+            "Generated metrics table: %s (%d metrics)",
             output_path.relative_to(ROOT_DIR),
             len(metrics),
         )
