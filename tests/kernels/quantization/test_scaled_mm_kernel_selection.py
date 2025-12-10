@@ -60,7 +60,8 @@ def test_aiter_kernel_implements_is_supported():
     ) or inspect.isfunction(AiterScaledMMLinearKernel.is_supported), (
         "AiterScaledMMLinearKernel.is_supported() should be a classmethod"
     )
-    # Verify it can be called as a classmethod (will return False on CPU, which is expected)
+    # Verify it can be called as a classmethod
+    # (will return False on CPU, which is expected)
     result, reason = AiterScaledMMLinearKernel.is_supported()
     assert isinstance(result, bool), "is_supported() should return a bool"
     assert reason is None or isinstance(reason, str), "reason should be str or None"
