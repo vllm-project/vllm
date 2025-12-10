@@ -2896,6 +2896,7 @@ class GPUModelRunner(
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        force_eager: bool = False,
         **model_kwargs: dict[str, Any],
     ) -> Any:
         """Helper method to call the model forward pass.
@@ -2914,6 +2915,17 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
+
+        if force_eager:
+            # Run un-compiled forward pass.
+            return self.model.forward(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
+
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3268,6 +3280,13 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        # Encoder-decoder models can only compile the pure decode steps where no
+        # encoder inputs are present. Use eager for the first pass.
+        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
+        has_encoder_input = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -3288,6 +3307,7 @@ class GPUModelRunner(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                force_eager=has_encoder_input,
                 **model_kwargs,
             )
 
