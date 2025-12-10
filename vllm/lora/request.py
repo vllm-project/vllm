@@ -30,6 +30,7 @@ class LoRARequest(
     long_lora_max_len: int | None = None
     base_model_name: str | None = msgspec.field(default=None)
     tensorizer_config_dict: dict | None = None
+    slab_path: str | None = msgspec.field(default=None)
 
     def __post_init__(self):
         if self.lora_int_id < 1:
