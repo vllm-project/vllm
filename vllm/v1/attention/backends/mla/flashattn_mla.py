@@ -105,13 +105,14 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         super().__init__(
             kv_cache_spec,
             layer_names,
             vllm_config,
             device,
             FlashAttnMLAMetadata,
-            supports_dcp_with_varlen=True,
+            supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = get_flash_attn_version() == 3
