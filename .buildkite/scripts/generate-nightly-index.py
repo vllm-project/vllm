@@ -16,6 +16,17 @@ from urllib.parse import quote
 
 import regex as re
 
+
+def normalize_package_name(name: str) -> str:
+    """
+    Normalize package name according to PEP 503.
+    https://peps.python.org/pep-0503/#normalized-names
+
+    Replace runs of underscores, hyphens, and periods with a single hyphen,
+    and lowercase the result.
+    """
+    return re.sub(r"[-_.]+", "-", name).lower()
+
 if not sys.version_info >= (3, 12):
     raise RuntimeError("This script requires Python 3.12 or higher.")
 
@@ -78,7 +89,13 @@ def parse_from_filename(file: str) -> WheelFileInfo:
             version = version.removesuffix("." + variant)
     else:
         if "+" in version:
-            version, variant = version.split("+")
+            version_part, suffix = version.split("+", 1)
+            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu)
+            # Git hashes and other suffixes are NOT variants
+            if suffix.startswith(("rocm", "cu", "cpu")):
+                variant = suffix
+                version = version_part
+            # Otherwise keep the full version string (variant stays None)
 
     return WheelFileInfo(
         package_name=package_name,
@@ -206,6 +223,23 @@ def generate_index_and_metadata(
         print("No wheel files found, skipping index generation.")
         return
 
+    # For ROCm builds: inherit variant from vllm wheel
+    # All ROCm wheels should share the same variant as vllm
+    rocm_variant = None
+    for file in parsed_files:
+        if file.package_name == "vllm" and file.variant:
+            if file.variant.startswith("rocm"):
+                rocm_variant = file.variant
+                print(f"Detected ROCm variant from vllm: {rocm_variant}")
+                break
+
+    # Apply ROCm variant to all wheels without a variant
+    if rocm_variant:
+        for file in parsed_files:
+            if file.variant is None:
+                file.variant = rocm_variant
+                print(f"Inherited variant '{rocm_variant}' for {file.filename}")
+
     # Group by variant
     variant_to_files: dict[str, list[WheelFileInfo]] = {}
     for file in parsed_files:
@@ -256,8 +290,8 @@ def generate_index_and_metadata(
 
         variant_dir.mkdir(parents=True, exist_ok=True)
 
-        # gather all package names in this variant
-        packages = set(f.package_name for f in files)
+        # gather all package names in this variant (normalized per PEP 503)
+        packages = set(normalize_package_name(f.package_name) for f in files)
         if variant == "default":
             # these packages should also appear in the "project list"
             # generate after all variants are processed
@@ -269,8 +303,8 @@ def generate_index_and_metadata(
                 f.write(project_list_str)
 
         for package in packages:
-            # filter files belonging to this package only
-            package_files = [f for f in files if f.package_name == package]
+            # filter files belonging to this package only (compare normalized names)
+            package_files = [f for f in files if normalize_package_name(f.package_name) == package]
             package_dir = variant_dir / package
             package_dir.mkdir(parents=True, exist_ok=True)
             index_str, metadata_str = generate_package_index_and_metadata(
@@ -334,8 +368,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     version = args.version
-    if "/" in version or "\\" in version:
-        raise ValueError("Version string must not contain slashes.")
+    # Allow rocm/ prefix, reject other slashes and all backslashes
+    if "\\" in version:
+        raise ValueError("Version string must not contain backslashes.")
+    if "/" in version and not version.startswith("rocm/"):
+        raise ValueError("Version string must not contain slashes (except for 'rocm/' prefix).")
     current_objects_path = Path(args.current_objects)
     output_dir = Path(args.output_dir)
     if not output_dir.exists():
@@ -375,7 +412,21 @@ if __name__ == "__main__":
     # Generate index and metadata, assuming wheels and indices are stored as:
     # s3://vllm-wheels/{version}/<wheel files>
     # s3://vllm-wheels/<anything>/<index files>
-    wheel_base_dir = Path(output_dir).parent / version
+    #
+    # For ROCm builds, version is "rocm/{commit}" and indices are uploaded to:
+    #   - rocm/{commit}/  (same as wheels)
+    #   - rocm/nightly/
+    #   - rocm/{version}/
+    # All these are under the "rocm/" prefix, so relative paths should be
+    # relative to "rocm/", not the bucket root.
+    #
+    # Extract the commit/version part after "rocm/" for path calculation
+    if version.startswith("rocm/"):
+        # For rocm/commit, wheel_base_dir should be just the commit part
+        # so relative path from rocm/0.12.0/rocm710/vllm/ -> ../../../{commit}/
+        wheel_base_dir = Path(output_dir).parent / version.split("/", 1)[1]
+    else:
+        wheel_base_dir = Path(output_dir).parent / version
     index_base_dir = Path(output_dir)
 
     generate_index_and_metadata(
