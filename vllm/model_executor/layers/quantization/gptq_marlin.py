@@ -845,23 +845,23 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         assert self.moe_quant_config is not None, (
             "moe_quant_config must be initialized before select_gemm_impl"
         )
-        
-        kwargs_experts = {
-            "quant_config": self.moe_quant_config,
-            "w13_g_idx": getattr(layer, "w13_g_idx", None)
+
+        w13_g_idx = (
+            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w2_g_idx = (
+            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w13_g_idx_sort_indices = (
+            getattr(layer, "w13_g_idx_sort_indices", None)
             if self.quant_config.desc_act
-            else None,
-            "w2_g_idx": getattr(layer, "w2_g_idx", None)
+            else None
+        )
+        w2_g_idx_sort_indices = (
+            getattr(layer, "w2_g_idx_sort_indices", None)
             if self.quant_config.desc_act
-            else None,
-            "w13_g_idx_sort_indices": getattr(layer, "w13_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None,
-            "w2_g_idx_sort_indices": getattr(layer, "w2_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None,
-            "is_k_full": self.is_k_full,
-        }
+            else None
+        )
 
         # Check if using batched expert format (for Expert Parallelism)
         if (
@@ -874,12 +874,22 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
-                **kwargs_experts
+                quant_config=self.moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
             )
         else:
             # Standard Marlin experts for GPTQ
             return MarlinExperts(
-                **kwargs_experts
+                quant_config=self.moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
             )
 
     def apply(
