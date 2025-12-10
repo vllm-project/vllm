@@ -1,0 +1,23 @@
+group: Tool use
+depends_on: 
+  - image-build
+steps:
+- label: OpenAI-Compatible Tool Use
+  timeout_in_minutes: 35
+  mirror_hardwares: [amdexperimental]
+  fast_check: false
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  commands:
+    - pytest -v -s -m 'not cpu_test' tool_use
+
+- label: OpenAI-Compatible Tool Use (CPU)
+  depends_on: ~
+  timeout_in_minutes: 10
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+  no_gpu: true
+  commands:
+    - pytest -v -s -m 'cpu_test' tool_use

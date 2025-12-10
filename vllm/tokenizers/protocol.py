@@ -22,6 +22,9 @@ class TokenizerLike(Protocol):
     ) -> "TokenizerLike":
         raise NotImplementedError
 
+    def num_special_tokens_to_add(self) -> int:
+        raise NotImplementedError
+
     @property
     def all_special_tokens(self) -> list[str]:
         raise NotImplementedError

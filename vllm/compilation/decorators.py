@@ -392,7 +392,6 @@ def _support_torch_compile(
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
-
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
                 "torch_aot_compile",
@@ -409,9 +408,12 @@ def _support_torch_compile(
                     open(aot_compilation_path, "rb") as f,
                 ):
                     start_monitoring_torch_compile(self.vllm_config)
-                    loaded_fn = torch.compiler.load_compiled_function(f)
+                    loaded_fn = torch.compiler.load_compiled_function(
+                        f, f_globals=self.forward.__globals__
+                    )
                 _verify_source_unchanged(loaded_fn.source_info(), self.vllm_config)
-                loaded_fn.disable_guard_check()
+                if not self.compilation_config.dynamic_shapes_config.evaluate_guards:
+                    loaded_fn.disable_guard_check()
                 self.aot_compiled_fn = loaded_fn
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
@@ -433,7 +435,6 @@ def _support_torch_compile(
             return TorchCompileWithNoGuardsWrapper.__call__(self, *args, **kwargs)
 
         # This is the path for the first compilation.
-
         # the first compilation needs to have dynamic shapes marked
         _mark_dynamic_inputs(
             self,

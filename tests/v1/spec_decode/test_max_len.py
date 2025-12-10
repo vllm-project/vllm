@@ -47,7 +47,7 @@ def test_eagle_max_len(
                 "multi-token eagle spec decode on current platform"
             )
 
-        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+        if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         llm = LLM(
@@ -82,7 +82,7 @@ def test_eagle_max_len(
                 len(o.prompt_token_ids)
                 < 80
                 < len(o.prompt_token_ids) + len(o.outputs[0].token_ids)
-                < 200
+                <= 200
             ), (
                 "This test is only meaningful if the output "
                 "is longer than the eagle max length"

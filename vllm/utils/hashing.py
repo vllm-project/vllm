@@ -11,6 +11,17 @@ from typing import Any
 
 import cbor2
 
+try:
+    # It is important that this remains an optional dependency.
+    # It would not be allowed in environments with strict security controls,
+    # so it's best not to have it installed when not in use.
+    import xxhash as _xxhash
+
+    if not hasattr(_xxhash, "xxh3_128_digest"):
+        _xxhash = None
+except ImportError:  # pragma: no cover
+    _xxhash = None
+
 
 def sha256(input: Any) -> bytes:
     """Hash any picklable Python object using SHA-256.
@@ -47,6 +58,27 @@ def sha256_cbor(input: Any) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
+def _xxhash_digest(input_bytes: bytes) -> bytes:
+    if _xxhash is None:
+        raise ModuleNotFoundError(
+            "xxhash is required for the 'xxhash' prefix caching hash algorithms. "
+            "Install it via `pip install xxhash`."
+        )
+    return _xxhash.xxh3_128_digest(input_bytes)
+
+
+def xxhash(input: Any) -> bytes:
+    """Hash picklable objects using xxHash."""
+    input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
+    return _xxhash_digest(input_bytes)
+
+
+def xxhash_cbor(input: Any) -> bytes:
+    """Hash objects serialized with CBOR using xxHash."""
+    input_bytes = cbor2.dumps(input, canonical=True)
+    return _xxhash_digest(input_bytes)
+
+
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if the function is not found.
 
@@ -60,6 +92,10 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
         return sha256
     if hash_fn_name == "sha256_cbor":
         return sha256_cbor
+    if hash_fn_name == "xxhash":
+        return xxhash
+    if hash_fn_name == "xxhash_cbor":
+        return xxhash_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 

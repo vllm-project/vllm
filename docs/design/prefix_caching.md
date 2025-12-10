@@ -22,8 +22,8 @@ In the example above, the KV cache in the first block can be uniquely identified
     We only cache full blocks.
 
 !!! note "Note 2"
-    The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we advise to use SHA256** as hash function instead of the default builtin hash.
-    SHA256 is supported since vLLM v0.8.3 and must be enabled with a command line argument. It comes with a performance impact of about 100-200ns per token (~6ms for 50k tokens of context).
+    The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we use SHA256** as hash function instead of the builtin hash.
+    SHA256 is supported since vLLM v0.8.3 and the default since v0.10.2. It comes with a negligible performance impact of about 75ns per token (<4ms for 50k tokens of context).
 
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
