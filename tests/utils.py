@@ -44,7 +44,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -1225,9 +1225,9 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         try:
             import aiter  # noqa: F401
 
-            attn_backend_list.append("FLASH_ATTN")
+            attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():
