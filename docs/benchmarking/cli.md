@@ -670,6 +670,35 @@ vllm bench serve \
 
 </details>
 
+### 🧪 Hashing Benchmarks
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Two helper scripts live in `benchmarks/` to compare hashing options used by prefix caching and related utilities. They are standalone (no server required) and help choose a hash algorithm before enabling prefix caching in production.
+
+- `benchmarks/benchmark_hash.py`: Micro-benchmark that measures per-call latency of three implementations on a representative `(bytes, tuple[int])` payload.
+
+```bash
+python benchmarks/benchmark_hash.py --iterations 20000 --seed 42
+```
+
+- `benchmarks/benchmark_prefix_block_hash.py`: End-to-end block hashing benchmark that runs the full prefix-cache hash pipeline (`hash_block_tokens`) across many fake blocks and reports throughput.
+
+```bash
+python benchmarks/benchmark_prefix_block_hash.py --num-blocks 20000 --block-size 32 --trials 5
+```
+
+Supported algorithms: `sha256`, `sha256_cbor`, `xxhash`, `xxhash_cbor`. Install optional deps to exercise all variants:
+
+```bash
+uv pip install xxhash cbor2
+```
+
+If an algorithm’s dependency is missing, the script will skip it and continue.
+
+</details>
+
 ### ⚡ Request Prioritization Benchmark
 
 <details class="admonition abstract" markdown="1">
