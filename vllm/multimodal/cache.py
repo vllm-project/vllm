@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from multiprocessing.synchronize import Lock as LockType
-from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast
 
 import torch
 from typing_extensions import override
@@ -17,6 +19,11 @@ from vllm.distributed.device_communicators.shm_object_storage import (
     SingleWriterShmRingBuffer,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.lmdb_cache import (
+    LmdbMultiModalCache,
+    LmdbReadTransaction,
+    LmdbWriteTransaction,
+)
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
@@ -200,6 +207,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     @abstractmethod
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: _I,
         mm_hash: str,
     ) -> _O:
@@ -220,6 +228,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
 
     def get_and_update(
         self,
+        modality: str,
         mm_items: Sequence[_I],
         mm_hashes: list[str],
     ) -> list[_O]:
@@ -239,7 +248,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         assert len(mm_items) == len(mm_hashes)
 
         return [
-            self.get_and_update_item(mm_item, mm_hash)
+            self.get_and_update_item(modality, mm_item, mm_hash)
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
 
@@ -263,6 +272,10 @@ class BaseMultiModalProcessorCache(
     BaseMultiModalCache[MultiModalProcessorCacheInItem, MultiModalProcessorCacheOutItem]
 ):
     """The required interface for caches on P0."""
+
+    def begin(self) -> "AbstractContextManager[BaseMultiModalProcessorCache]":
+        """Context manager for batch cache operations."""
+        return contextlib.nullcontext(self)
 
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -347,6 +360,7 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     @override
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
@@ -405,6 +419,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     @override
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
@@ -459,8 +474,8 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             ring_buffer=ring_buffer,
             serde_class=MsgpackSerde,
         )
-        # cache (prompt_updates, modality) for P0 only
-        self._p0_cache: dict[str, tuple[Sequence[ResolvedPromptUpdate], str]] = {}
+        # cache prompt_updates for P0 only
+        self._p0_cache: dict[str, Sequence[ResolvedPromptUpdate]] = {}
 
         self._hits = 0
         self._total = 0
@@ -483,6 +498,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     @override
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
@@ -491,7 +507,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             self._total += 1
 
             address, monotonic_id = self._shm_cache.get_cached(mm_hash)
-            prompt_updates, modality = self._p0_cache[mm_hash]
+            prompt_updates = self._p0_cache[mm_hash]
             return self.address_as_item(address, monotonic_id, modality), prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
@@ -503,10 +519,8 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             # Try to remove dangling items if p0 cache is too large.
             if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
                 self.remove_dangling_items()
-            self._p0_cache[mm_hash] = mm_item[1], mm_item[0].modality
-            address_item = self.address_as_item(
-                address, monotonic_id, mm_item[0].modality
-            )
+            self._p0_cache[mm_hash] = mm_item[1]
+            address_item = self.address_as_item(address, monotonic_id, modality)
             return address_item, mm_item[1]
         except (ValueError, MemoryError) as e:
             # put may fail if the object is too large or
@@ -560,71 +574,14 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return mm_item
 
 
-def _enable_processor_cache(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-) -> bool:
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return False
-
-    mm_config = model_config.get_multimodal_config()
-    return mm_config.mm_processor_cache_gb > 0
-
-
-def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (
-        parallel_config._api_process_count == 1
-        and parallel_config.data_parallel_size == 1
-    ) or parallel_config.data_parallel_external_lb
-
-    return supports_ipc_cache
-
-
-def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
-    """Whether the shared memory based cache should be enabled."""
-
-    if not _enable_ipc_cache(vllm_config):
-        return False
-
-    mm_config = vllm_config.model_config.get_multimodal_config()
-
-    return mm_config.mm_processor_cache_type == "shm"
-
-
-def processor_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalProcessorCache | None:
-    """Return a `BaseMultiModalProcessorCache`, if enabled."""
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return MultiModalProcessorOnlyCache(model_config)
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalProcessorSenderCache(model_config)
-    return ShmObjectStoreSenderCache(vllm_config)
-
-
-def processor_only_cache_from_config(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-):
-    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    return MultiModalProcessorOnlyCache(model_config)
-
-
 class BaseMultiModalReceiverCache(
     BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
 ):
     """The required interface for caches on P1."""
+
+    def begin(self) -> "AbstractContextManager[BaseMultiModalReceiverCache]":
+        """Context manager for batch cache operations."""
+        return contextlib.nullcontext(self)
 
     def get_and_update_features(
         self,
@@ -639,7 +596,9 @@ class BaseMultiModalReceiverCache(
             self.touch_receiver_cache_item(feature.identifier, feature.data)
 
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data, feature.identifier)
+            feature.data = self.get_and_update_item(
+                feature.modality, feature.data, feature.identifier
+            )
         return mm_features
 
     @abstractmethod
@@ -686,6 +645,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
     @override
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
@@ -746,6 +706,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     @override
     def get_and_update_item(
         self,
+        modality: str,
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
@@ -776,6 +737,275 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         self._shm_cache.clear()
 
 
+class _LmdbSenderTransaction(BaseMultiModalProcessorCache, AbstractContextManager):
+    def __init__(self, parent: "LmdbObjectStoreSenderCache", txn: LmdbWriteTransaction):
+        self._parent = parent
+        self._txn = txn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._txn.__exit__(exc_type, exc_value, traceback)
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        return self._txn.is_cached_item(mm_hash)
+
+    @override
+    def get_and_update_item(
+        self, modality, mm_item, mm_hash
+    ) -> MultiModalProcessorCacheOutItem:
+        if mm_item is None:
+            self._parent._hits += 1
+        self._parent._total += 1
+        return self._txn.get_and_update_item(modality, mm_item, mm_hash)
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+    @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        # Not required.
+        pass
+
+    @override
+    def make_stats(self, *, delta=False):
+        return self._parent.make_stats(delta=delta)
+
+
+class LmdbObjectStoreSenderCache(BaseMultiModalProcessorCache):
+    """
+    The P0 cache which writes items to the LMDB-backed cache.
+    """
+
+    def __init__(
+        self,
+        cache: LmdbMultiModalCache,
+    ) -> None:
+        super().__init__()
+        self._cache = cache
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    @override
+    def make_stats(self, *, delta=False):
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
+
+    @override
+    def begin(self) -> AbstractContextManager[BaseMultiModalProcessorCache]:
+        return _LmdbSenderTransaction(self, self._cache.begin_write())
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+    @override
+    def get_and_update_item(
+        self, modality, mm_item, mm_hash
+    ) -> MultiModalProcessorCacheOutItem:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        raise ValueError("Requires a transaction.")
+
+
+class LmdbObjectStoreEngineReceiverCache(BaseMultiModalReceiverCache):
+    """
+    A dummy cache for the engine process that owns the evictor process
+    and file lock.
+    """
+
+    def __init__(self, cache: LmdbMultiModalCache) -> None:
+        super().__init__()
+
+        self._cache = cache
+        self._file_lock = self._cache.lock_and_clear_stale_caches()
+        if self._file_lock is not None:
+            self._evictor = self._cache.start_evictor()
+
+    @override
+    def clear_cache(self):
+        # If we don't have the file lock, another engine process owns the cache.
+        if self._file_lock is not None:
+            self._cache.clear()
+
+    @override
+    def get_and_update_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        return mm_features
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        raise NotImplementedError()
+
+    @override
+    def get_and_update_item(
+        self,
+        modality: str,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        raise NotImplementedError()
+
+
+class _LmdbWorkerTransaction(BaseMultiModalReceiverCache, AbstractContextManager):
+    def __init__(self, txn: LmdbReadTransaction):
+        self._txn = txn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._txn.__exit__(exc_type, exc_value, traceback)
+
+    @override
+    def get_and_update_item(
+        self,
+        modality: str,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        return self._txn.get_and_update_item(mm_item)
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        # Not necessary; nothing can be evicted under a transaction.
+        pass
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+
+class LmdbObjectStoreWorkerReceiverCache(BaseMultiModalReceiverCache):
+    """
+    The worker process cache which reads items from the LMDB cache.
+    """
+
+    def __init__(self, cache: LmdbMultiModalCache) -> None:
+        super().__init__()
+        self._cache = cache
+
+    @override
+    def begin(self):
+        return _LmdbWorkerTransaction(self._cache.begin_read())
+
+    @override
+    def get_and_update_item(
+        self,
+        modality: str,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+
+def _cache_type(
+    vllm_config: "VllmConfig", mm_registry: "MultiModalRegistry"
+) -> Literal[None, "processor_only", "lru", "shm", "lmdb"]:
+    model_config = vllm_config.model_config
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return None
+
+    # Check if the cache is disabled.
+    mm_config = model_config.get_multimodal_config()
+    if mm_config.mm_processor_cache_gb <= 0:
+        return None
+
+    # Check if IPC caching is supported.
+    parallel_config = vllm_config.parallel_config
+    if mm_config.mm_processor_cache_type == "lmdb":
+        # LMDB cache is supported as long as all local
+        # frontends are only communicating with local
+        # backends.
+        is_ipc_supported = (
+            parallel_config.data_parallel_size_local
+            == parallel_config.data_parallel_size
+        ) or parallel_config.data_parallel_external_lb
+    else:
+        is_ipc_supported = parallel_config._api_process_count == 1 and (
+            parallel_config.data_parallel_size == 1
+            or parallel_config.data_parallel_external_lb
+        )
+
+    if not is_ipc_supported:
+        return "processor_only"
+
+    return mm_config.mm_processor_cache_type
+
+
+def processor_cache_from_config(
+    vllm_config: "VllmConfig",
+    mm_registry: "MultiModalRegistry",
+) -> BaseMultiModalProcessorCache | None:
+    """Return a `BaseMultiModalProcessorCache`, if enabled."""
+    cache_type = _cache_type(vllm_config, mm_registry)
+    if cache_type is None:
+        return None
+    elif cache_type == "processor_only":
+        return MultiModalProcessorOnlyCache(vllm_config.model_config)
+    elif cache_type == "lru":
+        return MultiModalProcessorSenderCache(vllm_config.model_config)
+    elif cache_type == "shm":
+        return ShmObjectStoreSenderCache(vllm_config)
+    elif cache_type == "lmdb":
+        return LmdbObjectStoreSenderCache(
+            LmdbMultiModalCache.from_vllm_config(vllm_config)
+        )
+    else:
+        raise ValueError(f"Unknown cache type: {cache_type}")
+
+
+def processor_only_cache_from_config(
+    model_config: "ModelConfig",
+    mm_registry: "MultiModalRegistry",
+):
+    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return None
+
+    mm_config = model_config.get_multimodal_config()
+    if mm_config.mm_processor_cache_gb <= 0:
+        return None
+
+    return MultiModalProcessorOnlyCache(model_config)
+
+
 def engine_receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
@@ -785,18 +1015,17 @@ def engine_receiver_cache_from_config(
     Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
     mm_processor_cache_type=="lru".
     """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
+    cache_type = _cache_type(vllm_config, mm_registry)
+    if cache_type in (None, "processor_only", "shm"):
         return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalReceiverCache(model_config)
-
-    return None
+    elif cache_type == "lru":
+        return MultiModalReceiverCache(vllm_config.model_config)
+    elif cache_type == "lmdb":
+        return LmdbObjectStoreEngineReceiverCache(
+            LmdbMultiModalCache.from_vllm_config(vllm_config)
+        )
+    else:
+        raise ValueError(f"Unknown cache type: {cache_type}")
 
 
 def worker_receiver_cache_from_config(
@@ -809,15 +1038,15 @@ def worker_receiver_cache_from_config(
     Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
     mm_processor_cache_type=="shm".
     """
-    model_config = vllm_config.model_config
 
-    if not _enable_processor_cache(model_config, mm_registry):
+    cache_type = _cache_type(vllm_config, mm_registry)
+    if cache_type in (None, "processor_only", "lru"):
         return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return None
-
-    return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
+    elif cache_type == "shm":
+        return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
+    elif cache_type == "lmdb":
+        return LmdbObjectStoreWorkerReceiverCache(
+            LmdbMultiModalCache.from_vllm_config(vllm_config)
+        )
+    else:
+        raise ValueError(f"Unknown cache type: {cache_type}")
