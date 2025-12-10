@@ -60,7 +60,8 @@ class XgrammarBackend(StructuredOutputBackend):
             # copy from xgr.TokenizerInfo.from_huggingface()
             # because we are using a custom tokenizer wrapper here.
             vocab_dict = self.tokenizer.get_vocab()
-            vocab_size = self.vocab_size or self.tokenizer.max_token_id
+            tokenizer_vocab_size = max(len(vocab_dict), self.tokenizer.max_token_id + 1)
+            vocab_size = self.vocab_size or tokenizer_vocab_size
             # maintain tokenizer's indexing
             encoded_vocab = [""] * vocab_size
             for token, idx in vocab_dict.items():
