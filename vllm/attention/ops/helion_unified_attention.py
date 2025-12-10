@@ -3,8 +3,7 @@
 import helion
 import helion.language as hl
 import torch
-
-from vllm.triton_utils.triton import next_power_of_2
+from triton import next_power_of_2
 
 from .triton_unified_attention import (
     unified_attention as triton_baseline_unified_attention,
@@ -447,20 +446,10 @@ def kernel_helion_v5_attention(
     page_size = hl.specialize(t_value_cache.size(1))
     num_queries_per_kv = hl.specialize(num_query_heads // num_kv_heads)
 
-    # t_output.fill_(42.2)
     assert page_size == t_key_cache.size(1)
     assert head_size == t_key_cache.size(3)
 
-    # q_block_size = hl.register_block_size(1, int(max_query_len))
-    # q_block_size = hl.register_block_size(1, 32)
-    # TODO: bug: leads to invalid python code
-    # if is_decode_only:
-    #     q_block_size = hl.register_block_size(1, 1)
-    # TODO: bug, doesn't have any effect in code gen, block size is always 1
-    # q_block_size = hl.register_block_size(1, 32) if not is_decode_only \
-    #   else hl.register_block_size(1, 1)
     q_block_size = hl.register_block_size(1, q_block_padded_size)
-    # num_pages_at_once = hl.register_block_size(1, 512//page_size)
     num_pages_at_once = hl.register_block_size(1, 32)
 
     for seq_tile, tile_m in hl.tile(
