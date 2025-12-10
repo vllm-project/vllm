@@ -47,7 +47,11 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
-from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
+from .rebalance_execute import (
+    RecvMetadata,
+    move_from_buffer,
+    rearrange_expert_weights_inplace,
+)
 
 logger = init_logger(__name__)
 
@@ -175,14 +179,9 @@ class EplbModelState:
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     The size is same as the num of physical experts in the current layer.
     """
-    recv_metadata: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+    recv_metadata: RecvMetadata
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
-    The tuple contains:
-    - recv_primary_mask: np.ndarray, shape (group_size, num_local_experts)
-    - recv_counts: np.ndarray, shape (group_size,)
-    - recv_expert_ids: np.ndarray, shape (group_size, num_local_experts)
-    - recv_dst_rows: np.ndarray, shape (group_size, num_local_experts)
     """
     is_async_enabled: bool
     """
@@ -514,7 +513,12 @@ class EplbState:
             pending_global_ready_check=False,
             is_unchanged=np.array([]),
             is_received_locally=np.array([]),
-            recv_metadata=(np.array([]), np.array([]), np.array([]), np.array([])),
+            recv_metadata=RecvMetadata(
+                recv_primary_mask=np.array([]),
+                recv_counts=np.array([]),
+                recv_expert_ids=np.array([]),
+                recv_dst_rows=np.array([]),
+            ),
             is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
             new_physical_to_logical_map=new_physical_to_logical_map,
@@ -985,17 +989,20 @@ class EplbState:
                 model_state.model.expert_weights[model_state.layer_to_transfer]
             ]
             buffers_group = [model_state.expert_buffer]
+            new_indices_group = (
+                model_state.new_physical_to_logical_map[
+                    model_state.layer_to_transfer : model_state.layer_to_transfer + 1
+                ]
+                .cpu()
+                .numpy()
+            )
             move_from_buffer(
                 weights_group=weights_group,
                 buffers_group=buffers_group,
                 is_unchanged=model_state.is_unchanged,
                 is_received_locally=model_state.is_received_locally,
                 recv_metadata=model_state.recv_metadata,
-                new_indices_group=model_state.new_physical_to_logical_map[
-                    model_state.layer_to_transfer : model_state.layer_to_transfer + 1
-                ]
-                .cpu()
-                .numpy(),
+                new_indices_group=new_indices_group,
                 ep_group=ep_group,
             )
             transferred_layer = model_state.layer_to_transfer
