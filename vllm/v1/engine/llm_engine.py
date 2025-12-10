@@ -139,7 +139,7 @@ class LLMEngine:
     @property
     @deprecated(
         "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
