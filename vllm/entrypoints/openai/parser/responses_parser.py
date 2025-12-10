@@ -15,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
     ResponseReasoningItem,
 )
 
+from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.outputs import CompletionOutput
@@ -131,7 +132,7 @@ class ResponsesParser:
                     )
                 if isinstance(output_messages[-1], ResponseFunctionToolCall):
                     mcp_message = McpCall(
-                        id=f"mcp_{random_uuid()}",
+                        id=f"{MCP_PREFIX}{random_uuid()}",
                         arguments=output_messages[-1].arguments,
                         name=output_messages[-1].name,
                         server_label=output_messages[

@@ -516,7 +516,11 @@ class ModelConfig:
             if task == "classify":
                 return "classify"
             if task == "reward":
-                return "reward"
+                logger.warning(
+                    "Pooling models now default support all pooling; "
+                    "you can use it without any settings."
+                )
+                return "embed"
             if task == "score":
                 new_task = self._get_default_pooling_task(architectures)
                 return "classify" if new_task == "classify" else "embed"
@@ -1899,8 +1903,8 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForImageClassification", ("pooling", "classify")),
     ("ForVideoClassification", ("pooling", "classify")),
     ("ClassificationModel", ("pooling", "classify")),
-    ("ForRewardModeling", ("pooling", "reward")),
-    ("RewardModel", ("pooling", "reward")),
+    ("ForRewardModeling", ("pooling", "embed")),
+    ("RewardModel", ("pooling", "embed")),
     # Let other `*Model`s take priority
     ("Model", ("pooling", "embed")),
 ]
