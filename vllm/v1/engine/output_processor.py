@@ -42,44 +42,52 @@ class RequestOutputCollector:
 
     def __init__(self, output_kind: RequestOutputKind):
         self.aggregate = output_kind == RequestOutputKind.DELTA
-        self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.outputs: dict[str, RequestOutput | PoolingRequestOutput] | Exception | None = None
         self.ready = asyncio.Event()
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
-        if self.output is None or isinstance(output, Exception):
-            self.output = output
+        if isinstance(output, Exception):
+            self.outputs = output
             self.ready.set()
-        elif isinstance(self.output, RequestOutput) and isinstance(
-            output, RequestOutput
-        ):
-            # This ensures that request outputs with different request indexes
-            # (if n > 1) do not override each other.
-            self.output.add(output, aggregate=self.aggregate)
-        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
-            output, PoolingRequestOutput
-        ):
-            self.output = output
+        elif self.outputs is None:
+            self.outputs = {output.request_id: output}
+            self.ready.set()
+        elif self.outputs.get(output.request_id) is None:
+            self.outputs[output.request_id] = output
+        else:
+            prev_output = self.outputs.get(output.request_id)
+            if isinstance(prev_output, RequestOutput) and isinstance(output, RequestOutput):
+                # This ensures that request outputs with different request indexes
+                # (if n > 1) do not override each other.
+                prev_output.add(output, aggregate=self.aggregate)
+                # self.outputs[output.request_id] = prev_output
+            elif isinstance(prev_output, PoolingRequestOutput) and isinstance(
+                output, PoolingRequestOutput
+            ):
+                self.outputs[output.request_id] = output
 
-    async def get(self) -> RequestOutput | PoolingRequestOutput:
+    async def get(self) -> list[RequestOutput | PoolingRequestOutput]:
         """Get operation blocks on put event."""
-        while (output := self.output) is None:
+        while (outputs := self.outputs) is None:
             await self.ready.wait()
-        self.output = None
+        self.outputs = None
         self.ready.clear()
-        if isinstance(output, Exception):
-            raise output
-        return output
+        if isinstance(outputs, Exception):
+            raise outputs
+        return [output for output in outputs.values()]
 
-    def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
+    def get_nowait(self) -> list[RequestOutput | PoolingRequestOutput] | None:
         """Non-blocking get operation."""
-        output = self.output
-        if output is not None:
-            self.output = None
+        if self.outputs is None:
+            return None
+        outputs = self.outputs
+        if outputs is not None:
+            self.outputs = None
             self.ready.clear()
-        if isinstance(output, Exception):
-            raise output
-        return output
+        if isinstance(outputs, Exception):
+            raise outputs
+        return [output for output in outputs.values()]
 
 
 @dataclass
