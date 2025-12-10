@@ -185,6 +185,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        rotary_emb: nn.Module | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -260,6 +261,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        self.impl.rotary_emb = rotary_emb
         backend_name = self.attn_backend.get_name()
         self.backend = AttentionBackendEnum.__members__.get(backend_name)
         self.dtype = dtype
@@ -316,6 +318,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -365,7 +368,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query, key, value, output, self.layer_name, positions=positions
                 )
             return output.view(-1, hidden_size)
         else:
@@ -868,8 +871,25 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+    if positions is not None:
+        assert hasattr(self.impl, "rotary_emb") and self.impl.rotary_emb is not None
+        self.impl.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            positions=positions,
+        )
+        return
+    
     self.impl.forward(
         self,
         query,
@@ -891,6 +911,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 
