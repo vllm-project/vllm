@@ -445,6 +445,7 @@ def test_ht_deepep_deepgemm_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     disable_deepgemm_ue8m0,
+    workspace_init,
 ):
     """
     Tests for High-Throughput DeepEP + DeepGemm integration.
@@ -518,6 +519,7 @@ def test_ll_deepep_deepgemm_moe(
     block_size: list[int],
     world_dp_size: tuple[int, int],
     disable_deepgemm_ue8m0,
+    workspace_init,
 ):
     """
     Tests for Low-Latency DeepEP + DeepGemm integration.

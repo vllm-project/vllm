@@ -437,6 +437,7 @@ def test_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
+    workspace_init,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
@@ -492,6 +493,7 @@ def test_low_latency_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     use_fp8_dispatch: bool,
+    workspace_init,
 ):
     low_latency_mode = True
 
