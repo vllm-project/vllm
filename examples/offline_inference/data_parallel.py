@@ -108,12 +108,6 @@ def parse_args():
         help="Disable expert parallel (default: enabled).",
     )
     parser.set_defaults(enable_expert_parallel=True)
-    parser.add_argument(
-        "--all2all-backend",
-        type=str,
-        default=None,
-        help="All2All backend for MoE expert parallel communication.",
-    )
     return parser.parse_args()
 
 
@@ -134,7 +128,6 @@ def main(
     gpu_memory_utilization,
     enable_dbo,
     quantization,
-    all2all_backend,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
@@ -191,7 +184,6 @@ def main(
         enable_dbo=enable_dbo,
         quantization=quantization,
         compilation_config=compilation_config,
-        all2all_backend=all2all_backend,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -253,7 +245,6 @@ if __name__ == "__main__":
                 args.gpu_memory_utilization,
                 args.enable_dbo,
                 args.quantization,
-                args.all2all_backend,
             ),
         )
         proc.start()
