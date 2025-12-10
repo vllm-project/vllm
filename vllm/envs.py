@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_FLASHINFER_PREFILL: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
-    VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_CONFIGURE_LOGGING: bool = True
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_STREAM: str = "ext://sys.stdout"
@@ -78,8 +78,8 @@ if TYPE_CHECKING:
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
-    VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
+    VLLM_ENABLE_MOE_DP_CHUNK: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
@@ -175,6 +176,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_ALL2ALL_BACKEND: Literal[
         "naive",
         "pplx",
@@ -197,6 +199,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
@@ -462,17 +465,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     .lower()
     in ("1", "true")
     or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    # If set, skip adding +precompiled suffix to version string
+    "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: bool(
+        int(os.environ.get("VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX", "0"))
+    ),
     # Used to mark that setup.py is running in a Docker build context,
     # in order to force the use of precompiled binaries.
     "VLLM_DOCKER_BUILD_CONTEXT": lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "")
     .strip()
     .lower()
     in ("1", "true"),
-    # Whether to force using nightly wheel in python build.
-    # This is used for testing the nightly wheel in python build.
-    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL": lambda: bool(
-        int(os.getenv("VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL", "0"))
-    ),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
@@ -618,7 +620,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 0, vllm will not configure logging
     # If set to 1, vllm will configure logging using the default configuration
     #    or the configuration file specified by VLLM_LOGGING_CONFIG_PATH
-    "VLLM_CONFIGURE_LOGGING": lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
+    "VLLM_CONFIGURE_LOGGING": lambda: bool(
+        int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
+    ),
     "VLLM_LOGGING_CONFIG_PATH": lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL": lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO").upper(),
@@ -1098,6 +1102,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
     # units.
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
+    "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+    ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0"
@@ -1259,6 +1266,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
     ),
+    # Port used for Mooncake handshake between remote agents.
+    "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
+    ),
     # all2all backend for vllm's expert parallel communication
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
@@ -1367,6 +1378,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # disaggregated decode-prefill setup.
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
+    "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
     ),
     # Controls whether or not to use cudnn prefill
     "VLLM_USE_CUDNN_PREFILL": lambda: bool(
