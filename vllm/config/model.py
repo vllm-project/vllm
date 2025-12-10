@@ -196,8 +196,8 @@ class ModelConfig:
     - 1k -> 1000\n
     - 1K -> 1024\n
     - 25.6k -> 25,600\n
-    - -1 -> Automatically choose the maximum model length that fits in GPU
-    memory. This will use the model's maximum context length if it fits,
+    - -1 or 'auto' -> Automatically choose the maximum model length that fits in
+    GPU memory. This will use the model's maximum context length if it fits,
     otherwise it will find the largest length that can be accommodated."""
     spec_target_max_model_len: int | None = None
     """Specify the maximum length for spec decoding draft models."""
