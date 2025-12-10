@@ -5495,7 +5495,10 @@ class GPUModelRunner(
     def _record_context(self, event: RunnerEvent) -> AbstractContextManager[None]:
         @contextmanager
         def f():
-            with self.timer.track(event), record_function_or_nullcontext(event.name):
+            with (
+                self.timer.track(event),
+                record_function_or_nullcontext(f"gpu_model_runner: {event.name}"),
+            ):
                 yield
 
         return f()
