@@ -3571,74 +3571,89 @@ class GPUModelRunner(
         if self.parallel_config.enable_eplb:
             self.eplb_state = EplbState(self.parallel_config, self.device)
             eplb_models = 0
-        with DeviceMemoryProfiler() as m:
-            time_before_load = time.perf_counter()
-            model_loader = get_model_loader(self.load_config)
-            self.model = model_loader.load_model(
-                vllm_config=self.vllm_config, model_config=self.model_config
-            )
-            if self.lora_config:
-                self.model = self.load_lora_model(
-                    self.model, self.vllm_config, self.device
+
+        try:
+            with DeviceMemoryProfiler() as m:
+                time_before_load = time.perf_counter()
+                model_loader = get_model_loader(self.load_config)
+                self.model = model_loader.load_model(
+                    vllm_config=self.vllm_config, model_config=self.model_config
                 )
-            if hasattr(self, "drafter"):
-                logger.info_once("Loading drafter model...")
-                self.drafter.load_model(self.model)
-                if (
-                    hasattr(self.drafter, "model")
-                    and is_mixture_of_experts(self.drafter.model)
-                    and self.parallel_config.enable_eplb
-                ):
-                    spec_config = self.vllm_config.speculative_config
-                    assert spec_config is not None
-                    assert spec_config.draft_model_config is not None
-                    logger.info_once(
-                        "EPLB is enabled for drafter model %s.",
-                        spec_config.draft_model_config.model,
+                if self.lora_config:
+                    self.model = self.load_lora_model(
+                        self.model, self.vllm_config, self.device
                     )
+                if hasattr(self, "drafter"):
+                    logger.info_once("Loading drafter model...")
+                    self.drafter.load_model(self.model)
+                    if (
+                        hasattr(self.drafter, "model")
+                        and is_mixture_of_experts(self.drafter.model)
+                        and self.parallel_config.enable_eplb
+                    ):
+                        spec_config = self.vllm_config.speculative_config
+                        assert spec_config is not None
+                        assert spec_config.draft_model_config is not None
+                        logger.info_once(
+                            "EPLB is enabled for drafter model %s.",
+                            spec_config.draft_model_config.model,
+                        )
 
-                    global_expert_load = (
-                        global_expert_loads[eplb_models]
-                        if global_expert_loads
-                        else None
-                    )
-                    old_global_expert_indices = (
-                        old_global_expert_indices_per_model[eplb_models]
-                        if old_global_expert_indices_per_model
-                        else None
-                    )
-                    if self.eplb_state is None:
-                        self.eplb_state = EplbState(self.parallel_config, self.device)
-                    self.eplb_state.add_model(
-                        self.drafter.model,
-                        spec_config.draft_model_config,
-                        global_expert_load,
-                        old_global_expert_indices,
-                        rank_mapping,
-                    )
-                    eplb_models += 1
+                        global_expert_load = (
+                            global_expert_loads[eplb_models]
+                            if global_expert_loads
+                            else None
+                        )
+                        old_global_expert_indices = (
+                            old_global_expert_indices_per_model[eplb_models]
+                            if old_global_expert_indices_per_model
+                            else None
+                        )
+                        if self.eplb_state is None:
+                            self.eplb_state = EplbState(
+                                self.parallel_config, self.device
+                            )
+                        self.eplb_state.add_model(
+                            self.drafter.model,
+                            spec_config.draft_model_config,
+                            global_expert_load,
+                            old_global_expert_indices,
+                            rank_mapping,
+                        )
+                        eplb_models += 1
 
-            if self.use_aux_hidden_state_outputs:
-                if not supports_eagle3(self.get_model()):
-                    raise RuntimeError(
-                        "Model does not support EAGLE3 interface but "
-                        "aux_hidden_state_outputs was requested"
-                    )
+                if self.use_aux_hidden_state_outputs:
+                    if not supports_eagle3(self.get_model()):
+                        raise RuntimeError(
+                            "Model does not support EAGLE3 interface but "
+                            "aux_hidden_state_outputs was requested"
+                        )
 
-                # Try to get auxiliary layers from speculative config,
-                # otherwise use model's default layers
-                aux_layers = self._get_eagle3_aux_layers_from_config()
-                if aux_layers:
-                    logger.info(
-                        "Using auxiliary layers from speculative config: %s",
-                        aux_layers,
-                    )
-                else:
-                    aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
+                    # Try to get auxiliary layers from speculative config,
+                    # otherwise use model's default layers
+                    aux_layers = self._get_eagle3_aux_layers_from_config()
+                    if aux_layers:
+                        logger.info(
+                            "Using auxiliary layers from speculative config: %s",
+                            aux_layers,
+                        )
+                    else:
+                        aux_layers = self.model.get_eagle3_aux_hidden_state_layers()
 
-                self.model.set_aux_hidden_state_layers(aux_layers)
-            time_after_load = time.perf_counter()
-        self.model_memory_usage = m.consumed_memory
+                    self.model.set_aux_hidden_state_layers(aux_layers)
+                time_after_load = time.perf_counter()
+            self.model_memory_usage = m.consumed_memory
+        except torch.cuda.OutOfMemoryError as e:
+            msg = (
+                "Failed to load model - not enough GPU memory. "
+                "Try lowering --gpu-memory-utilization to free memory for weights, "
+                "increasing --tensor-parallel-size, or using --quantization. "
+                "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+                "for more tips."
+            )
+            combined_msg = f"{msg} (original error: {e})"
+            logger.error(combined_msg)
+            raise e
         logger.info_once(
             "Model loading took %.4f GiB memory and %.6f seconds",
             self.model_memory_usage / GiB_bytes,
