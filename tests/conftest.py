@@ -67,6 +67,9 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
+from torch._inductor.utils import fresh_cache
+
+
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     from transformers.generation.utils import GenerateOutput
@@ -402,6 +405,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -415,10 +419,18 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
-                processor_kwargs: dict[str, Any] = {
-                    "text": prompt,
-                    "return_tensors": "pt",
-                }
+                # Create a copy to avoid modifying the original dict
+                processor_kwargs = (
+                    tokenization_kwargs.copy()
+                    if tokenization_kwargs is not None
+                    else {}
+                )
+                processor_kwargs.update(
+                    {
+                        "text": prompt,
+                        "return_tensors": "pt",
+                    }
+                )
                 if images is not None and (image := images[i]) is not None:
                     processor_kwargs["images"] = image
                 if videos is not None and (video := videos[i]) is not None:
@@ -1465,3 +1477,14 @@ def clean_gpu_memory_between_tests():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         gc.collect()
+
+
+@pytest.fixture
+def use_fresh_inductor_cache():
+    """
+    Use a fresh inductor cache for the test.
+    This is useful to ensure that the test is not affected by the
+    previous test calls.
+    """
+    with fresh_cache():
+        yield

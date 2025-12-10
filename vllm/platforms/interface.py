@@ -239,6 +239,7 @@ class Platform:
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         """Get the attention backend class of a device."""

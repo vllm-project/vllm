@@ -34,6 +34,7 @@ from typing_extensions import TypeIs
 import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -49,6 +50,7 @@ from vllm.config import (
     ObservabilityConfig,
     ParallelConfig,
     PoolerConfig,
+    ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -528,8 +530,11 @@ class EngineArgs:
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
+    attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
+
+    profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
@@ -543,6 +548,7 @@ class EngineArgs:
     )
     model_impl: str = ModelConfig.model_impl
     override_attention_dtype: str = ModelConfig.override_attention_dtype
+    attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
@@ -581,6 +587,8 @@ class EngineArgs:
         # CompilationConfig object
         if isinstance(self.compilation_config, dict):
             self.compilation_config = CompilationConfig(**self.compilation_config)
+        if isinstance(self.attention_config, dict):
+            self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
@@ -716,6 +724,16 @@ class EngineArgs:
         load_group.add_argument("--use-tqdm-on-load", **load_kwargs["use_tqdm_on_load"])
         load_group.add_argument(
             "--pt-load-map-location", **load_kwargs["pt_load_map_location"]
+        )
+
+        # Attention arguments
+        attention_kwargs = get_kwargs(AttentionConfig)
+        attention_group = parser.add_argument_group(
+            title="AttentionConfig",
+            description=AttentionConfig.__doc__,
+        )
+        attention_group.add_argument(
+            "--attention-backend", **attention_kwargs["backend"]
         )
 
         # Structured outputs arguments
@@ -1146,12 +1164,15 @@ class EngineArgs:
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
+            "--attention-config", "-ac", **vllm_kwargs["attention_config"]
+        )
+        vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
         vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
-
+        vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1589,12 +1610,6 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
-        if self.async_scheduling and not self.disable_nccl_for_dp_synchronization:
-            logger.info(
-                "Disabling NCCL for DP synchronization when using async scheduling."
-            )
-            self.disable_nccl_for_dp_synchronization = True
-
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1699,6 +1714,16 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
+        # Attention config overrides
+        attention_config = copy.deepcopy(self.attention_config)
+        if self.attention_backend is not None:
+            if attention_config.backend is not None:
+                raise ValueError(
+                    "attention_backend and attention_config.backend "
+                    "are mutually exclusive"
+                )
+            attention_config.backend = self.attention_backend
+
         load_config = self.create_load_config()
 
         # Pass reasoning_parser into StructuredOutputsConfig
@@ -1756,15 +1781,17 @@ class EngineArgs:
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
             device_config=device_config,
+            load_config=load_config,
+            attention_config=attention_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
-            load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
         )
