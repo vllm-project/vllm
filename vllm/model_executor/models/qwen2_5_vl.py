@@ -77,7 +77,7 @@ from vllm.multimodal.evs import (
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
@@ -307,7 +307,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
@@ -344,24 +343,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.attn_backend = attn_backend
-        self.use_upstream_fa = use_upstream_fa
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
-        # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
-        from vllm.platforms import current_platform
 
-        if (
-            current_platform.is_rocm()
-            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-        ):
-            self.use_upstream_fa = True
-        if current_platform.is_xpu():
-            self.use_upstream_fa = False
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
@@ -415,7 +403,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                 max_seqlen,
                 batch_size,
                 self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
-                self.use_upstream_fa,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
@@ -459,7 +446,6 @@ class Qwen2_5_VisionBlock(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: AttentionBackendEnum = AttentionBackendEnum.TORCH_SDPA,
-        use_upstream_fa: bool = False,
         attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
@@ -475,7 +461,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
             attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2_5_VisionMLP(
@@ -644,7 +629,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             is_neox_style=True,
         )
 
-        use_upstream_fa = False
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
@@ -654,7 +638,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                use_upstream_fa,
                 attn_backend_override=attn_backend_override,
             )
         )
@@ -681,7 +664,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
                         prefix=f"{prefix}.blocks.{layer_idx}",
                         use_data_parallel=use_data_parallel,
                         attn_backend=self.attn_backend,
-                        use_upstream_fa=use_upstream_fa,
                         attn_backend_override=attn_backend_override,
                     )
                     for layer_idx in range(depth)
@@ -991,7 +973,7 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
@@ -1057,9 +1039,6 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsMultiModalPruning,
     SupportsMRoPE,
 ):
-    merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

@@ -21,7 +21,8 @@ from vllm.entrypoints.chat_utils import (
     get_history_tool_calls_cnt,
     make_tool_call_id,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
@@ -30,7 +31,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_input_to_harmony_message,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -62,8 +62,9 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import (
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import (
+    MistralTokenizer,
     maybe_serialize_tool_calls,
     truncate_tool_call_ids,
     validate_request_params,
@@ -530,7 +531,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -1071,10 +1072,15 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        if output.finish_reason is None:
+                        # NOTE: If return_token_ids is enabled, we still need to
+                        # send a chunk with token_ids even if delta_message is None
+                        # to ensure all tokens are included in the response
+                        if (
+                            output.finish_reason is None
+                            and not request.return_token_ids
+                        ):
                             continue
-                        else:
-                            delta_message = DeltaMessage()
+                        delta_message = DeltaMessage()
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -1296,7 +1302,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
@@ -1624,7 +1630,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         logprobs: dict[int, Logprob],
         top_logprobs: int | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         should_return_as_token_id: bool,
     ) -> list[ChatCompletionLogProb]:
         return [
@@ -1648,7 +1654,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:

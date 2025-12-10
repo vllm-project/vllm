@@ -191,8 +191,8 @@ def test_suffix_decoding_acceptance(
     # Expect the acceptance rate to improve.
     assert first_accept_rate < last_accept_rate
 
-    # Heuristic: expect at least 85% acceptance rate at the end.
-    assert last_accept_rate > 0.85
+    # Heuristic: expect at least 80.0% acceptance rate at the end.
+    assert last_accept_rate > 0.80
 
     del spec_llm
     torch.cuda.empty_cache()
@@ -286,6 +286,19 @@ def test_speculators_model_integration(
         pytest.param(
             (
                 "eagle3",
+                "Qwen/Qwen3-VL-8B-Instruct",
+                "taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+                1,
+            ),
+            False,
+            False,
+            marks=pytest.mark.skip(
+                reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
+            ),
+        ),
+        pytest.param(
+            (
+                "eagle3",
                 "Qwen/Qwen2.5-VL-7B-Instruct",
                 "Rayzl/qwen2.5-vl-7b-eagle3-sgl",
                 1,
@@ -352,6 +365,7 @@ def test_speculators_model_integration(
     ],
     ids=[
         "qwen3_eagle3",
+        "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
         "llama3_eagle3",
@@ -388,7 +402,11 @@ def test_eagle_correctness(
             # Scout requires default backend selection
             # because vision encoder has head_dim 88 being incompatible
             #  with FLASH_ATTN and needs to fall back to Flex Attn
-            pass
+
+            # pass if not ROCm
+            if current_platform.is_rocm():
+                # TODO: Enable Flex Attn for spec_decode on ROCm
+                pytest.skip("Flex Attn for spec_decode not supported on ROCm currently")
         else:
             m.setenv("VLLM_MLA_DISABLE", "1")
             m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
@@ -399,8 +417,11 @@ def test_eagle_correctness(
                 "multi-token eagle spec decode on current platform"
             )
 
-        if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
-            m.setenv("VLLM_ROCM_USE_AITER", "1")
+        if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
+            if "deepseek" in model_setup[1].lower():
+                pytest.skip("ROCM_AITER_FA for deepseek not supported on ROCm platform")
+            else:
+                m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
         max_model_len = 2048

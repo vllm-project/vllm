@@ -62,6 +62,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ImageSize,
+    ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -562,7 +563,7 @@ def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
     )
 
 
@@ -570,7 +571,7 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ):
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -785,8 +786,6 @@ class HunYuanVLForConditionalGeneration(
     SupportsQuant,
     SupportsXDRoPE,
 ):
-    multimodal_cpu_fields = {"image_grid_thw"}
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -847,7 +846,7 @@ class HunYuanVLForConditionalGeneration(
                 .expand(-1, llm_grid_w + 1)
                 .reshape(-1)
             )
-            h_index[pos : pos + token_num] = 0
+            t_index[pos : pos + token_num] = image_index
 
         if xd_num == 4:
             llm_positions = torch.stack([p_index, w_index, h_index, t_index])

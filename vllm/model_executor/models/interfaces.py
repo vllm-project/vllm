@@ -32,11 +32,13 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
     MultiModalFeatureSpec = object
+    _ProcessorFactories = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -76,15 +78,20 @@ class SupportsMultiModal(Protocol):
     `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
-    merge_by_field_config: ClassVar[bool] = False
+    merge_by_field_config: ClassVar[bool | None] = None
     """
-    A flag that indicates which implementation of
+    [DEPRECATED] A flag that indicates which implementation of
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
     """
 
-    multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
+    multimodal_cpu_fields: ClassVar[Set[str] | None] = None
     """
-    A set indicating CPU-only multimodal fields.
+    [DEPRECATED] A set indicating CPU-only multimodal fields.
+    """
+
+    _processor_factory: ClassVar[_ProcessorFactories]
+    """
+    Set internally by `MultiModalRegistry.register_processor`.
     """
 
     @classmethod
@@ -253,7 +260,35 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
-    return getattr(model, "supports_multimodal", False)
+    res = getattr(model, "supports_multimodal", False)
+
+    if res:
+        # We can remove this starting from v0.14
+        merge_by_field_config = getattr(model, "merge_by_field_config", None)
+        if merge_by_field_config is False:
+            raise ValueError(
+                "`merge_by_field_config=False` is no longer effective, "
+                "please update your model to consider the new batching logic "
+                "in `group_mm_kwargs_by_modality` (refer to "
+                "https://github.com/vllm-project/vllm/issues/26149), "
+                "and then remove the override from your model."
+            )
+        if merge_by_field_config is True:
+            logger.warning_once(
+                "`merge_by_field_config=True` is redundant, "
+                "please remove the override from your model."
+            )
+
+        multimodal_cpu_fields = getattr(model, "multimodal_cpu_fields", None)
+        if multimodal_cpu_fields is not None:
+            raise ValueError(
+                "`multimodal_cpu_fields` is no longer effective, "
+                "please set `keep_on_cpu=True` in `MultiModalFieldConfig` "
+                "(refer to https://github.com/vllm-project/vllm/pull/30181), "
+                "and then remove the override from your model."
+            )
+
+    return res
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
@@ -336,10 +371,10 @@ class SupportsLoRA(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+    is_3d_moe_weight: ClassVar[bool] = False
     # The `embedding_module` and `embedding_padding_modules`
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
-    embedding_padding_modules: ClassVar[list[str]] = []
     packed_modules_mapping: dict[str, list[str]] = {}
 
 
@@ -351,7 +386,6 @@ class _SupportsLoRAType(Protocol):
 
     packed_modules_mapping: dict[str, list[str]]
     embedding_modules: dict[str, str]
-    embedding_padding_modules: list[str]
 
 
 @overload
@@ -371,7 +405,6 @@ def supports_lora(
         lora_attrs = (
             "packed_modules_mapping",
             "embedding_modules",
-            "embedding_padding_modules",
         )
         missing_attrs = tuple(attr for attr in lora_attrs if not hasattr(model, attr))
 
@@ -831,6 +864,10 @@ class SupportsTranscription(Protocol):
     """
     Transcription models can opt out of text generation by setting this to
     `True`.
+    """
+    supports_segment_timestamp: ClassVar[bool] = False
+    """
+    Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
     def __init_subclass__(cls, **kwargs):

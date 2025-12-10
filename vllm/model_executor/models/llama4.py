@@ -24,7 +24,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
