@@ -71,6 +71,8 @@ def lmdb_cache():
 def test_lmdb_insert_get_evict(lmdb_cache: LmdbMultiModalCache):
     sender_cache = LmdbObjectStoreSenderCache(lmdb_cache)
 
+    MODALITY = "modality"
+    MM_HASH = "fake_hash"
     ITEM_CHUNKS = 150.5
     dummy_item = _dummy_item(
         "modality", {"key": int(lmdb_cache._max_chunk_size * ITEM_CHUNKS)}
@@ -80,21 +82,22 @@ def test_lmdb_insert_get_evict(lmdb_cache: LmdbMultiModalCache):
     # Do two rounds to ensure inserting after evicting works correctly.
     for _ in range(2):
         with sender_cache.begin() as txn:
-            assert not txn.is_cached_item("fake_hash")
-            item_1, update_1 = txn.get_and_update_item(
-                "modality", (dummy_item, prompt_update), "fake_hash"
+            assert not txn.is_cached_item(MM_HASH)
+            should_be_none, update_1 = txn.get_and_update_item(
+                MODALITY, (dummy_item, prompt_update), MM_HASH
             )
+            assert should_be_none is None
             assert update_1 == prompt_update
 
         receiver_cache = LmdbObjectStoreWorkerReceiverCache(lmdb_cache)
         with receiver_cache.begin() as txn:
-            retrieved_item = txn.get_and_update_item("modality", item_1, "fake_hash")
+            retrieved_item = txn.get_and_update_item(MODALITY, None, MM_HASH)
             assert retrieved_item == dummy_item
 
         with sender_cache.begin() as txn:
-            assert txn.is_cached_item("fake_hash")
-            item_2, update_2 = txn.get_and_update_item("modality", None, "fake_hash")
-            assert item_1 == item_2
+            assert txn.is_cached_item(MM_HASH)
+            should_be_none, update_2 = txn.get_and_update_item(MODALITY, None, MM_HASH)
+            assert should_be_none is None
             assert update_2 == prompt_update
 
         evicted_items, _ = lmdb_cache.evict_once(min_utilization=0.0)
@@ -104,86 +107,91 @@ def test_lmdb_insert_get_evict(lmdb_cache: LmdbMultiModalCache):
 def test_lmdb_eviction_with_transaction_open(lmdb_cache: LmdbMultiModalCache):
     sender_cache = LmdbObjectStoreSenderCache(lmdb_cache)
 
+    MODALITY = "modality"
+    MM_HASH = "fake_hash"
     ITEM_CHUNKS = 150.5
     dummy_item = _dummy_item(
         "modality", {"key": int(lmdb_cache._max_chunk_size * ITEM_CHUNKS)}
     )
     prompt_update = PromptInsertion("dummy", "target", "insertion")
     with sender_cache.begin() as txn:
-        txn.get_and_update_item("modality", (dummy_item, prompt_update), "fake_hash")
+        txn.get_and_update_item(MODALITY, (dummy_item, prompt_update), MM_HASH)
 
     with sender_cache.begin() as txn:
-        assert txn.is_cached_item("fake_hash")
+        assert txn.is_cached_item(MM_HASH)
         evicted, _ = lmdb_cache.evict_once(min_utilization=0.0)
         assert evicted == math.ceil(ITEM_CHUNKS) + 1
 
         # The item should be cached since the transaction is still open.
-        assert txn.is_cached_item("fake_hash")
+        assert txn.is_cached_item(MM_HASH)
 
         # But a separate transaction should not see the item.
         with sender_cache.begin() as other_txn:
-            assert not other_txn.is_cached_item("fake_hash")
+            assert not other_txn.is_cached_item(MM_HASH)
 
-        hash_item, update = txn.get_and_update_item("modality", None, "fake_hash")
+        should_be_none, update = txn.get_and_update_item(MODALITY, None, MM_HASH)
+        assert should_be_none is None
         assert update == prompt_update
 
     # After the transaction commits, the item should be there.
     with sender_cache.begin() as txn:
-        assert txn.is_cached_item("fake_hash")
-        new_hash_item, update = txn.get_and_update_item("modality", None, "fake_hash")
+        assert txn.is_cached_item(MM_HASH)
+        should_be_none, update = txn.get_and_update_item(MODALITY, None, MM_HASH)
+        assert should_be_none is None
         assert update == prompt_update
-        assert new_hash_item == hash_item
 
     # And the receiver cache should see the item as well.
     receiver_cache = LmdbObjectStoreWorkerReceiverCache(lmdb_cache)
     with receiver_cache.begin() as txn:
-        retrieved_item = txn.get_and_update_item("modality", new_hash_item, "fake_hash")
+        retrieved_item = txn.get_and_update_item(MODALITY, None, MM_HASH)
         assert retrieved_item == dummy_item
 
         evicted, _ = lmdb_cache.evict_once(min_utilization=0.0)
         assert evicted == math.ceil(ITEM_CHUNKS) + 1
 
         # The item should be cached since the transaction is still open.
-        retrieved_item = txn.get_and_update_item("modality", new_hash_item, "fake_hash")
+        retrieved_item = txn.get_and_update_item(MODALITY, None, MM_HASH)
         assert retrieved_item == dummy_item
 
     # But now it should be gone.
     with receiver_cache.begin() as txn, pytest.raises(ValueError):
-        txn.get_and_update_item("modality", new_hash_item, "fake_hash")
+        txn.get_and_update_item(MODALITY, None, MM_HASH)
 
 
 def test_lmdb_concurrent_inserts(lmdb_cache: LmdbMultiModalCache):
     sender_cache = LmdbObjectStoreSenderCache(lmdb_cache)
 
     ITEM_CHUNKS = 150.5
+    MM_HASH = "fake_hash"
     dummy_item = _dummy_item(
         "modality", {"key": int(lmdb_cache._max_chunk_size * ITEM_CHUNKS)}
     )
     prompt_update = PromptInsertion("dummy", "target", "insertion")
     with sender_cache.begin() as txn:
-        assert not txn.is_cached_item("fake_hash")
+        assert not txn.is_cached_item(MM_HASH)
         item_1, update_1 = txn.get_and_update_item(
-            "modality", (dummy_item, prompt_update), "fake_hash"
+            "modality", (dummy_item, prompt_update), MM_HASH
         )
+        assert item_1 is None
 
         with sender_cache.begin() as other_txn:
-            assert not other_txn.is_cached_item("fake_hash")
+            assert not other_txn.is_cached_item(MM_HASH)
             item2, update_2 = other_txn.get_and_update_item(
-                "modality", (dummy_item, prompt_update), "fake_hash"
+                "modality", (dummy_item, prompt_update), MM_HASH
             )
+            assert item2 is None
 
-    # Both transactions should return the same item and update
-    assert item_1 == item2
+    # Both transactions should return the same prompt update.
     assert update_1 == update_2
 
     # And the item should be present in a new transaction.
     with sender_cache.begin() as new_txn:
-        assert new_txn.is_cached_item("fake_hash")
+        assert new_txn.is_cached_item(MM_HASH)
 
     # And the receiver cache should see the item as well.
     receiver_cache = LmdbObjectStoreWorkerReceiverCache(lmdb_cache)
     with receiver_cache.begin() as txn:
-        retrieved_item = txn.get_and_update_item("modality", item_1, "fake_hash")
+        retrieved_item = txn.get_and_update_item("modality", None, MM_HASH)
         assert retrieved_item == dummy_item
 
     evicted_items, _ = lmdb_cache.evict_once(min_utilization=0.0)
@@ -191,7 +199,7 @@ def test_lmdb_concurrent_inserts(lmdb_cache: LmdbMultiModalCache):
 
     # Now it should be gone.
     with sender_cache.begin() as txn:
-        assert not txn.is_cached_item("fake_hash")
+        assert not txn.is_cached_item(MM_HASH)
 
     evicted_items, _ = lmdb_cache.evict_once(min_utilization=0.0)
     assert evicted_items == 0
@@ -202,17 +210,19 @@ def test_lmdb_concurrent_inserts(lmdb_cache: LmdbMultiModalCache):
 def test_lmdb_evictor_process(lmdb_cache: LmdbMultiModalCache):
     event = multiprocessing.Event()
 
+    MM_HASH = "fake_hash"
+    ITEM_CHUNKS = 150.5
+
     with lmdb_cache.begin_write() as txn:
-        ITEM_CHUNKS = 150.5
         dummy_item = _dummy_item(
             "modality", {"key": int(lmdb_cache._max_chunk_size * ITEM_CHUNKS)}
         )
 
         prompt_update = PromptInsertion("dummy", "target", "insertion")
-        txn.get_and_update_item("modality", (dummy_item, prompt_update), "test_hash")
+        txn.get_and_update_item("modality", (dummy_item, prompt_update), MM_HASH)
 
     with lmdb_cache.begin_read() as txn:
-        assert txn.is_cached_item("test_hash")
+        assert txn.is_cached_item(MM_HASH)
 
     evictor_process = lmdb_cache.start_evictor(event)
     event.wait()
@@ -221,7 +231,7 @@ def test_lmdb_evictor_process(lmdb_cache: LmdbMultiModalCache):
     for _ in range(5):
         assert evictor_process.is_alive()
         with lmdb_cache.begin_read() as txn:
-            if not txn.is_cached_item("test_hash"):
+            if not txn.is_cached_item(MM_HASH):
                 break
 
         time.sleep(0.1)
