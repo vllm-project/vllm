@@ -19,7 +19,7 @@ ARG PYTHON_VERSION=3.12
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
 
@@ -356,7 +356,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
 
 # TODO (huydhn): There is no prebuilt gdrcopy package on 12.9 at the moment
-ARG GDRCOPY_CUDA_VERSION=12.8
+ARG GDRCOPY_CUDA_VERSION=13.0
 # Keep in line with FINAL_BASE_IMAGE
 ARG GDRCOPY_OS_VERSION=Ubuntu22_04
 
