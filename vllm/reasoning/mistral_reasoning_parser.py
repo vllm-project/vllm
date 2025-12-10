@@ -102,7 +102,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
         # 3. Both BOT and EOT have been outputted.
         elif has_bot_token and has_eot_token:
             return input_ids[:bot_token_index] + input_ids[eot_token_index + 1 :]
-        # 3. Only EOT has been outputted => this should not have occured for a model
+        # 4. Only EOT has been outputted => this should not have occured for a model
         #    well prompted and trained.
         else:
             return input_ids[:eot_token_index] + input_ids[eot_token_index + 1 :]
@@ -141,7 +141,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
             has_non_valid_eot_token = self.end_token in prev_bot_token
             # 3.a EOT token has been outputted without BOT
             # If model is well prompted and trained `has_non_valid_eot_token` should
-            # be `False` and the parseroutputs all tokens as 'content'
+            # be `False` and the parser outputs all tokens as 'content'
             if has_non_valid_eot_token:
                 prev_eot_token, _, post_eot_token = prev_bot_token.partition(
                     self.end_token
