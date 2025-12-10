@@ -82,7 +82,7 @@ DOCKER_BUILDKIT=1 docker build . \
 
 ## Building for Arm64/aarch64
 
-A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. At time of this writing, this should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
 
 !!! note
     Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
