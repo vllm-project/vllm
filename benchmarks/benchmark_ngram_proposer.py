@@ -37,7 +37,7 @@ def benchmark_propose(args):
             tokenizer="facebook/opt-125m",
             tokenizer_mode="auto",
             dtype="auto",
-            seed=None,
+            seed=0,
             trust_remote_code=False,
         )
         proposer = NgramProposer(
