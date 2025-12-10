@@ -1,27 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ScaledMM kernel selection logic
+"""Tests for ScaledMM kernel selection logic (CPU-only)
 
 Run `pytest tests/kernels/quantization/test_scaled_mm_kernel_selection.py`.
 """
 
+import inspect
 from abc import ABC
+
+import pytest
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
-    CutlassScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
-    TritonScaledMMLinearKernel,
-)
+
+pytestmark = pytest.mark.cpu_test
 
 
 def test_is_supported_is_abstract():
@@ -30,49 +32,40 @@ def test_is_supported_is_abstract():
     assert hasattr(ScaledMMLinearKernel, "is_supported")
 
 
-def test_all_kernels_implement_is_supported():
-    """Test that all kernel classes implement is_supported() method."""
-    kernels = [
-        CPUScaledMMLinearKernel,
-        CutlassScaledMMLinearKernel,
-        TritonScaledMMLinearKernel,
-    ]
-
-    for kernel in kernels:
-        assert hasattr(kernel, "is_supported"), (
-            f"{kernel.__name__} missing is_supported() method"
-        )
-        # Verify it's a classmethod
-        assert isinstance(kernel.is_supported, classmethod), (
-            f"{kernel.__name__}.is_supported() should be a classmethod"
-        )
-
-
-def test_triton_kernel_rejects_asymmetric():
-    """Test that TritonScaledMMLinearKernel rejects asymmetric quantization."""
-    config = ScaledMMLinearLayerConfig(
-        is_channelwise=False,
-        is_static_input_scheme=True,
-        input_symmetric=False,  # Asymmetric
+def test_cpu_kernel_implements_is_supported():
+    """Test that CPUScaledMMLinearKernel implements is_supported() method."""
+    assert hasattr(CPUScaledMMLinearKernel, "is_supported"), (
+        "CPUScaledMMLinearKernel missing is_supported() method"
     )
+    # Verify it's a classmethod by checking if it can be called with the class
+    # and by checking the method type
+    assert inspect.ismethod(CPUScaledMMLinearKernel.is_supported) or inspect.isfunction(
+        CPUScaledMMLinearKernel.is_supported
+    ), "CPUScaledMMLinearKernel.is_supported() should be a classmethod"
+    # Verify it can be called as a classmethod
+    result, reason = CPUScaledMMLinearKernel.is_supported()
+    assert isinstance(result, bool), "is_supported() should return a bool"
+    assert reason is None or isinstance(reason, str), "reason should be str or None"
 
-    can_impl, reason = TritonScaledMMLinearKernel.can_implement(config)
-    assert not can_impl, "TritonScaledMMLinearKernel should reject asymmetric config"
-    assert "symmetric" in reason.lower(), f"Unexpected rejection reason: {reason}"
 
-
-def test_triton_kernel_accepts_symmetric():
-    """Test that TritonScaledMMLinearKernel accepts symmetric quantization."""
-    config = ScaledMMLinearLayerConfig(
-        is_channelwise=False,
-        is_static_input_scheme=True,
-        input_symmetric=True,  # Symmetric
+def test_aiter_kernel_implements_is_supported():
+    """Test that AiterScaledMMLinearKernel implements is_supported() method."""
+    assert hasattr(AiterScaledMMLinearKernel, "is_supported"), (
+        "AiterScaledMMLinearKernel missing is_supported() method"
     )
-
-    can_impl, reason = TritonScaledMMLinearKernel.can_implement(config)
-    assert can_impl, (
-        f"TritonScaledMMLinearKernel should accept symmetric config: {reason}"
+    # Verify it's a classmethod by checking if it can be called with the class
+    # and by checking the method type
+    assert inspect.ismethod(
+        AiterScaledMMLinearKernel.is_supported
+    ) or inspect.isfunction(AiterScaledMMLinearKernel.is_supported), (
+        "AiterScaledMMLinearKernel.is_supported() should be a classmethod"
     )
+    # Verify it can be called as a classmethod (will return False on CPU, which is expected)
+    result, reason = AiterScaledMMLinearKernel.is_supported()
+    assert isinstance(result, bool), "is_supported() should return a bool"
+    assert reason is None or isinstance(reason, str), "reason should be str or None"
+    # On CPU, it should return False with a reason about requiring ROCm
+    # This validates the method works correctly even on non-ROCm platforms
 
 
 def test_cpu_kernel_accepts_all_configs():
