@@ -364,6 +364,18 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+            # NOTE(Chendi): new allocated blocks for prefill should also be updated
+            # to kv_connector, otherwise the kv_connector_metadata block_ids will be
+            # incorrect.
+            if self.connector is not None:
+                total_tokens = num_new_tokens + request.num_computed_tokens
+                is_prefill = total_tokens <= request.num_prompt_tokens
+                if is_prefill:
+                    self.connector.update_state_after_alloc(
+                        request,
+                        new_blocks,
+                        0,
+                    )
 
             # Speculative decode related.
             if request.spec_token_ids:
