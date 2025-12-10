@@ -1,8 +1,12 @@
-FROM python:3.12.9-slim AS builder
+# ===== BUILDER =====
+ARG PYTHON_VERSION=3.12
+ARG CUDA_VERSION=12.9.1
+ARG VLLM_VERSION=0.12.0
 
+FROM python:${PYTHON_VERSION}.9-slim AS builder
 WORKDIR /tmp
 
-ARG VLLM_VERSION=0.10.0
+ARG VLLM_VERSION
 
 # Install packages in a temporary directory
 RUN pip install --no-cache-dir vllm==${VLLM_VERSION} -t /tmp/python-packages
@@ -10,46 +14,55 @@ RUN pip install --no-cache-dir vllm==${VLLM_VERSION} -t /tmp/python-packages
 # Separate the nvidia packages (2.7 GB) into cudnn (1 GB), cublas (600 MB), and all else (1.2 GB)
 # rm -rf needed at the end to remove the now-empty dirs after mv
 RUN mkdir -p /chunk-nvidia/chunk-cudnn && \
-  mkdir -p /chunk-nvidia/chunk-cublas && \
-  mkdir -p /chunk-nvidia/other && \
-  mv /tmp/python-packages/nvidia/cudnn /chunk-nvidia/chunk-cudnn && \
-  mv /tmp/python-packages/nvidia/cublas /chunk-nvidia/chunk-cublas && \
-  mv /tmp/python-packages/nvidia/* /chunk-nvidia/other && \
-  rm -rf /chunk-nvidia/other/cudnn /chunk-nvidia/other/cublas
+    mkdir -p /chunk-nvidia/chunk-cublas && \
+    mkdir -p /chunk-nvidia/other && \
+    mv /tmp/python-packages/nvidia/cudnn /chunk-nvidia/chunk-cudnn && \
+    mv /tmp/python-packages/nvidia/cublas /chunk-nvidia/chunk-cublas && \
+    mv /tmp/python-packages/nvidia/* /chunk-nvidia/other && \
+    rm -rf /chunk-nvidia/other/cudnn /chunk-nvidia/other/cublas
 
-# Separate the torch packages (1.7 GB)
-RUN mkdir -p /chunk-torch && \
-  mv /tmp/python-packages/torch /chunk-torch/
-
-# Separate the vllm packages (800 MB)
-RUN mkdir -p /chunk-vllm && \
-  mv /tmp/python-packages/vllm /chunk-vllm/
+# Separate the torch packages (1.7 GB) and vllm packages (800 MB)
+RUN mkdir -p /chunk-torch && mv /tmp/python-packages/torch /chunk-torch/
+RUN mkdir -p /chunk-vllm && mv /tmp/python-packages/vllm /chunk-vllm/
 
 # Move the rest of the packages (1.8 GB)
-# rm -rf needed at the end to remove the now-empty dirs after mv
 RUN mkdir -p /chunk-other && \
-  mv /tmp/python-packages/* /chunk-other/ && \
-  rm -rf /chunk-other/nvidia /chunk-other/torch /chunk-other/vllm
+    mv /tmp/python-packages/* /chunk-other/ && \
+    rm -rf /chunk-other/nvidia /chunk-other/torch /chunk-other/vllm
 
-# This is the final image
-FROM python:3.12.9-slim
-
+# ===== FINAL =====
+FROM python:${PYTHON_VERSION}.9-slim
 WORKDIR /app
+
+ARG PYTHON_VERSION
+ARG CUDA_VERSION
 
 # Copy each chunk into the final image into cohesive wholes
 # each of these will be pulled concurrently during docker pull
-COPY --from=builder /chunk-nvidia/chunk-cudnn/cudnn /usr/local/lib/python3.12/site-packages/nvidia/cudnn
-COPY --from=builder /chunk-nvidia/chunk-cublas/cublas /usr/local/lib/python3.12/site-packages/nvidia/cublas
-COPY --from=builder /chunk-nvidia/other /usr/local/lib/python3.12/site-packages/nvidia/
-COPY --from=builder /chunk-torch /usr/local/lib/python3.12/site-packages/
-COPY --from=builder /chunk-vllm /usr/local/lib/python3.12/site-packages/
-COPY --from=builder /chunk-other /usr/local/lib/python3.12/site-packages/
+COPY --from=builder /chunk-nvidia/chunk-cudnn/cudnn /usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/cudnn
+COPY --from=builder /chunk-nvidia/chunk-cublas/cublas /usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/cublas
+COPY --from=builder /chunk-nvidia/other /usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/
+COPY --from=builder /chunk-torch /usr/local/lib/python${PYTHON_VERSION}/site-packages/
+COPY --from=builder /chunk-vllm /usr/local/lib/python${PYTHON_VERSION}/site-packages/
+COPY --from=builder /chunk-other /usr/local/lib/python${PYTHON_VERSION}/site-packages/
 
-ENV MODEL_PATH=/app/models/custom_model
+# Install GCC needed by vllm 
+RUN apt-get update && \
+    apt-get install -y gcc && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install GCC
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
+# Install FlashInfer (core + cubin from PyPI; JIT cache from FlashInfer index derived from CUDA_VERSION)
+RUN CU_TAG=$(echo ${CUDA_VERSION} | cut -d. -f1,2 | tr -d '.') && \
+    pip install --no-cache-dir \
+        flashinfer-python==0.5.3 flashinfer-cubin==0.5.3 && \
+    pip install --no-cache-dir \
+        flashinfer-jit-cache==0.5.3 \
+        --extra-index-url https://flashinfer.ai/whl/cu${CU_TAG}
 
-# TODO: Install a compatible FlashInfer wheel for current PyTorch and CUDA version
+# Needed for JIT-compiling torch-c-dlpack-ext to cache to enable EnvTensorAllocator in vLLM
+RUN pip install --no-cache-dir torch-c-dlpack-ext
 
-ENTRYPOINT ["sh", "-c", "exec python3 -m vllm.entrypoints.openai.api_server --model $MODEL_PATH $VLLM_ARGS"]
+ENV MODEL_PATH="/app/models/custom_model"
+
+ENTRYPOINT ["sh", "-c", "python3 -m vllm.entrypoints.openai.api_server --model $MODEL_PATH $VLLM_ARGS"]
