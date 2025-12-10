@@ -198,6 +198,10 @@ class TritonAttentionBackend(AttentionBackend):
         return head_size >= 32
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         return True
 

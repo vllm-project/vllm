@@ -86,6 +86,8 @@ def kernel_unified_attention_2d(
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    USE_MM_PREFIX: tl.constexpr,  # bool
+    mm_prefix_ranges: tl.int64,  # [num_seqs] - prefix length for each sequence
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -99,8 +101,6 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    USE_PREFIX_LM: tl.constexpr,  # bool
-    prefix_lens_ptr,  # [num_seqs] - prefix length for each sequence
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -168,7 +168,7 @@ def kernel_unified_attention_2d(
     context_len = seq_len - cur_batch_query_len
 
     # prefix length for PrefixLM (bidirectional attention in prefix region)
-    prefix_len = tl.load(prefix_lens_ptr + seq_idx) if USE_PREFIX_LM else 0
+    prefix_len = tl.load(mm_prefix_ranges + seq_idx) if USE_MM_PREFIX else 0
 
     # alibi slope for this head
     if USE_ALIBI_SLOPES:
@@ -278,7 +278,7 @@ def kernel_unified_attention_2d(
         # Compute attention mask
         # For PrefixLM: prefix region uses bidirectional attention,
         # suffix region uses causal attention
-        if USE_PREFIX_LM:
+        if USE_MM_PREFIX:
             # Key positions in the prefix region are always visible
             is_key_in_prefix = seq_offset[None, :] < prefix_len
             # For keys outside prefix, use causal masking
