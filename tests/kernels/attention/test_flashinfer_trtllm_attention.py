@@ -11,7 +11,7 @@ from tests.kernels.quantization.nvfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(10):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
