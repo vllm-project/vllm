@@ -536,7 +536,7 @@ def resolve_hf_chat_template(
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -593,7 +593,7 @@ def resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
     given_format: ChatTemplateContentFormatOption,
-    tokenizer: TokenizerLike,
+    tokenizer: TokenizerLike | None,
     *,
     model_config: ModelConfig,
 ) -> _ChatTemplateContentFormat:
@@ -627,11 +627,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     maximum per prompt.
     """
 
-    def __init__(self, model_config: ModelConfig, tokenizer: TokenizerLike):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
 
         self._model_config = model_config
-        self._tokenizer = tokenizer
 
         self._items_by_modality = defaultdict[str, list[_T | None]](list)
         self._uuids_by_modality = defaultdict[str, list[str | None]](list)
@@ -695,16 +694,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             raise ValueError("Mixing raw image and embedding inputs is not allowed")
 
         if "image_embeds" in uuids_by_modality:
-            image_embeds_uuids = uuids_by_modality["image_embeds"]
-            if len(image_embeds_uuids) > 1:
-                raise ValueError("Only one message can have {'type': 'image_embeds'}")
             mm_uuids["image"] = uuids_by_modality["image_embeds"]
         if "image" in uuids_by_modality:
             mm_uuids["image"] = uuids_by_modality["image"]  # UUIDs of images
         if "audio_embeds" in uuids_by_modality:
-            audio_embeds_uuids = uuids_by_modality["audio_embeds"]
-            if len(audio_embeds_uuids) > 1:
-                raise ValueError("Only one message can have {'type': 'audio_embeds'}")
             mm_uuids["audio"] = uuids_by_modality["audio_embeds"]
         if "audio" in uuids_by_modality:
             mm_uuids["audio"] = uuids_by_modality["audio"]  # UUIDs of audios
@@ -730,16 +723,16 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
 
         if "image_embeds" in items_by_modality:
             image_embeds_lst = items_by_modality["image_embeds"]
-            if len(image_embeds_lst) > 1:
-                raise ValueError("Only one message can have {'type': 'image_embeds'}")
-            mm_inputs["image"] = image_embeds_lst[0]
+            mm_inputs["image"] = (
+                image_embeds_lst if len(image_embeds_lst) != 1 else image_embeds_lst[0]
+            )
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"]  # A list of images
         if "audio_embeds" in items_by_modality:
             audio_embeds_lst = items_by_modality["audio_embeds"]
-            if len(audio_embeds_lst) > 1:
-                raise ValueError("Only one message can have {'type': 'audio_embeds'}")
-            mm_inputs["audio"] = audio_embeds_lst[0]
+            mm_inputs["audio"] = (
+                audio_embeds_lst if len(audio_embeds_lst) != 1 else audio_embeds_lst[0]
+            )
         if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"]  # A list of audios
         if "video" in items_by_modality:
@@ -772,16 +765,16 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
 
         if "image_embeds" in items_by_modality:
             image_embeds_lst = items_by_modality["image_embeds"]
-            if len(image_embeds_lst) > 1:
-                raise ValueError("Only one message can have {'type': 'image_embeds'}")
-            mm_inputs["image"] = image_embeds_lst[0]
+            mm_inputs["image"] = (
+                image_embeds_lst if len(image_embeds_lst) != 1 else image_embeds_lst[0]
+            )
         if "image" in items_by_modality:
             mm_inputs["image"] = items_by_modality["image"]  # A list of images
         if "audio_embeds" in items_by_modality:
             audio_embeds_lst = items_by_modality["audio_embeds"]
-            if len(audio_embeds_lst) > 1:
-                raise ValueError("Only one message can have {'type': 'audio_embeds'}")
-            mm_inputs["audio"] = audio_embeds_lst[0]
+            mm_inputs["audio"] = (
+                audio_embeds_lst if len(audio_embeds_lst) != 1 else audio_embeds_lst[0]
+            )
         if "audio" in items_by_modality:
             mm_inputs["audio"] = items_by_modality["audio"]  # A list of audios
         if "video" in items_by_modality:
@@ -1612,7 +1605,6 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1620,7 +1612,7 @@ def parse_chat_messages(
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = MultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = MultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
@@ -1644,7 +1636,6 @@ def parse_chat_messages(
 def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    tokenizer: TokenizerLike,
     content_format: _ChatTemplateContentFormat,
 ) -> tuple[
     list[ConversationMessage],
@@ -1652,7 +1643,7 @@ def parse_chat_messages_futures(
     MultiModalUUIDDict | None,
 ]:
     conversation: list[ConversationMessage] = []
-    mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
+    mm_tracker = AsyncMultiModalItemTracker(model_config)
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
