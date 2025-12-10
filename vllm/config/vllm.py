@@ -402,8 +402,6 @@ class VllmConfig:
                 ]
                 if compatible_dtypes:
                     # Prefer float16 > bfloat16 > float32 for performance
-                    import torch
-
                     dtype_preference = [torch.float16, torch.bfloat16, torch.float32]
                     for preferred in dtype_preference:
                         if preferred in compatible_dtypes:
