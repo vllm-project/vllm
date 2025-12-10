@@ -25,7 +25,6 @@ _ROPE_DICT: dict[tuple, RotaryEmbedding] = {}
 
 def get_rope(
     head_size: int,
-    rotary_dim: int,
     max_position: int,
     is_neox_style: bool = True,
     rope_parameters: dict[str, Any] | None = None,
@@ -58,8 +57,10 @@ def get_rope(
     if rope_parameters is not None:
         partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
 
+    rotary_dim = head_size
     if partial_rotary_factor < 1.0:
         rotary_dim = int(rotary_dim * partial_rotary_factor)
+
     key = (
         head_size,
         rotary_dim,
