@@ -142,8 +142,9 @@ def _compare_caches(
     item_size_gb = int(cache_size_gb / item_capacity)
 
     rng = np.random.RandomState(seed)
+    modality = "test_modality"
     all_items = [
-        _dummy_item("item", {"key": item_size_gb}, rng=rng)
+        _dummy_item(modality, {"key": item_size_gb}, rng=rng)
         for _ in range(int(item_capacity / hit_rate))
     ]
     all_hashes = [
@@ -168,6 +169,7 @@ def _compare_caches(
             cache_0_p0_out = [
                 item
                 for item, _ in cache_0_p0.get_and_update(
+                    modality,
                     [(item, [prompt_update]) for item in selected_items],
                     selected_hashes,
                 )
@@ -182,6 +184,7 @@ def _compare_caches(
             cache_1_p0_out = [
                 item
                 for item, _ in cache_1_p0.get_and_update(
+                    modality,
                     [(item, [prompt_update]) for item in selected_items],
                     selected_hashes,
                 )
@@ -190,12 +193,16 @@ def _compare_caches(
         if cache_0_p1 is None:
             cache_0_p1_out = cache_0_p0_out
         else:
-            cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out, selected_hashes)
+            cache_0_p1_out = cache_0_p1.get_and_update(
+                modality, cache_0_p0_out, selected_hashes
+            )
 
         if cache_1_p1 is None:
             cache_1_p1_out = cache_1_p0_out
         else:
-            cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out, selected_hashes)
+            cache_1_p1_out = cache_1_p1.get_and_update(
+                modality, cache_1_p0_out, selected_hashes
+            )
 
         assert cache_0_p1_out == cache_1_p1_out, f"Failed at {it=}"
 
