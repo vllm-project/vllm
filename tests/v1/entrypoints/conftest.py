@@ -78,7 +78,7 @@ def sample_json_schema():
         "additionalProperties": False,
         "minProperties": 1,
         "maxProperties": 10,
-        "propertyNames": {"pattern": "^*$"},
+        "propertyNames": {"pattern": "^.*$"},
         "patternProperties": {
             "^grade$": {"type": "string"},
         },
