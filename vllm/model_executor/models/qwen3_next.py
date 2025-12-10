@@ -1089,7 +1089,9 @@ class Qwen3NextModel(nn.Module):
                     if is_pp_missing_parameter(name, self):
                         continue
                     # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") or name.endswith("_bias"):
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
                     if name not in params_dict:
                         continue
