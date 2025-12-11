@@ -141,16 +141,23 @@ class Base(
         self.pp_group = get_pp_group()
         self.tp_group = get_tp_group()
 
-        # Weights to skip in `self.load_weights`
+        # Attrs for weight loading (see self.load_weights)
         self.skip_prefixes: list[str] = []
         """Skip loading weights whose qualname starts with these prefixes."""
         self.skip_substrs: list[str] = []
         """Skip loading weights whose qualname contains these substrings."""
         self.ignore_unexpected_prefixes: list[str] = []
-        """Ignore unexpected weights whose qualname starts with these prefixes.
-        """
+        """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
+
+        # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
+        self._target_class: type[nn.Module] = nn.Module
+        """Target class for Eagle3 aux hidden state recording."""
+        self._layer_names: dict[int, str] = {}
+        """Mapping from layer index to layer name for Eagle3."""
+        self._output_aux_hidden_states_kwargs: dict[str, bool] = {}
+        """Kwargs to pass to model forward for Eagle3 aux hidden states."""
 
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
@@ -204,9 +211,6 @@ class Base(
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.text_config.hidden_size
         )
-
-        # Eagle3 aux hidden states
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def pipeline_parallel(self):
         """
@@ -291,6 +295,15 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
+                # Populate Eagle3 attrs
+                if (
+                    isinstance(module, nn.ModuleList)
+                    and len(module) == self.text_config.num_hidden_layers
+                ):
+                    self._target_class = type(child_module)
+                    layer_name = qual_name.removeprefix("model.")
+                    self._layer_names[int(child_name)] = layer_name
+                # Replace modules as needed
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
                     pattern = next(generator, None)
@@ -445,21 +458,18 @@ class Base(
             position_ids=position_ids,
             attention_instances=self.attention_instances,
             return_dict=False,
-            output_hidden_states=True,
+            **self._output_aux_hidden_states_kwargs,
             **kwargs,
         )
         # We must remove the batch dimension from these outputs
         hidden_states = outputs[0][0, ...]
-        aux_hidden_states = [
-            x[0, ...]
-            for i, x in enumerate(outputs[1])
-            if i in self.aux_hidden_state_layers
-        ]
+        if self._output_aux_hidden_states_kwargs:
+            aux_hidden_states = [x[0][0, ...] for x in outputs[1:]]
 
         if not self.pp_group.is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
-        if len(aux_hidden_states) > 0:
+        if self._output_aux_hidden_states_kwargs and len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
 
@@ -488,7 +498,20 @@ class Base(
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.check_version("5.0.0.dev0", "Eagle3 support")
-        self.aux_hidden_state_layers = layers
+        from transformers.utils.generic import OutputRecorder
+
+        # The default value in PreTrainedModel is None
+        if self.model._can_record_outputs is None:
+            self.model._can_record_outputs = {}
+
+        target_class = self._target_class
+        for layer in layers:
+            # layer - 1 because we want the input to the layer
+            layer_name = self._layer_names[layer - 1]
+            layer_key = f"aux_hidden_state_{layer}"
+            aux_hidden_state_i = OutputRecorder(target_class, layer_name=layer_name)
+            self.model._can_record_outputs[layer_key] = aux_hidden_state_i
+            self._output_aux_hidden_states_kwargs[f"output_{layer_key}"] = True
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = self.text_config.num_hidden_layers
