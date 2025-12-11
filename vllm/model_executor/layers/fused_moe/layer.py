@@ -979,7 +979,7 @@ class FusedMoE(CustomOp):
         shard_id: str,
         expert_id: int,
         return_success: bool = False,
-        quark_loading: bool = False,
+        quark_loading: bool = False, # TODO: refactor this flag
     ) -> bool | None:
         if self.quant_config:
             if self.quant_config.get_name() == "mxfp4":
@@ -992,10 +992,8 @@ class FusedMoE(CustomOp):
                     dim2 = loaded_weight.shape[2]
                     param.data[:, :dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
-            elif self.quant_config.get_name() == "quark" and quark_loading:
-                print(f"loading {weight_name} via Quark")
-                # from vllm.debug import ForkedPdb; ForkedPdb().set_trace()
-                # TODO (Xuebin): this code snippet is only for gpt-oss
+            elif self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss" and quark_loading:
+                # TODO (Xuebin): this is for gpt-oss, need to refactor
                 expert_data = param.data[expert_id]
                 if "input_scale" in weight_name:
                     assert loaded_weight.numel() == 1
@@ -1136,7 +1134,6 @@ class FusedMoE(CustomOp):
                 loaded_weight=loaded_weight,
                 expert_id=global_expert_id if use_global_sf else expert_id,
             )
-            print(f"self._load_single_value for {weight_name}")
             return True if return_success else None
 
         # Case g_idx
@@ -1224,7 +1221,6 @@ class FusedMoE(CustomOp):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
-                print(f"self._load_model_weight_or_group_weight_scale for {weight_name}")
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1234,7 +1230,6 @@ class FusedMoE(CustomOp):
                     load_full_w2=getattr(param, "load_full_w2", False),
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
-                print(f"self._load_per_tensor_weight_scale for {weight_name}")
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
