@@ -10,20 +10,37 @@ import torch
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.engine.core_client import InprocClient
 from vllm.v1.outputs import SamplerOutput
+from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import get_mamba_groups
 
+
+@dataclass
+class StepAction:
+    num_computed_tokens_start: int
+    num_scheduled_tokens: int
+    kv_cache_block_ids: list[int] | None  # [] to follow last step
+    preprocess_copy_idx: tuple[int, int] | None  # -1, -1 for no copy
+    postprocess_copy_idx: tuple[int, int] | None  # -1, -1 for no copy
+
+
 num_speculative_tokens = 3
 
-num_accepted_tokens = 4
+num_accepted_tokens = 1
 prompt_token_ids = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 BLOCK_SIZE = 560
 NUM_HIDDEN_LAYERS = 8
+cur_step_action_idx = 0
+cur_step_action: StepAction | None = None
+step_actions: list[StepAction] = []
 
 
 def get_fake_sample_fn() -> SamplerOutput:
@@ -122,6 +139,55 @@ def get_fake_propose_draft_token_ids_fn():
     return fake_propose_draft_token_ids_fn
 
 
+def get_fake_step_action_fn(original_step_action_fn: Callable):
+    def fake_get_output(self: InprocClient):
+        global cur_step_action_idx
+        global cur_step_action
+        if cur_step_action_idx < len(step_actions):
+            cur_step_action = step_actions[cur_step_action_idx]
+            cur_step_action_idx += 1
+        else:
+            cur_step_action = None
+        print(f"fake_get_output: {cur_step_action_idx=} {cur_step_action=}")
+        return original_step_action_fn(self)
+
+    return fake_get_output
+
+
+def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
+    def fake_allocate_slots_fn(
+        self: KVCacheManager,
+        request: Request,
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
+        num_encoder_tokens: int = 0,
+    ):
+        ret = original_allocate_slots_fn(
+            self,
+            request,
+            num_new_tokens,
+            num_new_computed_tokens,
+            new_computed_blocks,
+            num_lookahead_tokens,
+            delay_cache_blocks,
+            num_encoder_tokens,
+        )
+        if cur_step_action is not None:
+            print("[UNIT TEST STEP] verifying kv_cache_block_ids")
+            cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
+                request.request_id
+            ]
+            not_null_block = [not block.is_null for block in cur_block_ids]
+            not_null_block = [1 if block else 0 for block in not_null_block]
+            assert not_null_block == cur_step_action.kv_cache_block_ids
+        return ret
+
+    return fake_allocate_slots_fn
+
+
 mamba_kv_cache_dict = {}
 
 
@@ -133,6 +199,12 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ):
+        if cur_step_action is not None:
+            num_scheduled_tokens = next(
+                iter(scheduler_output.num_scheduled_tokens.values())
+            )
+            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
+            print("[UNIT TEST STEP] verified num_scheduled_tokens")
         mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
         mamba_group_id = mamba_group_ids[0]
         mamba_layer_name = self.kv_cache_config.kv_cache_groups[
@@ -172,9 +244,68 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
 
         ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
 
+        if cur_step_action is not None:
+            assert (
+                cur_step_action.num_computed_tokens_start
+                == self.input_batch.num_computed_tokens_cpu[0].item()
+            )
+            print("[UNIT TEST STEP] verified num_computed_tokens_start")
+
         return ret
 
     return fake_execute_model_fn
+
+
+def get_fake_process_mamba_fn(
+    original_preprocess_mamba_fn: Callable,
+    original_post_process_mamba_fn: Callable,
+    original_copy_fn: Callable,
+):
+    copy_info = (-1, -1)
+
+    def fake_preprocess_mamba_fn(
+        self: GPUModelRunner, scheduler_output: SchedulerOutput
+    ):
+        nonlocal copy_info
+        copy_info = (-1, -1)
+        ret = original_preprocess_mamba_fn(self, scheduler_output)
+        if cur_step_action is not None:
+            print("[UNIT TEST STEP] verifying preprocess_copy_idx")
+            assert copy_info == cur_step_action.preprocess_copy_idx
+        return ret
+
+    def fake_post_process_mamba_fn(
+        self: GPUModelRunner, scheduler_output: SchedulerOutput
+    ):
+        nonlocal copy_info
+        copy_info = (-1, -1)
+        ret = original_post_process_mamba_fn(self, scheduler_output)
+        if cur_step_action is not None:
+            print("[UNIT TEST STEP] verifying postprocess_copy_idx")
+            assert copy_info == cur_step_action.postprocess_copy_idx
+        return ret
+
+    def fake_copy_fn(
+        self: GPUModelRunner,
+        kv_cache_group_ids: list[int],
+        src_block_idx: int,
+        dest_block_idx: int,
+        accept_token_bias: int,
+        req_state: CachedRequestState,
+    ):
+        nonlocal copy_info
+        assert copy_info == (-1, -1)
+        copy_info = (src_block_idx, dest_block_idx)
+        return original_copy_fn(
+            self,
+            kv_cache_group_ids,
+            src_block_idx,
+            dest_block_idx,
+            accept_token_bias,
+            req_state,
+        )
+
+    return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
 
 
 def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
@@ -244,36 +375,197 @@ def check_mamba_state_equal(mamba_state_ref: dict, mamba_state_new: dict):
 
 
 @dataclass
-class StepActions:
-    scheduled_tokens: int
-    preprocess_copy_idx: int
-    postprocess_copy_idx: int
-
-
-@dataclass
 class TestConfig:
     num_prompt_tokens: int
     num_generated_tokens: int
     num_accepted_tokens: int
-    expect_schedule_tokens: list[int] | None
-    expect_block_table: list[int] | None
+    step_actions: list[StepAction]
 
 
-def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
+def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_LIGHTER_MAMBA_CACHE", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    num_generated_tokens = 50
-    num_prompt_tokens = 551
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
-    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
+
     fake_sample_fn = get_fake_sample_fn()
     monkeypatch.setattr(GPUModelRunner, "_sample", fake_sample_fn)
+
     fake_propose_draft_token_ids_fn = get_fake_propose_draft_token_ids_fn()
     monkeypatch.setattr(
         GPUModelRunner, "propose_draft_token_ids", fake_propose_draft_token_ids_fn
     )
+
     fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
     monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
+
+    fake_step_action_fn = get_fake_step_action_fn(InprocClient.get_output)
+    monkeypatch.setattr(InprocClient, "get_output", fake_step_action_fn)
+
+    fake_allocate_slots_fn = get_fake_allocate_slots_fn(KVCacheManager.allocate_slots)
+    monkeypatch.setattr(KVCacheManager, "allocate_slots", fake_allocate_slots_fn)
+
+    fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn = (
+        get_fake_process_mamba_fn(
+            GPUModelRunner._preprocess_mamba,
+            GPUModelRunner._postprocess_mamba,
+            GPUModelRunner._mamba_copy_block_for_qwen_next,
+        )
+    )
+    monkeypatch.setattr(GPUModelRunner, "_preprocess_mamba", fake_preprocess_mamba_fn)
+    monkeypatch.setattr(
+        GPUModelRunner, "_postprocess_mamba", fake_post_process_mamba_fn
+    )
+    monkeypatch.setattr(GPUModelRunner, "_mamba_copy_block_for_qwen_next", fake_copy_fn)
+
+
+def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
+    apply_patch(monkeypatch)
+    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
+    tests = {
+        # test case 1: no hit, accept 1 token
+        "accept_1": TestConfig(
+            num_prompt_tokens=554,
+            num_generated_tokens=20,
+            num_accepted_tokens=1,
+            step_actions=[
+                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(556, 4, [], (-1, -1), (-1, -1)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(558, 4, [], (-1, -1), (-1, -1)),
+                StepAction(559, 4, [], (-1, -1), (1, 0)),
+                StepAction(560, 4, [], (-1, -1), (-1, -1)),
+                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        # test case 2.1: no hit, accept 2 tokens
+        "accept_2_1": TestConfig(
+            num_prompt_tokens=554,
+            num_generated_tokens=20,
+            num_accepted_tokens=2,
+            step_actions=[
+                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(556, 4, [], (-1, -1), (-1, -1)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(560, 4, [], (-1, -1), (-1, -1)),
+                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        # test case 2.2: no hit, accept 2 tokens
+        "accept_2_2": TestConfig(
+            num_prompt_tokens=555,
+            num_generated_tokens=20,
+            num_accepted_tokens=2,
+            step_actions=[
+                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(559, 4, [], (-1, -1), (1, 0)),
+                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_3_1": TestConfig(
+            num_prompt_tokens=553,
+            num_generated_tokens=20,
+            num_accepted_tokens=3,
+            step_actions=[
+                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(553, 4, [], (-1, -1), (-1, -1)),
+                StepAction(556, 4, [], (-1, -1), (-1, -1)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_3_2": TestConfig(
+            num_prompt_tokens=554,
+            num_generated_tokens=20,
+            num_accepted_tokens=3,
+            step_actions=[
+                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(560, 4, [], (-1, -1), (-1, -1)),
+                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_3_3": TestConfig(
+            num_prompt_tokens=555,
+            num_generated_tokens=20,
+            num_accepted_tokens=3,
+            step_actions=[
+                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_4_1": TestConfig(
+            num_prompt_tokens=553,
+            num_generated_tokens=20,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(553, 4, [], (-1, -1), (-1, -1)),
+                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(565, 4, [], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_4_2": TestConfig(
+            num_prompt_tokens=554,
+            num_generated_tokens=25,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(554, 4, [], (-1, -1), (-1, -1)),
+                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(566, 4, [], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_4_3": TestConfig(
+            num_prompt_tokens=555,
+            num_generated_tokens=25,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(555, 4, [], (-1, -1), (-1, -1)),
+                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "accept_4_4": TestConfig(
+            num_prompt_tokens=556,
+            num_generated_tokens=25,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(556, 4, [], (-1, -1), (0, 0)),
+                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        # "prompt_block_size": TestConfig(
+        #     num_prompt_tokens=560,
+        #     num_generated_tokens=10,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "prompt_2_block_size": TestConfig(
+        #     num_prompt_tokens=560 * 2,
+        #     num_generated_tokens=10,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 560, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
+        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+    }
+
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
@@ -290,22 +582,43 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     prompt_token_ids = engine.get_tokenizer().encode(full_prompt)
     # print(f"Token IDs: {token_ids}")
     print(f"Token IDs length: {len(prompt_token_ids)}")
-    print(
-        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
-    )
-
-    outputs = engine.generate(
-        [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
-        sampling_params,
-    )
-    print(f"Generated text: {outputs[0].outputs[0].token_ids}")
-    print(
-        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
-    )
-
-    torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict_new.pth")
     mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
-    check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict)
+    for test_case_name, test_config in tests.items():
+        print(f"Running test case: {test_case_name}")
+        num_generated_tokens = test_config.num_generated_tokens
+        num_prompt_tokens = test_config.num_prompt_tokens
+        global num_accepted_tokens
+        num_accepted_tokens = test_config.num_accepted_tokens
+        sampling_params = SamplingParams(
+            temperature=0.0, max_tokens=num_generated_tokens
+        )
+        global cur_step_action_idx
+        cur_step_action_idx = 0
+        for step_action_prev, step_action_next in zip(
+            test_config.step_actions[:-1], test_config.step_actions[1:]
+        ):
+            if (
+                step_action_next.kv_cache_block_ids is not None
+                and len(step_action_next.kv_cache_block_ids) == 0
+            ):
+                step_action_next.kv_cache_block_ids = (
+                    step_action_prev.kv_cache_block_ids.copy()
+                )
+        global step_actions
+        step_actions = test_config.step_actions
+        print("step actions: ", step_actions)
+        print(
+            f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
+        )
+
+        outputs = engine.generate(
+            [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
+            sampling_params,
+        )
+        assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
+        print(f"End test case: {test_case_name}")
+        check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict)
+        mamba_kv_cache_dict.clear()
 
 
 def test_check_mamba_state_equal():
