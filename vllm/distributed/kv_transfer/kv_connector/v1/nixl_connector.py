@@ -236,11 +236,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         _req = ReqMeta(
             local_block_ids=local_block_ids,
             local_physical_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params.get("remote_block_ids", []),
-            remote_engine_id=kv_transfer_params.get("remote_engine_id", ""),
-            remote_request_id=kv_transfer_params.get("remote_request_id", ""),
-            remote_host=kv_transfer_params.get("remote_host", ""),
-            remote_port=kv_transfer_params.get("remote_port", 0),
+            remote_block_ids=kv_transfer_params.get("remote_block_ids"),  # type: ignore
+            remote_engine_id=kv_transfer_params.get("remote_engine_id"),  # type: ignore
+            remote_request_id=kv_transfer_params.get("remote_request_id"),  # type: ignore
+            remote_host=kv_transfer_params.get("remote_host"),  # type: ignore
+            remote_port=kv_transfer_params.get("remote_port"),  # type: ignore
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
         )
