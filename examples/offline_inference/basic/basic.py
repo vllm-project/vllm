@@ -5,8 +5,10 @@ from vllm import LLM, SamplingParams
 
 # Sample prompts.
 prompts = [
-    "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
-    "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
@@ -14,13 +16,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(
-        model="tiiuae/falcon-mamba-7b",
-        enforce_eager=True,
-        block_size=16,
-        mamba_block_size=16,
-        enable_prefix_caching=True,
-    )
+    llm = LLM(model="facebook/opt-125m")
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
