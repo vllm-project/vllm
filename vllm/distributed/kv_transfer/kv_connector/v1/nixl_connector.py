@@ -950,7 +950,6 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-
         self._physical_blocks_per_logical_kv_block = 1
 
     def _nixl_handshake(
@@ -1176,7 +1175,7 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
-            cross_layers = next(iter(kv_caches)) == "ALL_LAYERS"
+            cross_layers=next(iter(kv_caches)) == "ALL_LAYERS",
         )
         self._use_pallas = self.kv_topo._use_pallas
 
