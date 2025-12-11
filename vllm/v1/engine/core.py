@@ -987,7 +987,16 @@ class EngineCoreProc(EngineCore):
         identity: bytes,
         ready_event: threading.Event,
     ):
-        """Input socket IO thread."""
+        """
+        Input socket IO thread.
+        
+        Receives messages from:
+        1. input_sockets (from clients): ADD, ABORT, UTILITY requests
+        2. coord_socket (from coordinator): START_DP_WAVE, FT_SCALE_DOWN
+        
+        Most messages are queued for main thread processing, but FT_SCALE_DOWN
+        sets a flag immediately for detection even when main thread is blocked.
+        """
 
         # Msgpack serialization decoding.
         add_request_decoder = MsgpackDecoder(EngineCoreRequest)
@@ -1005,6 +1014,9 @@ class EngineCoreProc(EngineCore):
             if coord_input_address is None:
                 coord_socket = None
             else:
+                # coord_socket receives broadcasts from coordinator:
+                # - START_DP_WAVE (wake up paused engines)
+                # - FT_SCALE_DOWN (fault tolerance reconfiguration)
                 coord_socket = stack.enter_context(
                     make_zmq_socket(
                         ctx,
@@ -1045,6 +1057,20 @@ class EngineCoreProc(EngineCore):
                         request = self.preprocess_add_request(request)
                     else:
                         request = generic_decoder.decode(data_frames)
+                    
+                    # Special handling for FT_SCALE_DOWN: Set flag immediately
+                    # This allows detection even when main thread is blocked in NCCL
+                    if request_type == EngineCoreRequestType.FT_SCALE_DOWN:
+                        # Set flag for immediate detection by collective wrappers
+                        self.ft_scale_down_pending = request
+                        logger.warning(
+                            "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread "
+                            "(main thread should be in collective)",
+                            self.engine_index
+                        )
+                        # Don't queue it - processing happens via exception handler
+                        # when the collective times out (Scenario B - common case)
+                        continue  # Skip queueing
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1141,6 +1167,11 @@ class DPEngineCoreProc(EngineCoreProc):
         
         # Track if exception has occurred (for fault tolerance)
         self.has_exception = False
+        
+        # Fault tolerance state
+        self.ft_scale_down_pending = None
+        self.in_reconfiguration = False
+        self.reconfiguration_lock = threading.Lock()
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -1153,6 +1184,9 @@ class DPEngineCoreProc(EngineCoreProc):
             client_handshake_address,
             dp_rank,
         )
+        
+        # FT monitor is handled by process_input_sockets IO thread
+        # (no separate thread needed)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -1177,6 +1211,137 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+    
+    def _safe_collective_operation(self, collective_fn, operation_name="collective"):
+        """
+        Execute a collective operation with fault tolerance awareness.
+        
+        This wrapper checks if FT is in progress and skips the collective if so.
+        Otherwise, just executes the collective normally.
+        
+        The caller (run_busy_loop) will check ft_scale_down_pending flag
+        to distinguish FT errors from GPU errors.
+        
+        Args:
+            collective_fn: Lambda/function that performs the collective
+            operation_name: Name for logging
+            
+        Returns:
+            Result from collective_fn if successful
+            
+        Raises:
+            RuntimeError: If collective fails (timeout or GPU error)
+        """
+        # Skip collective if FT reconfiguration is already in progress
+        if self.in_reconfiguration:
+            logger.debug(
+                "[FT] Rank %d: Skipping %s - FT reconfiguration in progress",
+                self.dp_rank, operation_name
+            )
+            # Return a dummy value - caller should handle in_reconfiguration
+            return True  # Assume has unfinished work during reconfiguration
+        
+        # Execute the collective operation
+        # If it times out due to rank failure, the exception will be caught
+        # by run_busy_loop which will check ft_scale_down_pending
+        return collective_fn()
+    
+    def _handle_ft_reconfiguration_exception(self, exception: Exception) -> bool:
+        """
+        Handle exception that is due to fault tolerance (another rank died).
+        
+        Args:
+            exception: The caught exception
+            
+        Returns:
+            True if FT was handled successfully (continue loop)
+            False if this rank should exit
+        """
+        logger.info(
+            "[FT] Rank %d: Exception due to FT (another rank died), "
+            "starting reconfiguration. Error: %s",
+            self.dp_rank, str(exception)
+        )
+        
+        if not self.ft_scale_down_pending:
+            logger.error(
+                "[FT] Rank %d: in_reconfiguration set but no "
+                "ft_scale_down_pending message!",
+                self.dp_rank
+            )
+            return False  # Inconsistent state - should exit
+        
+        try:
+            # Execute reconfiguration
+            self._execute_ft_reconfiguration(self.ft_scale_down_pending)
+            self.ft_scale_down_pending = None
+            
+            logger.info(
+                "[FT] Rank %d: Reconfiguration successful, resuming operations",
+                self.dp_rank
+            )
+            return True  # Successfully reconfigured - continue loop
+            
+        except Exception as reconfig_error:
+            # Reconfiguration failed - this rank must exit
+            # Other ranks that succeeded will continue
+            logger.critical(
+                "[FT] Rank %d: Reconfiguration FAILED: %s. "
+                "This rank will exit cleanly. Other ranks may continue.",
+                self.dp_rank, reconfig_error, exc_info=True
+            )
+            return False  # Failed - should exit
+    
+    def _handle_gpu_exception(self, exception: Exception):
+        """
+        Handle GPU/CUDA exception on this rank.
+        
+        This triggers EPLB masking to redistribute experts and
+        allows this rank to continue in CPU-only mode.
+        
+        Args:
+            exception: The caught GPU exception
+            
+        Raises:
+            Exception: If this rank cannot recover (already masked and still failing)
+        """
+        was_already_masked = self.check_if_masked_by_eplb()
+        
+        if was_already_masked:
+            # Already masked but still getting exceptions
+            # This means even CPU-only sync is failing - cannot recover
+            logger.critical(
+                "[GPU_FT] DP rank %d: Exception in masked rank. "
+                "CPU synchronization failing, cannot recover. "
+                "Exception: %s",
+                self.dp_rank,
+                str(exception),
+                exc_info=True
+            )
+            raise  # Exit process - CPU sync is broken
+        
+        # First exception - mark as unhealthy and trigger EPLB masking
+        logger.error(
+            "[GPU_FT] DP rank %d: Exception caught, marking rank as unhealthy. "
+            "Exception: %s. Triggering EPLB masking and expert redistribution.",
+            self.dp_rank,
+            str(exception),
+            exc_info=True
+        )
+        self.has_exception = True
+        
+        # Trigger full EPLB masking (expert redistribution)
+        self.trigger_eplb_masking()
+        
+        # If fault tolerance enabled, clear local requests
+        if getattr(self.vllm_config.parallel_config, 'fault_tolerance', False):
+            logger.info(
+                "[FT] Rank %d: Fault tolerance enabled. "
+                "Clearing local requests and continuing in CPU-only mode.",
+                self.dp_rank
+            )
+            self._clear_local_requests_for_ft()
+            # Continue loop with cpu_only mode (next iteration uses cpu_only=True)
 
     def trigger_eplb_masking(self):
         """
@@ -1328,14 +1493,34 @@ class DPEngineCoreProc(EngineCoreProc):
         3. Rebuild new communication groups (without failed rank)
         4. Redistribute experts with new groups
         5. Recapture CUDA graphs
+        
+        Note: KV cache is NOT cleared - it remains valid for Data Parallel!
+        Only requests on the failed rank are lost (handled by client).
         """
         import torch
+        
+        # Use lock to ensure single execution
+        with self.reconfiguration_lock:
+            if self.in_reconfiguration:
+                logger.debug("[FT] Rank %d: Already in reconfiguration", self.dp_rank)
+                return
+            
+            self.in_reconfiguration = True
         
         failed_rank = scale_down_info['failed_rank']
         new_size = scale_down_info['new_size']
         rank_mapping = scale_down_info['rank_mapping']
         new_master_port = scale_down_info['new_master_port']
         my_new_rank = rank_mapping[self.dp_rank]
+        
+        if my_new_rank == -1:
+            # This rank is being removed (shouldn't happen in this code path)
+            # The rank should have been dead already
+            # Raise error - run_busy_loop will handle shutdown
+            raise RuntimeError(
+                f"Rank {self.dp_rank} received FT_SCALE_DOWN but mapped to -1. "
+                "This rank should have already died."
+            )
         
         logger.info(
             "[FT] Rank %d→%d: Starting FT reconfiguration "
@@ -1360,6 +1545,7 @@ class DPEngineCoreProc(EngineCoreProc):
             destroy_distributed_environment()
             
             # ===== STEP 3: Rebuild New Communication Groups =====
+            # Reuse the logic from reinitialize_distributed but WITHOUT shutdown
             logger.info(
                 "[FT] Rank %d→%d: Rebuilding comm groups (size=%d)",
                 self.dp_rank, my_new_rank, new_size
@@ -1378,14 +1564,23 @@ class DPEngineCoreProc(EngineCoreProc):
                 local_rank=my_new_rank,  # Simplified for now
             )
             
-            # Update self.dp_rank
+            # Update config and dp_group (same logic as reinitialize_distributed)
             old_dp_rank = self.dp_rank
-            self.dp_rank = my_new_rank
+            old_dp_size = self.vllm_config.parallel_config.data_parallel_size
+            
+            parallel_config = self.vllm_config.parallel_config
+            parallel_config.data_parallel_size = new_size
+            parallel_config.data_parallel_rank = my_new_rank
+            
+            # Update local state (same as reinitialize_distributed:1874-1875)
+            self.dp_rank = parallel_config.data_parallel_rank
             self.engine_index = my_new_rank
+            self.dp_group = parallel_config.stateless_init_dp_group()
             
             logger.info(
-                "[FT] Rank %d→%d: Communication groups rebuilt",
-                old_dp_rank, my_new_rank
+                "[FT] Rank %d→%d: Communication groups rebuilt "
+                "(dp_group: %d ranks → %d ranks)",
+                old_dp_rank, my_new_rank, old_dp_size, new_size
             )
             
             # ===== STEP 4: Redistribute Experts (with NEW groups) =====
@@ -1412,9 +1607,6 @@ class DPEngineCoreProc(EngineCoreProc):
             
             logger.info("[FT] Rank %d: CUDA graph recapture complete", self.dp_rank)
             
-            # Update config
-            self.vllm_config.parallel_config.data_parallel_size = new_size
-            
             logger.info(
                 "[FT] Rank %d: Reconfiguration complete! Ready to serve.",
                 self.dp_rank
@@ -1425,9 +1617,17 @@ class DPEngineCoreProc(EngineCoreProc):
                 "[FT] Rank %d: Reconfiguration failed: %s",
                 self.dp_rank, e, exc_info=True
             )
-            # Mark as failed
+            # Mark as failed - this rank will exit cleanly
             self.has_exception = True
+            
+            # Re-raise: Will be caught by run_busy_loop's outer handler.
+            # The handler will check ft_scale_down_pending to determine
+            # if this is an FT error (triggering reconfiguration) or
+            # a regular GPU error (triggering EPLB masking).
             raise
+        finally:
+            # Always reset reconfiguration flag (cleanup)
+            self.in_reconfiguration = False
 
     def add_request(self, request: Request, request_wave: int = 0):
         if self.has_coordinator and request_wave != self.current_wave:
@@ -1454,15 +1654,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 if not self.engines_running:
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
-        elif request_type == EngineCoreRequestType.FT_SCALE_DOWN:
-            # Fault tolerance: handle scale-down after rank failure
-            scale_down_info = request
-            logger.info(
-                "[FT] Rank %d: Received FT_SCALE_DOWN message",
-                self.dp_rank
-            )
-            self._execute_ft_reconfiguration(scale_down_info)
         else:
+            # FT_SCALE_DOWN is NOT queued - it's handled via exception handler
+            # when collective times out
             super()._handle_client_request(request_type, request)
 
     def _maybe_publish_request_counts(self):
@@ -1557,6 +1751,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # 5) All-reduce operation to determine global unfinished reqs.
                 # ALL ranks must participate in this CPU all-reduce!
+                # This can timeout if another rank dies (handled by outer except)
                 self.engines_running = self._has_global_unfinished_reqs(
                     local_unfinished_reqs
                 )
@@ -1595,43 +1790,22 @@ class DPEngineCoreProc(EngineCoreProc):
                 
             except Exception as e:
                 # Exception occurred in busy loop
-                was_already_masked = self.check_if_masked_by_eplb()
+                # Check if it's due to FT (another rank died) or GPU error (this rank broken)
                 
-                if was_already_masked:
-                    # Already masked but still getting exceptions
-                    # This means even CPU-only sync is failing - cannot recover
-                    logger.critical(
-                        "[GPU_FT] DP rank %d: Exception in masked rank. "
-                        "CPU synchronization failing, cannot recover. "
-                        "Exception: %s",
-                        self.dp_rank,
-                        str(e),
-                        exc_info=True
-                    )
-                    raise  # Exit process - CPU sync is broken
-                else:
-                    # First exception - mark as unhealthy and trigger EPLB masking
-                    logger.error(
-                        "[GPU_FT] DP rank %d: Exception caught, marking rank as unhealthy. "
-                        "Exception: %s. Triggering EPLB masking and expert redistribution.",
-                        self.dp_rank,
-                        str(e),
-                        exc_info=True
-                    )
-                    self.has_exception = True
-                    
-                    # Trigger full EPLB masking (expert redistribution)
-                    self.trigger_eplb_masking()
-                    
-                    # If fault tolerance enabled, clear local requests
-                    if getattr(self.vllm_config.parallel_config, 'fault_tolerance', False):
-                        logger.info(
-                            "[FT] Rank %d: Fault tolerance enabled. "
-                            "Clearing local requests and continuing in CPU-only mode.",
-                            self.dp_rank
-                        )
-                        self._clear_local_requests_for_ft()
-                        # Continue loop with cpu_only mode (next iteration uses cpu_only=True)
+                if self.ft_scale_down_pending or self.in_reconfiguration:
+                    # Fault tolerance scenario - another rank died
+                    should_continue = self._handle_ft_reconfiguration_exception(e)
+                    if not should_continue:
+                        # FT reconfiguration failed - shutdown and exit
+                        self.shutdown()
+                        return
+                    # Successfully reconfigured - continue to next iteration
+                    continue
+                
+                # Not FT - this is a GPU/CUDA error on THIS rank
+                # Trigger EPLB masking to redistribute experts and continue in CPU-only mode
+                self._handle_gpu_exception(e)
+                # Continue loop in cpu_only mode (next iteration will skip GPU ops)
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
@@ -1654,12 +1828,22 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.step_counter = 0
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        """
+        Check if there are unfinished requests across all DP ranks.
+        
+        Uses allreduce - can timeout if another rank dies.
+        Caller (run_busy_loop) checks ft_scale_down_pending flag to handle FT.
+        """
         # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.step_counter += 1
         if self.step_counter % 32 != 0:
             return True
 
-        return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+        # Wrap with FT-aware execution (skips if reconfiguration in progress)
+        return self._safe_collective_operation(
+            lambda: ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished),
+            operation_name="has_global_unfinished_reqs"
+        )
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

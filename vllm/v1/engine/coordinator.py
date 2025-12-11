@@ -443,7 +443,7 @@ class DPCoordinatorProc:
         from vllm.utils.network_utils import get_open_port
         from vllm.v1.engine import EngineCoreRequestType
         
-        cur_size = len(self.engines) + 1  # +1 because we haven't removed yet
+        cur_size = len(self.engines)
         new_size = cur_size - 1
         
         # Build rank_mapping
