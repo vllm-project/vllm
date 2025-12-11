@@ -458,8 +458,11 @@ class Worker(WorkerBase):
         kernel_warmup(self)
 
         cuda_graph_memory_bytes = 0
+        full_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            cuda_graph_memory_bytes, full_graph_memory_bytes = (
+                self.model_runner.capture_model()
+            )
 
         # Compare actual vs estimated FULL CUDA graph memory (if we did profiling)
         if (
@@ -470,12 +473,12 @@ class Worker(WorkerBase):
             logger.info(
                 "FULL CUDA graph memory: %s GiB (actual), %s GiB (estimated), "
                 "difference: %s GiB (%.1f%%)",
-                GiB(cuda_graph_memory_bytes),
+                GiB(full_graph_memory_bytes),
                 GiB(self.cudagraph_memory_estimate),
-                GiB(abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)),
+                GiB(abs(full_graph_memory_bytes - self.cudagraph_memory_estimate)),
                 100
-                * abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
-                / max(cuda_graph_memory_bytes, 1),
+                * abs(full_graph_memory_bytes - self.cudagraph_memory_estimate)
+                / max(full_graph_memory_bytes, 1),
             )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(

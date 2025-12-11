@@ -4733,13 +4733,18 @@ class GPUModelRunner(
 
         return int(estimated_total)
 
-    def capture_model(self) -> int:
+    def capture_model(self) -> tuple[int, int]:
+        """Capture CUDA graphs for the model.
+
+        Returns:
+            Tuple of (total_cuda_graph_memory, full_cuda_graph_memory) in bytes.
+        """
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
-            return 0
+            return 0, 0
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -4778,6 +4783,8 @@ class GPUModelRunner(
             else:
                 lora_cases = [False]
 
+            full_graph_memory = 0
+
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
                 # make sure we capture the largest batch size first
@@ -4789,6 +4796,12 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     uniform_decode=False,
                 )
+                # Track FULL graph memory from mixed mode
+                if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                    torch.cuda.synchronize()
+                    full_graph_memory = (
+                        start_free_gpu_memory - torch.cuda.mem_get_info()[0]
+                    )
 
             # Capture full cudagraph for uniform decode batches if we
             # don't already have full mixed prefill-decode cudagraphs.
@@ -4796,6 +4809,7 @@ class GPUModelRunner(
                 cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and cudagraph_mode.separate_routine()
             ):
+                before_decode = torch.cuda.mem_get_info()[0]
                 decode_batch_sizes = self._get_decode_cudagraph_batch_sizes()
                 compilation_cases_decode = list(
                     product(reversed(decode_batch_sizes), lora_cases)
@@ -4805,6 +4819,9 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=True,
                 )
+                # Add FULL graph memory from decode mode
+                torch.cuda.synchronize()
+                full_graph_memory += before_decode - torch.cuda.mem_get_info()[0]
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -4826,7 +4843,7 @@ class GPUModelRunner(
             cuda_graph_size / (1 << 30),
             scope="local",
         )
-        return cuda_graph_size
+        return cuda_graph_size, full_graph_memory
 
     def _capture_cudagraphs(
         self,
