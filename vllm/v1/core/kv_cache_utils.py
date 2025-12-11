@@ -1305,9 +1305,45 @@ def _report_kv_cache_config(
     )
 
 
+def _max_memory_usage_bytes_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """
+    Calculate maximum memory usage in bytes from KV cache groups.
+
+    This correctly accounts for padding in hybrid models. For example, if a
+    model has 8 full attention layers and 9 sliding window layers, they will
+    be padded to 9 full + 9 sliding window for uniform group sizes.
+    """
+    if not kv_cache_groups:
+        return 0
+
+    # UniformTypeKVCacheSpecs special case (single group, per-layer specs)
+    if len(kv_cache_groups) == 1 and isinstance(
+        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
+    ):
+        per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+        return sum(
+            spec.max_memory_usage_bytes(vllm_config)
+            for spec in per_layer_specs.values()
+        )
+
+    # General case: group_size pools, each shared by one layer per group
+    # Memory = group_size * page_size * blocks_for_max_len
+    group_size = max(len(group.layer_names) for group in kv_cache_groups)
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups]
+    )
+    any_spec = kv_cache_groups[0].kv_cache_spec
+    blocks_needed = cdiv(any_spec.max_memory_usage_bytes(vllm_config), page_size)
+
+    return group_size * page_size * blocks_needed
+
+
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
-    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: list[int],
 ) -> None:
     """
@@ -1318,29 +1354,14 @@ def _auto_fit_max_model_len(
 
     Args:
         vllm_config: The global VllmConfig (will be modified in-place)
-        kv_cache_specs: List of dict[layer_name, KVCacheSpec] for each worker.
-            These should already be unified (via get_kv_cache_groups) to match
-            the actual allocation strategy.
+        kv_cache_groups: The global KV cache groups (from get_kv_cache_groups).
+            This correctly accounts for padding in hybrid models.
         available_memory: Memory available for KV cache in bytes for each
             worker.
     """
     original_max = vllm_config.model_config.max_model_len
 
-    # Find the minimum estimated max_model_len across all workers
-    estimated_max_lens = []
-    for kv_cache_spec_one_worker, available_memory_one_worker in zip(
-        kv_cache_specs, available_memory
-    ):
-        if not kv_cache_spec_one_worker:
-            # Skip empty specs (attention-free models)
-            continue
-
-        estimated = estimate_max_model_len(
-            vllm_config, kv_cache_spec_one_worker, available_memory_one_worker
-        )
-        estimated_max_lens.append(estimated)
-
-    if not estimated_max_lens:
+    if not kv_cache_groups:
         # All workers have empty specs (attention-free model)
         logger.info_once(
             "Auto-fit max_model_len: attention-free model, "
@@ -1350,7 +1371,33 @@ def _auto_fit_max_model_len(
         )
         return
 
-    auto_fit_max = min(estimated_max_lens)
+    # Use minimum available memory across all workers
+    min_available_memory = min(available_memory)
+
+    # Binary search for max model length that fits
+    def fits_in_memory(model_len: int) -> bool:
+        vllm_config.model_config.max_model_len = model_len
+        return (
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            <= min_available_memory
+        )
+
+    try:
+        left, right = 1, original_max
+        if not fits_in_memory(left):
+            auto_fit_max = 0
+        else:
+            auto_fit_max = 1
+            while left <= right:
+                mid = (left + right) // 2
+                if fits_in_memory(mid):
+                    auto_fit_max = mid
+                    left = mid + 1
+                else:
+                    right = mid - 1
+    finally:
+        vllm_config.model_config.max_model_len = original_max
+
     if auto_fit_max <= 0:
         raise ValueError(
             "Cannot auto-fit max_model_len: not enough GPU memory available "
@@ -1373,7 +1420,7 @@ def _auto_fit_max_model_len(
             "available GPU memory (%.2f GiB available for KV cache)",
             original_max,
             auto_fit_max,
-            min(available_memory) / GiB_bytes,
+            min_available_memory / GiB_bytes,
             scope="local",
         )
 
@@ -1431,26 +1478,70 @@ def get_kv_cache_configs(
     # After this call, merged_kv_cache_specs may be modified in-place.
     global_kv_cache_groups = get_kv_cache_groups(vllm_config, merged_kv_cache_specs)
 
-    # Get unified per-worker specs by projecting from the merged specs.
-    # This ensures auto-fit and memory checks use the same unified specs
-    # that will be used for actual allocation.
-    unified_kv_cache_specs = [
-        {layer: merged_kv_cache_specs[layer] for layer in spec_one_worker}
-        for spec_one_worker in kv_cache_specs
-    ]
-
     # If original_max_model_len was -1, automatically
     # determine the maximum model length that fits in available GPU memory.
+    # We use the global groups here to correctly account for padding.
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(vllm_config, unified_kv_cache_specs, available_memory)
+        _auto_fit_max_model_len(vllm_config, global_kv_cache_groups, available_memory)
 
-    # Check if the available memory is enough for each worker.
-    for unified_spec_one_worker, available_memory_one_worker in zip(
-        unified_kv_cache_specs, available_memory
-    ):
-        check_enough_kv_cache_memory(
-            vllm_config, unified_spec_one_worker, available_memory_one_worker
+    # Check if the available memory is enough (using min across all workers).
+    # We use the global groups to correctly account for padding.
+    if global_kv_cache_groups:
+        min_available_memory = min(available_memory)
+        if min_available_memory <= 0:
+            raise ValueError(
+                "No available memory for the cache blocks. "
+                "Try increasing `gpu_memory_utilization` when "
+                "initializing the engine."
+            )
+        max_model_len = vllm_config.model_config.max_model_len
+        needed_memory = _max_memory_usage_bytes_from_groups(
+            vllm_config, global_kv_cache_groups
         )
+        if needed_memory > min_available_memory:
+            # Estimate max model len that would fit
+            original_max = max_model_len
+
+            def fits(model_len: int) -> bool:
+                vllm_config.model_config.max_model_len = model_len
+                return (
+                    _max_memory_usage_bytes_from_groups(
+                        vllm_config, global_kv_cache_groups
+                    )
+                    <= min_available_memory
+                )
+
+            try:
+                left, right = 1, original_max
+                estimated_max_len = 0
+                if fits(left):
+                    estimated_max_len = 1
+                    while left <= right:
+                        mid = (left + right) // 2
+                        if fits(mid):
+                            estimated_max_len = mid
+                            left = mid + 1
+                        else:
+                            right = mid - 1
+            finally:
+                vllm_config.model_config.max_model_len = original_max
+
+            estimated_msg = ""
+            if estimated_max_len > 0:
+                estimated_msg = (
+                    f"Based on the available memory, the estimated maximum "
+                    f"model length is {estimated_max_len}. "
+                )
+
+            raise ValueError(
+                f"To serve at least one request with the models's max seq len "
+                f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
+                f"cache is needed, which is larger than the available KV cache "
+                f"memory ({min_available_memory / GiB_bytes:.2f} GiB). "
+                f"{estimated_msg}"
+                f"Try increasing `gpu_memory_utilization` or decreasing "
+                f"`max_model_len` when initializing the engine."
+            )
 
     kv_cache_configs: list[KVCacheConfig] = []
     for kv_cache_spec_one_worker, available_memory_one_worker in zip(
