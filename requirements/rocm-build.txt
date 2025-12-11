@@ -2,9 +2,9 @@
 -r common.txt
 
 --extra-index-url https://download.pytorch.org/whl/rocm6.4
-torch==2.9.1
-torchvision==0.24.1
-torchaudio==2.9.1
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
 
 triton==3.5.1
 cmake>=3.26.1,<4
