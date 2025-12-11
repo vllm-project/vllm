@@ -782,6 +782,5 @@ def test_apc_common_prefix_same_batch(
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=20)
     outputs = llm.generate(prompts, sampling_params)
-    print(outputs)
     for output in outputs:
         assert "two" in output.outputs[0].text
