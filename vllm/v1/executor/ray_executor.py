@@ -403,7 +403,9 @@ class RayDistributedExecutor(Executor):
 
         if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
             # Model will not execute, call model runner immediately.
-            return self._execute_dag(scheduler_output, None, non_block)
+            return self._execute_dag(  # type: ignore[return-value]
+                scheduler_output, None, non_block
+            )
 
         # Model will execute, defer to sample_tokens() call.
         self.scheduler_output = scheduler_output
@@ -428,7 +430,7 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None  # type: ignore[return-value]
 
         self.scheduler_output = None
 
@@ -460,7 +462,9 @@ class RayDistributedExecutor(Executor):
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            output = self.kv_output_aggregator.aggregate(ray.get(refs))
+            assert output is not None
+            return output
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
