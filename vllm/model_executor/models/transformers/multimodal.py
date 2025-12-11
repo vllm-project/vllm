@@ -294,7 +294,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
         # Ensure encoder is not compiled
-        encoder = self.model.get_encoder()
+        encoder = self.model.get_encoder("image")
         encoder.__class__ = ignore_torch_compile(type(encoder))
 
     def forward(
