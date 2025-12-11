@@ -790,8 +790,8 @@ class ModelConfig:
     ) -> ConvertType:
         if convert == "reward":
             logger.warning(
-                "`--convert reward` is deprecated and will be removed in a future "
-                "version. Please use `--convert embed` instead."
+                "`--convert reward` is deprecated and will be removed in v0.15. "
+                "Please use `--convert embed` instead."
             )
             return "embed"
 
