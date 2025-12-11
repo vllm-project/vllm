@@ -57,7 +57,7 @@ class PoolingParams(
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
-    skip_reading_prefix_cache: bool = None
+    skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -219,6 +219,8 @@ class PoolingParams(
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
+            f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

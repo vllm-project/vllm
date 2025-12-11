@@ -29,7 +29,7 @@ The initialization code should look like this:
     ```python
     from torch import nn
     from vllm.config import VllmConfig
-    from vllm.attention import Attention
+    from vllm.attention.layer import Attention
 
     class MyAttention(nn.Module):
         def __init__(self, vllm_config: VllmConfig, prefix: str):
@@ -112,8 +112,6 @@ See [this page](registration.md) for instructions on how to register your new mo
 ## Frequently Asked Questions
 
 ### How to support models with interleaving sliding windows?
-
-For models with interleaving sliding windows (e.g. `google/gemma-2-2b-it` and `mistralai/Ministral-8B-Instruct-2410`), the scheduler will treat the model as a full-attention model, i.e., kv-cache of all tokens will not be dropped. This is to make sure prefix caching works with these models. Sliding window only appears as a parameter to the attention kernel computation.
 
 To support a model with interleaving sliding windows, we need to take care of the following details:
 

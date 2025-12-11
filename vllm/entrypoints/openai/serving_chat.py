@@ -21,7 +21,8 @@ from vllm.entrypoints.chat_utils import (
     get_history_tool_calls_cnt,
     make_tool_call_id,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
@@ -30,7 +31,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_input_to_harmony_message,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -51,18 +51,24 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
+from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import (
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import (
+    MistralTokenizer,
     maybe_serialize_tool_calls,
     truncate_tool_call_ids,
     validate_request_params,
@@ -378,6 +384,8 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -529,7 +537,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
@@ -1070,10 +1078,15 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        if output.finish_reason is None:
+                        # NOTE: If return_token_ids is enabled, we still need to
+                        # send a chunk with token_ids even if delta_message is None
+                        # to ensure all tokens are included in the response
+                        if (
+                            output.finish_reason is None
+                            and not request.return_token_ids
+                        ):
                             continue
-                        else:
-                            delta_message = DeltaMessage()
+                        delta_message = DeltaMessage()
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -1113,6 +1126,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        # check for error finish reason and abort streaming
+                        # finish_reason='error' indicates a retryable error
+                        self._raise_if_error(output.finish_reason, request_id)
+
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1206,6 +1223,7 @@ class OpenAIServingChat(OpenAIServing):
 
                         finish_reason_sent[i] = True
 
+                    choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1279,6 +1297,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
@@ -1294,7 +1314,7 @@ class OpenAIServingChat(OpenAIServing):
         request_id: str,
         model_name: str,
         conversation: list[ConversationMessage],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
@@ -1319,6 +1339,9 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            # check for error finish reason and raise GenerationError
+            # finish_reason='error' indicates a retryable request-level internal error
+            self._raise_if_error(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
@@ -1531,6 +1554,7 @@ class OpenAIServingChat(OpenAIServing):
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
             )
+            choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
 
@@ -1621,7 +1645,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         logprobs: dict[int, Logprob],
         top_logprobs: int | None,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         should_return_as_token_id: bool,
     ) -> list[ChatCompletionLogProb]:
         return [
@@ -1645,7 +1669,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         token_ids: GenericSequence[int],
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         num_output_top_logprobs: int | None = None,
         return_as_token_id: bool | None = None,
     ) -> ChatCompletionLogProbs:

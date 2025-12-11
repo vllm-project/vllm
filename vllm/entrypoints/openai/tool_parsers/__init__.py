@@ -30,6 +30,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv31_tool_parser",
         "DeepSeekV31ToolParser",
     ),
+    "deepseek_v32": (
+        "deepseekv32_tool_parser",
+        "DeepSeekV32ToolParser",
+    ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
@@ -129,6 +133,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "xlam": (
         "xlam_tool_parser",
         "xLAMToolParser",
+    ),
+    "gigachat3": (
+        "gigachat3_tool_parser",
+        "GigaChat3ToolParser",
     ),
 }
 
