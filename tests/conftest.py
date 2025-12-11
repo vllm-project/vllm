@@ -741,7 +741,7 @@ class VllmRunner:
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
-        seed: int | None = 0,
+        seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
