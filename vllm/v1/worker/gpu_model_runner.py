@@ -2676,7 +2676,7 @@ class GPUModelRunner(
             scheduler_output.finished_req_ids, scheduler_output.preempted_req_ids
         ):
             self.mamba_state_idx.pop(req_id, None)
-        for req_id in self.input_batch.req_ids:
+        for i, req_id in enumerate(self.input_batch.req_ids):
             if is_global_first_rank():
                 logger.info(f">>> [DEBUG] Worker: preprocess mamba for RUN: {req_id=}")
             req_state = self.requests[req_id]
@@ -2694,23 +2694,17 @@ class GPUModelRunner(
                     f">>> [DEBUG] Worker: preprocess mamba: {req_id=}, idx {prev_state_idx=} -> {curr_state_idx=}"
                 )
             self.mamba_state_idx[req_id] = curr_state_idx
-            if prev_state_idx == -1 or prev_state_idx == curr_state_idx:
-                # no need to copy
-                continue
-            for mamba_group_id in mamba_group_ids:
-                prev_block_id = req_state.block_ids[mamba_group_id][prev_state_idx]
-                curr_block_id = req_state.block_ids[mamba_group_id][curr_state_idx]
-                assert prev_block_id != 0
-                assert curr_block_id != 0
-                if is_global_first_rank():
-                    logger.info(
-                        f">>> [DEBUG] Worker: preprocess mamba: {req_id=}, COPY block {prev_block_id=} -> {curr_block_id=}"
+            if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
+                # TODO: merge all these lines to copy_block
+                for mamba_group_id in mamba_group_ids:
+                    self._mamba_copy_block_for_qwen_next(
+                        self.kv_cache_config.kv_cache_groups[mamba_group_id],
+                        prev_state_idx,
+                        curr_state_idx,
+                        self.input_batch.num_accepted_tokens_cpu[i] - 1,
+                        req_state.block_ids[mamba_group_id],
                     )
-                self._mamba_copy_block(
-                    self.kv_cache_config.kv_cache_groups[mamba_group_id],
-                    prev_block_id,
-                    curr_block_id,
-                )
+                self.input_batch.num_accepted_tokens_cpu[i] = 1
 
     def _mamba_copy_block_for_qwen_next(
         self,
@@ -2745,7 +2739,7 @@ class GPUModelRunner(
                 and layer_name == kv_cache_group_spec.layer_names[0]
             ):
                 logger.info(
-                    f">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: {layer_name=}, conv {conv_state_block_id=} -> {dest_block_id=} with bias {accept_token_bias}, {gdn_state_block_id=} -> {dest_block_id=}"
+                    f">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: {layer_name=}, idx {src_block_idx=} -> {dest_block_idx=} conv {conv_state_block_id=} -> {dest_block_id=} with bias {accept_token_bias}, {gdn_state_block_id=} -> {dest_block_id=}"
                 )
 
     def _postprocess_mamba(self, scheduler_output: "SchedulerOutput"):
@@ -2794,7 +2788,7 @@ class GPUModelRunner(
                 )
                 if is_global_first_rank():
                     logger.info(
-                        f">>> [DEBUG] Worker: postprocess mamba: {req_id=}, {src_block_idx=} -> {dest_block_idx=} with bias {accept_token_bias}"
+                        f">>> [DEBUG] Worker: postprocess mamba copy: {req_id=}, {src_block_idx=} -> {dest_block_idx=} with bias {accept_token_bias}"
                     )
                 for mamba_group_id in mamba_group_ids:
                     self._mamba_copy_block_for_qwen_next(
