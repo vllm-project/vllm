@@ -123,9 +123,17 @@ class ApplyRotaryEmb(CustomOp):
     def __init__(
         self,
         is_neox_style: bool = True,
+        enable_fp32_compute: bool = False,
     ) -> None:
         super().__init__()
         self.is_neox_style = is_neox_style
+        self.enable_fp32_compute = enable_fp32_compute
+
+        self.apply_rotary_emb_flash_attn = None
+        if find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
+
+            self.apply_rotary_emb_flash_attn = apply_rotary
 
     @staticmethod
     def forward_static(
@@ -133,6 +141,7 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
         is_neox_style: bool = True,
+        enable_fp32_compute: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -140,7 +149,13 @@ class ApplyRotaryEmb(CustomOp):
             cos: [seq_len, head_size // 2]
             sin: [seq_len, head_size // 2]
             is_neox_style: Whether to use the Neox-style or GPT-J-style.
+            enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
+                                 for higher accuracy.
         """
+        origin_dtype = x.dtype
+        if enable_fp32_compute:
+            x = x.float()
+
         cos = cos.unsqueeze(-2).to(x.dtype)
         sin = sin.unsqueeze(-2).to(x.dtype)
 
@@ -154,9 +169,13 @@ class ApplyRotaryEmb(CustomOp):
         o2 = x2 * cos + x1 * sin
 
         if is_neox_style:
-            return torch.cat((o1, o2), dim=-1)
+            output = torch.cat((o1, o2), dim=-1)
         else:
-            return torch.stack((o1, o2), dim=-1).flatten(-2)
+            output = torch.stack((o1, o2), dim=-1).flatten(-2)
+
+        if enable_fp32_compute:
+            output = output.to(origin_dtype)
+        return output
 
     def forward_native(
         self,
@@ -164,7 +183,10 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        output = self.forward_static(x, cos, sin, self.is_neox_style).type_as(x)
+        logger.info_once("ApplyRotaryEmb forward_native().")
+        output = self.forward_static(
+            x, cos, sin, self.is_neox_style, self.enable_fp32_compute
+        )
         return output
 
     def forward_cuda(
@@ -173,7 +195,14 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        logger.info_once("ApplyRotaryEmb forward_cuda().")
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+        origin_dtype = x.dtype
+        if self.enable_fp32_compute:
+            x = x.float()
+            cos = cos.float()
+            sin = sin.float()
 
         origin_shape = x.shape
         if len(origin_shape) == 3:
@@ -188,10 +217,12 @@ class ApplyRotaryEmb(CustomOp):
             ...
         """
         interleaved = not self.is_neox_style
-        output = apply_rotary_emb(x, cos, sin, interleaved).type_as(x)
+        output = apply_rotary_emb(x, cos, sin, interleaved)
 
         if len(origin_shape) == 3:
             output = output.squeeze(0)
+        if self.enable_fp32_compute:
+            output = output.to(origin_dtype)
         return output
 
     def forward_hip(
@@ -200,8 +231,13 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        if find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
+        logger.info_once("ApplyRotaryEmb forward_hip().")
+        if self.apply_rotary_emb_flash_attn is not None:
+            origin_dtype = x.dtype
+            if self.enable_fp32_compute:
+                x = x.float()
+                cos = cos.float()
+                sin = sin.float()
 
             origin_shape = x.shape
             if len(origin_shape) == 3:
@@ -216,10 +252,14 @@ class ApplyRotaryEmb(CustomOp):
                 ...
             """
             interleaved = not self.is_neox_style
-            output = apply_rotary(x, cos, sin, interleaved=interleaved).type_as(x)
+            output = self.apply_rotary_emb_flash_attn(
+                x, cos, sin, interleaved=interleaved
+            ).type_as(x)
 
             if len(origin_shape) == 3:
                 output = output.squeeze(0)
+            if self.enable_fp32_compute:
+                output = output.to(origin_dtype)
         else:
             logger.warning(
                 "flash_attn is not installed. Falling back to PyTorch "
@@ -231,4 +271,5 @@ class ApplyRotaryEmb(CustomOp):
 
     def extra_repr(self) -> str:
         s = f"is_neox_style={self.is_neox_style}"
+        s += f"enable_fp32_compute={self.enable_fp32_compute}"
         return s

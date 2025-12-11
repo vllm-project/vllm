@@ -275,7 +275,7 @@ class DotsVisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb()
+        self.apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
 
     def forward(
         self,

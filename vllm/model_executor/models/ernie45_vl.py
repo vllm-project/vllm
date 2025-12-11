@@ -156,7 +156,7 @@ class Ernie4_5_VisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb()
+        self.apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -203,7 +203,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
             qk_rotated = self.apply_rotary_emb(
-                qk_concat.float(),
+                qk_concat,
                 rotary_pos_emb.cos(),
                 rotary_pos_emb.sin(),
             )

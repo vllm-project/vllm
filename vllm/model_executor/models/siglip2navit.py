@@ -158,14 +158,15 @@ def apply_rotary_pos_emb(
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
 
-    apply_rotary_emb = ApplyRotaryEmb()
+    apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
     if is_flash_attn_backend and not current_platform.is_cuda():
         apply_rotary_emb_func = apply_rotary_emb.forward_cuda
     else:
         apply_rotary_emb_func = apply_rotary_emb.forward_native
 
-    q_embed = apply_rotary_emb_func(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb_func(k.float(), cos.float(), sin.float()).type_as(k)
+    q_embed = apply_rotary_emb_func(q, cos, sin)
+    k_embed = apply_rotary_emb_func(k, cos, sin)
+
     return q_embed, k_embed
 
 

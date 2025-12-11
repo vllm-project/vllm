@@ -343,10 +343,11 @@ def apply_rotary_pos_emb_flashatt(
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
 
-    apply_rotary_emb = ApplyRotaryEmb(is_neox_style=True)
+    apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
 
-    q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
+    q_embed = apply_rotary_emb(q, cos, sin)
+    k_embed = apply_rotary_emb(k, cos, sin)
+
     return q_embed, k_embed
 
 
