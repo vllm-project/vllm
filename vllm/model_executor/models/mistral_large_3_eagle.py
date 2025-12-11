@@ -20,7 +20,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
-from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
     _merge_multimodal_embeddings,
@@ -117,7 +116,7 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
         )
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -155,11 +154,3 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
             "model.embed_tokens.weight",
             "lm_head.weight",
         }
-
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: NestedTensors | None = None,
-        is_multimodal: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
