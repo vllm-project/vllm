@@ -290,8 +290,7 @@ class AsyncLLM(EngineClient):
             raise EngineDeadError()
 
         # Create a new output collector for the request.
-        # TODO: support multiple output kinds
-        queue = RequestOutputCollector(output_kind=params[0].output_kind)
+        queue = RequestOutputCollector()
 
         for i in range(len(request_id)):
             curr_request_id = request_id[i]

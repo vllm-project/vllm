@@ -40,32 +40,33 @@ class RequestOutputCollector:
     producer gets ahead of the consumer.
     """
 
-    def __init__(self, output_kind: RequestOutputKind):
-        self.aggregate = output_kind == RequestOutputKind.DELTA
-        self.outputs: dict[str, RequestOutput | PoolingRequestOutput] | Exception | None = None
+    def __init__(self):
+        self.outputs: dict[str, (RequestOutput | PoolingRequestOutput, bool)] | Exception | None = None
         self.ready = asyncio.Event()
 
-    def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
+    def put(self, output: RequestOutput | PoolingRequestOutput | Exception,
+        *,
+        output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+    ) -> None:
         """Non-blocking put operation."""
         if isinstance(output, Exception):
             self.outputs = output
             self.ready.set()
         elif self.outputs is None:
-            self.outputs = {output.request_id: output}
+            self.outputs = {output.request_id: (output, output_kind == RequestOutputKind.DELTA)}
             self.ready.set()
         elif self.outputs.get(output.request_id) is None:
-            self.outputs[output.request_id] = output
+            self.outputs[output.request_id] = (output, output_kind == RequestOutputKind.DELTA)
         else:
-            prev_output = self.outputs.get(output.request_id)
+            prev_output, aggregate = self.outputs.get(output.request_id)
             if isinstance(prev_output, RequestOutput) and isinstance(output, RequestOutput):
                 # This ensures that request outputs with different request indexes
                 # (if n > 1) do not override each other.
-                prev_output.add(output, aggregate=self.aggregate)
-                # self.outputs[output.request_id] = prev_output
+                prev_output.add(output, aggregate=aggregate)
             elif isinstance(prev_output, PoolingRequestOutput) and isinstance(
                 output, PoolingRequestOutput
             ):
-                self.outputs[output.request_id] = output
+                self.outputs[output.request_id] = (output, aggregate)
 
     async def get(self) -> list[RequestOutput | PoolingRequestOutput]:
         """Get operation blocks on put event."""
@@ -75,7 +76,7 @@ class RequestOutputCollector:
         self.ready.clear()
         if isinstance(outputs, Exception):
             raise outputs
-        return [output for output in outputs.values()]
+        return [output for output, _ in outputs.values()]
 
     def get_nowait(self) -> list[RequestOutput | PoolingRequestOutput] | None:
         """Non-blocking get operation."""
@@ -87,7 +88,7 @@ class RequestOutputCollector:
             self.ready.clear()
         if isinstance(outputs, Exception):
             raise outputs
-        return [output for output in outputs.values()]
+        return [output for output, _ in outputs.values()]
 
 
 @dataclass
@@ -407,7 +408,7 @@ class OutputProcessor:
                         kv_transfer_params=None,
                     )
                 ):
-                    req_state.queue.put(request_output)
+                    req_state.queue.put(request_output, output_kind=req_state.output_kind)
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
@@ -522,7 +523,7 @@ class OutputProcessor:
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put(request_output)
+                    req_state.queue.put(request_output, output_kind=req_state.output_kind)
                 else:
                     # LLMEngine: return list of RequestOutputs.
                     request_outputs.append(request_output)
