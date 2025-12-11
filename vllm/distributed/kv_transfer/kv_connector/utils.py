@@ -200,6 +200,7 @@ class TpKVTopology:
     attn_backend: type[AttentionBackend]
     engine_id: str
     remote_block_size: dict[str, int]
+    cross_layers: bool
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -223,7 +224,7 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+        return not (self.cross_layers or self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
 
     @property
     def tp_size(self) -> int:
@@ -232,6 +233,14 @@ class TpKVTopology:
     @property
     def block_size(self) -> int:
         return self.remote_block_size[self.engine_id]
+
+    def block_size_position(self, device_type: str) -> int:
+        if device_type == "cpu" or self.cross_layers:
+            block_size_position = -2
+        else:
+            block_size_position = -2 if self.is_mla else -3
+
+        return block_size_position
 
     def tp_ratio(
         self,
