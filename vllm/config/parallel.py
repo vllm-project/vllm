@@ -490,8 +490,10 @@ class ParallelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
-        # Explicitly include backend affecting env factor as before
-        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
+        # Explicitly include backend affecting factor
+        # Use self.all2all_backend (which includes CLI value or env fallback)
+        # but keep the key name for compatibility
+        factors["VLLM_ALL2ALL_BACKEND"] = str(self.all2all_backend)
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
@@ -501,7 +503,7 @@ class ParallelConfig:
             if envs.is_set("VLLM_ALL2ALL_BACKEND"):
                 logger.warning_once(
                     "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                    "will be removed in a future release. Please use the "
+                    "will be removed in v0.14.0. Please use the "
                     "--all2all-backend command-line argument instead."
                 )
 

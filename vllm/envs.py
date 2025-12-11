@@ -1263,7 +1263,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
-    # all2all backend for vllm's expert parallel communication
+    # [DEPRECATED - will be removed in v0.14.0] all2all backend for vllm's
+    # expert parallel communication. Use --all2all-backend CLI argument instead.
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
     # - "allgather_reducescatter": all2all implementation based on allgather and
