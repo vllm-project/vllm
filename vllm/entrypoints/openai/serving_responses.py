@@ -64,7 +64,8 @@ from vllm.entrypoints.context import (
     SimpleContext,
     StreamingHarmonyContext,
 )
-from vllm.entrypoints.harmony_utils import (
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.harmony_utils import (
     construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
@@ -76,7 +77,6 @@ from vllm.entrypoints.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -375,7 +375,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -423,6 +423,10 @@ class OpenAIServingResponses(OpenAIServing):
                             tokenizer=tokenizer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
+                            tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
                         )
                     else:
                         context = SimpleContext()

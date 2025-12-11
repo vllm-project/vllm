@@ -1103,8 +1103,6 @@ class SiglipVisionModel(nn.Module):
     dummy_inputs=PaddleOCRVLDummyInputsBuilder,
 )
 class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",

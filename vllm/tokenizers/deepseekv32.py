@@ -17,6 +17,8 @@ class DeepseekV32Tokenizer(HfTokenizer):
         self.name_or_path = (
             tokenizer.name_or_path if hasattr(tokenizer, "name_or_path") else ""
         )
+        self._added_vocab = self.tokenizer.get_added_vocab()
+        self._added_vocab_size = len(self._added_vocab)
 
     @classmethod
     def from_pretrained(
@@ -53,6 +55,9 @@ class DeepseekV32Tokenizer(HfTokenizer):
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
+
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
 
     @property
     def all_special_tokens(self) -> list[str]:
@@ -95,7 +100,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
 
     def __len__(self) -> int:
         # </think> is an added token in DeepseekV32 tokenizer
-        return self.vocab_size + len(self.get_added_vocab())
+        return self.vocab_size + self._added_vocab_size
 
     def __call__(
         self,
@@ -117,7 +122,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return self.tokenizer.get_vocab()
 
     def get_added_vocab(self) -> dict[str, int]:
-        return self.tokenizer.get_added_vocab()
+        return self._added_vocab.copy()
 
     def encode(
         self,
