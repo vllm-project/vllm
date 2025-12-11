@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import functools
 import hashlib
 import inspect
@@ -8,14 +10,16 @@ import json
 import types
 from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
-from vllm.config.utils import Range
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+if TYPE_CHECKING:
+    from vllm.config.utils import Range
 
 if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
