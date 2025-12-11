@@ -316,7 +316,11 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
-        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
+        partial_rotary_factor_names = (
+            "partial_rotary_factor",
+            "rotary_pct",
+            "rotary_emb_fraction",
+        )
         partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
         if partial_rotary_factor is not None:
             if not hasattr(config, "rope_parameters"):
