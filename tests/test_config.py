@@ -1085,7 +1085,7 @@ def test_vllm_config_explicit_overrides():
     )
 
     # Override one field but not others
-    pass_config = PassConfig(enable_noop=False)
+    pass_config = PassConfig(eliminate_noops=False)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
         model_config=regular_model,

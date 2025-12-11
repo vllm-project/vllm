@@ -377,7 +377,6 @@ class EngineArgs:
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
     seed: int | None = 0
     max_model_len: int | None = ModelConfig.max_model_len
-    cuda_graph_sizes: list[int] | None = CompilationConfig.cudagraph_capture_sizes
     cudagraph_capture_sizes: list[int] | None = (
         CompilationConfig.cudagraph_capture_sizes
     )
@@ -1127,15 +1126,6 @@ class EngineArgs:
         compilation_group.add_argument(
             "--cudagraph-capture-sizes", **compilation_kwargs["cudagraph_capture_sizes"]
         )
-        compilation_kwargs["cudagraph_capture_sizes"]["help"] = (
-            "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or v1.0.0,"
-            " whichever is soonest. Please use --cudagraph-capture-sizes instead."
-        )
-        compilation_group.add_argument(
-            "--cuda-graph-sizes",
-            **compilation_kwargs["cudagraph_capture_sizes"],
-            deprecated=True,
-        )
         compilation_group.add_argument(
             "--max-cudagraph-capture-size",
             **compilation_kwargs["max_cudagraph_capture_size"],
@@ -1758,18 +1748,6 @@ class EngineArgs:
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
-        if self.cuda_graph_sizes is not None:
-            logger.warning(
-                "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
-                "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
-                "instead."
-            )
-            if compilation_config.cudagraph_capture_sizes is not None:
-                raise ValueError(
-                    "cuda_graph_sizes and compilation_config."
-                    "cudagraph_capture_sizes are mutually exclusive"
-                )
-            compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
         if self.cudagraph_capture_sizes is not None:
             if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
