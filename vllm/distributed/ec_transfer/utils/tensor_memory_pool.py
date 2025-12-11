@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import atexit
+from collections import OrderedDict
 import ctypes
 import math
 from dataclasses import dataclass
@@ -58,6 +59,7 @@ Example:
 
 class TensorMemoryPool:
     """Initializes the memory pool with given size constraints.
+    On top of tensorpool in KV, this supports eviction with FIFO
 
     Args:
         max_block_size (int): Maximum size of memory blocks to manage
@@ -79,7 +81,7 @@ class TensorMemoryPool:
         self.min_block_size = self._round_to_power_of_two(min_block_size)
 
         self.free_lists: dict[int, dict[int, MemoryBlock]] = {}
-        self.allocated_blocks: dict[int, MemoryBlock] = {}
+        self.allocated_blocks: OrderedDict[int, MemoryBlock] = {}
 
         self._initialize_free_lists()
         self._allocate_pinned_memory()
@@ -109,6 +111,17 @@ class TensorMemoryPool:
             self.max_block_size,
         )
 
+    def _allocate(self, required_size: int) -> int:
+        current_size = required_size
+        while current_size <= self.max_block_size:
+            if self.free_lists[current_size]:
+                _, block = self.free_lists[current_size].popitem()
+                self._split_block(block, required_size)
+                self.allocated_blocks[block.addr] = block
+                return block.addr
+            current_size *= 2
+        raise InsufficientMemoryError()
+
     def allocate(self, size: int) -> int:
         """Allocates a memory block of at least the requested size.
 
@@ -128,16 +141,16 @@ class TensorMemoryPool:
         if required_size > self.max_block_size:
             raise ValueError("Requested size exceeds maximum block size")
 
-        current_size = required_size
-        while current_size <= self.max_block_size:
-            if self.free_lists[current_size]:
-                _, block = self.free_lists[current_size].popitem()
-                self._split_block(block, required_size)
-                self.allocated_blocks[block.addr] = block
-                return block.addr
-            current_size *= 2
-
-        raise InsufficientMemoryError("Insufficient memory")
+        while True:
+            try:
+                return self._allocate(required_size)
+            except InsufficientMemoryError:
+                if self.allocated_blocks:
+                    self.free()
+                else:
+                    raise InsufficientMemoryError(
+                        f"Can not allocate required size {required_size}"
+                    )
 
     def _split_block(self, block: MemoryBlock, required_size: int):
         while block.size > required_size and block.size // 2 >= self.min_block_size:
@@ -149,7 +162,7 @@ class TensorMemoryPool:
 
             self.free_lists[buddy_size][buddy.addr] = buddy
 
-    def free(self, addr: int):
+    def free(self, addr: int | None = None):
         """Frees an allocated memory block.
 
         Args:
@@ -158,11 +171,19 @@ class TensorMemoryPool:
         Raises:
             ValueError: If address is invalid or not allocated
         """
+        if addr is None:
+            # Retrieved the earliest inserted key
+            addr = next(iter(self.allocated_blocks))
+
         if addr not in self.allocated_blocks:
             raise ValueError("Invalid address to free")
 
         block = self.allocated_blocks.pop(addr)
         self._merge_buddies(block)
+
+    def batch_free(self, addrs: list[int]):
+        for addr in addrs:
+            self.free(addr)
 
     def _merge_buddies(self, block: MemoryBlock):
         MAX_MERGE_DEPTH = 30
@@ -207,7 +228,7 @@ class TensorMemoryPool:
 
         if block.size < size:
             self.free(addr)
-            raise ValueError(
+            raise InsufficientMemoryError(
                 f"Allocated block size {block.size} is smaller than "
                 f"required size {size}"
             )

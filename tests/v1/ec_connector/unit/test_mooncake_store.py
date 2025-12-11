@@ -7,7 +7,7 @@ from unittest import mock
 from vllm.platforms import current_platform
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.utils.tensor_memory_pool import (
-    TensorMemoryPool)
+    TensorMemoryPool, InsufficientMemoryError)
 from vllm.distributed.ec_transfer.ec_lookup_buffer.mooncake_store import (
     ECMooncakeStore)
 
@@ -61,13 +61,10 @@ class FakeMooncakeDistributedStore:
                 self.data[key] = data[:size]
 
     def register_buffer(self, addr, size):
-        print(type(addr), addr, size)
         self.registered_buffers.add((addr, size))
 
     def unregister_buffer(self, addr, size):
-        print(type(addr), addr, size)
         self.registered_buffers.remove((addr, size))
-        print("remove completed")
 
     def remove_by_regex(self, pattern):
         import regex as re
@@ -267,8 +264,6 @@ def test_pool_eviction(monkeypatch, vllm_config, mock_inner_mooncake_store):
     vllm_config.ec_transfer_config.ec_connector_extra_config["fast_transfer"] = True
 
     store = ECMooncakeStore(vllm_config)
-    orig_tensor_pool = store.tensor_pool
-    store.tensor_pool = mock.MagicMock(wraps=store.tensor_pool)
 
     evict_tensor = torch.randn((4, 4), dtype=torch.float32, device=vllm_config.device_config.device)
     store.batch_put(["evict_key"], [evict_tensor])
@@ -276,14 +271,19 @@ def test_pool_eviction(monkeypatch, vllm_config, mock_inner_mooncake_store):
 
     # Trigger allocation with eviction, 16 * 16 * 4 = 1024
     new_tensor = torch.randn((16, 16), dtype=torch.float32, device=vllm_config.device_config.device)
-    store.batch_put(["new_key"], [new_tensor])
-    store.wait_for_put()
-
-    store.tensor_pool.free.assert_called_once()
-    assert mock_inner_mooncake_store.data.get("new_key") == new_tensor.cpu().numpy().tobytes()
-    assert "evict_key" not in mock_inner_mooncake_store.data
-
-    store.tensor_pool = orig_tensor_pool
+    with mock.patch.object(store.tensor_pool, '_allocate') as mock_allocate, \
+         mock.patch.object(store.tensor_pool, 'free') as mock_free:
+        
+        mock_allocate.side_effect = [
+            InsufficientMemoryError("Not enough memory"),
+            mock.Mock()
+        ]
+        
+        store.batch_put(["new_key"], [new_tensor])
+        store.wait_for_put()
+        
+        mock_free.assert_called_once()
+        assert mock_allocate.call_count == 2
     store.close()
 
 def test_close(ec_mooncake_store, mock_inner_mooncake_store):

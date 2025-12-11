@@ -12,7 +12,7 @@ import json
 import math
 import os
 import threading
-from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -182,10 +182,10 @@ class ECMooncakeStore:
             self.tensor_pool = TensorMemoryPool(
                 max_block_size=self.config.fast_transfer_buffer_size
             )
+            self.pool_lock = threading.Lock()
             self.store.register_buffer(
                 self.tensor_pool.base_address, self.config.fast_transfer_buffer_size
             )
-            self.fifo_pool_queue: deque[ECMooncakeTensorPoolMetadata] = deque()
 
         # Put async init
         # queue of unfinished put requests stored by keys
@@ -197,16 +197,23 @@ class ECMooncakeStore:
         )
         self.put_thread.start()
 
+        self.io_executor = ThreadPoolExecutor(max_workers=10)
+        self.meta_suffix = "_metadata"
+
     def close(self):
+        self.wait_for_put()
+
+        if self.put_loop.is_running():
+            self.put_loop.call_soon_threadsafe(self.put_loop.stop)
+            self.put_thread.join(timeout=5.0)  # Add timeout
+
+        self.put_loop.close()
+
         if self.config.fast_transfer:
             self.store.unregister_buffer(
                 self.tensor_pool.base_address, self.config.fast_transfer_buffer_size
             )
             self.tensor_pool.cleanup()
-
-        self.put_loop.call_soon_threadsafe(self.put_loop.stop)
-        self.put_thread.join()
-        self.put_loop.close()
 
         self.store.close()
         logger.info("Closed the mooncake store connection")
@@ -216,9 +223,17 @@ class ECMooncakeStore:
             return []
         return self.store.batch_is_exist(keys)
 
+    def batch_remove(self, keys: list[str]) -> int:
+        if not keys:
+            return 0
+        pattern = re.compile(
+            r"\b(" + "|".join(re.escape(k) for k in keys) + r")\b"
+        )
+        return self.store.remove_by_regex(pattern)
+
     def metadata_key(self, key: str) -> str:
         # TODO: no guarantee that there is no (k,v) with this key
-        return key + "_metadata"
+        return key + self.meta_suffix
 
     def get(self, key: str) -> torch.Tensor | None:
         logger.error("Single get operation is not supported. Use batch_get instead.")
@@ -245,7 +260,7 @@ class ECMooncakeStore:
             return [None] * len(keys)
 
         buffer_shapes = []
-        buffer_addrs = []
+        buffer_addrs = None
         buffer_dtypes = []
         sizes = []
         exist_ids = []
@@ -263,12 +278,13 @@ class ECMooncakeStore:
             element_size = torch.tensor([], dtype=buffer_dtype).element_size()
             num_elem = math.prod(buffer_shape)
             buffer_size = num_elem * element_size
-
-            buffer_addr = self._pool_allocate(buffer_size)
-            buffer_addrs.append(buffer_addr)
             buffer_dtypes.append(buffer_dtype)
             sizes.append(buffer_size)
             buffer_shapes.append(buffer_shape)
+
+        with self.pool_lock:
+            buffer_addrs = [self.tensor_pool.allocate(buffer_size)
+                            for buffer_size in sizes]
 
         # Fill None first and
         # replace valid keys with corresponding buffers
@@ -277,16 +293,18 @@ class ECMooncakeStore:
             valid_keys = [keys[id] for id in exist_ids]
             read_bytes = self.store.batch_get_into(valid_keys, buffer_addrs, sizes)
         except Exception as e:
+            with self.pool_lock:
+                self.tensor_pool.batch_free(buffer_addrs)
             logger.error("batch_get_into failed: %s", str(e))
 
-        # NOTE: should I delay free buffer
         for id, addr, dtype, shape, read_byte in zip(
             exist_ids, buffer_addrs, buffer_dtypes, buffer_shapes, read_bytes
         ):
             if read_byte > 0:
                 results[id] = self.tensor_pool.load_tensor(addr, dtype, shape, device)
 
-            self.tensor_pool.free(addr)
+        with self.pool_lock:
+            self.tensor_pool.batch_free(buffer_addrs)
 
         return results
 
@@ -356,7 +374,7 @@ class ECMooncakeStore:
             async with self.put_queue_cv:
                 self.put_queue.difference_update(keys)
                 if not self.put_queue:
-                    self.put_queue_cv.notify()
+                    self.put_queue_cv.notify_all()
 
     async def _zero_copy_batch_put(
         self, keys: list[str], tensors: list[torch.Tensor]
@@ -364,18 +382,20 @@ class ECMooncakeStore:
         if not keys:
             return
 
-        # Prepair metadata
-        meta_keys = []
-        meta_values = []
+        # Allocate buffer
         buffer_addrs = []
         buffer_sizes = []
-        for key, tensor in zip(keys, tensors):
-            buffer_addr = self._pool_store_tensor(tensor)
-            self.fifo_pool_queue.append(ECMooncakeTensorPoolMetadata(key, buffer_addr))
-            buffer_size = tensor.numel() * tensor.element_size()
-            buffer_addrs.append(buffer_addr)
-            buffer_sizes.append(buffer_size)
+        with self.pool_lock:
+            for key, tensor in zip(keys, tensors):
+                buffer_addr = self.tensor_pool.store_tensor(tensor)
+                buffer_size = tensor.numel() * tensor.element_size()
+                buffer_addrs.append(buffer_addr)
+                buffer_sizes.append(buffer_size)
 
+        # Prepare metadata
+        meta_keys = []
+        meta_values = []
+        for key, tensor in zip(keys, tensors):
             meta = {"shape": list(tensor.shape), "dtype": str(tensor.dtype)}
             meta_str = json.dumps(meta)
             meta_bytes = meta_str.encode("utf-8")
@@ -385,22 +405,20 @@ class ECMooncakeStore:
 
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.put_batch, meta_keys, meta_values, self.replica_config
+                asyncio.get_event_loop().run_in_executor(
+                    self.io_executor,
+                    self.store.put_batch,
+                    meta_keys,
+                    meta_values,
+                    self.replica_config
                 ),
                 timeout=self.config.transfer_timeout,
             )
-        except Exception as e:
-            logger.error(
-                "Failed to put metadata for keys %s using put_batch with error %s",
-                ",".join(keys),
-                str(e),
-            )
 
-        try:
             # Zero-copy put
             await asyncio.wait_for(
-                asyncio.to_thread(
+                asyncio.get_event_loop().run_in_executor(
+                    self.io_executor,
                     self.store.batch_put_from,
                     keys,
                     buffer_addrs,
@@ -410,6 +428,8 @@ class ECMooncakeStore:
                 timeout=self.config.transfer_timeout,
             )
         except Exception as e:
+            with self.pool_lock:
+                self.tensor_pool.batch_free(buffer_addrs)
             logger.error(
                 "Failed to put keys %s using batch_put_from with error %s",
                 ",".join(keys),
@@ -443,8 +463,12 @@ class ECMooncakeStore:
 
         try:
             await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.put_batch, keys, bytes_list, self.replica_config
+                asyncio.get_event_loop().run_in_executor(
+                    self.io_executor,
+                    self.store.put_batch,
+                    keys,
+                    bytes_list,
+                    self.replica_config
                 ),
                 timeout=self.config.transfer_timeout,
             )
@@ -454,35 +478,3 @@ class ECMooncakeStore:
                 ",".join(keys),
                 str(e),
             )
-
-    # ==============================
-    # Tensor pool helper functions
-    # ==============================
-
-    def _pool_eviction(self) -> None:
-        evicted_buffer = self.fifo_pool_queue.popleft()
-        self.tensor_pool.free(evicted_buffer.addr)
-        key = re.escape(evicted_buffer.key)
-        meta_key = re.escape(self.metadata_key(evicted_buffer.key))
-        count = self.store.remove_by_regex(f"^(?:{key}|{meta_key})$")
-        assert count <= 2
-
-    def _pool_allocate(self, size: int) -> int:
-        while True:
-            try:
-                return self.tensor_pool.allocate(size)
-            except InsufficientMemoryError:
-                if not self.fifo_pool_queue:
-                    raise
-
-                self._pool_eviction()
-
-    def _pool_store_tensor(self, tensor: torch.Tensor) -> int:
-        while True:
-            try:
-                return self.tensor_pool.store_tensor(tensor)
-            except InsufficientMemoryError:
-                if not self.fifo_pool_queue:
-                    raise
-
-                self._pool_eviction()
