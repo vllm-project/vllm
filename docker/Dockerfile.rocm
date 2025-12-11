@@ -51,12 +51,11 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-# Build vLLM wheel (for dev/image builds - no custom wheel pinning)
+# Build vLLM
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
-    && python3 setup.py clean --all \
+    && python3 setup.py clean --all  \
     && python3 setup.py bdist_wheel --dist-dir=dist
-
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
