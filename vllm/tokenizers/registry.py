@@ -11,14 +11,14 @@ from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.gguf_utils import get_gguf_file_path_from_hf
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
-from vllm.transformers_utils.utils import (
+from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
@@ -183,7 +183,7 @@ def get_tokenizer(
             "`tokenizer_mode='custom'` when initializing vLLM.",
             tokenizer_args,
             str(tokenizer_kwargs),
-            tokenizer_mode,
+            tokenizer_name,
         )
 
         tokenizer_mode = str(tokenizer_name)
