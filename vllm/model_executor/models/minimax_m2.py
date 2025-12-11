@@ -145,6 +145,7 @@ class MiniMaxM2MoE(nn.Module):
 class MiniMaxM2Attention(nn.Module):
     def __init__(
         self,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -199,9 +200,13 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        # https://github.com/vllm-project/vllm/pull/30384
+        if hasattr(config, "partial_rotary_factor"):
+            rotary_dim = self.head_dim
+
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
+            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -260,6 +265,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
 
         self.layer_idx = layer_idx
         self.self_attn = MiniMaxM2Attention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
