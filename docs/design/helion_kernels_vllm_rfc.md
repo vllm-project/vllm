@@ -347,4 +347,67 @@ As stated earlier, each Helion kernel is compiled once per model; each compilati
 
 ## Performance Evaluations
 
-WIP
+To demonstrate the competitive performance potential of Helion, we implemented three different types of ops and measured their performance with representative input shapes.
+
+Operators:
+- silu_mul_fp8: element-wise + quantization
+- rmsnorm_fp8: element-wise + reduction + quantization
+- allreduce_add_rmsnorm: collective + element-wise + reduction
+
+Platforms for evaluation:
+- 2 x H200 (only one node used for silu_mul_fp8, rmsnorm_fp8)
+- 2 x B200 (only one node used for silu_mul_fp8, rmsnorm_fp8)
+- All with cudagraph enabled
+- Warmup for 50 iterations, then benchmark 5000 iterations back to back
+
+Autotuning parameters:
+- Full Helion autotuning mode
+- Autotuned for 4 different representative `hidden_size`: 2048, 4096, 5120, 8192
+
+Autotuning/Benchmarking script: scripts/comprehensive_helion_benchmark.py
+
+### NVIDIA H200 Results
+
+| Kernel | Autotuned for Hidden Size | Helion Avg (ms) | Baseline Avg (ms) | GeoMean Speedup | Median Speedup | Min-Max Speedup |
+|--------|---------------------------|-----------------|-------------------|-------------|----------------|-----------------|
+| **silu_mul_fp8** | 2048 | 0.0129 | 0.0163 | **1.27x** | 1.24x | 0.88x - 2.48x |
+| | 4096 | 0.0130 | 0.0164 | **0.99x** | 1.14x | 0.19x - 3.33x |
+| | 5120 | 0.0122 | 0.0163 | **1.28x** | 1.23x | 0.85x - 2.42x |
+| | 8192 | 0.0181 | 0.0165 | **1.04x** | 0.98x | 0.66x - 2.08x |
+| **rms_norm_fp8** | 2048 | 0.0050 | 0.0057 | **1.08x** | 1.00x | 0.66x - 2.12x |
+| | 4096 | 0.0050 | 0.0059 | **1.11x** | 1.00x | 0.66x - 2.69x |
+| | 5120 | 0.0050 | 0.0057 | **1.08x** | 1.00x | 0.66x - 2.14x |
+| | 8192 | 0.0054 | 0.0056 | **1.03x** | 1.00x | 0.41x - 1.94x |
+| **allreduce_add_rmsnorm** | 2048 | 0.1365 | 0.1283 | **0.92x** | 0.86x | 0.81x - 2.29x |
+| | 4096 | 0.1297 | 0.1256 | **0.94x** | 0.88x | 0.83x - 2.46x |
+| | 5120 | 0.1338 | 0.1276 | **0.93x** | 0.87x | 0.82x - 2.40x |
+| | 8192 | 0.1350 | 0.1274 | **0.92x** | 0.86x | 0.81x - 2.42x |
+
+### NVIDIA B200 Results
+
+| Kernel | Autotuned for Hidden Size | Helion Avg (ms) | Baseline Avg (ms) | GeoMean Speedup | Median Speedup | Min-Max Speedup |
+|--------|---------------------------|-----------------|-------------------|-------------|----------------|-----------------|
+| **silu_mul_fp8** | 2048 | 0.0069 | 0.0160 | **2.12x** | 2.00x | 1.26x - 3.73x |
+| | 4096 | 0.0064 | 0.0160 | **2.21x** | 2.01x | 1.26x - 3.70x |
+| | 5120 | 0.0065 | 0.0160 | **2.21x** | 2.00x | 1.26x - 3.78x |
+| | 8192 | 0.0063 | 0.0160 | **2.14x** | 2.00x | 1.02x - 3.73x |
+| **rms_norm_fp8** | 2048 | 0.0045 | 0.0054 | **1.20x** | 1.26x | 0.68x - 1.72x |
+| | 4096 | 0.0041 | 0.0053 | **1.26x** | 1.27x | 1.00x - 1.90x |
+| | 5120 | 0.0038 | 0.0052 | **1.32x** | 1.24x | 0.98x - 2.00x |
+| | 8192 | 0.0043 | 0.0052 | **1.27x** | 1.26x | 0.44x - 1.90x |
+| **allreduce_add_rmsnorm** | 2048 | 0.0986 | 0.1276 | **1.05x** | 0.73x | 0.59x - 6.41x |
+| | 4096 | 0.0987 | 0.1275 | **1.05x** | 0.73x | 0.55x - 6.50x |
+| | 5120 | 0.0979 | 0.1266 | **1.04x** | 0.73x | 0.57x - 6.70x |
+| | 8192 | - | - | - | - | - |
+
+*Note: allreduce_add_rmsnorm hidden size 8192 failed during B200 benchmarking, so no results yet*
+
+### Performance Summary
+
+**Overall Geometric Mean Speedups (across all configurations):**
+
+| Platform | **silu_mul_fp8** | **rms_norm_fp8** | **allreduce_add_rmsnorm** | **Overall** |
+|----------|------------------|------------------|--------------------------|-------------|
+| **H200** | **1.14x** | **1.07x** | **0.93x** (slowdown) | **1.04x** |
+| **B200** | **2.17x** | **1.26x** | **1.05x** | **1.49x** |
+| **B200 Advantage** | +90.5% | +17.4% | +12.8% | **+42.7%** |

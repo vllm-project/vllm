@@ -9,6 +9,7 @@ their CUDA reference implementations, measuring both correctness and performance
 
 import csv
 import json
+import math
 import statistics
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -22,6 +23,27 @@ import torch.distributed as dist
 
 # Global container for distributed benchmark result collection
 _distributed_results_container = [None]
+
+
+def geometric_mean(values: list[float]) -> float:
+    """
+    Calculate geometric mean of a list of values.
+
+    Args:
+        values: List of positive numeric values
+
+    Returns:
+        Geometric mean of the values
+    """
+    if not values:
+        return 0.0
+
+    if any(v <= 0 for v in values):
+        raise ValueError("All values must be positive for geometric mean calculation")
+
+    # Use log-space calculation to avoid overflow/underflow
+    log_sum = sum(math.log(v) for v in values)
+    return math.exp(log_sum / len(values))
 
 
 def _sanitize_filename(name: str) -> str:
@@ -1248,6 +1270,7 @@ def print_summary_statistics(results: list[BenchmarkResult]):
     print()
 
     print("Speedup:")
+    print(f"  GeoMean: {geometric_mean(speedups):.2f}x")
     print(f"  Average: {statistics.mean(speedups):.2f}x")
     print(f"  Median:  {statistics.median(speedups):.2f}x")
     print(f"  Min:     {min(speedups):.2f}x")
