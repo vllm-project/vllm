@@ -180,15 +180,9 @@ class EagleProposer:
                 rocm_types.append(AiterFlashAttentionMetadata)
 
             # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
-            try:
-                from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 
-                rocm_types.append(MLACommonMetadata)
-            except ImportError:
-                logger.debug(
-                    "Could not import MLACommonMetadata. MLA backend "
-                    "for speculative decoding will be unavailable."
-                )
+            rocm_types.append(MLACommonMetadata)
 
             self.allowed_attn_types = tuple(rocm_types)
 
