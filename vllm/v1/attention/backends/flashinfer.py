@@ -285,7 +285,7 @@ class FlashInferBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         # Note: Not sure for all platforms, but on Blackwell,
         # only support a page size of 16, 32, 64
         # TODO: 16 is temporary removed because TRT-LLM kernel has a bug when using 16.

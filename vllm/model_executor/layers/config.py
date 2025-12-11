@@ -37,7 +37,7 @@ class AttentionConfig(VerifyAndUpdateConfig):
             else 16,
         )
 
-        supported_sizes = backend_cls.get_supported_kernel_block_size()
+        supported_sizes = backend_cls.get_supported_kernel_block_sizes()
         supported_sizes = [
             s.base if isinstance(s, MultipleOf) else s for s in supported_sizes
         ]
