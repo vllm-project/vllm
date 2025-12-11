@@ -200,10 +200,8 @@ class RocmPlatform(Platform):
         def _get_aiter_backend():
             return AttentionBackendEnum.ROCM_AITER_FA
 
-        # Note: Qwen3-VL models only support AITER FA.
-        # TODO: Add support for other backends.
         aiter_backend = _get_aiter_backend()
-        if aiter_backend is not None:
+        if aiter_backend is not None and envs.VLLM_ROCM_USE_AITER:
             logger.info("Using AITER Flash Attention backend for ViT model.")
             return aiter_backend
 
@@ -271,19 +269,6 @@ class RocmPlatform(Platform):
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
             )
-
-        from vllm.config import AttentionConfig
-
-        attn_backend_override = AttentionConfig.backend
-        logger.info(
-            "Attention backend override from AttentionConfig: %s", attn_backend_override
-        )
-        if selected_backend is None and attn_backend_override is not None:
-            logger.info(
-                "Detected VLLM_ATTENTION_BACKEND=%s (set by model architecture).",
-                attn_backend_override,
-            )
-            selected_backend = attn_backend_override
 
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info("Using FlexAttention backend.")
