@@ -164,7 +164,6 @@ class Qwen2Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
