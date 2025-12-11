@@ -24,7 +24,7 @@ if has_triton_kernels():
     try:
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing, routing_from_bitmatrix
+        from triton_kernels.routing import RoutingData, routing_from_bitmatrix
         from triton_kernels.tensor import Bitmatrix
     except (AttributeError, ImportError) as e:
         logger.error(
@@ -74,6 +74,132 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({"ROWS_PER_PID": r}, num_warps=num_warps, num_stages=num_stages)
+        for r in [1, 2, 4, 8, 16, 32]
+        for num_warps in [1, 2, 4, 8, 16]
+        for num_stages in [1, 2, 3]
+    ],
+    key=["N", "topk"],
+    cache_results=True,
+)
+@triton.jit
+def _topk_softmax_kernel(
+    logits_ptr,
+    weights_ptr,
+    indices_ptr,
+    M: tl.constexpr,
+    N: tl.constexpr,
+    topk: tl.constexpr,
+    stride_lm,
+    stride_ln,
+    stride_wm,
+    stride_wk,
+    stride_im,
+    stride_ik,
+    RENORM: tl.constexpr,
+    ROWS_PER_PID: tl.constexpr,
+    num_stages: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    num_programs = tl.num_programs(0)
+
+    offs_n = tl.arange(0, N)
+    offs_k = tl.arange(0, topk)
+
+    # impl topk<=2 and RENORM specialization by tl.constexpr,
+    # same as constexpr if in C++17
+
+    rows = tl.arange(0, ROWS_PER_PID)
+    for row_idx in tl.range(
+        pid * ROWS_PER_PID,
+        M,
+        num_programs * ROWS_PER_PID,
+        num_stages,
+        warp_specialize=True,
+    ):
+        topk_vals = tl.full([ROWS_PER_PID, topk], float("-inf"), dtype=tl.float32)
+        topk_idxs = tl.zeros([ROWS_PER_PID, topk], dtype=tl.int32)
+        row_indices = row_idx + rows  # [ROWS_PER_POD,]
+
+        # broadcast to [ROWS_PER_PID, BLOCKN]
+        ptr_off = (
+            logits_ptr + row_indices[:, None] * stride_lm + offs_n[None, :] * stride_ln
+        )
+        logits = tl.load(ptr_off)
+
+        if not RENORM:
+            logits = tl.softmax(logits, dim=1, keep_dims=True)
+
+        # XXX: may use topk from triton_kernels
+        for k in tl.static_range(topk):
+            cur_max = tl.max(logits, axis=1, keep_dims=True)  # [ROWS_PER_PID, 1]
+            cur_idx = tl.argmax(logits, axis=1, keep_dims=True)
+
+            k_mask = offs_k == k
+            topk_vals = tl.where(
+                k_mask, cur_max, topk_vals
+            )  # [ROWS_PER PID, 1], [ROWS_PER PID, topkpadded]
+            topk_idxs = tl.where(k_mask, cur_idx, topk_idxs)
+
+            mask_selected = cur_idx == offs_n[None, :]  # [ROWSPERPID,1] [1,BLOCKN]
+            logits = tl.where(mask_selected, float("-inf"), logits)
+
+        if RENORM:
+            topk_vals = tl.softmax(topk_vals, dim=1, keep_dims=True)
+
+        # WB
+        tl.store(
+            weights_ptr
+            + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
+            + offs_k[None, :] * stride_wk,  # [1, topkpadded]
+            topk_vals,
+        )
+        tl.store(
+            indices_ptr
+            + row_indices[:, None] * stride_im
+            + offs_k[None, :] * stride_ik,
+            topk_idxs,
+        )
+
+
+def fused_topk_softmax(
+    router_logits: torch.Tensor,
+    topk: int,
+    renormalize: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = router_logits.shape  # num_tokens, num_experts
+    weights = torch.empty(
+        (M, topk), device=router_logits.device, dtype=router_logits.dtype
+    )
+    indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int32)
+
+    BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
+    topk_padded = triton.next_power_of_2(topk)
+    assert (BLOCK_N == N) and (topk_padded == topk)
+
+    grid = lambda META: (triton.cdiv(M, META["ROWS_PER_PID"]),)
+
+    _topk_softmax_kernel[grid](
+        logits_ptr=router_logits,
+        weights_ptr=weights,
+        indices_ptr=indices,
+        M=M,
+        N=N,
+        topk=topk,
+        stride_lm=router_logits.stride(0),
+        stride_ln=router_logits.stride(1),
+        stride_wm=weights.stride(0),
+        stride_wk=weights.stride(1),
+        stride_im=indices.stride(0),
+        stride_ik=indices.stride(1),
+        RENORM=renormalize,
+    )
+
+    return weights, indices
+
+
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -87,8 +213,9 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = routing(
-        gating_output, topk, sm_first=not renormalize
+    topk_weights, topk_indices = fused_topk_softmax(gating_output, topk, renormalize)
+    routing_data, gather_idx, scatter_idx = make_routing_data(
+        topk_indices, topk_weights, num_local_experts=gating_output.shape[-1]
     )
 
     output = torch.empty_like(hidden_states)

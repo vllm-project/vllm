@@ -188,7 +188,7 @@ def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
 
 
 @dataclass
-class ModelConfig:
+class GPTOSS120BModelConfig:
     num_hidden_layers: int = 36
     num_experts: int = 128
     experts_per_token: int = 4
@@ -204,7 +204,25 @@ class ModelConfig:
     rope_parameters_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
+ModelConfig = GPTOSS120BModelConfig
 
+@dataclass
+class GPTOSS20BModelConfig:
+    num_hidden_layers: int = 24
+    num_experts: int = 32
+    experts_per_token: int = 4
+    vocab_size: int = 201088
+    hidden_size: int = 2880
+    intermediate_size: int = 2880
+    head_dim: int = 64
+    num_attention_heads: int = 64
+    num_key_value_heads: int = 8
+    sliding_window: int = 128
+    initial_context_length: int = 4096
+    rope_theta: float = 150000.0
+    rope_parameters_factor: float = 32.0
+    rope_ntk_alpha: float = 1.0
+    rope_ntk_beta: float = 32.0
 
 def swiglu(x, alpha: float = 1.702, limit: float = 1.0):
     # Note we add an extra bias of 1 to the linear layer
@@ -269,17 +287,18 @@ class Case:
 )
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
-def test_equiv(num_token, a_dtype, w_dtype, tp):
+@pytest.mark.parametrize("GPTOSSModelConfig", [GPTOSS120BModelConfig, GPTOSS20BModelConfig])
+def test_equiv(num_token, a_dtype, w_dtype, tp, GPTOSSModelConfig):
     from triton_kernels.tensor_details import layout
 
     if not hasattr(layout, "make_default_matmul_mxfp4_w_layout"):
         pytest.skip("make_default_matmul_mxfp4_w_layout not available")
 
     M = num_token
-    E = ModelConfig.num_experts
-    K = ModelConfig.hidden_size
-    N = ModelConfig.intermediate_size // tp
-    topk = ModelConfig.experts_per_token
+    E = GPTOSSModelConfig.num_experts
+    K = GPTOSSModelConfig.hidden_size
+    N = GPTOSSModelConfig.intermediate_size // tp
+    topk = GPTOSSModelConfig.experts_per_token
 
     (
         x,
