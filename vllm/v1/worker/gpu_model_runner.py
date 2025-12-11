@@ -4476,6 +4476,263 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def _get_decode_cudagraph_batch_sizes(self) -> list[int]:
+        """Get the batch sizes for decode-only CUDA graphs.
+
+        This is used when cudagraph_mode.separate_routine() is True,
+        meaning decode batches use separate graphs from mixed batches.
+
+        Returns:
+            List of batch sizes for decode graphs, or empty list if not applicable.
+        """
+        max_num_tokens = (
+            self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
+        )
+        return [
+            x
+            for x in self.cudagraph_batch_sizes
+            if max_num_tokens >= x >= self.uniform_decode_query_len
+        ]
+
+    def _get_full_graph_info(self) -> tuple[int | None, int]:
+        """Get info about FULL CUDA graphs for profiling.
+
+        Returns:
+            Tuple of (largest_batch_size, total_graph_count).
+            largest_batch_size is None if no FULL graphs will be captured.
+        """
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+
+        if (
+            cudagraph_mode == CUDAGraphMode.NONE
+            or not cudagraph_mode.has_full_cudagraphs()
+            or not self.cudagraph_batch_sizes
+        ):
+            return None, 0
+
+        # Determine LoRA cases (same logic as in capture_model)
+        if self.lora_config:
+            lora_cases = 2 if self.compilation_config.cudagraph_specialize_lora else 1
+        else:
+            lora_cases = 1
+
+        largest_batch_size = None
+        total_graphs = 0
+
+        # Mixed mode FULL graphs
+        if cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL:
+            largest_batch_size = self.cudagraph_batch_sizes[-1]
+            total_graphs += len(self.cudagraph_batch_sizes) * lora_cases
+
+        # Decode mode FULL graphs (only if separate routine)
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode.separate_routine()
+        ):
+            decode_batch_sizes = self._get_decode_cudagraph_batch_sizes()
+            if decode_batch_sizes:
+                decode_largest = decode_batch_sizes[-1]
+                largest_batch_size = max(largest_batch_size or 0, decode_largest)
+                total_graphs += len(decode_batch_sizes) * lora_cases
+
+        return largest_batch_size, total_graphs
+
+    def _init_minimal_kv_cache_for_profiling(self) -> None:
+        """Initialize a minimal KV cache for CUDA graph memory profiling.
+
+        This creates a small KV cache (1 block) just to enable attention
+        metadata building during graph profiling. The actual KV cache will
+        be allocated later with the correct size.
+        """
+        from vllm.v1.core.kv_cache_utils import (
+            get_kv_cache_config_from_groups,
+            get_kv_cache_groups,
+        )
+
+        kv_cache_spec = self.get_kv_cache_spec()
+        kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
+
+        # Use minimal memory to get 1 block. The function calculates
+        # num_blocks = available_memory // page_size // group_size, so we need
+        # to pass page_size * group_size to get exactly 1 block.
+        if kv_cache_groups:
+            page_size = kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            group_size = max(len(g.layer_names) for g in kv_cache_groups)
+            available_memory = page_size * group_size
+        else:
+            available_memory = 1  # Attention-free model
+
+        minimal_config = get_kv_cache_config_from_groups(
+            self.vllm_config, kv_cache_groups, available_memory=available_memory
+        )
+
+        self.initialize_kv_cache(minimal_config)
+        logger.debug("Initialized minimal KV cache for CUDA graph profiling")
+
+    def _cleanup_profiling_kv_cache(self) -> None:
+        """Clean up the minimal KV cache used for profiling.
+
+        This frees the KV cache tensors and resets the state so that
+        the actual KV cache can be allocated later.
+
+        Note: We don't need to clean up CUDA graphs here because profiling
+        now uses a private pool (not the global shared pool). The temporary
+        graphs from profiling are deleted after measurement and their private
+        pool is automatically cleaned up.
+        """
+        # Ensure all GPU operations are complete before cleanup
+        torch.cuda.synchronize()
+
+        # Clear KV cache tensors to free GPU memory
+        if hasattr(self, "kv_caches") and self.kv_caches:
+            for i in range(len(self.kv_caches)):
+                self.kv_caches[i] = None  # type: ignore
+            self.kv_caches.clear()
+
+        # Clear cross-layer KV cache if present
+        if hasattr(self, "cross_layers_kv_cache"):
+            self.cross_layers_kv_cache = None
+            self.cross_layers_attn_backend = None
+
+        # Clear attention groups
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+
+        # Clear KV cache config
+        if hasattr(self, "kv_cache_config"):
+            delattr(self, "kv_cache_config")
+
+        # Force garbage collection to free GPU memory
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        logger.debug("Cleaned up profiling KV cache and CUDA graphs")
+
+    @torch.inference_mode()
+    def profile_cudagraph_memory(self) -> int:
+        """Profile CUDA graph memory by capturing the largest FULL graph twice.
+
+        This method estimates the total memory that will be consumed by FULL
+        CUDA graphs when they are captured later. It captures the largest batch
+        size twice (first capture allocates memory pool, second is representative
+        of typical graph size), then estimates total memory based on the number
+        of FULL graphs that will be captured.
+
+        This requires a temporary minimal KV cache to be allocated for the
+        profiling captures. The KV cache is cleaned up after profiling.
+
+        Returns:
+            Estimated total CUDA graph memory in bytes that will be consumed
+            by all FULL graphs. Returns 0 if no FULL graphs will be captured.
+        """
+        largest_batch_size, num_full_graphs = self._get_full_graph_info()
+
+        if largest_batch_size is None or num_full_graphs == 0:
+            logger.debug(
+                "No FULL CUDA graphs will be captured, skipping graph memory profiling"
+            )
+            return 0
+
+        logger.info(
+            "Profiling CUDA graph memory: largest batch size=%d, total graphs=%d",
+            largest_batch_size,
+            num_full_graphs,
+        )
+
+        # Setup: minimal KV cache and private graph pool
+        self._init_minimal_kv_cache_for_profiling()
+        profiling_pool = torch.cuda.graph_pool_handle()
+
+        # Swap graph pool to private one (to avoid corrupting global pool)
+        original_pool = None
+        if isinstance(self.model, CUDAGraphWrapper):
+            original_pool = self.model.graph_pool
+            self.model.graph_pool = profiling_pool
+        elif isinstance(self.model, UBatchWrapper):
+            if self.model.cudagraph_wrapper is not None:
+                original_pool = self.model.cudagraph_wrapper.graph_pool
+                self.model.cudagraph_wrapper.graph_pool = profiling_pool
+
+        set_cudagraph_capturing_enabled(True)
+        with graph_capture(device=self.device):
+            torch.cuda.synchronize()
+            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
+            # Warmup
+            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                self._dummy_run(
+                    largest_batch_size,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                    force_attention=True,
+                    uniform_decode=True,
+                    skip_eplb=True,
+                    remove_lora=False,
+                    activate_lora=False,
+                )
+
+            # First capture
+            self._dummy_run(
+                largest_batch_size,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                uniform_decode=True,
+                skip_eplb=True,
+                remove_lora=False,
+                activate_lora=False,
+                is_graph_capturing=True,
+            )
+            torch.cuda.synchronize()
+            first_capture_size = start_free_gpu_memory - torch.cuda.mem_get_info()[0]
+
+            # Second capture with different batch size
+            decode_batch_sizes = self._get_decode_cudagraph_batch_sizes()
+            second_batch_size = largest_batch_size
+            for size in reversed(decode_batch_sizes):
+                if size < largest_batch_size:
+                    second_batch_size = size
+                    break
+
+            before_second = torch.cuda.mem_get_info()[0]
+            self._dummy_run(
+                second_batch_size,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                uniform_decode=True,
+                skip_eplb=True,
+                remove_lora=False,
+                activate_lora=False,
+                is_graph_capturing=True,
+            )
+            torch.cuda.synchronize()
+            second_capture_size = before_second - torch.cuda.mem_get_info()[0]
+
+        # Cleanup: restore pool, clear entries, cleanup KV cache
+        set_cudagraph_capturing_enabled(False)
+        if isinstance(self.model, CUDAGraphWrapper):
+            self.model.concrete_cudagraph_entries.clear()
+            self.model.graph_pool = original_pool
+        elif isinstance(self.model, UBatchWrapper):
+            self.model.cudagraphs.clear()
+            if self.model.cudagraph_wrapper is not None:
+                self.model.cudagraph_wrapper.concrete_cudagraph_entries.clear()
+                self.model.cudagraph_wrapper.graph_pool = original_pool
+        self._cleanup_profiling_kv_cache()
+
+        if num_full_graphs > 1:
+            estimated_total = first_capture_size + second_capture_size * (
+                num_full_graphs - 1
+            )
+        else:
+            estimated_total = first_capture_size
+        logger.info(
+            "Estimated total CUDA graph memory: %.2f GiB "
+            "(first: %.2f MiB + %d graphs × %.2f MiB)",
+            estimated_total / (1 << 30),
+            first_capture_size / (1 << 20),
+            num_full_graphs - 1,
+            second_capture_size / (1 << 20),
+        )
+
+        return int(estimated_total)
+
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
@@ -4539,16 +4796,9 @@ class GPUModelRunner(
                 cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and cudagraph_mode.separate_routine()
             ):
-                max_num_tokens = (
-                    self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
-                )
-                decode_cudagraph_batch_sizes = [
-                    x
-                    for x in self.cudagraph_batch_sizes
-                    if max_num_tokens >= x >= self.uniform_decode_query_len
-                ]
+                decode_batch_sizes = self._get_decode_cudagraph_batch_sizes()
                 compilation_cases_decode = list(
-                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
+                    product(reversed(decode_batch_sizes), lora_cases)
                 )
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,

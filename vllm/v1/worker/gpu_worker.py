@@ -334,8 +334,14 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
+            # Profile CUDA graph memory if FULL graphs will be captured
+            cudagraph_memory_estimate = 0
+            if not self.model_config.enforce_eager:
+                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
+        self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -350,7 +356,9 @@ class Worker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory
+            self.requested_memory
+            - profile_result.non_kv_cache_memory
+            - cudagraph_memory_estimate
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -452,6 +460,23 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        # Compare actual vs estimated FULL CUDA graph memory (if we did profiling)
+        if (
+            hasattr(self, "cudagraph_memory_estimate")
+            and self.cudagraph_memory_estimate > 0
+        ):
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            logger.info(
+                "FULL CUDA graph memory: %s GiB (actual), %s GiB (estimated), "
+                "difference: %s GiB (%.1f%%)",
+                GiB(cuda_graph_memory_bytes),
+                GiB(self.cudagraph_memory_estimate),
+                GiB(abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)),
+                100
+                * abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+                / max(cuda_graph_memory_bytes, 1),
+            )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
