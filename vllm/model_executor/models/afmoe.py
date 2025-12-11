@@ -239,11 +239,20 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
+            # Handle Transformers v5 rope_parameters format (dict with layer types)
+            layer_type = config.layer_types[layer_idx]
+            if layer_type in config.rope_parameters:
+                # Transformers v5 rope config: use layer-specific rope_parameters
+                rope_parameters = config.rope_parameters[layer_type]
+            else:
+                # Transformers v4 rope config: use config.rope_parameters directly
+                rope_parameters = config.rope_parameters
+            
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                rope_parameters=config["rope_parameters"],
+                rope_parameters=rope_parameters,
                 is_neox_style=True,
             )
         else:
