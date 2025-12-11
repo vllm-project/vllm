@@ -164,7 +164,8 @@ class TestCudagraphDispatcher:
         # 4. disable_full should have a fall back mode (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True)
+            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+        )
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
