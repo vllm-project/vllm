@@ -132,7 +132,7 @@ vllm serve /path/to/the/model/in/the/container \
 
 ### Running vLLM with MultiProcessing
 
-Besides Ray, Multi-node vLLM deployments can also use `multiprocessing` as the runtime engine. Here's an example to deploy model across 2 nodes ((8 GPUs per node)) with `tp_size=8` and `pp_size=2`.
+Besides Ray, Multi-node vLLM deployments can also use `multiprocessing` as the runtime engine. Here's an example to deploy model across 2 nodes (8 GPUs per node) with `tp_size=8` and `pp_size=2`.
 
 Choose one node as the head node and run:
 
