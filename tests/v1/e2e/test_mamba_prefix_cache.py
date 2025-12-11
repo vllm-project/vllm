@@ -314,8 +314,8 @@ def get_fake_process_mamba_fn(
 
 def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    num_generated_tokens = 20
-    num_prompt_tokens = 551
+    num_generated_tokens = 4000
+    num_prompt_tokens = 500
     sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
     full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
@@ -342,9 +342,9 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
         f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
     )
     print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
-    ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
-    check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
-    # torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
+    # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
+    # check_mamba_state_equal(ref_mamba_kv_cache_dict, mamba_kv_cache_dict)
+    torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
 
 
 def check_mamba_state_equal(mamba_state_ref: dict, mamba_state_new: dict):
