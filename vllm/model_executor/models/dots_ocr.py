@@ -290,7 +290,7 @@ class DotsVisionAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self.apply_rotary_emb = ApplyRotaryEmb()
+        self.apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
 
     def forward(
         self,
