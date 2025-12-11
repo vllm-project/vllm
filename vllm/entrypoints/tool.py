@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from openai.types.responses.response_function_tool_call_output_item import (
+    ResponseFunctionToolCallOutputItem,
+)
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
     # Avoid circular import.
@@ -46,6 +51,10 @@ class Tool(ABC):
     async def get_result(self, context: "ConversationContext") -> Any:
         pass
 
+    @abstractmethod
+    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+        pass
+
 
 class HarmonyBrowserTool(Tool):
     def __init__(self):
@@ -80,6 +89,9 @@ class HarmonyBrowserTool(Tool):
         async for msg in self.browser_tool.process(last_msg):
             tool_output_msgs.append(msg)
         return tool_output_msgs
+
+    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+        raise NotImplementedError("Not implemented yet")
 
     @property
     def tool_config(self) -> Any:
@@ -136,6 +148,38 @@ class HarmonyPythonTool(Tool):
         tool_output_msgs = []
         async for msg in self.python_tool.process(last_msg):
             tool_output_msgs.append(msg)
+        return tool_output_msgs
+
+    async def get_result_parsable_context(self, context: "ConversationContext") -> Any:
+        """
+        This function converts parsable context types to harmony and
+        back so we can use GPTOSS demo python tool
+        """
+        from vllm.entrypoints.context import ParsableContext
+
+        assert isinstance(context, ParsableContext)
+
+        last_msg = context.parser.response_messages[-1]
+        args = json.loads(last_msg.arguments)
+
+        last_msg_harmony = Message(
+            author=Author(role="assistant", name=None),
+            content=[TextContent(text=args["code"])],
+            channel="analysis",
+            recipient="python",
+            content_type="code",
+        )
+
+        tool_output_msgs = []
+        async for msg in self.python_tool.process(last_msg_harmony):
+            processed = ResponseFunctionToolCallOutputItem(
+                id=f"fco_{random_uuid()}",
+                type="function_call_output",
+                call_id=f"call_{random_uuid()}",
+                output=msg.content[0].text,
+                status="completed",
+            )
+            tool_output_msgs.append(processed)
         return tool_output_msgs
 
     @property

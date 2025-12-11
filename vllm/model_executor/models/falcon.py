@@ -30,7 +30,7 @@ from torch import nn
 from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -164,13 +164,12 @@ class FalconAttention(nn.Module):
         )
 
         if self.use_rotary:
-            rope_theta = getattr(config, "rope_theta", 10000)
             max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
-                base=rope_theta,
+                rope_parameters=config.rope_parameters,
             )
             self.attn = Attention(
                 self.num_heads,

@@ -22,7 +22,7 @@ python tools/install_nixl_from_source_ubuntu.py
 NixlConnector uses NIXL library for underlying communication, which supports multiple transport backends. UCX (Unified Communication X) is the primary default transport library used by NIXL. Configure transport environment variables:
 
 ```bash
-# Example UCX configuration, adjust according to your enviroment
+# Example UCX configuration, adjust according to your environment
 export UCX_TLS=all  # or specify specific transports like "rc,ud,sm,^cuda_ipc" ..etc
 export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1"
 ```
@@ -146,6 +146,8 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8000 8000
 ```
 
+For multi-host DP deployment, only need to provide the host/port of the head instances.
+
 ### KV Role Options
 
 - **kv_producer**: For prefiller instances that generate KV caches
@@ -158,7 +160,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 
 ## Experimental Feature
 
-### Heterogenuous KV Layout support
+### Heterogeneous KV Layout support
 
 Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
 

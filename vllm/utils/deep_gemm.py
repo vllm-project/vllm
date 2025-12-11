@@ -325,6 +325,7 @@ DEFAULT_BLOCK_SIZE = [128, 128]
 def per_block_cast_to_fp8(
     x: torch.Tensor, block_size: list[int] = DEFAULT_BLOCK_SIZE, use_ue8m0: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    fp8_dtype = current_platform.fp8_dtype()
     assert x.dim() == 2
     m, n = x.shape
     block_m, block_n = block_size
@@ -334,9 +335,9 @@ def per_block_cast_to_fp8(
     x_padded[:m, :n] = x
     x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    sf = x_amax / 448.0
+    sf = x_amax / 224.0 if current_platform.is_fp8_fnuz() else x_amax / 448.0
     sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
+    x_scaled = (x_view * (1.0 / sf)).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
@@ -365,16 +366,40 @@ def should_use_deepgemm_for_fp8_linear(
 ):
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
+
+    # Verify DeepGEMM N/K dims requirements
+    # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
+    # test inside kernels/quatization/test_block_fp8.py
+    N_MULTIPLE = 64
+    K_MULTIPLE = 128
+
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight.shape[0] % 128 == 0
-        and weight.shape[1] % 128 == 0
+        and weight.shape[0] % N_MULTIPLE == 0
+        and weight.shape[1] % K_MULTIPLE == 0
+    )
+
+
+def should_use_deepgemm_for_fp8_linear_for_nk(
+    output_dtype: torch.dtype,
+    shape0: int,
+    shape1: int,
+    supports_deep_gemm: bool | None = None,
+):
+    if supports_deep_gemm is None:
+        supports_deep_gemm = is_deep_gemm_supported()
+    return (
+        supports_deep_gemm
+        and output_dtype == torch.bfloat16
+        and shape0 % 128 == 0
+        and shape1 % 128 == 0
     )
 
 
 __all__ = [
     "calc_diff",
+    "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
@@ -386,6 +411,7 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
+    "should_use_deepgemm_for_fp8_linear_for_nk",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
 ]
