@@ -1556,6 +1556,14 @@ class FusedMoE(CustomOp):
                     f"EPLB is not supported for {self.quant_method.method_name}."
                 )
 
+        def valid_grouping() -> bool:
+            # Check if num_experts is greater than num_expert_group
+            # and is divisible by num_expert_group
+            num_experts = router_logits.shape[-1]
+            if num_experts <= self.num_expert_group:
+                return False
+            return num_experts % self.num_expert_group == 0
+
         indices_type = self.quant_method.topk_indices_dtype
 
         # Check if we should use a routing simulation strategy
@@ -1570,7 +1578,7 @@ class FusedMoE(CustomOp):
             )
 
         # DeepSeekv2 uses grouped_top_k
-        elif self.use_grouped_topk:
+        elif self.use_grouped_topk and valid_grouping():
             assert self.topk_group is not None
             assert self.num_expert_group is not None
             if rocm_aiter_ops.is_fused_moe_enabled():
