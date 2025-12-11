@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Literal, get_args, overload
+from typing import Literal, Optional, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -216,9 +216,10 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 def maybe_roundup_hidden_size(
     hidden_size: int,
     act_dtype: torch.dtype,
-    quant_config: QuantizationConfig | None,
-    quant_method: FusedMoEMethodBase,
     moe_parallel_config: FusedMoEParallelConfig,
+    model_type: str,
+    is_mxfp4_quant: bool,
+    emulate_quant: bool,
     is_lora_enabled: bool,
 ) -> tuple[int, bool]:
     """
@@ -247,9 +248,7 @@ def maybe_roundup_hidden_size(
     )
 
     # we are padding globally so EP buffer allocation works
-    if quant_config and (
-        quant_config.get_name() == "mxfp4" or \
-        (quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.input_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2)):
+    if model_type == "gpt_oss" and is_mxfp4_quant and not emulate_quant:
         from vllm.model_executor.layers.quantization.mxfp4 import (
             Mxfp4Backend,
             get_mxfp4_backend,
@@ -267,7 +266,6 @@ def maybe_roundup_hidden_size(
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             hidden_size = round_up(hidden_size, 256)
-
         return hidden_size, True
 
     return hidden_size, False
@@ -558,15 +556,20 @@ class FusedMoE(CustomOp):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
+        self.model_type = getattr(self.vllm_config.model_config.hf_config, "model_type", None)
+        self.is_mxfp4_quant, self.emulate_quant = self._is_mxfp4_and_emulate_quant(quant_config, self.quant_method)
+
         # Round up hidden size if needed.
         hidden_size, is_rounded_hidden_size = maybe_roundup_hidden_size(
             hidden_size,
             moe_in_dtype,
-            quant_config,
-            self.quant_method,
             self.moe_parallel_config,
+            self.model_type,
+            self.is_mxfp4_quant,
+            self.emulate_quant,
             is_lora_enabled=self.vllm_config.lora_config is not None,
         )
+        print(f"is_rounded_hidden_size is {is_rounded_hidden_size}")
 
         if is_rounded_hidden_size:
             self.hidden_size = hidden_size
@@ -744,12 +747,21 @@ class FusedMoE(CustomOp):
                     dp_size=get_dp_group().world_size,
                 )
 
+    def _is_mxfp4_and_emulate_quant(self, quant_config: Optional[QuantizationConfig], quant_method: FusedMoEMethodBase) -> bool:
+        if quant_config:
+            if quant_config.get_name() == "mxfp4":
+                return True, False
+            elif quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.input_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2:
+                return True, quant_method.emulate
+        return False, False
+    
     def _load_per_tensor_weight_scale(
         self,
         shard_id: str,
         param: torch.nn.Parameter,
         loaded_weight: torch.Tensor,
         expert_id: int,
+        combined_w13: bool,
     ):
         param_data = param.data
         # for per tensor weight quantization
@@ -757,7 +769,11 @@ class FusedMoE(CustomOp):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            param_data[expert_id][idx] = loaded_weight
+            if combined_w13:
+                param_data[expert_id][0] = loaded_weight
+                param_data[expert_id][1] = loaded_weight
+            else:
+                param_data[expert_id][idx] = loaded_weight
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
@@ -963,17 +979,55 @@ class FusedMoE(CustomOp):
         shard_id: str,
         expert_id: int,
         return_success: bool = False,
+        quark_loading: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+        if self.quant_config:
+            if self.quant_config.get_name() == "mxfp4":
+                # (FIXME) for gpt-oss all experts are combined
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            elif self.quant_config.get_name() == "quark" and quark_loading:
+                print(f"loading {weight_name} via Quark")
+                # from vllm.debug import ForkedPdb; ForkedPdb().set_trace()
+                # TODO (Xuebin): this code snippet is only for gpt-oss
+                expert_data = param.data[expert_id]
+                if "input_scale" in weight_name:
+                    assert loaded_weight.numel() == 1
+                    expert_data.data.copy_(loaded_weight)
+                    return True if return_success else None
+
+                shard_dim = 0 if shard_id in (
+                    "w1", "w3") or "bias" in weight_name else 1
+                if shard_id == "w2":
+                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
+                    loaded_weight = loaded_weight.narrow(
+                        shard_dim, shard_size * self.tp_rank, shard_size)
+                    if "bias" in weight_name:
+                        dim1 = loaded_weight.shape[0]
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                elif shard_id is None:
+                    if "bias" in weight_name:
+                        try:
+                            dim1 = loaded_weight.shape[0]
+                            expert_data.data[:dim1].copy_(loaded_weight)
+                        except:
+                            print(f"exception happens at {weight_name}, dim1: {dim1}, data shape: {expert_data.data.shape}")
+                            raise
+                    else:
+                        dim1 = loaded_weight.shape[0]
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
@@ -1082,6 +1136,7 @@ class FusedMoE(CustomOp):
                 loaded_weight=loaded_weight,
                 expert_id=global_expert_id if use_global_sf else expert_id,
             )
+            print(f"self._load_single_value for {weight_name}")
             return True if return_success else None
 
         # Case g_idx
@@ -1169,6 +1224,7 @@ class FusedMoE(CustomOp):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
+                print(f"self._load_model_weight_or_group_weight_scale for {weight_name}")
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1178,11 +1234,13 @@ class FusedMoE(CustomOp):
                     load_full_w2=getattr(param, "load_full_w2", False),
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
+                print(f"self._load_per_tensor_weight_scale for {weight_name}")
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
                     loaded_weight=loaded_weight,
                     expert_id=expert_id,
+                    combined_w13=True
                 )
             else:
                 WEIGHT_SCALE_SUPPORTED = [e.value for e in FusedMoeWeightScaleSupported]
