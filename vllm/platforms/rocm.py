@@ -202,7 +202,7 @@ class RocmPlatform(Platform):
 
         aiter_backend = _get_aiter_backend()
         if aiter_backend is not None and envs.VLLM_ROCM_USE_AITER:
-            logger.info("Using AITER Flash Attention backend for ViT model.")
+            logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return aiter_backend
 
         if (
@@ -210,10 +210,10 @@ class RocmPlatform(Platform):
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
-            logger.info("Using Flash Attention backend for ViT model.")
+            logger.info_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        logger.info("Using Torch SDPA backend for ViT model.")
+        logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod

@@ -6,8 +6,6 @@ from typing import Any
 import pytest
 from transformers import SiglipModel
 
-from vllm.platforms import current_platform
-
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_embeddings_close
 
@@ -87,9 +85,7 @@ def _run_test(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize(
-    "dtype", ["float"] if not current_platform.is_rocm() else ["float16"]
-)
+@pytest.mark.parametrize("dtype", ["float"])
 def test_models_text(
     hf_runner,
     vllm_runner,
@@ -116,9 +112,7 @@ def test_models_text(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize(
-    "dtype", ["float"] if not current_platform.is_rocm() else ["float16"]
-)
+@pytest.mark.parametrize("dtype", ["float"])
 def test_models_image(
     hf_runner,
     vllm_runner,
@@ -143,9 +137,7 @@ def test_models_image(
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize(
-    "dtype", ["float"] if not current_platform.is_rocm() else ["float16"]
-)
+@pytest.mark.parametrize("dtype", ["float"])
 def test_models_text_image_no_crash(
     vllm_runner,
     image_assets,
