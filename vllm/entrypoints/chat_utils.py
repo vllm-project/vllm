@@ -764,7 +764,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
         if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
             raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
-        mm_inputs: MultiModalDataDict = {}
+        mm_inputs = {}
         if "image_embeds" in items_by_modality:
             mm_inputs["image"] = _get_embeds_data(items_by_modality, "image")
         if "image" in items_by_modality:
@@ -800,7 +800,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
         if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
             raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
-        mm_inputs: MultiModalDataDict = {}
+        mm_inputs = {}
         if "image_embeds" in items_by_modality:
             mm_inputs["image"] = _get_embeds_data(items_by_modality, "image")
         if "image" in items_by_modality:
