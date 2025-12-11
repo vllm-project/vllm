@@ -784,10 +784,10 @@ class StreamingHarmonyContext(HarmonyContext):
         # (finished=True), then the next token processed will mark the
         # beginning of a new message
         self.first_tok_of_message = output.finished
-        last_delta_text = ''
+        last_delta_text = ""
         for tok in output.outputs[0].token_ids:
             self.parser.process(tok)
-            last_delta_text += self.parser.last_content_delta or ''
+            last_delta_text += self.parser.last_content_delta or ""
         if last_delta_text:
             self.last_delta = last_delta_text
         self._update_decode_token_usage(output)
