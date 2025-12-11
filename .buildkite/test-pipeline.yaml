@@ -1033,7 +1033,27 @@ steps:
     # Run all e2e fusion tests
     - pytest -v -s tests/compile/distributed/test_fusions_e2e.py
 
-- label: Hopper Fusion E2E Tests # 1h+ min
+- label: Hopper Fusion E2E Tests (H100) # ?min
+  timeout_in_minutes: 70
+  working_dir: "/vllm-workspace/"
+  gpu: h100
+  optional: true
+  num_gpus: 2
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/
+  # can affect pattern matching
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/test_fusion_attn.py
+  commands:
+    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    - pytest -v -s tests/compile/test_fusion_attn.py
+
+- label: Hopper Fusion Distributed E2E Tests (2xH100)  # ?min
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/"
   gpu: h100
