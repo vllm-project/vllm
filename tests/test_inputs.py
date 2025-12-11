@@ -33,16 +33,6 @@ INPUTS_SLICES = [
     slice(None, None, -2),
 ]
 
-# List of lists that prompt[0] passes test case#4, but no TypeError will be raised.
-@pytest.mark.parametrize(
-    "invalid_input",
-    [
-        [[1, 2], ["foo", "bar"]] 
-    ]
-)
-def test_invalid_input_raise_type_error(invalid_input):
-    with pytest.raises(TypeError):
-        parse_raw_prompts(invalid_input)
 
 # Test that a nested mixed-type list of lists raises a TypeError.
 @pytest.mark.parametrize("invalid_input", [[[1, 2], ["foo", "bar"]]])
