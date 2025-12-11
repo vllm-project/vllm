@@ -1940,13 +1940,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_missing_prompt_updates=mm_missing_prompt_updates,
             )
 
-            mm_info = MultiModalProcessingInfo(
-                kwargs=mm_kwargs,
-                hashes=mm_hashes,
-                prompt_updates=mm_prompt_updates,
-            )
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
 
-            return prompt_ids, mm_info, is_update_applied
+        return prompt_ids, mm_info, is_update_applied
 
     def _apply_token_matches(
         self,

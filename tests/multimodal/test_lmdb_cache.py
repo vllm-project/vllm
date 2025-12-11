@@ -6,7 +6,6 @@ import os
 import signal
 import tempfile
 import time
-from unittest import mock
 
 import numpy as np
 import pytest
@@ -21,9 +20,10 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalSharedField,
 )
-from vllm.multimodal.lmdb_cache import LmdbMultiModalCache
+from vllm.multimodal.lmdb_cache import LmdbMultiModalCache, ensure_lmdb_env
 from vllm.multimodal.processing import PromptInsertion
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.utils.system_utils import get_mp_context
 
 
 def _dummy_elem(
@@ -66,6 +66,23 @@ def lmdb_cache():
             min_eviction_age=-1,
             max_object_size=10 * MiB_bytes,
         )
+
+
+def test_ensure_lmdb_env():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env_1 = ensure_lmdb_env(tmpdir)
+        env_2 = ensure_lmdb_env(tmpdir)
+
+        assert env_1 is env_2
+
+        def _child():
+            env_3 = ensure_lmdb_env(tmpdir)
+            assert env_3 is not env_1
+
+        p = multiprocessing.get_context("fork").Process(target=_child)
+        p.start()
+        p.join()
+        assert p.exitcode == 0
 
 
 def test_lmdb_insert_get_evict(lmdb_cache: LmdbMultiModalCache):
@@ -205,10 +222,8 @@ def test_lmdb_concurrent_inserts(lmdb_cache: LmdbMultiModalCache):
     assert evicted_items == 0
 
 
-# On macOS, set_process_title crashes in a forked subprocess.
-@mock.patch("vllm.envs.VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 def test_lmdb_evictor_process(lmdb_cache: LmdbMultiModalCache):
-    event = multiprocessing.Event()
+    event = get_mp_context().Event()
 
     MM_HASH = "fake_hash"
     ITEM_CHUNKS = 150.5
