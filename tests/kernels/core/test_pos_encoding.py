@@ -151,6 +151,8 @@ def test_rope_module_cache():
             rope_parameters,
             dtype,
         ) = setting
+        if rotary_dim is None:
+            rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
         rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
@@ -176,6 +178,8 @@ def test_rope_module_cache():
             rope_parameters,
             dtype,
         ) = setting
+        if rotary_dim is None:
+            rotary_dim = head_size
         rope_parameters["rope_theta"] = rope_theta
         rope_parameters["partial_rotary_factor"] = rotary_dim / head_size
         rope = get_rope(
