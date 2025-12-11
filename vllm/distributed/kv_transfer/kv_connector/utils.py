@@ -224,7 +224,12 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.cross_layers or self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+        return not (
+            self.cross_layers
+            or self.is_mla
+            or self._use_pallas
+            or self.is_kv_layout_blocks_first
+        )
 
     @property
     def tp_size(self) -> int:
