@@ -1602,8 +1602,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
+        # Hidden_states in select_experts is only used to extract metadata
+        if isinstance(x, tuple):
+            x_routing, _ = x
+        else:
+            x_routing = x
         topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
+            hidden_states=x_routing,
             router_logits=router_logits,
         )
 
