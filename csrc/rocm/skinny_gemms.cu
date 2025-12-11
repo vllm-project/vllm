@@ -1466,15 +1466,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (m + (threadIdx.x % 16) < M)
       if (doRdc)
         if (k_str == 0) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                       (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr_ = mindx + M * nindx_ / 4;
+          __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
           for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
-              const int adr = m + (threadIdx.x % 16) +
-                              (j + (threadIdx.x / 16) * 4) * M +
-                              nt * NTILE * M +
-                              (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              int adr = mindx + M * nindx;
               __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
-                                 __HIP_MEMORY_SCOPE_AGENT);
-              __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED,
                                  __HIP_MEMORY_SCOPE_AGENT);
             }
           }
@@ -1503,16 +1506,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (m + (threadIdx.x % 16) < M)
         if (doRdc)
           if (k_str == 0) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr_ = mindx + M * nindx_ / 4;
+            __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                               __HIP_MEMORY_SCOPE_AGENT);
             for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
               for (uint32_t j = 0; j < 4; j++) {
-                const int adr = m + (threadIdx.x % 16) +
-                                (j + (threadIdx.x / 16) * 4) * M +
-                                nt * NTILE * M +
-                                (N / GrpsShrB) * M * (threadIdx.y % GrpsShrB);
-
+                int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                            (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                int adr = mindx + M * nindx;
                 __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
-                                   __HIP_MEMORY_SCOPE_AGENT);
-                __hip_atomic_store(&cntr[adr], 0, __ATOMIC_RELAXED,
                                    __HIP_MEMORY_SCOPE_AGENT);
               }
             }
@@ -1720,9 +1725,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
         int adr_ = mindx + M * nindx_;
         my_cntr = atomicAdd(&cntr[adr_], 1);
-        __builtin_amdgcn_sched_barrier(0);
         float vals[N / NTILE / GrpsShrB][4] = {};
-        __builtin_amdgcn_sched_barrier(0);
         if (my_cntr + 1 == k_rnd) {
           for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
             for (uint32_t j = 0; j < 4; j++) {
@@ -1759,12 +1762,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-        int adr_ = mindx + M * nindx_;
+        int adr_ = mindx + M * nindx_ / 4;
         // Update the complete counter
         my_cntr = atomicAdd(&cntr[adr_], 1);
-        __builtin_amdgcn_sched_barrier(0);
         float vals[N / NTILE / GrpsShrB][4] = {};
-        __builtin_amdgcn_sched_barrier(0);
         // If we're the last k-shard, read back the value and convert...
         if (my_cntr + 1 == k_rnd) {
           for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
@@ -1839,7 +1840,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
 
   auto axl_glbl = torch::empty(
-      {N_in, M_in * 2},
+      {N_in + (N_in + 1) / 2, M_in + (M_in + 1) / 2},
       torch::TensorOptions().dtype(torch::kFloat32).device(in_b.device()));
   axl_glbl.zero_();  // disable for FAST_UNSAFE_RDC_INIT
 
