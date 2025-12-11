@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Final, cast
 
 import jinja2
 import partial_json_parser
@@ -18,6 +18,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    apply_hf_chat_template,
     get_history_tool_calls_cnt,
     make_tool_call_id,
 )
@@ -250,7 +251,11 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 # For GPT-OSS.
-                conversation, engine_prompts = self._make_request_with_harmony(request)
+                (
+                    conversation,
+                    request_prompts,
+                    engine_prompts,
+                ) = self._make_request_with_harmony(request, tokenizer)
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -1783,6 +1788,7 @@ class OpenAIServingChat(OpenAIServing):
     def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,
+        tokenizer: TokenizerLike,
     ):
         messages: list[OpenAIMessage] = []
 
@@ -1813,6 +1819,72 @@ class OpenAIServingChat(OpenAIServing):
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
+
+        # If a chat template is provided, allow rendering through it even in
+        # Harmony mode, then tokenize. On failure, fall back to Harmony render.
+        if self.chat_template:
+            try:
+                conversation: list[ConversationMessage] = []
+                for msg in request.messages:
+                    model_dump_fn = getattr(msg, "model_dump", None)
+                    if callable(model_dump_fn):
+                        conversation.append(model_dump_fn(exclude_none=True))
+                    elif isinstance(msg, dict):
+                        conversation.append(msg)  # type: ignore[arg-type]
+                    else:
+                        conversation.append(cast(ConversationMessage, msg))
+
+                tools = None
+                if request.tools:
+                    tools = [tool.model_dump() for tool in request.tools]
+
+                prompt_text = apply_hf_chat_template(
+                    tokenizer=getattr(tokenizer, "hf_tokenizer", tokenizer),
+                    conversation=conversation,
+                    chat_template=self.chat_template,
+                    tools=tools,
+                    model_config=self.model_config,
+                )
+                tokenized = tokenizer(prompt_text, add_special_tokens=False)
+                rendered_ids = (
+                    tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized
+                )
+                normalized_ids: list[int] | None = None
+                if isinstance(rendered_ids, list):
+                    if rendered_ids and all(isinstance(t, int) for t in rendered_ids):
+                        normalized_ids = rendered_ids
+                    elif rendered_ids and isinstance(rendered_ids[0], list):
+                        candidate = rendered_ids[0]
+                        if all(isinstance(t, int) for t in candidate):
+                            normalized_ids = candidate
+                elif hasattr(rendered_ids, "tolist"):
+                    flat = rendered_ids.tolist()
+                    if flat and isinstance(flat[0], list):
+                        flat = flat[0]
+                    if flat and all(isinstance(t, int) for t in flat):
+                        normalized_ids = flat
+
+                if normalized_ids is None and hasattr(tokenizer, "encode"):
+                    try:
+                        normalized_ids = tokenizer.encode(
+                            prompt_text, add_special_tokens=False
+                        )
+                    except Exception:
+                        normalized_ids = None
+
+                if normalized_ids is not None:
+                    prompt_token_ids = normalized_ids
+                else:
+                    logger.warning(
+                        "Harmony chat template returned non-int tokens; "
+                        "falling back to Harmony default"
+                    )
+            except Exception:
+                logger.warning(
+                    "Harmony chat template rendering failed; using Harmony default",
+                    exc_info=True,
+                )
+
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request

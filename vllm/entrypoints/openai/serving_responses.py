@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Final
+from typing import Final, cast
 
 import jinja2
 from fastapi import Request
@@ -57,6 +57,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    ConversationMessage,
+    apply_hf_chat_template,
 )
 from vllm.entrypoints.context import (
     ConversationContext,
@@ -352,8 +354,8 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer()
 
             if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
-                    request, prev_response
+                messages, request_prompts, engine_prompts = (
+                    self._make_request_with_harmony(request, prev_response, tokenizer)
                 )
             else:
                 messages, engine_prompts = await self._make_request(
@@ -577,6 +579,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        tokenizer: TokenizerLike,
     ):
         if request.tool_choice != "auto":
             raise NotImplementedError(
@@ -584,6 +587,79 @@ class OpenAIServingResponses(OpenAIServing):
             )
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
+
+        # If a chat template is provided, allow rendering through it even in
+        # Harmony mode, then tokenize. On failure, fall back to Harmony render.
+        if self.chat_template:
+            try:
+                conversation: list[ConversationMessage] = []
+                if request.instructions:
+                    conversation.append(
+                        {"role": "system", "content": request.instructions}
+                    )
+
+                if isinstance(request.input, str):
+                    conversation.append({"role": "user", "content": request.input})
+                elif isinstance(request.input, list):
+                    for item in request.input:
+                        if hasattr(item, "model_dump"):
+                            conversation.append(item.model_dump(exclude_none=True))
+                        elif isinstance(item, dict):
+                            conversation.append(item)  # type: ignore[arg-type]
+                        else:
+                            conversation.append(cast(ConversationMessage, item))
+
+                tools = None
+                if request.tools:
+                    tools = [tool.model_dump() for tool in request.tools]
+
+                prompt_text = apply_hf_chat_template(
+                    tokenizer=getattr(tokenizer, "hf_tokenizer", tokenizer),
+                    conversation=conversation,
+                    chat_template=self.chat_template,
+                    tools=tools,
+                    model_config=self.model_config,
+                )
+
+                tokenized = tokenizer(prompt_text, add_special_tokens=False)
+                rendered_ids = (
+                    tokenized["input_ids"] if isinstance(tokenized, dict) else tokenized
+                )
+                normalized_ids: list[int] | None = None
+                if isinstance(rendered_ids, list):
+                    if rendered_ids and all(isinstance(t, int) for t in rendered_ids):
+                        normalized_ids = rendered_ids
+                    elif rendered_ids and isinstance(rendered_ids[0], list):
+                        candidate = rendered_ids[0]
+                        if all(isinstance(t, int) for t in candidate):
+                            normalized_ids = candidate
+                elif hasattr(rendered_ids, "tolist"):
+                    flat = rendered_ids.tolist()
+                    if flat and isinstance(flat[0], list):
+                        flat = flat[0]
+                    if flat and all(isinstance(t, int) for t in flat):
+                        normalized_ids = flat
+
+                if normalized_ids is None and hasattr(tokenizer, "encode"):
+                    try:
+                        normalized_ids = tokenizer.encode(
+                            prompt_text, add_special_tokens=False
+                        )
+                    except Exception:
+                        normalized_ids = None
+
+                if normalized_ids is not None:
+                    prompt_token_ids = normalized_ids
+                else:
+                    logger.warning(
+                        "Harmony chat template returned non-int tokens; "
+                        "falling back to Harmony default"
+                    )
+            except Exception:
+                logger.warning(
+                    "Harmony chat template rendering failed; using Harmony default",
+                    exc_info=True,
+                )
         engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request
