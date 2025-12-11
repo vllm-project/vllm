@@ -329,7 +329,7 @@ class RMSNormFp8Benchmark(KernelBenchmark):
             Input shapes are (num_tokens, hidden_size).
         """
         num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-        hidden_sizes = [512, 1024, 2048, 4096, 5504, 6912, 7168, 8192, 14336, 16384]
+        hidden_sizes = [1024, 2048, 4096, 5120, 5504, 6912, 7168, 8192]
 
         shapes_bf16 = []
         shapes_fp16 = []
