@@ -139,7 +139,7 @@ Choose one node as the head node and run:
 ```bash
 vllm serve /path/to/the/model/in/the/container \
   -tp=8 -pp=2 --nnodes 2 --node-rank 0 \
-  --master-addr 172.16.98.223 --port 8000
+  --master-addr 172.16.98.223
 ```
 
 On the other worker node, run:
@@ -147,7 +147,7 @@ On the other worker node, run:
 ```bash
 vllm serve /path/to/the/model/in/the/container \
   -tp=8 -pp=2 --nnodes 2 --node-rank 1 \
-  --master-addr 172.16.98.223 --master-port 8000
+  --master-addr 172.16.98.223 --headless
 ```
 
 ## Optimizing network communication for tensor parallelism
