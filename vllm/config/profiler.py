@@ -123,12 +123,6 @@ class ProfilerConfig:
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
-        if self.profiler is not None and self.profiler not in ("torch", "cuda"):
-            raise ValueError(
-                f"Invalid profiler: {self.profiler}. "
-                "Supported profilers are 'torch' and 'cuda'."
-            )
-
         maybe_use_cuda_profiler = self._get_from_env_if_set(
             "profiler", "VLLM_TORCH_CUDA_PROFILE"
         )
