@@ -188,5 +188,5 @@ class SchedulerInterface(ABC):
     def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
         return None
 
-    def reconfigure(self, max_num_seqs: int | None, max_num_batched_tokens: int | None):
+    def reconfigure(self, max_num_seqs: int, max_num_batched_tokens: int) -> None:
         raise NotImplementedError

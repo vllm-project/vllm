@@ -215,8 +215,3 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
-
-
-class SchedulerReconfigure(msgspec.Struct, array_like=True):
-    max_num_seqs: int | None = None
-    max_num_batched_tokens: int | None = None

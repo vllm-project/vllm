@@ -48,7 +48,6 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
-    SchedulerReconfigure,
     UtilityOutput,
     UtilityResult,
 )
@@ -581,25 +580,25 @@ class EngineCore:
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
 
-    def reconfigure_scheduler(self, config: SchedulerReconfigure):
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
         vllm_config = self.vllm_config
-        org_scheduler_config = vllm_config.org_scheduler_config
-
-        max_num_seqs = config.max_num_seqs or org_scheduler_config.max_num_seqs
+        max_num_seqs = max_num_seqs or vllm_config.org_max_num_seqs
         max_num_batched_tokens = (
-            config.max_num_batched_tokens or org_scheduler_config.max_num_batched_tokens
+            max_num_batched_tokens or vllm_config.org_max_num_batched_tokens
         )
 
         # The reconfigured values can only be less than or equal to their original
         # values. Otherwise, it may lead to an OOM, or CUDA graphs are not covered.
-        if max_num_seqs > org_scheduler_config.max_num_seqs:
+        if max_num_seqs > vllm_config.org_max_num_seqs:
             return False
-        if max_num_batched_tokens > org_scheduler_config.max_num_batched_tokens:
+        if max_num_batched_tokens > vllm_config.org_max_num_batched_tokens:
             return False
 
         scheduler_config = self.vllm_config.scheduler_config
-        scheduler_config.max_num_seqs = config.max_num_seqs
-        scheduler_config.max_num_batched_tokens = config.max_num_batched_tokens
+        scheduler_config.max_num_seqs = max_num_seqs
+        scheduler_config.max_num_batched_tokens = max_num_batched_tokens
 
         self.scheduler.reconfigure(
             max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens

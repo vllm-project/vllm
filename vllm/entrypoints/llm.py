@@ -76,7 +76,7 @@ from vllm.tokenizers import MistralTokenizer, TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
-from vllm.v1.engine import EngineCoreRequest, SchedulerReconfigure
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -370,8 +370,12 @@ class LLM:
         self.input_processor.clear_mm_cache()
         self.llm_engine.reset_mm_cache()
 
-    def reconfigure_scheduler(self, config: SchedulerReconfigure):
-        return self.llm_engine.engine_core.reconfigure_scheduler(config)
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.llm_engine.engine_core.reconfigure(
+            max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens
+        )
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:

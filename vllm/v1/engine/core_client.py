@@ -36,7 +36,6 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
-    SchedulerReconfigure,
     UtilityOutput,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -179,7 +178,9 @@ class EngineCoreClient(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def reconfigure_scheduler(self, config: SchedulerReconfigure):
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
         raise NotImplementedError
 
     def collective_rpc(
@@ -343,8 +344,10 @@ class InprocClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return False
 
-    def reconfigure_scheduler(self, config: SchedulerReconfigure):
-        self.engine_core.reconfigure_scheduler(config)
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.engine_core.reconfigure(max_num_seqs, max_num_batched_tokens)
 
 
 @dataclass
@@ -811,8 +814,10 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
-    def reconfigure_scheduler(self, config: SchedulerReconfigure):
-        self.call_utility("reconfigure_scheduler", config)
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.call_utility("reconfigure", max_num_seqs, max_num_batched_tokens)
 
 
 class AsyncMPClient(MPClient):
