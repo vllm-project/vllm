@@ -111,38 +111,26 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        print(f"GOT HERE A {topk_ids.shape} {topk_weights.shape}")
         all_topk_ids, all_topk_weights = get_dp_group().all_gatherv(
             [topk_ids, topk_weights], dim=0
         )
-        print("GOT HERE B")
 
         start = self.rank_expert_offset
         end = self.rank_expert_offset + self.num_local_experts
 
         oob_idx = self.num_local_experts if self.rank_expert_offset == 0 else 0
 
-        print("GOT HERE B0")
-
         assert not (all_topk_ids == oob_idx).all()
-
-        print("GOT HERE B1")
 
         new_topk_ids = torch.where(
             (all_topk_ids >= start) & (all_topk_ids < end), all_topk_ids, oob_idx
         )
 
-        print("GOT HERE B2")
-
         new_topk_weights = torch.where(all_topk_ids != oob_idx, all_topk_weights, 0.0)
-
-        print("GOT HERE B3")
 
         mask = ~torch.all(new_topk_ids == oob_idx, dim=1)
         new_topk_ids = new_topk_ids[mask]
         new_topk_weights = new_topk_weights[mask]
-
-        print("GOT HERE C")
 
         return new_topk_ids, new_topk_weights
 
@@ -185,34 +173,22 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q_scale = None
             a1_post_scale = quant_config.a1_scale
 
-        print(f"GOT HERE 1 {a1q.shape, topk_ids.shape, topk_weights.shape}")
-
         (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
             hidden=a1q,
             scaling_factor=a1q_scale,
             topk_idx=topk_ids,
             topk_weights=topk_weights,
-            # routing_map=None,
-            # probs=None,
-            # handle=None,
-            # num_dispatched_tokens=None,
             num_of_experts=num_experts,
         )
-
-        print("GOT HERE 2")
 
         self.handle = handle
         self.expert_probs = expert_probs
         assert self.handle is not None
 
-        print("GOT HERE 2a")
-
         new_topk_ids, new_topk_weights = self._dispatch_topk_data(
             topk_ids,
             topk_weights,
         )
-
-        print("GOT HERE 2b")
 
         assert new_topk_ids.shape[0] == expert_x.shape[0], (
             f"{new_topk_ids.shape} == {expert_x.shape}"
@@ -261,15 +237,11 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
-        print("GOT HERE 3")
-
         combined_x, combined_probs = self.buffer.combine(
             hidden=fused_expert_output,
             probs=probs,
             handle=self.handle,
         )
-
-        print("GOT HERE 4")
 
         weight_and_reduce_impl.apply(
             output=output,
