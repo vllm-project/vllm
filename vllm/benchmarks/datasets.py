@@ -867,7 +867,7 @@ class RandomMultiModalDataset(RandomDataset):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 30  # frames per second
 
-        with NamedTemporaryFile(suffix=".mp4", delete_on_close=False) as temp_file:
+        with NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
             temp_path = temp_file.name
 
             # Create video writer
