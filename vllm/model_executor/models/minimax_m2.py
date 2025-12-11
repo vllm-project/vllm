@@ -200,13 +200,14 @@ class MiniMaxM2Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        final_rotary_dim = rotary_dim
         # https://github.com/vllm-project/vllm/pull/30384
         if hasattr(config, "partial_rotary_factor"):
-            rotary_dim = self.head_dim
+            final_rotary_dim = self.head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
+            rotary_dim=final_rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
