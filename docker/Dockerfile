@@ -149,7 +149,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install --python /opt/venv/bin/python3 torch --pre \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && echo "Installing other requirements..." \
-        && /opt/venv/bin/python3 use_existing_torch.py; \
+        && /opt/venv/bin/python3 use_existing_torch.py \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
