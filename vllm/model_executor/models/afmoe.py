@@ -239,16 +239,6 @@ class AfmoeAttention(nn.Module):
 
         # Only create rotary embeddings for local attention
         if self.is_local_attention:
-            # Handle Transformers v5 rope_parameters format (dict with layer types)
-            layer_type = config.layer_types[layer_idx]
-            rope_params = getattr(config, "rope_parameters", None)
-            if isinstance(rope_params, dict) and layer_type in rope_params:
-                # Transformers v5 rope config: use layer-specific rope_parameters
-                rope_parameters = rope_params[layer_type]
-            else:
-                # Transformers v4 rope config: use config.rope_parameters directly
-                rope_parameters = rope_params
-
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
