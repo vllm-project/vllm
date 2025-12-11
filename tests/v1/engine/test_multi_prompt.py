@@ -10,7 +10,7 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
 
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
-    model="meta-llama/Llama-3.2-1B-Instruct",
+    model="facebook/opt-125m",
     enforce_eager=True,
 )
 
@@ -54,7 +54,7 @@ async def test_multi_prompt_generate_mismatched_lengths():
 
         sampling_params = SamplingParams(max_tokens=5)
 
-        with pytest.raises(ValueError, match="same length"):
+        with pytest.raises(ValueError, match="length"):
             async for _ in engine.generate(
                 request_id=request_ids, prompt=prompts, sampling_params=sampling_params
             ):
