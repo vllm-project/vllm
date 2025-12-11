@@ -33,13 +33,45 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+OPEN_ENVS_LOCK = threading.Lock()
+OPEN_ENVS = dict[str, lmdb.Environment]()
+REGISTERED_FORK_HANDLER = False
+
+
+def _on_fork():
+    with OPEN_ENVS_LOCK:
+        for env in OPEN_ENVS.values():
+            env.close()
+        OPEN_ENVS.clear()
+
+
+def ensure_lmdb_env(path: str, **kwargs) -> lmdb.Environment:
+    """Opens or reuses an LMDB environment."""
+    global REGISTERED_FORK_HANDLER
+
+    with OPEN_ENVS_LOCK:
+        # A given LMDB environment can only be opened once per process,
+        # and not across forks.
+        if existing_env := OPEN_ENVS.get(path):
+            logger.debug("Reusing existing LMDB environment at %s", path)
+            return existing_env
+        else:
+            lmdb_env = lmdb.Environment(
+                path=path,
+                **kwargs,
+            )
+
+            OPEN_ENVS[path] = lmdb_env
+            if not REGISTERED_FORK_HANDLER:
+                os.register_at_fork(after_in_child=_on_fork)
+                REGISTERED_FORK_HANDLER = True
+            return lmdb_env
+
 
 class LmdbMultiModalCache:
     """LMDB-based multi-modal processor cache."""
 
     CACHES_DIR = os.path.join(envs.VLLM_CACHE_ROOT, "mm_caches")
-    OPEN_ENVS_LOCK = threading.Lock()
-    OPEN_ENVS = dict[str, lmdb.Environment]()
 
     DB_TIMESTAMPS_AND_HASHES = b"timestamps_and_hashes"
     DB_HASH_TO_TIMESTAMP = b"hash_to_timestamp"
@@ -75,34 +107,15 @@ class LmdbMultiModalCache:
         self._cache_size = cache_size
         self._min_eviction_age = min_eviction_age
         self._max_object_size = max_object_size
-
-        with self.OPEN_ENVS_LOCK:
-            # A given LMDB environment can only be opened once per process,
-            # and not across forks.
-            if existing_env := self.OPEN_ENVS.get(cache_dir):
-                logger.debug("Reusing existing LMDB environment at %s", cache_dir)
-                self.lmdb_env = existing_env
-            else:
-                # LMDB can require additional space beyond the maximum amoun of data
-                # we're storing, so allocate extra space. (Once the map size is
-                # exhausted, even eviction is liable to fail.)
-                map_size = max(
-                    self._cache_size * self.MAP_SIZE_MULTIPLIER, self.MINIMUM_MAP_SIZE
-                )
-                self.lmdb_env = lmdb.Environment(
-                    path=cache_dir,
-                    map_size=map_size,
-                    max_dbs=4,
-                    writemap=True,
-                    map_async=True,
-                )
-
-                self.OPEN_ENVS[cache_dir] = self.lmdb_env
-
-                # Ensure that the LMDB environment is closed/removed on fork.
-                os.register_at_fork(
-                    after_in_child=lambda: self.OPEN_ENVS.pop(cache_dir).close()
-                )
+        # LMDB can require additional space beyond the maximum amoun of data
+        # we're storing, so allocate extra space. (Once the map size is
+        # exhausted, even eviction is liable to fail.)
+        map_size = max(
+            self._cache_size * self.MAP_SIZE_MULTIPLIER, self.MINIMUM_MAP_SIZE
+        )
+        self.lmdb_env = ensure_lmdb_env(
+            cache_dir, map_size=map_size, max_dbs=4, writemap=True, map_async=True
+        )
 
         # Large objects are stored in chunks to fit within LMDB page size limits and
         # avoid pathological free list fragmentation.
@@ -134,10 +147,6 @@ class LmdbMultiModalCache:
         )
 
         self._serde = MsgpackSerde()
-
-    @property
-    def cache_dir(self) -> str:
-        return self._cache_dir
 
     @classmethod
     def ensure_cache_id(cls):
