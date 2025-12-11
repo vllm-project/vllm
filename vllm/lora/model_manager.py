@@ -137,6 +137,9 @@ class LoRAModelManager:
         if not self.supports_mm_lora:
             return
 
+        assert vllm_config is not None, (
+            "vllm_config should not be None when supports_mm_lora is True"
+        )
         mm_budget = MultiModalBudget(
             model_config,
             vllm_config.scheduler_config,

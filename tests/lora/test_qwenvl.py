@@ -153,7 +153,7 @@ EXPECTED_OUTPUTS_VISION_QWEN2_5_VL = [
 
 EXPECTED_OUTPUTS_VISION_QWEN3_VL = [
     "A black SUV drives past a stop sign in front of a Chinese gate.",
-    "A white tower is seen through pink flowers.",
+    "A tall white tower is seen through pink flowers.",
 ]
 
 # NOTE - beam search .text contains the whole text
