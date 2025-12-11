@@ -145,8 +145,10 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$PYTORCH_NIGHTLY" = "1" ]; then \
-        uv pip install --python /opt/venv/bin/python3 torch --pre \
+        echo "Installing torch nightly..." \
+        && uv pip install --python /opt/venv/bin/python3 torch --pre \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && echo "Installing other requirements..." \
         && /opt/venv/bin/python3 use_existing_torch.py; \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
