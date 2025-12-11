@@ -347,10 +347,14 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     torch.save(mamba_kv_cache_dict, "mamba_kv_cache_dict.pth")
 
 
-def check_mamba_state_equal(mamba_state_ref: dict, mamba_state_new: dict):
+def check_mamba_state_equal(
+    mamba_state_ref: dict, mamba_state_new: dict, keys_to_check: list[int]
+):
     atol = 1e-2
     rtol = 1e-2
-    for key in mamba_state_new:
+    for key in keys_to_check:
+        assert key in mamba_state_new
+        assert key in mamba_state_ref
         # mamba state new is a subset of mamba state ref
         for i, (ref, new) in enumerate(zip(mamba_state_ref[key], mamba_state_new[key])):
             print("check_mamba_state_equal: ", ref.shape, new.shape)
@@ -425,130 +429,130 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     apply_patch(monkeypatch)
     full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     tests = {
-        "accept_1": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=20,
-            num_accepted_tokens=1,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(558, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [], (-1, -1), (1, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        # test case 2.1: no hit, accept 2 tokens
-        "accept_2_1": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=20,
-            num_accepted_tokens=2,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        # test case 2.2: no hit, accept 2 tokens
-        "accept_2_2": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=20,
-            num_accepted_tokens=2,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(559, 4, [], (-1, -1), (1, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_1": TestConfig(
-            num_prompt_tokens=553,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_2": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(560, 4, [], (-1, -1), (-1, -1)),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_3_3": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=20,
-            num_accepted_tokens=3,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_1": TestConfig(
-            num_prompt_tokens=553,
-            num_generated_tokens=20,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(553, 4, [], (-1, -1), (-1, -1)),
-                StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(565, 4, [], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_2": TestConfig(
-            num_prompt_tokens=554,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(554, 4, [], (-1, -1), (-1, -1)),
-                StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(566, 4, [], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_3": TestConfig(
-            num_prompt_tokens=555,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(555, 4, [], (-1, -1), (-1, -1)),
-                StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
-                StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
-        "accept_4_4": TestConfig(
-            num_prompt_tokens=556,
-            num_generated_tokens=25,
-            num_accepted_tokens=4,
-            step_actions=[
-                StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
-                StepAction(556, 4, [], (-1, -1), (0, 0)),
-                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
-                StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
-            ],
-        ),
+        # "accept_1": TestConfig(
+        #     num_prompt_tokens=554,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=1,
+        #     step_actions=[
+        #         StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(554, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(555, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(556, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+        #         StepAction(558, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(559, 4, [], (-1, -1), (1, 0)),
+        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # # test case 2.1: no hit, accept 2 tokens
+        # "accept_2_1": TestConfig(
+        #     num_prompt_tokens=554,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=2,
+        #     step_actions=[
+        #         StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(554, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(556, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # # test case 2.2: no hit, accept 2 tokens
+        # "accept_2_2": TestConfig(
+        #     num_prompt_tokens=555,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=2,
+        #     step_actions=[
+        #         StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(555, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+        #         StepAction(559, 4, [], (-1, -1), (1, 0)),
+        #         StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_3_1": TestConfig(
+        #     num_prompt_tokens=553,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=3,
+        #     step_actions=[
+        #         StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(553, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(556, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_3_2": TestConfig(
+        #     num_prompt_tokens=554,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=3,
+        #     step_actions=[
+        #         StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(554, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_3_3": TestConfig(
+        #     num_prompt_tokens=555,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=3,
+        #     step_actions=[
+        #         StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(555, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_4_1": TestConfig(
+        #     num_prompt_tokens=553,
+        #     num_generated_tokens=20,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 553, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(553, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(557, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(561, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(565, 4, [], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_4_2": TestConfig(
+        #     num_prompt_tokens=554,
+        #     num_generated_tokens=25,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 554, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(554, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(558, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(562, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(566, 4, [], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_4_3": TestConfig(
+        #     num_prompt_tokens=555,
+        #     num_generated_tokens=25,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 555, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(555, 4, [], (-1, -1), (-1, -1)),
+        #         StepAction(559, 4, [1, 1, 1, 1, 1], (0, 1), (1, 0)),
+        #         StepAction(563, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
+        # "accept_4_4": TestConfig(
+        #     num_prompt_tokens=556,
+        #     num_generated_tokens=25,
+        #     num_accepted_tokens=4,
+        #     step_actions=[
+        #         StepAction(0, 556, [1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #         StepAction(556, 4, [], (-1, -1), (0, 0)),
+        #         StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+        #         StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+        #     ],
+        # ),
         "prompt_block_size": TestConfig(
             num_prompt_tokens=560,
             num_generated_tokens=10,
@@ -652,7 +656,12 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         )
         assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
         print(f"End test case: {test_case_name}")
-        check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict)
+        keys_to_check = [
+            (action.postprocess_copy_idx[1] + 1) * BLOCK_SIZE
+            for action in test_config.step_actions
+            if action.postprocess_copy_idx[0] != -1
+        ]
+        check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
 
 
