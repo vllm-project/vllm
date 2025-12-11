@@ -147,8 +147,7 @@ def test_structured_output(
 
     prompt = (
         "Give an example JSON for an employee profile that fits this "
-        "schema. Make the response as short as possible but ensure that "
-        "all requried properties of the schema are included. Schema: "
+        "schema. Make the response as short as possible. Schema: "
         f"{sample_json_schema}"
     )
     outputs = llm.generate(

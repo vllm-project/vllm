@@ -42,6 +42,14 @@ def unsupported_array_schemas():
 
 
 @pytest.fixture
+def unsupported_object_schemas():
+    return [
+        {"type": "object", "propertyNames": {"pattern": "^[a-z]+$"}},
+        {"type": "object", "patternProperties": {"^S": {"type": "string"}}},
+    ]
+
+
+@pytest.fixture
 def supported_schema():
     return {
         "type": "object",
@@ -71,10 +79,6 @@ def supported_schema():
         },
         "minProperties": 1,
         "maxProperties": 100,
-        "propertyNames": {"pattern": "^.*$"},
-        "patternProperties": {
-            "^age$": {"type": "integer"},
-        },
     }
 
 
@@ -85,6 +89,7 @@ def supported_schema():
         "unsupported_integer_schemas",
         "unsupported_number_schemas",
         "unsupported_array_schemas",
+        "unsupported_object_schemas",
     ],
 )
 def test_unsupported_json_features_by_type(schema_type, request):

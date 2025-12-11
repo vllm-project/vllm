@@ -78,10 +78,6 @@ def sample_json_schema():
         "additionalProperties": False,
         "minProperties": 1,
         "maxProperties": 10,
-        "propertyNames": {"pattern": "^.*$"},
-        "patternProperties": {
-            "^grade$": {"type": "string"},
-        },
     }
 
 
@@ -102,6 +98,9 @@ def unsupported_json_schema():
         },
         "required": ["score", "tags"],
         "additionalProperties": False,
+        "patternProperties": {
+            "^score$": {"type": "integer"},
+        },
     }
 
 
