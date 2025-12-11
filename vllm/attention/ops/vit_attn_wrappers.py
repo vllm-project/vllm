@@ -57,8 +57,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     batch_size: int,
     is_rocm_aiter: bool,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -113,8 +112,7 @@ def torch_sdpa_wrapper_fake(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
