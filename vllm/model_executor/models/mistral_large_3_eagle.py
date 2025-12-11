@@ -18,14 +18,10 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2Model,
 )
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
-from .utils import (
-    _merge_multimodal_embeddings,
-    make_empty_intermediate_tensors_factory,
-    maybe_prefix,
-)
+from .interfaces import SupportsMultiModal
+from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -116,26 +112,10 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
         )
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        inputs_embeds = super().embed_input_ids(input_ids)
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
 
-        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
-        assert is_multimodal is not None
-
-        return _merge_multimodal_embeddings(
-            inputs_embeds=inputs_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
     def forward(
         self,
