@@ -29,8 +29,27 @@ uv pip install --pre vllm==<version>+cpu --extra-index-url https://wheels.vllm.a
 
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
 
-!!! note
-    Nightly wheels are currently unsupported for this architecture. (e.g. to bisect the behavior change, performance regression).
+**Install the latest code**
+
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides working pre-built Arm CPU wheels for every commit since `v0.11.2` on <https://wheels.vllm.ai/nightly>. For native CPU wheels, this index should be used:
+
+* `https://wheels.vllm.ai/nightly/cpu/vllm`
+
+To install from nightly index, copy the link address of the `*.whl` under this index to run, for example:
+
+```bash
+uv pip install -U https://wheels.vllm.ai/c756fb678184b867ed94e5613a529198f1aee423/vllm-0.13.0rc2.dev11%2Bgc756fb678.cpu-cp38-abi3-manylinux_2_31_aarch64.whl # current nightly build (the filename will change!)
+```
+
+**Install specific revisions**
+
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), specify the full commit hash in the index:
+https://wheels.vllm.ai/${VLLM_COMMIT}/cpu/vllm .
+Then, copy the link address of the `*.whl` under this index to run:
+
+```bash
+uv pip install -U <wheel-url>
+```
 
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
