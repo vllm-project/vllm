@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
@@ -292,6 +293,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        # Ensure encoder is not compiled
+        encoder = self.model.get_encoder()
+        encoder.__class__ = ignore_torch_compile(type(encoder))
 
     def forward(
         self,
