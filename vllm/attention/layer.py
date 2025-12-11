@@ -394,7 +394,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
-            is_output_shape_given = output_shape is not None
             output_shape = output_shape if output_shape is not None else query.shape
             output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
             hidden_size = output_shape[-1]
@@ -402,7 +401,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # NOTE(woosuk): We do this outside the custom op to minimize the
             # CPU overheads from the non-CUDA-graph regions.
             query = query.view(-1, self.num_heads, self.head_size)
-            if not is_output_shape_given:
+            if output_shape is None:
                 output = output.view(-1, self.num_heads, self.head_size)
             if key is not None:
                 key = key.view(-1, self.num_kv_heads, self.head_size)
