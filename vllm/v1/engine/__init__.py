@@ -27,7 +27,7 @@ PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition", "rejected")
 
 EEP_NOTIFICATION_CALL_ID = -1
 
@@ -59,6 +59,7 @@ class FinishReason(enum.IntEnum):
     ABORT = 2
     ERROR = 3
     REPETITION = 4
+    REJECTED = 5
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -128,6 +129,7 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    REJECTED = 4
 
 
 class EngineCoreEvent(msgspec.Struct):

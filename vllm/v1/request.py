@@ -321,6 +321,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
     FINISHED_REPETITION = enum.auto()
+    FINISHED_REJECTED = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -346,4 +347,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
     RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
+    RequestStatus.FINISHED_REJECTED: FinishReason.REJECTED,
 }
