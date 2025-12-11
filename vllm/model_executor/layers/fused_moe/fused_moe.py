@@ -53,6 +53,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Sc
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -1641,7 +1642,7 @@ def fused_experts(
     if (
         allow_deep_gemm
         and quant_config.use_fp8_w8a8
-        and _valid_deep_gemm(hidden_states, w1, w2)
+        and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
     ):
         assert quant_config is not None
         assert apply_router_weight_on_input is False

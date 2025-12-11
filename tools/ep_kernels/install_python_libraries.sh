@@ -177,12 +177,12 @@ do_build \
     ""
 
 # build DeepEP
-# do_build \
-#     "https://github.com/deepseek-ai/DeepEP" \
-#     "DeepEP" \
-#     "setup.py" \
-#     "$DEEPEP_COMMIT_HASH" \
-#     "export NVSHMEM_DIR=$WORKSPACE/nvshmem; "
+do_build \
+    "https://github.com/deepseek-ai/DeepEP" \
+    "DeepEP" \
+    "setup.py" \
+    "$DEEPEP_COMMIT_HASH" \
+    "export NVSHMEM_DIR=$WORKSPACE/nvshmem; "
 
 if [ "$MODE" = "wheel" ]; then
     echo "All wheels written to $WHEEL_DIR"
