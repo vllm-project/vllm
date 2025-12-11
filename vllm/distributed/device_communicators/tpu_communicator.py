@@ -19,20 +19,6 @@ USE_RAY = parallel_config = (
 
 logger = init_logger(__name__)
 
-if not USE_TPU_INFERENCE:
-    logger.info("tpu_inference not found, using vLLM's TpuCommunicator")
-    if current_platform.is_tpu():
-        import torch_xla
-        import torch_xla.core.xla_model as xm
-        import torch_xla.runtime as xr
-        from torch_xla._internal import pjrt
-        from torch_xla.distributed.xla_multiprocessing import (
-            create_optimized_replica_groups,
-        )
-
-        if USE_RAY:
-            from vllm.v1.executor import ray_utils
-
 
 class TpuCommunicator(DeviceCommunicatorBase):
     def __init__(
