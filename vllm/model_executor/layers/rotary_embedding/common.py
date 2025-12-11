@@ -258,10 +258,7 @@ class ApplyRotaryEmb(CustomOp):
             if self.enable_fp32_compute:
                 output = output.to(origin_dtype)
         else:
-            logger.warning(
-                "flash_attn is not installed. Falling back to PyTorch "
-                "implementation for rotary embeddings."
-            )
+            # Falling back to PyTorch native implementation.
             output = self.forward_native(x, cos, sin)
 
         return output
