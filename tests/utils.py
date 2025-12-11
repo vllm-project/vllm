@@ -53,9 +53,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
-)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -1381,8 +1378,8 @@ class TestBlockFP8Layer:
     """
     Test wrapper for W8A8BlockFp8LinearOp to match TestFP8Layer interface.
 
-    This is a workaround until W8A8BlockFp8LinearOp has a similar API to
-    FP8ScaledMMLinearKernel (i.e., a kernel abstraction for blockwise quantization).
+    This is a workaround until W8A8BlockFp8LinearOp implements
+    ScaledMMLinearKernel (i.e., a kernel abstraction for blockwise quantization).
     """
 
     def __init__(
@@ -1390,20 +1387,21 @@ class TestBlockFP8Layer:
         group_shape: GroupShape,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        input_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
+        cutlass_block_fp8_supported: bool = False,
+        use_aiter_and_is_supported: bool = False,
     ):
-        self.kernel = None  # For compatibility with TestFP8Layer interface
         self.linear_op = W8A8BlockFp8LinearOp(
             weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
             act_quant_group_shape=group_shape,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-            use_aiter_and_is_supported=False,
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
+            use_aiter_and_is_supported=use_aiter_and_is_supported,
         )
         self.weight = weight
         self.weight_scale = weight_scale
         self.input_scale = input_scale
 
-    def forward(
+    def __call__(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.linear_op.apply(
