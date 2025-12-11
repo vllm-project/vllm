@@ -230,6 +230,9 @@ class KVCacheManager:
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
+            num_encoder_tokens: The number of encoder tokens to allocate for
+                cross-attention in encoder-decoder models(e.g., Whisper).
+                For decoder-only models, this should be 0.
 
         Blocks layout:
         ```
@@ -329,6 +332,14 @@ class KVCacheManager:
             request: The request to free the blocks.
         """
         self.coordinator.free(request.request_id)
+
+    def evict_blocks(self, block_ids: set[int]) -> None:
+        """evict blocks from the prefix cache by their block IDs.
+
+        Args:
+            block_ids: Set of block IDs to evict from cache.
+        """
+        self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF

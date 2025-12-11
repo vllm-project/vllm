@@ -1128,7 +1128,11 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         dtype="float16",
         max_model_len=max_model_len,
     )
-    scheduler_config = SchedulerConfig(max_num_batched_tokens=32768)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=32768,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
 
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -1163,7 +1167,10 @@ def test_get_max_concurrency_for_kv_cache_config():
         max_model_len=max_model_len,
     )
     scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=1024, enable_chunked_prefill=True
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
 
     vllm_config = VllmConfig(

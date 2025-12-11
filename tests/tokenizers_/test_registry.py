@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from pathlib import Path
 
-from vllm.tokenizers import TokenizerLike, TokenizerRegistry
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import TokenizerLike, TokenizerRegistry, get_tokenizer
 
 
 class TestTokenizer(TokenizerLike):

@@ -227,6 +227,19 @@ class Request:
         events, self.events = self.events, []
         return events
 
+    def __lt__(self, other: "Request") -> bool:
+        """
+        Compare two requests based on priority, arrival time, and request ID.
+        Used in priority scheduling.
+        """
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        if self.arrival_time != other.arrival_time:
+            return self.arrival_time < other.arrival_time
+        if self.request_id != other.request_id:
+            return self.request_id < other.request_id
+        return id(self) < id(other)
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request."""
@@ -242,6 +255,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_ERROR = enum.auto()
 
     def __str__(self):
         return self.name
@@ -264,4 +278,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
 }

@@ -31,7 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -130,10 +130,9 @@ def create_batched_mm_kwargs(
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()
-    items = [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+
     return group_mm_kwargs_by_modality(
-        items,
-        merge_by_field_config=model_cls.merge_by_field_config,
+        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
     )
 
 
