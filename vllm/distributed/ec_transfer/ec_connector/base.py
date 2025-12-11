@@ -159,6 +159,16 @@ class ECConnectorBase(ABC):
         """
         pass
 
+    def wait_for_save(self):
+        """
+        Block until all the save operations is done. This is called
+        as the forward context exits to ensure that the async saving
+        from save_kv_layer is complete before finishing the forward.
+
+        This prevents overwrites of paged KV buffer before saving done.
+        """
+        return
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:

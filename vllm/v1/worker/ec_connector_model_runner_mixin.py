@@ -37,6 +37,11 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
     @staticmethod
+    def maybe_wait_for_ec_save() -> None:
+        if has_ec_transfer():
+            get_ec_transfer().wait_for_save()
+
+    @staticmethod
     def get_finished_ec_transfers(
         scheduler_output: "SchedulerOutput",
     ) -> tuple[set[str] | None, set[str] | None]:
