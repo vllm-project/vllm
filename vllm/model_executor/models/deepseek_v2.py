@@ -156,7 +156,6 @@ class DeepseekAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -499,7 +498,6 @@ class DeepseekV2Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
@@ -1018,7 +1016,6 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
@@ -1038,7 +1035,6 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
-                rotary_dim=qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
                 is_neox_style=True,

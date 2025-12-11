@@ -176,7 +176,6 @@ class Exaone4Attention(nn.Module):
         set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
