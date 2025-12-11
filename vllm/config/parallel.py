@@ -317,11 +317,6 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        if self.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "Prefill context parallelism is not fully supported. "
-                "Please set prefill_context_parallel_size to 1."
-            )
         return self
 
     @property

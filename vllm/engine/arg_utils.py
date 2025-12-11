@@ -1865,16 +1865,6 @@ class EngineArgs:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
         default_prefix_caching = model_config.is_prefix_caching_supported
 
-        if self.prefill_context_parallel_size > 1:
-            default_chunked_prefill = False
-            default_prefix_caching = False
-            logger.warning_once(
-                "--prefill-context-parallel-size > 1 is not compatible with "
-                "chunked prefill and prefix caching now. Chunked prefill "
-                "and prefix caching have been disabled by default.",
-                scope="local",
-            )
-
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
 
