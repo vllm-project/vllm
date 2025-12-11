@@ -73,7 +73,6 @@ def capture_gpu_trace(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     trace_file = Path(output_path) / f"{clean_trace_name}_{timestamp}_trace.json"
 
-
     # Capture trace
     with torch.profiler.profile(
         activities=[
