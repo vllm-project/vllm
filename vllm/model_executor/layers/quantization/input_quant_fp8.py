@@ -40,7 +40,7 @@ class QuantFP8(CustomOp):
         """
         :param static: static or dynamic quantization
         :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            or arbitrary block size)
+            PER_CHANNEL, or arbitrary block size)
         :param num_token_padding: Pad the token dimension of output to this
             size
         :param column_major_scales: For group quantization, output scales in

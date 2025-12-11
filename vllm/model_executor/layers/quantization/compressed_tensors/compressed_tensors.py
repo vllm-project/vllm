@@ -204,11 +204,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        config["config_groups"] = {
-            k: v
-            for k, v in config["config_groups"].items()
-            if "Attention" not in v["targets"][0]
-        }
+        grps_without_attn_quant = {}
+        for k, v in config["config_groups"].items():
+            # e.g. LlamaAttention, Qwen3Attention, etc.
+            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                logger.warning(
+                    "Skipping CompressedTensors config group for %s. Attention quant "
+                    "is coupled with KV-cache quantization in vLLM.",
+                    v["targets"][0],
+                )
+                continue
+            grps_without_attn_quant[k] = v
+        config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
@@ -1002,15 +1009,19 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         Initialize placeholder scales and zero points to enable loading of
         quantized params from compressed-tensors checkpoints.
         """
-        assert hasattr(self.quant_config, "kv_cache_scheme"), (
-            "This is to satisfy mypy. We will be able to remove it with the next"
-            " release of compressed-tensors."
-        )
-        strategy = self.quant_config.kv_cache_scheme.get("strategy")
+        if (
+            hasattr(self.quant_config, "kv_cache_scheme")
+            and self.quant_config.kv_cache_scheme is not None
+        ):
+            strategy = self.quant_config.kv_cache_scheme["strategy"]
+        else:
+            strategy = None
 
         shape_kv: tuple[int, ...]
         shape_q: tuple[int, ...]
-        if strategy == "tensor":
+        if strategy == "tensor" or strategy is None:
+            # for compliance with existing vllm codebase, we initialize scales to 1.0
+            # even when there is no quantization (i.e. strategy is None)
             shape_kv = (1,)
             shape_q = (1,)
         else:  # strategy == "attn_head"
@@ -1027,13 +1038,13 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             shape_q = (int(layer.num_heads), 1, 1)
 
         layer.k_scale = torch.nn.Parameter(
-            torch.empty(shape_kv, requires_grad=False, dtype=torch.float32)
+            torch.ones(shape_kv, requires_grad=False, dtype=torch.float32)
         )
         layer.v_scale = torch.nn.Parameter(
-            torch.empty(shape_kv, requires_grad=False, dtype=torch.float32)
+            torch.ones(shape_kv, requires_grad=False, dtype=torch.float32)
         )
         layer.q_scale = torch.nn.Parameter(
-            torch.empty(shape_q, requires_grad=False, dtype=torch.float32)
+            torch.ones(shape_q, requires_grad=False, dtype=torch.float32)
         )
 
         # Zero points are not used in vLLM as currently only symmetric quantization is
