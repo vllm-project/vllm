@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -20,6 +20,7 @@ from vllm.beam_search import (
 from vllm.config import (
     CompilationConfig,
     PoolerConfig,
+    ProfilerConfig,
     StructuredOutputsConfig,
     is_init_field,
 )
@@ -72,7 +73,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.tokenizers.hf import get_cached_tokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -211,6 +211,7 @@ class LLM:
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
+        profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -282,6 +283,20 @@ class LLM:
         else:
             structured_outputs_instance = StructuredOutputsConfig()
 
+        if profiler_config is not None:
+            if isinstance(profiler_config, dict):
+                profiler_config_instance = ProfilerConfig(
+                    **{
+                        k: v
+                        for k, v in profiler_config.items()
+                        if is_init_field(ProfilerConfig, k)
+                    }
+                )
+            else:
+                profiler_config_instance = profiler_config
+        else:
+            profiler_config_instance = ProfilerConfig()
+
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
@@ -324,6 +339,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
+            profiler_config=profiler_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -349,16 +365,6 @@ class LLM:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
-
-    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
-        if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer = tokenizer
-        else:
-            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
