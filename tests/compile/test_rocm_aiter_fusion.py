@@ -15,13 +15,19 @@ from vllm.compilation.fusion import (
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.rocm_aiter_rmsnorm_fusion import (
-    FusedAddRMSNormAiterDynamicQuantPattern,
-    RMSNormAiterDynamicQuantPattern,
-    RMSNormAiterQuantFusionPass,
+from vllm.compilation.rocm_aiter_fusion import (
+    AiterFusedAddRMSFp8GroupQuantPattern,
+    AiterFusedAddRMSNormDynamicQuantPattern,
+    AiterRMSFp8GroupQuantPattern,
+    AiterRMSNormDynamicQuantPattern,
+    AiterRMSNormQuantPattern,
+    RocmAiterRMSNormFusionPass,
 )
-from vllm.config import CompilationConfig, CompilationLevel, PassConfig, VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    W8A8BlockFp8LinearOp,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -43,6 +49,7 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
+        is_block_linear: bool = False,
         *args,
         **kwargs,
     ):
@@ -50,54 +57,76 @@ class TestModel(torch.nn.Module):
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
         group_shape = GroupShape.PER_TOKEN
         # AITER RMSNorm fusion pass does not support static quantization at the moment.
-        self.wscale = [
-            torch.rand(size=(hidden_size, 1), dtype=torch.float32) for _ in range(2)
-        ]
         quant_scale = ScaleDesc(torch.float32, static=False, group_shape=group_shape)
         self.key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
 
-        self.scale = [None for _ in range(2)]
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
         ]
+        self.scale = [None for _ in range(2)]
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False,
-            act_quant_group_shape=group_shape,
-        )
+        self.is_block_linear = is_block_linear
+
+        if is_block_linear:
+            scale_hidden_size = (hidden_size + 128 - 1) // 128
+            self.wscale = [
+                torch.rand(
+                    size=(scale_hidden_size, scale_hidden_size), dtype=torch.float32
+                )
+                for _ in range(2)
+            ]
+            self.linear = W8A8BlockFp8LinearOp(
+                weight_group_shape=GroupShape(128, 128),
+                act_quant_group_shape=GroupShape(1, 128),
+                cutlass_block_fp8_supported=False,
+                use_aiter_and_is_supported=True,
+            )
+        else:
+            self.wscale = [
+                torch.rand(size=(hidden_size, 1), dtype=torch.float32) for _ in range(2)
+            ]
+            self.linear = Fp8LinearOp(
+                act_quant_static=False,
+                act_quant_group_shape=group_shape,
+            )
 
     def forward(self, x):
         resid = torch.sqrt(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear.apply(
-            y, self.w[0], self.wscale[0], input_scale=self.scale[0]
-        )
+        x2 = self.linear.apply(y, self.w[0], self.wscale[0], input_scale=self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(
-            y2, self.w[1], self.wscale[1], input_scale=self.scale[1]
-        )
+        x3 = self.linear.apply(y2, self.w[1], self.wscale[1], input_scale=self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
     def ops_in_model_before(self) -> Sequence[OpOverload]:
-        return [(QUANT_OPS[self.key])]
+        if self.is_block_linear:
+            return [RocmAiterRMSNormFusionPass.AITER_GROUP_FP8_QUANT_OP]
+        return [QUANT_OPS[self.key]]
 
     def ops_in_model_after(self) -> Sequence[OpOverload]:
+        if self.is_block_linear:
+            return [
+                AiterFusedAddRMSFp8GroupQuantPattern.RMS_ADD_GROUP_QUANT_OP,
+                AiterRMSFp8GroupQuantPattern.RMS_GROUP_QUANT_OP,
+            ]
+
         ROCM_AITER_FUSED_OPS = (
-            FusedAddRMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
-            | RMSNormAiterDynamicQuantPattern.ROCM_AITER_FUSED_OPS
+            AiterFusedAddRMSNormDynamicQuantPattern.FUSED_OPS
+            | AiterRMSNormDynamicQuantPattern.FUSED_OPS
         )
+
         return [
-            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, False)]),
-            (ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)]),
+            ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, False)],
+            ROCM_AITER_FUSED_OPS[FusedRMSQuantKey(self.key, True)],
         ]
 
     def ops_in_model(self):
-        return [torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default]
+        return [AiterRMSNormQuantPattern.RMS_ADD_OP]
 
     def ops_not_in_model(self):
         return []
@@ -107,12 +136,14 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("enable_block_linear", [True, False])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Only test on ROCm")
 def test_fusion_rmsnorm_quant(
     dtype: torch.dtype,
     hidden_size: int,
     num_tokens: int,
     eps: float,
+    enable_block_linear: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -122,7 +153,7 @@ def test_fusion_rmsnorm_quant(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            compilation_config=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm", "+quant_fp8"],
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         )
@@ -133,12 +164,12 @@ def test_fusion_rmsnorm_quant(
 
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
-        fusion_pass = RMSNormAiterQuantFusionPass(vllm_config)
+        fusion_pass = RocmAiterRMSNormFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
 
-        model = TestModel(hidden_size, eps)
+        model = TestModel(hidden_size, eps, is_block_linear=enable_block_linear)
 
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
@@ -181,7 +212,6 @@ def test_fix_functionalization(
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
             custom_ops=["+rms_norm", "+quant_fp8"],
             pass_config=PassConfig(enable_fusion=True, enable_noop=True),
         )
@@ -192,7 +222,7 @@ def test_fix_functionalization(
 
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
-        fusion_pass = RMSNormAiterQuantFusionPass(vllm_config)
+        fusion_pass = RocmAiterRMSNormFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         passes = [noop_pass, fusion_pass, cleanup_pass]

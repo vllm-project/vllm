@@ -34,6 +34,20 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 logger = init_logger(__name__)
 
 
+AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+AITER_RMS_ADD_GROUP_QUANT_OP = (
+    torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+)
+
+AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
+AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+
+AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
+TRITON_GROUP_FP8_QUANT_OP = torch.ops.vllm.triton_per_token_group_quant_fp8.default
+
+FUSED_SILU_MUL_QUANT_OP = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+
 class RMSNormAiterQuantPattern(RMSNormQuantPattern):
     def __init__(self, epsilon, key):
         self.epsilon = epsilon

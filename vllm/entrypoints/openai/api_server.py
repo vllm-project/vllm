@@ -663,14 +663,27 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(
-        raw_request: Request, reset_running_requests: bool = Query(default=False)
+        raw_request: Request,
+        reset_running_requests: bool = Query(default=False),
+        reset_external: bool = Query(default=False),
     ):
         """
-        Reset the prefix cache. Note that we currently do not check if the
-        prefix cache is successfully reset in the API server.
+        Reset the local prefix cache.
+
+        Optionally, if the query parameter `reset_external=true`
+        also resets the external (connector-managed) prefix cache.
+
+        Note that we currently do not check if the prefix cache
+        is successfully reset in the API server.
+
+        Example:
+            POST /reset_prefix_cache?reset_external=true
         """
         logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
+
+        await engine_client(raw_request).reset_prefix_cache(
+            reset_running_requests, reset_external
+        )
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")
