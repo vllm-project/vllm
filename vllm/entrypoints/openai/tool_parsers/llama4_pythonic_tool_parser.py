@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
@@ -31,7 +30,6 @@ class _UnexpectedAstError(Exception):
     pass
 
 
-@ToolParserManager.register_module("llama4_pythonic")
 class Llama4PythonicToolParser(ToolParser):
     """
     Toolcall parser for Llama4 that produce tool calls in a pythonic style

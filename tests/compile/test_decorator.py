@@ -84,7 +84,6 @@ def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatc
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
@@ -219,7 +218,6 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
@@ -261,7 +259,6 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,

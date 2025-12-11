@@ -307,7 +307,7 @@ constexpr auto FLOAT = at::ScalarType::Float;
 constexpr auto INT = at::ScalarType::Int;
 constexpr auto UINT8 = at::ScalarType::Byte;
 
-void scaled_fp4_experts_quant_sm100a(
+void scaled_fp4_experts_quant_sm1xxa(
     torch::Tensor& output, torch::Tensor& output_scale,
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,

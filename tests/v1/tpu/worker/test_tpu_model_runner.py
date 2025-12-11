@@ -26,15 +26,16 @@ from vllm.v1.worker.tpu_model_runner import (
 
 
 def get_vllm_config():
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=10,
-        max_num_batched_tokens=512,
-        max_model_len=512,
-    )
     model_config = ModelConfig(
         model="facebook/opt-125m",
         dtype="bfloat16",  # TPUs typically use bfloat16
         seed=42,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     cache_config = CacheConfig(
         block_size=16,
@@ -92,8 +93,6 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
 
@@ -171,8 +170,6 @@ def test_update_states_request_finished(model_runner):
         num_common_prefix_blocks=[],
         finished_req_ids={req_id},
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
@@ -201,8 +198,6 @@ def test_update_states_request_resumed(model_runner):
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
@@ -212,10 +207,12 @@ def test_update_states_request_resumed(model_runner):
     # resume req
     cached_req_data = CachedRequestData(
         req_ids=[req_id],
-        resumed_from_preemption=[False],
+        resumed_req_ids={req_id},
         new_token_ids=[[]],
+        all_token_ids={req_id: scheduler_output.scheduled_new_reqs[0].prompt_token_ids},
         new_block_ids=[([],)],
         num_computed_tokens=[0],
+        num_output_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(
@@ -228,8 +225,6 @@ def test_update_states_request_resumed(model_runner):
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
@@ -259,8 +254,6 @@ def test_update_states_no_changes(model_runner):
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
@@ -294,8 +287,6 @@ def test_update_states_request_unscheduled(model_runner):
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_runner._update_states(scheduler_output)
