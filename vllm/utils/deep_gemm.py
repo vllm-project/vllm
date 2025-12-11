@@ -38,7 +38,7 @@ class DeepGemmQuantScaleFMT(Enum):
             return DeepGemmQuantScaleFMT.FLOAT32
         return (
             DeepGemmQuantScaleFMT.UE8M0
-            if current_platform.is_device_capability(10)
+            if current_platform.is_device_capability_family(10)
             else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
         )
 
