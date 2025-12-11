@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, Response
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.serve.dev.protocol import ReconfigureRequest
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -47,6 +48,15 @@ async def is_sleeping(raw_request: Request):
     logger.info("check whether the engine is sleeping")
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})
+
+
+@router.post("/reconfigure")
+async def reconfigure(request: ReconfigureRequest, raw_request: Request):
+    success = await engine_client(raw_request).reconfigure_async(
+        max_num_seqs=request.max_num_seqs,
+        max_num_batched_tokens=request.max_num_batched_tokens,
+    )
+    return JSONResponse(content={"success": success})
 
 
 def attach_router(app: FastAPI):

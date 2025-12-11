@@ -258,6 +258,11 @@ class EngineCoreClient(ABC):
     ) -> list[_R]:
         raise NotImplementedError
 
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        raise NotImplementedError
+
 
 class InprocClient(EngineCoreClient):
     """
@@ -1027,6 +1032,13 @@ class AsyncMPClient(MPClient):
     ) -> list[_R]:
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
+        )
+
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return await self.call_utility_async(
+            "reconfigure", max_num_seqs, max_num_batched_tokens
         )
 
 
