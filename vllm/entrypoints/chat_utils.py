@@ -651,7 +651,16 @@ def _get_embeds_data(items_by_modality: dict[str, list[Any]], modality: str):
     if is_list_of(embeds, torch.Tensor):
         return _extract_embeds(embeds)
     if is_list_of(embeds, dict):
-        return {k: _extract_embeds([item[k] for item in embeds]) for k in embeds[0]}
+        if not embeds:
+            return {}
+
+        first_keys = set(embeds[0].keys())
+        if any(set(item.keys()) != first_keys for item in embeds[1:]):
+            raise ValueError(
+                "All dictionaries in the list of embeddings must have the same keys."
+            )
+
+        return {k: _extract_embeds([item[k] for item in embeds]) for k in first_keys}
 
     return embeds
 
