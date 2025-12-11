@@ -4,8 +4,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
+from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+
+logger = init_logger(__name__)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -94,9 +97,11 @@ class KVCacheCoordinator(ABC):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                cross_attn_blocks = manager.get_num_blocks_to_allocate(
                     request_id, num_encoder_tokens, []
                 )
+                logger.info(f"[CROSS-ATTN ALLOC] Request {request_id[:32]} allocating {cross_attn_blocks} cross-attention blocks for {num_encoder_tokens} encoder tokens")
+                num_blocks_to_allocate += cross_attn_blocks
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id, num_tokens, new_computed_blocks[i]
