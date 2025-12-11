@@ -139,11 +139,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
-        and (
-            (n == 16 or n == 32 or n == 64 or n == 128)
-            and k == 2880
-            and (m == 640 or m == 128)
-        )
+        and ((n >= 16 and n <= 128) and k == 2880 and (m == 640 or m == 128))
     )
     if use_skinny_reduce_counting is True:
         cu_count = get_cu_count()
