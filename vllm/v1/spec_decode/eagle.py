@@ -178,6 +178,12 @@ class EagleProposer:
                 )
 
                 rocm_types.append(AiterFlashAttentionMetadata)
+
+            # TRITON_MLA backend support for MLA models (e.g., DeepSeek)
+            from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+
+            rocm_types.append(MLACommonMetadata)
+
             self.allowed_attn_types = tuple(rocm_types)
 
         # Parse the speculative token tree.
