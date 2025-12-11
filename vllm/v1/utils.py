@@ -145,29 +145,19 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
     If local_only is True, participants are colocated and so a unique IPC
     address will be returned.
 
-    Otherwise, returns a TCP wildcard address for late binding when port==0.
-    The actual port will be discovered after the socket is bound via
-    socket.last_endpoint.
+    Otherwise, returns a TCP address. When port==0, returns a wildcard port
+    address (e.g., "tcp://192.168.1.5:0") for late binding. The actual port
+    will be discovered after the socket is bound via socket.last_endpoint.
 
     Args:
         local_only: If True, use IPC; if False, use TCP
-        host: Host for TCP addresses (unused for wildcard binding)
-        port: Port for TCP (0 means wildcard; non-zero for explicit port)
+        host: Host for TCP addresses (preserved in wildcard binding)
+        port: Port for TCP (0 means wildcard port; non-zero for explicit port)
 
     Returns:
-        IPC path, explicit TCP address, or TCP wildcard "tcp://*:0"
+        IPC path, explicit TCP address, or TCP wildcard "tcp://<host>:0"
     """
-    if local_only:
-        return get_open_zmq_ipc_path()
-
-    if port == 0:
-        # Return wildcard for late binding.
-        # This eliminates race conditions by deferring port assignment
-        # until the socket is actually bound.
-        return "tcp://*:0"
-
-    # Explicit port requested (e.g., for handshake with configured port).
-    return get_tcp_uri(host, port)
+    return get_open_zmq_ipc_path() if local_only else get_tcp_uri(host, port)
 
 
 class APIServerProcessManager:
@@ -267,9 +257,7 @@ class APIServerProcessManager:
                     )
                 except Exception as e:
                     logger.error("Failed to get addresses from API server %d: %s", i, e)
-                    # Fall back to original addresses (may fail later)
-                    actual_in = in_addr
-                    actual_out = out_addr
+                    raise
             else:
                 # No late binding needed - use original addresses
                 actual_in = in_addr

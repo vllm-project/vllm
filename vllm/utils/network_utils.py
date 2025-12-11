@@ -255,13 +255,27 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 
 def is_wildcard_addr(addr: str) -> bool:
-    """Check if an address is a TCP wildcard address requiring late binding.
+    """Check if an address is a TCP address with wildcard port requiring late binding.
+
+    A wildcard port address has port 0, which tells the OS to assign an available
+    port. The host can be specific (e.g., "tcp://192.168.1.5:0") or wildcard
+    (e.g., "tcp://*:0").
 
     Args:
         addr: Address string to check
 
     Returns:
-        True if the address is a TCP wildcard (e.g., "tcp://*:0")
+        True if the address is a TCP address with wildcard port (:0)
+
+    Examples:
+        >>> is_wildcard_addr("tcp://*:0")
+        True
+        >>> is_wildcard_addr("tcp://192.168.1.5:0")
+        True
+        >>> is_wildcard_addr("tcp://127.0.0.1:8080")
+        False
+        >>> is_wildcard_addr("ipc:///tmp/socket")
+        False
     """
     return addr.startswith("tcp://") and ":0" in addr
 
@@ -404,13 +418,20 @@ def make_zmq_socket(
 
     if bind:
         socket.bind(path)
-        # For wildcard addresses, discover the actual bound address.
+        # For wildcard port addresses, discover the actual bound address.
         if return_address and is_wildcard_addr(path):
+            # last_endpoint is bytes like b"tcp://192.168.1.5:54321" or b"tcp://[::1]:54321"
             actual_endpoint = socket.last_endpoint.decode("utf-8")
-            # Extract port and construct proper address.
-            port_str = actual_endpoint.split(":")[-1]
-            host = get_loopback_ip()
-            actual_address = get_tcp_uri(host, int(port_str))
+
+            # Parse the endpoint to extract host and port
+            # Handle both IPv4 and IPv6 formats
+            scheme, host, port_str = split_zmq_path(actual_endpoint)
+            if scheme != "tcp":
+                # Shouldn't happen for wildcard TCP addresses, but fallback safely
+                actual_address = actual_endpoint
+            else:
+                # Preserve the host from the bound endpoint
+                actual_address = make_zmq_path(scheme, host, int(port_str))
         else:
             actual_address = path
     else:

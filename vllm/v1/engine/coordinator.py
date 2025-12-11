@@ -4,6 +4,7 @@ import copy
 import multiprocessing
 import time
 import weakref
+from contextlib import ExitStack
 from multiprocessing.connection import Connection
 
 import msgspec.msgpack
@@ -199,30 +200,35 @@ class DPCoordinatorProc:
         last_stats_wave = -1
         last_step_counts: list[list[int]] | None = None
 
-        # Bind sockets with late binding support (auto-discovers wildcard ports)
-        publish_front, actual_front = make_zmq_socket(
-            ctx=self.ctx,
-            path=front_publish_address,
-            socket_type=zmq.XPUB,
-            bind=True,
-            return_address=True,
-        )
-        output_back, actual_back_out = make_zmq_socket(
-            ctx=self.ctx,
-            path=back_output_address,
-            socket_type=zmq.PULL,
-            bind=True,
-            return_address=True,
-        )
-        publish_back, actual_back_pub = make_zmq_socket(
-            ctx=self.ctx,
-            path=back_publish_address,
-            socket_type=zmq.XPUB,
-            bind=True,
-            return_address=True,
-        )
+        with ExitStack() as sockets_to_close:
+            # Bind sockets with late binding support (auto-discovers wildcard ports).
+            publish_front, actual_front = make_zmq_socket(
+                ctx=self.ctx,
+                path=front_publish_address,
+                socket_type=zmq.XPUB,
+                bind=True,
+                return_address=True,
+            )
+            sockets_to_close.enter_context(publish_front)
 
-        with publish_front, output_back, publish_back:
+            output_back, actual_back_out = make_zmq_socket(
+                ctx=self.ctx,
+                path=back_output_address,
+                socket_type=zmq.PULL,
+                bind=True,
+                return_address=True,
+            )
+            sockets_to_close.enter_context(output_back)
+
+            publish_back, actual_back_pub = make_zmq_socket(
+                ctx=self.ctx,
+                path=back_publish_address,
+                socket_type=zmq.XPUB,
+                bind=True,
+                return_address=True,
+            )
+            sockets_to_close.enter_context(publish_back)
+
             # Report actual addresses to parent
             if address_report_pipe is not None:
                 address_report_pipe.send(
