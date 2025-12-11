@@ -1053,7 +1053,7 @@ steps:
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
     - nvidia-smi
     # Run all e2e fusion tests
-    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'"
+    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
     - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
 
 - label: Blackwell GPT-OSS Eval
