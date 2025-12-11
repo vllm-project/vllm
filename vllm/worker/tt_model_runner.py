@@ -3,6 +3,8 @@
 
 import dataclasses
 from dataclasses import dataclass
+from functools import cached_property
+from itertools import product
 from typing import Any, Callable, Dict, List, Optional, Set, Type, Union
 
 import torch
@@ -36,6 +38,7 @@ PADDING_PRESENCE_PENALTY = 0.0
 PADDING_FREQUENCY_PENALTY = 0.0
 PADDING_REPETITION_PENALTY = 1.0
 PADDING_SEED = 0
+PADDING_LOGPROBS = False
 
 SAMPLING_PARAM_KEYS = [
     "temperature",
@@ -45,6 +48,7 @@ SAMPLING_PARAM_KEYS = [
     "frequency_penalty",
     "repetition_penalty",
     "seed",
+    "logprobs",
 ]
 PENALTY_PARAM_DEFAULTS = {
     "presence_penalty": PADDING_PRESENCE_PENALTY,
@@ -86,24 +90,27 @@ def create_sampling_params(sample_on_device_mode, max_batch_size):
     sampling_configs: List[Any] = []
 
     if TTPlatform.non_greedy_decoding_on_device:
+        # We need to capture traces for all combinations of isolated parameters
+        # Leaving the model to do lazy trace capture causes hangs
+        # https://github.com/tenstorrent/vllm/issues/274
+        for penalties, log_probs in product([True, False], repeat=2):
+            presence_penalty = [1.2] * max_batch_size if penalties else None
+            frequency_penalty = [1.2] * max_batch_size if penalties else None
+            repetition_penalty = [1.5] * max_batch_size if penalties else None
+            enable_log_probs = [log_probs] * max_batch_size
 
-        # 1. Greedy sampling
-        sampling_configs.append(
-            TTSamplingParams(temperature=0.0, top_k=1, top_p=1.0))
+            sampling_configs.append(
+                TTSamplingParams(temperature=[1.0] * max_batch_size,
+                                 top_k=[10] * max_batch_size,
+                                 top_p=[0.9] * max_batch_size,
+                                 presence_penalty=presence_penalty,
+                                 frequency_penalty=frequency_penalty,
+                                 repetition_penalty=repetition_penalty,
+                                 enable_log_probs=enable_log_probs))
 
-        # 2. Non-greedy sampling (one representative example with penalties)
-        sampling_configs.append(
-            TTSamplingParams(temperature=[1.0] * max_batch_size,
-                             top_k=[10] * max_batch_size,
-                             top_p=[0.9] * max_batch_size,
-                             presence_penalty=[1.2] * max_batch_size,
-                             frequency_penalty=[1.2] * max_batch_size,
-                             repetition_penalty=[1.5] * max_batch_size))
-
-    else:
-        # Basic on-device sampling only supports greedy
-        sampling_configs.append(
-            TTSamplingParams(temperature=0.0, top_k=1, top_p=1.0))
+    # Basic on-device sampling only supports greedy
+    sampling_configs.append(
+        TTSamplingParams(temperature=0.0, top_k=1, top_p=1.0))
 
     sampling_configs.append(None)
 
@@ -179,6 +186,7 @@ class TTSamplingParams:
     frequency_penalty: Optional[Union[float, List[float]]] = 0.0
     repetition_penalty: Optional[Union[float, List[float]]] = 1.0
     seed: Optional[Union[int, List[Optional[int]]]] = 0
+    enable_log_probs: Optional[Union[bool, List[bool]]] = False
 
 
 @dataclass(frozen=True)
@@ -337,6 +345,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # SamplingMetadata.selected_token_indices logic.
         self.sampler = get_sampler()
 
+    @cached_property
+    def _num_devices(self) -> int:
+        num_devices = self.vllm_config.device_config.num_devices
+        data_parallel = 1
+        if self.model_config.override_tt_config:
+            data_parallel = self.model_config.override_tt_config.get(
+                "data_parallel", 1)
+        return num_devices // data_parallel
+
     def load_model(self) -> None:
         # Note: using custom TT loader
         # instead of selecting from default vllm loaders
@@ -376,6 +393,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
             if self.async_read_decode:
+                # queue of perm tables for each decode step
                 self.perm_table_tensor: List[torch.Tensor] = []
 
         self.prev_seq_ids_tensor = torch.ones(
@@ -437,7 +455,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         seq_lens: List[int] = []
         block_tables_list: List[List[int]] = []
         seq_groups_list: List[int] = []
-        top_pk_sampling_params: Dict[str, Any] = {}
+        sampling_params_dict: Dict[str, Any] = {}
         multi_modal_kwargs: Dict[str, Any] = {}
         if supports_multimodal(self.model) and is_prompt:
             multi_modal_kwargs = {"images": []}
@@ -445,7 +463,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         decode_prompt_tokens: List[List[int]] = []
         decode_output_tokens: List[List[int]] = []
         penalties_requested = False
-        penalties_or_seed_in_batch = False
+        params_need_compat_if_sample_host = False
 
         # create seq_groups_list before any cleanup to active batch slots
         for seq_group_metadata in seq_group_metadata_list:
@@ -476,18 +494,19 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 sampling_params = seq_group_metadata.sampling_params
                 # If any request in the batch requires compat sampling
                 # individually, enable compat sampling for the batch
-                if TTPlatform.compat_sampling_required(sampling_params):
+                if TTPlatform.compat_sampling_required(sampling_params,
+                                                       self._num_devices):
                     compat_sampling_used = True
                     break
                 for key in SAMPLING_PARAM_KEYS:
                     current_value = getattr(sampling_params, key)
                     if key in PENALTY_PARAM_DEFAULTS:
-                        penalties_or_seed_in_batch = (
-                            penalties_or_seed_in_batch
+                        params_need_compat_if_sample_host = (
+                            params_need_compat_if_sample_host
                             or current_value != PENALTY_PARAM_DEFAULTS[key])
-                    elif key == "seed":
-                        penalties_or_seed_in_batch = (
-                            penalties_or_seed_in_batch
+                    elif key in ["seed", "logprobs"]:
+                        params_need_compat_if_sample_host = (
+                            params_need_compat_if_sample_host
                             or current_value is not None)
                     if key not in param_values:
                         param_values[key] = current_value
@@ -508,7 +527,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         else:
             perform_device_sampling = False
             # Host sampling only supports uniform params and no penalties/seed
-            if not uniform_sampling or penalties_or_seed_in_batch:
+            if not uniform_sampling or params_need_compat_if_sample_host:
                 compat_sampling_used = True
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -583,7 +602,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 # that it also supports non-uniform sampling
                 for key in SAMPLING_PARAM_KEYS:
                     value = getattr(sampling_params, key)
-                    top_pk_sampling_params.setdefault(key, []).append(value)
+                    sampling_params_dict.setdefault(key, []).append(value)
 
             else:
                 # uniform sampling - all requests must have same params
@@ -591,11 +610,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     key: getattr(sampling_params, key)
                     for key in SAMPLING_PARAM_KEYS
                 }
-                if len(top_pk_sampling_params) == 0:
-                    top_pk_sampling_params.update(param_bundle)
+                if len(sampling_params_dict) == 0:
+                    sampling_params_dict.update(param_bundle)
                 else:
                     for key, value in param_bundle.items():
-                        if top_pk_sampling_params[key] != value:
+                        if sampling_params_dict[key] != value:
                             # This should never happen, we always fall back
                             # to a different sampling implementation if needed
                             raise ValueError(
@@ -650,13 +669,24 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         elif (TTPlatform.non_greedy_decoding_on_device
               and perform_device_sampling):
             sampling_metadata = None
-            temp_list = top_pk_sampling_params["temperature"]
-            top_k_list = top_pk_sampling_params["top_k"]
-            top_p_list = top_pk_sampling_params["top_p"]
-            presence_list = top_pk_sampling_params["presence_penalty"]
-            frequency_list = top_pk_sampling_params["frequency_penalty"]
-            repetition_list = top_pk_sampling_params["repetition_penalty"]
-            seed_list = top_pk_sampling_params["seed"]
+            temp_list = sampling_params_dict["temperature"]
+            top_k_list = sampling_params_dict["top_k"]
+            top_p_list = sampling_params_dict["top_p"]
+            presence_list = sampling_params_dict["presence_penalty"]
+            frequency_list = sampling_params_dict["frequency_penalty"]
+            repetition_list = sampling_params_dict["repetition_penalty"]
+            seed_list = sampling_params_dict["seed"]
+
+            # Currently supporting only logprobs=None or 1
+            # Generic logprobs support tracked here
+            # https://github.com/tenstorrent/tt-metal/issues/34080
+            for lp in sampling_params_dict["logprobs"]:
+                assert lp in [
+                    None, 0, 1, True
+                ], ("TT device sampling only supports logprobs=None or 1")
+            log_probs_list = [
+                bool(lp) for lp in sampling_params_dict["logprobs"]
+            ]
 
             # Pad sampling params to max_num_seqs in decode mode for
             # proper permutation
@@ -667,17 +697,14 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 batch_pad_len = (self.scheduler_config.max_num_seqs -
                                  len(temp_list))
                 # Pad with default values for greedy/deterministic behavior
-                temp_list = temp_list + [PADDING_TEMPERATURE] * batch_pad_len
-                top_k_list = top_k_list + [PADDING_TOP_K] * batch_pad_len
-                top_p_list = top_p_list + [PADDING_TOP_P] * batch_pad_len
-                presence_list = presence_list + [PADDING_PRESENCE_PENALTY
-                                                 ] * batch_pad_len
-                frequency_list = frequency_list + [PADDING_FREQUENCY_PENALTY
-                                                   ] * batch_pad_len
-                repetition_list = repetition_list + [
-                    PADDING_REPETITION_PENALTY
-                ] * batch_pad_len
-                seed_list = seed_list + [PADDING_SEED] * batch_pad_len
+                temp_list += [PADDING_TEMPERATURE] * batch_pad_len
+                top_k_list += [PADDING_TOP_K] * batch_pad_len
+                top_p_list += [PADDING_TOP_P] * batch_pad_len
+                presence_list += [PADDING_PRESENCE_PENALTY] * batch_pad_len
+                frequency_list += [PADDING_FREQUENCY_PENALTY] * batch_pad_len
+                repetition_list += [PADDING_REPETITION_PENALTY] * batch_pad_len
+                seed_list += [PADDING_SEED] * batch_pad_len
+                log_probs_list += [PADDING_LOGPROBS] * batch_pad_len
 
             tt_sampling_params = TTSamplingParams(
                 temperature=temp_list,
@@ -686,18 +713,19 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 presence_penalty=presence_list,
                 frequency_penalty=frequency_list,
                 repetition_penalty=repetition_list,
-                seed=seed_list)
+                seed=seed_list,
+                enable_log_probs=log_probs_list)
         else:
             sampling_metadata = None
             tt_sampling_params = TTSamplingParams(
-                temperature=top_pk_sampling_params["temperature"],
-                top_k=top_pk_sampling_params["top_k"],
-                top_p=top_pk_sampling_params["top_p"],
-                presence_penalty=top_pk_sampling_params["presence_penalty"],
-                frequency_penalty=top_pk_sampling_params["frequency_penalty"],
-                repetition_penalty=top_pk_sampling_params[
-                    "repetition_penalty"],
-                seed=top_pk_sampling_params["seed"])
+                temperature=sampling_params_dict["temperature"],
+                top_k=sampling_params_dict["top_k"],
+                top_p=sampling_params_dict["top_p"],
+                presence_penalty=sampling_params_dict["presence_penalty"],
+                frequency_penalty=sampling_params_dict["frequency_penalty"],
+                repetition_penalty=sampling_params_dict["repetition_penalty"],
+                seed=sampling_params_dict["seed"],
+                enable_log_probs=sampling_params_dict["logprobs"])
 
         # Remove cached encoder-decoder data
         # for any seq ids that are not in the current batch
@@ -1033,8 +1061,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         next_token_ids = self.model.process_decode_output_host(next_token_ids,
                                                                is_tokens=True)
         if self.dp_kv_cache:
-            # permute the tt_out
-            next_token_ids = next_token_ids[self.perm_table_tensor.pop(0)]
+            # permute the tt_out with corresponding perm table for this step
+            perm_table_tensor = self.perm_table_tensor.pop(0)
+            if isinstance(next_token_ids, tuple):
+                next_token_ids = (next_token_ids[0][perm_table_tensor],
+                                  next_token_ids[1][perm_table_tensor])
+            else:
+                next_token_ids = next_token_ids[perm_table_tensor]
         return next_token_ids
 
     def _send_async_out(self, sampler_output, async_callback,
@@ -1055,16 +1088,19 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     ) -> SamplerOutput:
         # Minimal code to construct the sampler outputs,
         # based on tpu_model_runner.py
-        # TT backend does not support the advanced sampling parameters
-        # such as logprobs.
 
-        zero_logprob = Logprob(0.0)
+        if isinstance(next_token_ids, tuple):
+            logprobs = [Logprob(lp) for lp in next_token_ids[1]]
+            next_token_ids = next_token_ids[0]
+        else:
+            logprobs = [Logprob(0.0) for _ in seq_groups]
+
         sampler_outputs = []
         for batch_idx, seq_id in enumerate(seq_groups):
             next_token_id = int(next_token_ids[batch_idx])
             seq_outputs = [
                 SequenceOutput(seq_id, next_token_id,
-                               {next_token_id: zero_logprob})
+                               {next_token_id: logprobs[batch_idx]})
             ]
             sampler_outputs.append(
                 CompletionSequenceGroupOutput(seq_outputs, None))
@@ -1322,6 +1358,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                             tt_sampling_params.seed[i]
                             for i in inverse_perm_indices
                         ]
+                        permuted_log_probs = [
+                            tt_sampling_params.enable_log_probs[i]
+                            for i in inverse_perm_indices
+                        ]
                         execute_model_kwargs[
                             "sampling_params"] = TTSamplingParams(
                                 temperature=permuted_temp,
@@ -1330,7 +1370,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                 presence_penalty=permuted_presence,
                                 frequency_penalty=permuted_frequency,
                                 repetition_penalty=permuted_repetition,
-                                seed=permuted_seed)
+                                seed=permuted_seed,
+                                enable_log_probs=permuted_log_probs)
 
             enable_trace = self.trace_mode in ["all", "decode_only"]
             tt_out = self.model.decode_forward(**execute_model_kwargs,
@@ -1351,9 +1392,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 tt_out = self.model.process_decode_output_host(
                     tt_out, is_tokens=model_input.perform_device_sampling)
                 if self.dp_kv_cache:
-                    tt_out = tt_out[perm_table_tensor]
+                    if isinstance(tt_out, tuple):
+                        logits, logprobs = tt_out
+                        logits = logits[perm_table_tensor]
+                        logprobs = logprobs[perm_table_tensor]
+                        tt_out = (logits, logprobs)
+                    else:
+                        tt_out = tt_out[perm_table_tensor]
 
         if model_input.compat_sampling_used:
+            # discarding dummy logprobs
+            # refactor to create response object tracked here
+            # https://github.com/tenstorrent/tt-metal/issues/34215
+            if isinstance(tt_out, tuple):
+                tt_out, _ = tt_out
+
             # compat sampling is only supported on host
             tt_logits = tt_out[:model_input.unpadded_batch_size,
                                -1, :]  # [unpadded batch, vocab]
@@ -1375,6 +1428,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             return sampler_output
         else:
             if not model_input.perform_device_sampling:
+                # discarding dummy logprobs
+                if isinstance(tt_out, tuple):
+                    tt_out, _ = tt_out
+
                 # unpadded batch, vocab of last token
                 next_logits = tt_out[:model_input.unpadded_batch_size, -1, :]
                 assert model_input.tt_sampling_params is not None

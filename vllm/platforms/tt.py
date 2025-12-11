@@ -290,12 +290,16 @@ class TTPlatform(Platform):
                     f"{cls.device_name}")
 
     @staticmethod
-    def compat_sampling_required(sampling_params) -> bool:
+    def compat_sampling_required(sampling_params, num_devices) -> bool:
+        # device logprobs currently only supported on multi-device setups
+        # https://github.com/tenstorrent/tt-metal/issues/34077
+        if sampling_params.logprobs is not None and num_devices == 1:
+            return True
+
         # all of the following sampling params require compat sampling
         return (sampling_params.min_p != 0.0
                 or (sampling_params.bad_words is not None
                     and len(sampling_params.bad_words) > 0)
-                or sampling_params.logprobs is not None
                 or sampling_params.prompt_logprobs is not None
                 or sampling_params.logits_processors is not None
                 or sampling_params.guided_decoding is not None
