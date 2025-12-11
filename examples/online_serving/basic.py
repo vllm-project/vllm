@@ -1,8 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import signal
-from typing import Dict
 
-from rich.console import Console
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -33,6 +33,7 @@ sampling_params = SamplingParams(
     output_kind=RequestOutputKind.DELTA,  # Get only new tokens each iteration
 )
 
+
 async def main():
     # Create AsyncLLM engine
     engine_args = AsyncEngineArgs(
@@ -52,7 +53,7 @@ async def main():
 
     # Initialize content buffers for each request
     # content_map maps request_id -> Rich Text object
-    content_map: Dict[str, Text] = {}
+    content_map: dict[str, Text] = {}
 
     for req_id, prompt in zip(request_ids, prompts):
         # Create a styled Text object
@@ -70,12 +71,9 @@ async def main():
         # Use Live to update the screen dynamically
         # screen=True enables full-screen mode (alt screen)
         with Live(layout, refresh_per_second=15, screen=True):
-
             # Start generation
             async for output in engine.generate(
-                request_id=request_ids,
-                prompt=prompts,
-                sampling_params=sampling_params
+                request_id=request_ids, prompt=prompts, sampling_params=sampling_params
             ):
                 req_id = output.request_id
 
@@ -95,27 +93,35 @@ async def main():
                     text_buffer.append("\n[Finished]", style="bold green")
                     # Update panel border to green to indicate completion
                     layout[req_id].update(
-                        Panel(text_buffer, title=f"Request: {req_id} (Done)", border_style="green")
+                        Panel(
+                            text_buffer,
+                            title=f"Request: {req_id} (Done)",
+                            border_style="green",
+                        )
                     )
                 else:
-                    # print("[{}]:{}".format(req_id, completion.text), end="", flush=True)
-                    # Update the panel content (in case it wasn't automatically reflected,
-                    # though modifying the Text object in-place usually works with Rich if referentially transparent,
-                    # explicitly updating the Panel ensures the render tree is correct)
+                    # Update the panel content (in case it wasn't automatically
+                    # reflected, though modifying the Text object in-place
+                    # usually works with Rich if referentially transparent,
+                    # explicitly updating the Panel ensures the render tree is
+                    # correct)
                     layout[req_id].update(
-                        Panel(text_buffer, title=f"Request: {req_id}", border_style="blue")
+                        Panel(
+                            text_buffer, title=f"Request: {req_id}", border_style="blue"
+                        )
                     )
 
             # After generation is complete, keep the display active until Ctrl+C
             while True:
-                original_ctrl_c_handler = signal.getsignal(signal.SIGINT)
+
                 def signal_handler(sig, frame):
-                     raise KeyboardInterrupt
+                    raise KeyboardInterrupt
+
                 signal.signal(signal.SIGINT, signal_handler)
                 await asyncio.sleep(0.1)
 
     except KeyboardInterrupt:
-        pass # Graceful exit on Ctrl+C
+        pass  # Graceful exit on Ctrl+C
     except Exception as e:
         # Print error after exiting Live context so it's visible
         print(f"\n❌ Error during streaming: {e}")
@@ -124,6 +130,7 @@ async def main():
     finally:
         print("🔧 Shutting down engine...")
         engine.shutdown()
+
 
 if __name__ == "__main__":
     try:
