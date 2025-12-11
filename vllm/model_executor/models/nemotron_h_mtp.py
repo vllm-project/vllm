@@ -237,7 +237,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         # Total number of physical layers = num_steps * pattern_len
         total_layers = self.num_mtp_layers * self.pattern_len
-
         for i in range(total_layers):
             step_rel_idx = i % self.pattern_len
 
@@ -291,35 +290,59 @@ class NemotronHMultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | IntermediateTensors:
-        if get_tensor_model_parallel_rank() == 0:
-            print(
-                f"SMOR- spec_step_idx: {spec_step_idx}, "
-                f"hidden_states.shape: {hidden_states.shape}"
-            )
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
 
-        # Determine range of layers for this step
-        if spec_step_idx >= self.num_mtp_layers:
-            # TODO SMOR- a patch, for current checkpoint format,
-            # we reuse last layer for every spec step that is greater
-            # than num_mtp_layers
-            spec_step_idx = self.num_mtp_layers - 1
+        num_tokens = hidden_states.shape[0]
 
-        start_idx = spec_step_idx * self.pattern_len
-        end_idx = start_idx + self.pattern_len
+        # prompt-prefill and catch-up "prefill"
+        is_prefill = num_tokens > 1
 
-        residual = None
+        if is_prefill:
+            # Run ALL layers to populate KV cache
+            final_hidden_states = hidden_states
 
-        for i in range(start_idx, end_idx):
-            hidden_states, residual = self.layers[str(i)](
-                inputs_embeds=inputs_embeds,
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
+            for step in range(self.num_mtp_layers):
+                start_idx = step * self.pattern_len
+                end_idx = start_idx + self.pattern_len
 
-        return hidden_states
+                residual = None
+                current_hidden_states = hidden_states
+
+                for i in range(start_idx, end_idx):
+                    current_hidden_states, residual = self.layers[str(i)](
+                        inputs_embeds=inputs_embeds,
+                        positions=positions,
+                        hidden_states=current_hidden_states,
+                        residual=residual,
+                    )
+
+                # Save the output of the requested step
+                if step == spec_step_idx:
+                    final_hidden_states = current_hidden_states
+
+            return final_hidden_states
+        else:
+            if spec_step_idx >= self.num_mtp_layers:
+                # TODO SMOR- a patch, for current checkpoint format,
+                # we reuse last layer for every spec step that is greater
+                # than num_mtp_layers
+                spec_step_idx = self.num_mtp_layers - 1
+
+            start_idx = spec_step_idx * self.pattern_len
+            end_idx = start_idx + self.pattern_len
+
+            residual = None
+
+            for i in range(start_idx, end_idx):
+                hidden_states, residual = self.layers[str(i)](
+                    inputs_embeds=inputs_embeds,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
+
+            return hidden_states
 
 
 @support_torch_compile
@@ -537,4 +560,9 @@ class NemotronHMTP(nn.Module, SupportsPP):
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        if get_tensor_model_parallel_rank() == 0:
+            torch.save(
+                self.state_dict(),
+                f"/tmp/nemotron_h_mtp_weights_tp_rank_{get_tensor_model_parallel_rank()}.pt",
+            )
         return loaded_params
