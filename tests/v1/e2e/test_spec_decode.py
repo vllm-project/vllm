@@ -283,6 +283,7 @@ def test_speculators_model_integration(
     ["model_setup", "mm_enabled", "enable_chunked_prefill"],
     [
         (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
+        (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
         pytest.param(
             (
                 "eagle3",
@@ -365,6 +366,7 @@ def test_speculators_model_integration(
     ],
     ids=[
         "qwen3_eagle3",
+        "qwen3_eagle3-transformers",
         "qwen3_vl_eagle3",
         "qwen2_5_vl_eagle3",
         "llama3_eagle",
@@ -382,6 +384,7 @@ def test_eagle_correctness(
     mm_enabled: bool,
     enable_chunked_prefill: bool,
     attn_backend: str,
+    request: pytest.FixtureRequest,
 ):
     if attn_backend == "TREE_ATTN":
         # TODO: Fix this flaky test
@@ -435,6 +438,9 @@ def test_eagle_correctness(
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
+        test_id = request.node.callspec.id
+        model_impl = "transformers" if "transformers" in test_id else "auto"
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
@@ -448,6 +454,7 @@ def test_eagle_correctness(
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=enable_chunked_prefill,
+            model_impl=model_impl,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
