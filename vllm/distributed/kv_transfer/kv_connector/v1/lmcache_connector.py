@@ -4,9 +4,6 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
-)
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
@@ -96,6 +93,11 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             cls = _adapter.LMCacheConnectorV1Impl
         else:
             logger.info("Initializing latest dev LMCache connector")
+            # lazy import
+            from lmcache.integration.vllm.vllm_v1_adapter import (
+                LMCacheConnectorV1Impl as LMCacheConnectorLatestImpl,
+            )
+
             cls = LMCacheConnectorLatestImpl
 
         self._lmcache_engine = cls(vllm_config, role, self)

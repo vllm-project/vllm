@@ -10,10 +10,6 @@ aenum==3.1.16
     # via lightly
 affine==2.4.0
     # via rasterio
-aiofile==3.9.0
-    # via lmcache
-aiofiles==25.1.0
-    # via lmcache
 aiohappyeyeballs==2.6.1
     # via aiohttp
 aiohttp==3.13.0
@@ -23,7 +19,6 @@ aiohttp==3.13.0
     #   fsspec
     #   gpt-oss
     #   lm-eval
-    #   lmcache
     #   ray
 aiohttp-cors==0.8.1
     # via ray
@@ -63,8 +58,6 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-awscrt==0.29.2
-    # via lmcache
 backoff==2.2.1
     # via
     #   -r requirements/test.in
@@ -97,8 +90,6 @@ cachetools==5.5.2
     # via
     #   google-auth
     #   mlflow-skinny
-caio==0.9.24
-    # via aiofile
 certifi==2024.8.30
     # via
     #   fiona
@@ -155,12 +146,8 @@ coverage==7.10.6
     # via pytest-cov
 cramjam==2.9.0
     # via fastparquet
-cufile-python==0.2.0
-    # via lmcache
 cupy-cuda12x==13.6.0
-    # via
-    #   lmcache
-    #   ray
+    # via ray
 cycler==0.12.1
     # via matplotlib
 databricks-sdk==0.59.0
@@ -219,7 +206,6 @@ evaluate==0.4.3
 fastapi==0.116.1
     # via
     #   gpt-oss
-    #   lmcache
     #   mlflow-skinny
 fastparquet==2024.11.0
     # via genai-perf
@@ -331,7 +317,6 @@ httpcore==1.0.6
 httpx==0.27.2
     # via
     #   -r requirements/test.in
-    #   lmcache
     #   schemathesis
 huggingface-hub==0.34.3
     # via
@@ -458,8 +443,6 @@ llvmlite==0.44.0
     # via numba
 lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d
     # via -r requirements/test.in
-lmcache==0.3.10.post2
-    # via -r requirements/test.in
 lxml==5.3.0
     # via
     #   blobfile
@@ -505,8 +488,6 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-msgspec==0.20.0
-    # via lmcache
 mteb==2.1.2
     # via -r requirements/test.in
 multidict==6.1.0
@@ -525,10 +506,6 @@ networkx==3.2.1
     # via
     #   scikit-image
     #   torch
-nixl==0.8.0
-    # via lmcache
-nixl-cu12==0.8.0
-    # via nixl
 nltk==3.9.1
     # via rouge-score
 num2words==0.5.14
@@ -562,12 +539,10 @@ numpy==1.26.4
     #   librosa
     #   lightly
     #   lightly-utils
-    #   lmcache
     #   matplotlib
     #   mistral-common
     #   mlflow
     #   mteb
-    #   nixl-cu12
     #   numba
     #   numexpr
     #   opencv-python-headless
@@ -637,8 +612,6 @@ nvidia-nvshmem-cu12==3.3.20
     # via torch
 nvidia-nvtx-cu12==12.9.79
     # via torch
-nvtx==0.2.14
-    # via lmcache
 omegaconf==2.3.0
     # via
     #   hydra-core
@@ -702,7 +675,6 @@ packaging==24.2
     #   ray
     #   rioxarray
     #   scikit-image
-    #   setuptools-scm
     #   statsmodels
     #   tensorboardx
     #   torchmetrics
@@ -765,7 +737,6 @@ pretrainedmodels==0.7.4
     # via segmentation-models-pytorch
 prometheus-client==0.22.0
     # via
-    #   lmcache
     #   opentelemetry-exporter-prometheus
     #   ray
 propcache==0.2.0
@@ -787,13 +758,10 @@ protobuf==5.28.3
 psutil==6.1.0
     # via
     #   accelerate
-    #   lmcache
     #   peft
     #   tensorizer
 py==1.11.0
     # via pytest-forked
-py-cpuinfo==9.0.0
-    # via lmcache
 py-spy==0.4.0
     # via ray
 pyarrow==18.0.0
@@ -918,7 +886,6 @@ pyyaml==6.0.2
     #   huggingface-hub
     #   jsonargparse
     #   lightning
-    #   lmcache
     #   mlflow-skinny
     #   omegaconf
     #   peft
@@ -929,8 +896,6 @@ pyyaml==6.0.2
     #   timm
     #   transformers
     #   vocos
-pyzmq==27.1.0
-    # via lmcache
 rapidfuzz==3.12.1
     # via jiwer
 rasterio==1.4.3
@@ -941,9 +906,7 @@ rasterio==1.4.3
 ray==2.48.0
     # via -r requirements/test.in
 redis==5.2.0
-    # via
-    #   lmcache
-    #   tensorizer
+    # via tensorizer
 referencing==0.35.1
     # via
     #   jsonschema
@@ -1015,7 +978,6 @@ sacrebleu==2.4.3
 safetensors==0.4.5
     # via
     #   accelerate
-    #   lmcache
     #   open-clip-torch
     #   peft
     #   timm
@@ -1055,12 +1017,8 @@ sentence-transformers==3.2.1
 setuptools==77.0.3
     # via
     #   lightning-utilities
-    #   lmcache
     #   pytablewriter
-    #   setuptools-scm
     #   torch
-setuptools-scm==9.2.2
-    # via lmcache
 shapely==2.1.1
     # via
     #   geopandas
@@ -1085,9 +1043,7 @@ sniffio==1.3.1
     #   anyio
     #   httpx
 sortedcontainers==2.4.0
-    # via
-    #   hypothesis
-    #   lmcache
+    # via hypothesis
 soundfile==0.12.1
     # via
     #   -r requirements/test.in
@@ -1179,9 +1135,7 @@ torch==2.9.0+cu129
     #   lightly
     #   lightning
     #   lm-eval
-    #   lmcache
     #   mteb
-    #   nixl-cu12
     #   open-clip-torch
     #   peft
     #   pretrainedmodels
@@ -1247,7 +1201,6 @@ transformers==4.57.3
     #   -r requirements/test.in
     #   genai-perf
     #   lm-eval
-    #   lmcache
     #   peft
     #   sentence-transformers
     #   transformers-stream-generator
@@ -1317,7 +1270,6 @@ urllib3==2.2.3
 uvicorn==0.35.0
     # via
     #   gpt-oss
-    #   lmcache
     #   mlflow-skinny
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test.in
