@@ -4,6 +4,8 @@
 import warnings
 from typing import Any
 
+from typing_extensions import deprecated
+
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -15,7 +17,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.AnyTokenizer` has been moved to "
             "`vllm.tokenizers.TokenizerLike`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -27,7 +29,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.get_tokenizer` "
             "has been moved to `vllm.tokenizers.get_tokenizer`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -39,7 +41,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.cached_get_tokenizer` "
             "has been moved to `vllm.tokenizers.cached_get_tokenizer`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -51,7 +53,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.cached_tokenizer_from_config` "
             "has been moved to `vllm.tokenizers.cached_tokenizer_from_config`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -63,7 +65,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer.init_tokenizer_from_configs` "
             "has been moved to `vllm.tokenizers.init_tokenizer_from_config`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -73,6 +75,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+@deprecated("Will be removed in v0.14. Please use `tokenizer.decode()` instead.")
 def decode_tokens(
     tokenizer: TokenizerLike,
     token_ids: list[int],
@@ -94,6 +97,7 @@ def decode_tokens(
     return tokenizer.decode(token_ids, **kw_args)
 
 
+@deprecated("Will be removed in v0.14. Please use `tokenizer.encode()` instead.")
 def encode_tokens(
     tokenizer: TokenizerLike,
     text: str,

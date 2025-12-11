@@ -4,7 +4,7 @@
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
-from importlib.util import find_spec
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -37,15 +37,13 @@ from vllm.transformers_utils.config import (
     uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
-    maybe_patch_hf_config_from_gguf,
-)
-from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import (
     is_gguf,
     is_remote_gguf,
-    maybe_model_redirect,
+    maybe_patch_hf_config_from_gguf,
     split_remote_gguf,
 )
+from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -75,18 +73,7 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
-TaskOption = Literal[
-    "auto",
-    "generate",
-    "embedding",
-    "embed",
-    "classify",
-    "score",
-    "reward",
-    "transcription",
-    "draft",
-]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral"]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -94,12 +81,6 @@ LogprobsMode = Literal[
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
 LayerBlockType = Literal["attention", "linear_attention", "mamba"]
-
-_RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
-    "generate": ["generate", "transcription"],
-    "pooling": ["embedding", "embed", "classify", "score", "reward"],
-    "draft": ["draft"],
-}
 
 _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "generate": [],
@@ -128,21 +109,17 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    task: TaskOption | None = None
-    """[DEPRECATED] The task to use the model for. If the model supports more
-    than one model runner, this is used to select which model runner to run.
-
-    Note that the model may support other tasks using the same model runner.
-    """
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:\n
-    - "auto" will use "hf" tokenizer if Mistral's tokenizer is not available.\n
+    - "auto" will use the tokenizer from `mistral_common` for Mistral models
+    if available, otherwise it will use the "hf" tokenizer.\n
     - "hf" will use the fast tokenizer if available.\n
     - "slow" will always use the slow tokenizer.\n
     - "mistral" will always use the tokenizer from `mistral_common`.\n
+    - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
     - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
@@ -335,7 +312,6 @@ class ModelConfig:
         ignored_factors = {
             "runner",
             "convert",
-            "task",
             "tokenizer",
             "tokenizer_mode",
             "seed",
@@ -468,18 +444,6 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
-        if (
-            (backend := envs.VLLM_ATTENTION_BACKEND)
-            and backend == "FLASHINFER"
-            and find_spec("flashinfer") is None
-        ):
-            raise ValueError(
-                "VLLM_ATTENTION_BACKEND is set to FLASHINFER, but flashinfer "
-                "module was not found. See "
-                "https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile "  # noqa: E501
-                "for instructions on how to install it."
-            )
-
         from vllm.platforms import current_platform
 
         if self.override_attention_dtype is not None and not current_platform.is_rocm():
@@ -521,93 +485,6 @@ class ModelConfig:
         registry = self.registry
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
-
-        def _task_to_convert(task: TaskOption) -> ConvertType:
-            if task == "embedding" or task == "embed":
-                return "embed"
-            if task == "classify":
-                return "classify"
-            if task == "reward":
-                return "reward"
-            if task == "score":
-                new_task = self._get_default_pooling_task(architectures)
-                return "classify" if new_task == "classify" else "embed"
-
-            return "none"
-
-        if self.task is not None:
-            runner: RunnerOption = "auto"
-            convert: ConvertOption = "auto"
-            msg_prefix = (
-                "The 'task' option has been deprecated and will be "
-                "removed in v0.13.0 or v1.0, whichever comes first."
-            )
-            msg_hint = "Please remove this option."
-
-            is_generative_task = self.task in _RUNNER_TASKS["generate"]
-            is_pooling_task = self.task in _RUNNER_TASKS["pooling"]
-
-            if is_generative_model and is_pooling_model:
-                if is_generative_task:
-                    runner = "generate"
-                    convert = "auto"
-                    msg_hint = (
-                        "Please replace this option with `--runner "
-                        "generate` to continue using this model "
-                        "as a generative model."
-                    )
-                elif is_pooling_task:
-                    runner = "pooling"
-                    convert = "auto"
-                    msg_hint = (
-                        "Please replace this option with `--runner "
-                        "pooling` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:  # task == "auto"
-                    pass
-            elif is_generative_model or is_pooling_model:
-                if is_generative_task:
-                    runner = "generate"
-                    convert = "auto"
-                    msg_hint = "Please remove this option"
-                elif is_pooling_task:
-                    runner = "pooling"
-                    convert = _task_to_convert(self.task)
-                    msg_hint = (
-                        "Please replace this option with `--convert "
-                        f"{convert}` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:  # task == "auto"
-                    pass
-            else:
-                # Neither generative nor pooling model - try to convert if possible
-                if is_pooling_task:
-                    runner = "pooling"
-                    convert = _task_to_convert(self.task)
-                    msg_hint = (
-                        "Please replace this option with `--runner pooling "
-                        f"--convert {convert}` to continue using this model "
-                        "as a pooling model."
-                    )
-                else:
-                    debug_info = {
-                        "architectures": architectures,
-                        "is_generative_model": is_generative_model,
-                        "is_pooling_model": is_pooling_model,
-                    }
-                    raise AssertionError(
-                        "The model should be a generative or "
-                        "pooling model when task is set to "
-                        f"{self.task!r}. Found: {debug_info}"
-                    )
-
-            self.runner = runner
-            self.convert = convert
-
-            msg = f"{msg_prefix} {msg_hint}"
-            warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
         self.runner_type = self._get_runner_type(architectures, self.runner)
         self.convert_type = self._get_convert_type(
@@ -926,22 +803,6 @@ class ModelConfig:
 
         return convert_type
 
-    def _get_default_pooling_task(
-        self,
-        architectures: list[str],
-    ) -> Literal["embed", "classify", "reward"]:
-        if self.registry.is_cross_encoder_model(architectures, self):
-            return "classify"
-
-        for arch in architectures:
-            match = try_match_architecture_defaults(arch, runner_type="pooling")
-            if match:
-                _, (_, convert_type) = match
-                assert convert_type != "none"
-                return convert_type
-
-        return "embed"
-
     def _parse_quant_hf_config(self, hf_config: PretrainedConfig):
         quant_cfg = getattr(hf_config, "quantization_config", None)
         if quant_cfg is None:
@@ -1229,6 +1090,19 @@ class ModelConfig:
                 and self.hf_text_config.kv_lora_rank is not None
             )
         return False
+
+    @cached_property
+    def is_mm_prefix_lm(self) -> bool:
+        """Whether to use bidirectional attention for mm positions."""
+        MM_PREFIX_LM_MODELS = (
+            "gemma3",
+            # TODO(Isotr0py): Disable paligemma for now before
+            # we supports soft cap attention for FlexAttention
+            # "paligemma",
+        )
+        if not hasattr(self.hf_config, "model_type"):
+            return False
+        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
     def get_head_size(self) -> int:
         # TODO remove hard code
@@ -1781,20 +1655,22 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["all", "mean", "step", "cls"]:
+                if pooling_type in ["mean", "step", "cls"]:
                     logger.debug(
                         "Pooling models with %s pooling does not "
                         "support chunked prefill.",
                         pooling_type,
                     )
                     return False
-                else:
-                    # pooling_type == "last"
+                elif pooling_type in ["all", "last"]:
                     logger.debug(
-                        "Pooling models with causal attn and last pooling support "
-                        "chunked prefill."
+                        "Pooling models with causal attn and %s pooling support "
+                        "chunked prefill.",
+                        pooling_type,
                     )
                     return True
+                else:
+                    raise ValueError(f"{pooling_type=} not supported.")
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return attn_type != "encoder_decoder"
@@ -1818,20 +1694,22 @@ class ModelConfig:
                 return False
             elif attn_type == "decoder":
                 pooling_type = self.pooler_config.pooling_type.lower()
-                if pooling_type in ["all", "mean", "step", "cls"]:
+                if pooling_type in ["mean", "step", "cls"]:
                     logger.debug(
                         "Pooling models with %s pooling does not "
                         "support prefix caching.",
                         pooling_type,
                     )
                     return False
-                else:
-                    # pooling_type == "last"
+                elif pooling_type in ["all", "last"]:
                     logger.debug(
-                        "Pooling models with causal attn and last pooling support "
-                        "prefix caching."
+                        "Pooling models with causal attn and %s pooling support "
+                        "prefix caching.",
+                        pooling_type,
                     )
                     return True
+                else:
+                    raise ValueError(f"{pooling_type=} not supported.")
             # vllm currently does not have pooling models using hybrid,
             # attention_free or encoder_decoder attn types.
             return False
@@ -1894,8 +1772,8 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForImageClassification", ("pooling", "classify")),
     ("ForVideoClassification", ("pooling", "classify")),
     ("ClassificationModel", ("pooling", "classify")),
-    ("ForRewardModeling", ("pooling", "reward")),
-    ("RewardModel", ("pooling", "reward")),
+    ("ForRewardModeling", ("pooling", "embed")),
+    ("RewardModel", ("pooling", "embed")),
     # Let other `*Model`s take priority
     ("Model", ("pooling", "embed")),
 ]

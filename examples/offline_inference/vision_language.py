@@ -72,7 +72,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
 # Aya Vision
 def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1801,7 +1801,10 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -2028,7 +2031,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
 
