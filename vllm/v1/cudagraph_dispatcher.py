@@ -108,6 +108,7 @@ class CudagraphDispatcher:
         # This should be called only after attention backend is initialized. So we can
         # get the correct cudagraph mode after backend support is resolved.
         self.cudagraph_mode = cudagraph_mode
+        self._compute_bs_to_padded_graph_size()
 
         # LoRA activation cases to specialize the cuda graphs on
         if self.vllm_config.lora_config:
@@ -155,8 +156,6 @@ class CudagraphDispatcher:
 
         self.keys_initialized = True
 
-        self._compute_bs_to_padded_graph_size()
-
     def dispatch(
         self,
         num_tokens: int,
@@ -191,7 +190,7 @@ class CudagraphDispatcher:
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
-s        if not disable_full:
+        if not disable_full:
             # check if key exists for full cudagraph
             if batch_desc in self.cudagraph_keys[CUDAGraphMode.FULL]:
                 return CUDAGraphMode.FULL, batch_desc
