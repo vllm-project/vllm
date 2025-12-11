@@ -31,6 +31,8 @@ def maybe_get_vit_flash_attn_backend(
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     elif attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
         from aiter import flash_attn_varlen_func
+    else:
+        flash_attn_varlen_func = None
 
     # if attn_backend is TORCH_SDPA,
     # it will reach here and the flash_attn_varlen_func will be None.
@@ -100,6 +102,10 @@ class MMEncoderAttention(CustomOp):
         )
 
         logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
+
+    @classmethod
+    def enabled(cls) -> bool:
+        return True
 
     def reshape_qkv_to_4d(
         self,
@@ -188,12 +194,7 @@ class MMEncoderAttention(CustomOp):
         # # TODO(Isotr0py): Migrate MultiHeadAttention
         assert cu_seqlens is not None and max_seqlen is not None
 
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
-
-        query, key, value = self.reshape_qkv_to_3d(
-            query, key, value, bsz, q_len, kv_len
-        )
+        bsz = query.shape[0]
 
         output = vit_flash_attn_wrapper(
             q=query,
@@ -201,7 +202,7 @@ class MMEncoderAttention(CustomOp):
             v=value,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            bsz=bsz,
+            batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
         )
         return output

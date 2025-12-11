@@ -44,7 +44,7 @@ from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoP
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -247,10 +247,15 @@ class Qwen2VisionMLP(nn.Module):
         hidden_features: int,
         act_layer: type[nn.Module] = QuickGELU,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.fc1 = ColumnParallelLinear(
             in_features,
             hidden_features,
@@ -291,11 +296,16 @@ class Qwen2VisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.tp_size = (
             1
             if use_data_parallel
@@ -327,6 +337,7 @@ class Qwen2VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
+            multimodal_config=multimodal_config,
         )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
@@ -377,6 +388,8 @@ class Qwen2VisionAttention(nn.Module):
             max_seqlen=max_seqlen,
         )
 
+        context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
+
         output, _ = self.proj(context_layer)
         return output
 
@@ -390,8 +403,8 @@ class Qwen2VisionBlock(nn.Module):
         act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -405,16 +418,16 @@ class Qwen2VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
         )
         self.mlp = Qwen2VisionMLP(
             dim,
             mlp_hidden_dim,
             act_layer=act_layer,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -474,10 +487,15 @@ class Qwen2VisionPatchMerger(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         spatial_merge_size: int = 2,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
@@ -521,9 +539,8 @@ class Qwen2VisionTransformer(nn.Module):
         vision_config: Qwen2VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -537,7 +554,11 @@ class Qwen2VisionTransformer(nn.Module):
         num_heads = vision_config.num_heads
         mlp_ratio = vision_config.mlp_ratio
 
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+            if multimodal_config
+            else False
+        )
         self.out_hidden_size = vision_config.hidden_size
 
         self.spatial_merge_size = spatial_merge_size
@@ -569,7 +590,7 @@ class Qwen2VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
+                    multimodal_config=multimodal_config,
                 )
                 for layer_idx in range(depth)
             ]
@@ -580,7 +601,10 @@ class Qwen2VisionTransformer(nn.Module):
             norm_layer=norm_layer,
             quant_config=quant_config,
             prefix=f"{prefix}.merger",
-            use_data_parallel=use_data_parallel,
+            multimodal_config=multimodal_config,
+        )
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
         )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
@@ -641,7 +665,7 @@ class Qwen2VisionTransformer(nn.Module):
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
     def forward(
@@ -1216,18 +1240,12 @@ class Qwen2VLForConditionalGeneration(
         if multimodal_config.get_limit_per_prompt(
             "image"
         ) or multimodal_config.get_limit_per_prompt("video"):
-            attn_backend_override = (
-                multimodal_config.mm_encoder_attn_backend
-                if multimodal_config is not None
-                else None
-            )
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
-                use_data_parallel=self.use_data_parallel,
-                attn_backend_override=attn_backend_override,
             )
         else:
             self.visual = None
