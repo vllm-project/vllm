@@ -3087,10 +3087,6 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            # logger.info("Number of input tokens: %d", num_input_tokens)
-            # logger.info("Positions size: %s", None if positions is None else positions.size())
-            # logger.info("Input id size: %s", None if input_ids is None else input_ids.size())
-            # logger.info("Input embeds size: %s", None if inputs_embeds is None else inputs_embeds.size())
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
