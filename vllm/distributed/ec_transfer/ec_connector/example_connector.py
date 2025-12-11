@@ -32,7 +32,7 @@ class MMMeta:
 
 
 @dataclass
-class ECSharedStorageConnectorMetadata(ECConnectorMetadata):
+class ECExampleConnectorMetadata(ECConnectorMetadata):
     mm_datas: list[MMMeta]
 
     def __init__(self):
@@ -42,7 +42,7 @@ class ECSharedStorageConnectorMetadata(ECConnectorMetadata):
         self.mm_datas.append(mm_data)
 
 
-class ECSharedStorageConnector(ECConnectorBase):
+class ECExampleConnector(ECConnectorBase):
     # NOTE: This is Simple debug implementation of the EC connector.
     # It save / load the EC cache to / from the disk.
 
@@ -76,7 +76,7 @@ class ECSharedStorageConnector(ECConnectorBase):
 
         # Get the metadata
         metadata: ECConnectorMetadata = self._get_connector_metadata()
-        assert isinstance(metadata, ECSharedStorageConnectorMetadata)
+        assert isinstance(metadata, ECExampleConnectorMetadata)
         assert encoder_cache is not None
         if metadata is None:
             logger.warning(
@@ -160,7 +160,7 @@ class ECSharedStorageConnector(ECConnectorBase):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        meta = ECSharedStorageConnectorMetadata()
+        meta = ECExampleConnectorMetadata()
         for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
