@@ -1800,6 +1800,7 @@ class EngineArgs:
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
+            device_name = ""
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -2059,11 +2060,13 @@ def human_readable_int(value):
             "k": 10**3,
             "m": 10**6,
             "g": 10**9,
+            "t": 10**12,
         }
         binary_multiplier = {
             "K": 2**10,
             "M": 2**20,
             "G": 2**30,
+            "T": 2**40,
         }
 
         number, suffix = match.groups()
