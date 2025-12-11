@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
+    EncoderDecoderCacheManager,
     compute_encoder_budget,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -181,7 +182,11 @@ class Scheduler(SchedulerInterface):
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+        self.encoder_cache_manager = (
+            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+            if self.is_encoder_decoder
+            else EncoderCacheManager(cache_size=encoder_cache_size)
+        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -941,18 +946,15 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            # Check and update encoder cache accounting.
-            # This ensures proper tracking of freeable entries.
-            is_cached = self.encoder_cache_manager.check_and_update_cache(request, i)
             if not self.is_encoder_decoder:
-                # We are not using the cache for encoder-decoder models -schedule even
-                # if cached- but we have to update the encoder cache state regardless.
+                # We are not using the encoder cache for encoder-decoder models,
+                # yet.
                 if request.mm_features[i].identifier in mm_hashes_to_schedule:
                     # The same encoder input has already been scheduled in the
                     # current step.
                     continue
 
-                if is_cached:
+                if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
                     # previous step.
                     continue
