@@ -40,7 +40,9 @@ def _create_vllm_config(
 ) -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.compilation_config = compilation_config
-    mock_config.scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
+    mock_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs,
+    )
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
     if not lora_config:
@@ -159,10 +161,10 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. Cascade attention should have a fall back mode
+        # 4. disable_full should have a fall back mode (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, use_cascade_attn=True
+            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
         )
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
