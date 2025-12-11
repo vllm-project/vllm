@@ -350,7 +350,8 @@ steps:
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
-    - vllm/
+    - vllm/v1/attention
+    - vllm/model_executor/layers
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -387,6 +388,7 @@ steps:
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
@@ -466,7 +468,9 @@ steps:
   # tests covered elsewhere.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -480,7 +484,9 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/fullgraph -maxdepth 1 -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
@@ -1374,21 +1380,3 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
-
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
-
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040

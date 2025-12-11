@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -269,53 +268,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-
         return self.forward(
-            x=x,
             layer=layer,
+            x=x,
             router_logits=router_logits,
-            top_k=top_k,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            enable_eplb=enable_eplb,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
         )
 
     def get_fused_moe_quant_config(
@@ -333,24 +293,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
@@ -364,9 +307,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                expert_map=expert_map,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         elif self.flashinfer_cutlass_moe_enabled:
             return self.flashinfer_cutlass_moe(
@@ -375,8 +318,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             result = fused_experts(
@@ -386,11 +329,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
+                activation=layer.activation,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
             )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
@@ -405,148 +348,101 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
-            enable_eplb is not False
-            or expert_load_view is not None
-            or logical_to_physical_map is not None
-            or logical_replica_count is not None
+            layer.enable_eplb is not False
+            or layer.expert_load_view is not None
+            or layer.logical_to_physical_map is not None
+            or layer.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
+
         return layer.cpu_fused_moe(
             layer,
             x,
-            use_grouped_topk,
-            top_k,
+            layer.use_grouped_topk,
+            layer.top_k,
             router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-            global_num_experts,
-            expert_map,
-            custom_routing_function,
-            scoring_func,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            activation,
+            layer.renormalize,
+            layer.topk_group,
+            layer.num_expert_group,
+            layer.global_num_experts,
+            layer.expert_map,
+            layer.custom_routing_function,
+            layer.scoring_func,
+            layer.routed_scaling_factor,
+            layer.e_score_correction_bias,
+            layer.apply_router_weight_on_input,
+            layer.activation,
         )
 
     def forward_xpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if (
-            enable_eplb is not False
-            or expert_load_view is not None
-            or logical_to_physical_map is not None
-            or logical_replica_count is not None
+            layer.enable_eplb is not False
+            or layer.expert_load_view is not None
+            or layer.logical_to_physical_map is not None
+            or layer.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
         return layer.ipex_fusion(
             x,
-            use_grouped_topk,
-            top_k,
+            layer.use_grouped_topk,
+            layer.top_k,
             router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-            custom_routing_function=custom_routing_function,
+            layer.renormalize,
+            layer.topk_group,
+            layer.num_expert_group,
+            custom_routing_function=layer.custom_routing_function,
         )
 
     def forward_tpu(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not use_grouped_topk
-        assert num_expert_group is None
-        assert topk_group is None
-        assert custom_routing_function is None
-        assert apply_router_weight_on_input is False
-        if scoring_func != "softmax":
+        assert not layer.use_grouped_topk
+        assert layer.num_expert_group is None
+        assert layer.topk_group is None
+        assert layer.custom_routing_function is None
+        assert layer.apply_router_weight_on_input is False
+        if layer.scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax scoring function is supported for TPU."
             )
-        if e_score_correction_bias is not None:
+        if layer.e_score_correction_bias is not None:
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU."
             )
-        assert activation == "silu", f"{activation} is not supported for TPU."
-        assert routed_scaling_factor == 1.0, (
-            f"routed_scaling_factor {routed_scaling_factor} is not supported for TPU."
+        assert layer.activation == "silu", (
+            f"{layer.activation} is not supported for TPU."
+        )
+        assert layer.routed_scaling_factor == 1.0, (
+            f"routed_scaling_factor {layer.routed_scaling_factor} is "
+            "not supported for TPU."
         )
         if (
-            enable_eplb is not False
-            or expert_load_view is not None
-            or logical_to_physical_map is not None
-            or logical_replica_count is not None
+            layer.enable_eplb is not False
+            or layer.expert_load_view is not None
+            or layer.logical_to_physical_map is not None
+            or layer.logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for TPU.")
         return fused_moe_pallas(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
-            topk=top_k,
+            topk=layer.top_k,
             gating_output=router_logits,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            renormalize=renormalize,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            renormalize=layer.renormalize,
         )
 
     if current_platform.is_tpu():

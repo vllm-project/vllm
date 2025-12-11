@@ -96,9 +96,13 @@ def _fused_moe_lora_kernel(
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
     lora_id = tl.load(lora_ids + lora_idx)
-    moe_enabled = tl.load(adapter_enabled + lora_id)
-    if lora_id == -1 or moe_enabled == 0:
+
+    if lora_id == -1:
         # Early exit for the no-lora case.
+        return
+    moe_enabled = tl.load(adapter_enabled + lora_id)
+    if moe_enabled == 0:
+        # Early exit for the no moe lora case.
         return
     max_loras = tl.num_programs(axis=2)
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
