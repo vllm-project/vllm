@@ -57,9 +57,6 @@ ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 # PyTorch provides its own indexes for standard and nightly builds
 ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
 
-# We can specify the standard or nightly build of PyTorch
-ARG PYTORCH_NIGHTLY=0
-
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
 # disabled by default, we allow third-party to use keyring authentication for
@@ -137,6 +134,9 @@ EOF
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
+
+# We can specify the standard or nightly build of PyTorch
+ARG PYTORCH_NIGHTLY
 
 # Install build and runtime dependencies, including PyTorch
 # Check whether to install torch nightly instead of release for this build
