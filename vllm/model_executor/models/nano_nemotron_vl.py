@@ -7,16 +7,16 @@
 #     LICENSE is in root directory.
 # --------------------------------------------------------
 
+import copy
 import math
 import random
-from dataclasses import dataclass
-
-import copy
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping, Sequence, Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
+import einops
 import numpy.typing as npt
 import regex as re
 import torch
@@ -24,7 +24,6 @@ import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
 from transformers import BatchFeature, PretrainedConfig, TensorType
-import einops
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -181,7 +180,8 @@ class DynamicResolutionImageTilingStrategy:
             thumbnail_area = self._thumbnail_size * self._thumbnail_size
             area_ratio = resized_area / thumbnail_area
 
-            # Only add thumbnail if resized image area is less than threshold % of thumbnail area
+            # Only add thumbnail if resized image area is less than threshold % of
+            # thumbnail area
             if area_ratio < self._thumbnail_area_threshold:
                 thumbnail_img = params.image.resize(
                     (self._thumbnail_size, self._thumbnail_size)
@@ -198,11 +198,11 @@ class DynamicResolutionImageTilingStrategy:
         tiling_augment_prob: float = 0.4,
     ) -> DynamicResolutionParams:
         """Process a single media item and return its parameters.
-
         Args:
             media: The media item to process
             num_tokens_available: Number of tokens available for this media
-            data_augment: Whether to apply data augmentation to the image. Defaults to False.
+            data_augment: Whether to apply data augmentation to the image. Defaults to
+            False.
         Returns:
             DynamicResolutionParams for the media
         """
@@ -222,7 +222,8 @@ class DynamicResolutionImageTilingStrategy:
         target_patch_height = math.floor(factor * closest_patch_height)
         target_patch_width = math.floor(factor * closest_patch_width)
 
-        # We only consider self._min_num_patches if it is greater than current_num_tokens_available.
+        # We only consider self._min_num_patches if it is greater than
+        # current_num_tokens_available.
         if (
             current_num_tokens_available > self._min_num_patches
             and target_patch_height * target_patch_width < self._min_num_patches
@@ -244,7 +245,8 @@ class DynamicResolutionImageTilingStrategy:
                 new_patch_width = math.ceil(up_factor * target_patch_width)
 
                 if new_patch_height * new_patch_width > current_num_tokens_available:
-                    # If only one side can be min_side, make as big as possible at native aspect ratio while staying below max_patches
+                    # If only one side can be min_side, make as big as possible at
+                    # native aspect ratio while staying below max_patches
                     if (
                         max(current_num_tokens_available // new_patch_width, 1)
                         * self._patch_size
@@ -271,7 +273,8 @@ class DynamicResolutionImageTilingStrategy:
                 new_patch_width = math.ceil(up_factor * target_patch_width)
 
                 if new_patch_height * new_patch_width > current_num_tokens_available:
-                    # If only one side can be min_side, make as big as possible at native aspect ratio while staying below max_patches
+                    # If only one side can be min_side, make as big as possible at
+                    # native aspect ratio while staying below max_patches
                     if (
                         max(current_num_tokens_available // new_patch_height, 1)
                         * self._patch_size
@@ -355,7 +358,8 @@ class DynamicResolutionImageTilingStrategy:
             thumbnail_area = self._thumbnail_size * self._thumbnail_size
             area_ratio = resized_area / thumbnail_area
 
-            # Only add thumbnail if resized image area is less than threshold % of thumbnail area
+            # Only add thumbnail if resized image area is less than threshold % of
+            # thumbnail area
             if area_ratio < self._thumbnail_area_threshold:
                 num_tiles += 1  # Add 1 for thumbnail
                 # Add embeddings for thumbnail (thumbnail_size x thumbnail_size)
@@ -435,7 +439,8 @@ class DynamicResolutionImageTilingStrategy:
             media_list: List of media items to process
             num_tokens_available: Total number of tokens available across all media
             max_num_tiles: Maximum number of tiles (unused in this implementation)
-            data_augment: Whether to apply data augmentation to the image. Defaults to False.
+            data_augment: Whether to apply data augmentation to the image. Defaults to
+            False.
         Returns:
             List of ImageTilingParams for each media item
         """
@@ -444,19 +449,21 @@ class DynamicResolutionImageTilingStrategy:
             * (4 if self._pixel_shuffle else 1)
             * (4 if self._conv_merging else 1)
         )
-        # When the number of available token is too small, allow self._min_num_patches per media and
-        # let the sample be truncated.
+        # When the number of available token is too small, allow self._min_num_patches
+        # per media and let the sample be truncated.
         num_tokens_available = max(
             num_tokens_available, self._min_num_patches * len(media_list)
         )
 
-        # Clip the number of tokens available per media to be between min and max patches.
+        # Clip the number of tokens available per media to be between min and max
+        # patches.
         num_tokens_available_per_media = [
             max(min(num_tokens_available, self._max_num_patches), self._min_num_patches)
             for _ in range(len(media_list))
         ]
 
-        # In theory this could be a while True loop, but in case the process_media method slightly
+        # In theory this could be a while True loop, but in case the process_media
+        # method slightly
         # changes, I want to make sure we don't get stuck in an infinite loop.
         for _ in range(10):
             # Step 1: Process each media with current token budget
@@ -496,8 +503,8 @@ class DynamicResolutionImageTilingStrategy:
                     for i in range(len(num_tokens_available_per_media))
                 ]
             )
-            # If there was not scaling down, we're stuck just use min_num_patches per media, else
-            # try with the scaled down num_tokens_available_per_media.
+            # If there was not scaling down, we're stuck just use min_num_patches per
+            # media, else try with the scaled down num_tokens_available_per_media.
             if not scaled_down:
                 num_tokens_available_per_media = [self._min_num_patches] * len(
                     media_list
@@ -558,8 +565,15 @@ class DynamicResolutionImageTilingStrategy:
             )
 
     def __str__(self):
-        return f"DynamicResolutionImageTransform(vision_model_type={self._vision_model_type}, min_num_patches={self._min_num_patches}, patch_size={self._patch_size}, pixel_shuffle={self._pixel_shuffle}, conv_merging={self._conv_merging}, use_thumbnail={self._use_thumbnail}, thumbnail_size={self._thumbnail_size}, thumbnail_area_threshold={self._thumbnail_area_threshold})"
-
+        return f"DynamicResolutionImageTransform(\
+            vision_model_type={self._vision_model_type}, \
+            min_num_patches={self._min_num_patches}, \
+            patch_size={self._patch_size}, \
+            pixel_shuffle={self._pixel_shuffle}, \
+            conv_merging={self._conv_merging}, \
+            use_thumbnail={self._use_thumbnail}, \
+            thumbnail_size={self._thumbnail_size}, \
+            thumbnail_area_threshold={self._thumbnail_area_threshold})"
 
 
 image_tiling_strategy = DynamicResolutionImageTilingStrategy(
