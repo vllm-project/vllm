@@ -241,13 +241,14 @@ class AfmoeAttention(nn.Module):
         if self.is_local_attention:
             # Handle Transformers v5 rope_parameters format (dict with layer types)
             layer_type = config.layer_types[layer_idx]
-            if layer_type in config.rope_parameters:
+            rope_params = getattr(config, "rope_parameters", None)
+            if isinstance(rope_params, dict) and layer_type in rope_params:
                 # Transformers v5 rope config: use layer-specific rope_parameters
-                rope_parameters = config.rope_parameters[layer_type]
+                rope_parameters = rope_params[layer_type]
             else:
                 # Transformers v4 rope config: use config.rope_parameters directly
-                rope_parameters = config.rope_parameters
-            
+                rope_parameters = rope_params
+
             self.rotary_emb = get_rope(
                 self.head_dim,
                 rotary_dim=self.head_dim,
