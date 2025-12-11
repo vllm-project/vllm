@@ -986,14 +986,21 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
+            # Calculate the number of embeddings to schedule in the current range
+            # of scheduled encoder placholder tokens.
+            start_idx_rel = max(0, num_computed_tokens - start_pos)
+            end_idx_rel = min(
+                num_encoder_tokens, num_computed_tokens + num_new_tokens - start_pos
+            )
             curr_embeds_start, curr_embeds_end = (
                 mm_feature.mm_position.get_embeds_indices_in_range(
-                    num_computed_tokens - start_pos,
-                    num_computed_tokens + num_new_tokens - start_pos,
+                    start_idx_rel,
+                    end_idx_rel,
                 )
             )
             curr_num_embeds = curr_embeds_end - curr_embeds_start
-            # There's no embeddings in the current range of encoder placeholder tokens.
+            # There's no embeddings in the current range of encoder placeholder tokens
+            # so we can skip the encoder input.
             if curr_num_embeds == 0:
                 continue
 
