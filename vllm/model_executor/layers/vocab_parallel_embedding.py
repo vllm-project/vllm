@@ -470,12 +470,17 @@ class VocabParallelEmbedding(CustomOp):
                 self.shard_indices.added_vocab_end_index,
             )
         else:
-            masked_input = input_
+            # handle OOB tokens by mapping to 0 and zeroing embeddings
+            oob_mask = (input_ < 0) | (input_ >= self.num_embeddings_per_partition)
+            masked_input = torch.where(oob_mask, torch.zeros_like(input_), input_)
         # Get the embeddings.
         output_parallel = self.quant_method.embedding(self, masked_input.long())
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
+        elif oob_mask is not None:
+            # Zero out OOB embeddings (no-op when oob_mask is all False)
+            output_parallel.masked_fill_(oob_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output

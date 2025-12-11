@@ -60,6 +60,18 @@ class InputProcessor:
             mm_processor_cache=self.mm_processor_cache,
         )
 
+        # Warn if tokenizer vocab size > model vocab size
+        if tokenizer is not None:
+            tokenizer_vocab_size = tokenizer.max_token_id + 1
+            model_vocab_size = self.model_config.get_vocab_size()
+            if tokenizer_vocab_size > model_vocab_size:
+                logger.warning(
+                    "Tokenizer vocab size (%d) > model vocab size (%d). "
+                    "Out-of-bound token embeddings will be zeros.",
+                    tokenizer_vocab_size, model_vocab_size
+                )
+
+
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
