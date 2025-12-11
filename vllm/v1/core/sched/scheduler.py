@@ -167,7 +167,7 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
-
+        self.rejected: list[Request] = []
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
@@ -1477,7 +1477,21 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
-
+        # Handle rejected requests.
+        if self.rejected:
+            # Create EngineCoreOutputs for all rejected requests.
+            for request in self.rejected:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
+            self.rejected.clear()
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
@@ -1706,6 +1720,14 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting) + len(self.skipped_waiting)
 
     def add_request(self, request: Request) -> None:
+        if (max_waiting := self.scheduler_config.max_waiting_queue_length) and len(
+            self.waiting
+        ) >= max_waiting:
+            request.status = RequestStatus.FINISHED_REJECTED
+            self.rejected.append(request)
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.REJECTED)
+            return
         existing = self.requests.get(request.request_id)
         if existing is not None:
             update = StreamingUpdate.from_request(request)
