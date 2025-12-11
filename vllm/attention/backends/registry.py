@@ -252,35 +252,3 @@ def register_backend(
         return lambda x: x
 
     return decorator
-
-
-# Backwards compatibility alias for plugins
-class _BackendMeta(type):
-    """Metaclass to provide deprecation warnings when accessing _Backend."""
-
-    def __getattribute__(cls, name: str):
-        if name not in ("__class__", "__mro__", "__name__"):
-            logger.warning(
-                "_Backend has been renamed to AttentionBackendEnum. "
-                "Please update your code to use AttentionBackendEnum instead. "
-                "_Backend will be removed in a future release."
-            )
-        return getattr(AttentionBackendEnum, name)
-
-    def __getitem__(cls, name: str):
-        logger.warning(
-            "_Backend has been renamed to AttentionBackendEnum. "
-            "Please update your code to use AttentionBackendEnum instead. "
-            "_Backend will be removed in a future release."
-        )
-        return AttentionBackendEnum[name]
-
-
-class _Backend(metaclass=_BackendMeta):
-    """Deprecated: Use AttentionBackendEnum instead.
-
-    This class is provided for backwards compatibility with plugins
-    and will be removed in a future release.
-    """
-
-    pass
