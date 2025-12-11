@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from math import prod
-
+from vllm.platforms import current_platform
 import torch
-
+from functools import lru_cache
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -330,3 +330,12 @@ def activation_without_mul(activation: str) -> str:
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+@lru_cache
+def supports_pdl(device: torch.device | None = None) -> bool:
+    """
+    Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
+    """
+    # PDL requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)

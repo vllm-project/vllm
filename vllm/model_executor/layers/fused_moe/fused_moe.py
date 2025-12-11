@@ -55,6 +55,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from .utils import supports_pdl
+
 
 logger = init_logger(__name__)
 
@@ -365,6 +367,8 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    USE_GDC: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -488,12 +492,37 @@ def fused_moe_kernel(
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        a = tl.load(
-            a_ptrs,
-            mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        block_start_k = k * BLOCK_SIZE_K
+        block_end = block_start_k + BLOCK_SIZE_K
+
+        if EVEN_K:
+            b = tl.load(b_ptrs)
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None],
+                other=0.0,
+            )
+        else:
+            if block_end <= K:
+                b = tl.load(b_ptrs)
+                if USE_GDC:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None],
+                    other=0.0,
+                )
+            else:
+                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+                if USE_GDC:
+                    tl.extra.cuda.gdc_wait()
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    other=0.0,
+                )
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -584,7 +613,7 @@ def invoke_fused_moe_kernel(
         assert A_scale is None
         assert B_scale is None
 
-    M = A.size(0)
+    M, K = A.size()
     num_tokens = M * top_k
 
     EM = sorted_token_ids.size(0)
@@ -688,6 +717,12 @@ def invoke_fused_moe_kernel(
         config = config.copy()
         config["SPLIT_K"] = 1
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+        use_gdc = supports_pdl(A.device)
+        EVEN_K = K % (BLOCK_SIZE_K * config["SPLIT_K"]) == 0
+        with open("log.txt", "a") as f:
+            f.write(
+                f"invoke_fused_moe_kernel: use_gdc={use_gdc}, EVEN_K={EVEN_K}\n"
+            )
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
         fused_moe_kernel[grid](
@@ -730,6 +765,8 @@ def invoke_fused_moe_kernel(
             per_channel_quant=per_channel_quant,
             HAS_BIAS=HAS_BIAS,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
+            EVEN_K=EVEN_K,
+            USE_GDC=use_gdc,
             **config,
         )
 
