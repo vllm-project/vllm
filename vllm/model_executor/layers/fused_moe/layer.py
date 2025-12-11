@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
+from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -297,6 +298,27 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+class FusedMoERouterImpl(FusedMoERouter):
+    def __init__(self, layer: "FusedMoE"):
+        super().__init__()
+        self.layer = layer
+
+    @property
+    def enable_eplb(self) -> bool:
+        return self.layer.enable_eplb
+
+    @property
+    def routing_method_type(self) -> RoutingMethodType:
+        return self.layer.routing_method_type
+
+    def select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        return self.layer.select_experts(hidden_states, router_logits)
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -353,7 +375,7 @@ class FusedMoE(CustomOp):
         zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        routing_method_type: int | None = None,
+        routing_method_type: RoutingMethodType | None = None,
     ):
         super().__init__()
 
@@ -542,7 +564,7 @@ class FusedMoE(CustomOp):
 
         # ToDo: Better logic to determine the routing method type
         if routing_method_type is not None:
-            self.routing_method_type = routing_method_type
+            self.routing_method_type: RoutingMethodType = routing_method_type
         else:
             if scoring_func == "sigmoid":
                 if self.use_grouped_topk:
@@ -651,6 +673,8 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
+
+        self.router = FusedMoERouterImpl(self)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -1810,6 +1834,7 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
+                router=self.router,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
             )
@@ -1953,6 +1978,7 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
+                router=self.router,
                 x=hidden_states_combined
                 if do_naive_dispatch_combine
                 else hidden_states,
