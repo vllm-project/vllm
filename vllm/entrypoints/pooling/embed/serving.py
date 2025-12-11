@@ -238,12 +238,14 @@ class OpenAIServingEmbedding(OpenAIServing):
             # Create engine prompt for this chunk
             chunk_engine_prompt = TokensPrompt(prompt_token_ids=chunk_tokens)
 
+            cache_hit_threshold = getattr(ctx.request, "cache_hit_threshold", None)
             # Log the chunk
             self._log_inputs(
                 chunk_request_id,
                 chunk_engine_prompt,
                 params=pooling_params,
                 lora_request=ctx.lora_request,
+                cache_hit_threshold=cache_hit_threshold,
             )
 
             # Create generator for this chunk and wrap it to return indices
@@ -254,6 +256,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request=ctx.lora_request,
                 trace_headers=trace_headers,
                 priority=getattr(ctx.request, "priority", 0),
+                cache_hit_threshold=cache_hit_threshold,
             )
 
             generators.append(original_generator)
@@ -345,12 +348,14 @@ class OpenAIServingEmbedding(OpenAIServing):
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
+        cache_hit_threshold = getattr(ctx.request, "cache_hit_threshold", None)
 
         self._log_inputs(
             request_id_item,
             engine_prompt,
             params=pooling_params,
             lora_request=ctx.lora_request,
+            cache_hit_threshold=cache_hit_threshold,
         )
 
         # Return the original generator without wrapping
@@ -361,6 +366,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             lora_request=ctx.lora_request,
             trace_headers=trace_headers,
             priority=getattr(ctx.request, "priority", 0),
+            cache_hit_threshold=cache_hit_threshold,
         )
 
     async def _prepare_generators(

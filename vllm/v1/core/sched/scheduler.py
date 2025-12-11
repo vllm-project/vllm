@@ -138,6 +138,11 @@ class Scheduler(SchedulerInterface):
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
 
+        # List to collect requests that are below the cache hit ratio
+        # threshold. These requests will be finished and the list cleared
+        # in update_from_output().
+        self.cache_hit_below_threshold_request_ids: list[str] = []
+
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
@@ -626,6 +631,39 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
+                    # Cache hit threshold in request overrides global setting
+                    scheduler_config = self.vllm_config.scheduler_config
+                    cache_hit_threshold = (
+                        request.cache_hit_threshold
+                        if request.cache_hit_threshold is not None
+                        else scheduler_config.global_cache_hit_threshold
+                    )
+
+                    # Check if cache hit is above threshold
+                    cache_hit_percent = (
+                        num_computed_tokens / request.num_prompt_tokens
+                        if request.num_prompt_tokens > 0
+                        else 0.0
+                    )
+                    if cache_hit_percent < cache_hit_threshold:
+                        threshold_source = (
+                            "request"
+                            if request.cache_hit_threshold is not None
+                            else "global"
+                        )
+                        logger.debug(
+                            "Request %s rejected: cache hit rate %.2f"
+                            " < threshold %.2f (%s)",
+                            request.request_id,
+                            cache_hit_percent,
+                            cache_hit_threshold,
+                            threshold_source,
+                        )
+                        self.waiting.pop_request()
+                        self.cache_hit_below_threshold_request_ids.append(
+                            request.request_id
+                        )
+                        continue
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
@@ -1436,6 +1474,26 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+
+        # Handle requests that were rejected due to low cache hit rate.
+        if self.cache_hit_below_threshold_request_ids:
+            for req_id in self.cache_hit_below_threshold_request_ids:
+                req = self.requests.get(req_id)
+                if req is None:
+                    # The request is already finished, e.g. aborted.
+                    continue
+                # Add EngineCoreOutput for this Request.
+                req.status = RequestStatus.FINISHED_CACHE_HIT_BELOW_THRESHOLD
+                outputs[req.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=req.get_finished_reason(),
+                    )
+                )
+                self._free_request(req)
+            # Clear the list after finishing all such requests.
+            self.cache_hit_below_threshold_request_ids.clear()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.

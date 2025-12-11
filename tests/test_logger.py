@@ -452,6 +452,7 @@ def test_request_logger_log_outputs_integration():
             prompt_embeds=None,
             params=None,
             lora_request=None,
+            cache_hit_threshold=None,
         )
 
         request_logger.log_outputs(

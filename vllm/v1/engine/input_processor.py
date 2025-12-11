@@ -488,6 +488,7 @@ class InputProcessor:
         priority: int = 0,
         data_parallel_rank: int | None = None,
         resumable: bool = False,
+        cache_hit_threshold: float | None = None,
     ) -> EngineCoreRequest:
         self._validate_lora(lora_request)
         self._validate_params(params)
@@ -633,6 +634,7 @@ class InputProcessor:
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
             resumable=resumable,
+            cache_hit_threshold=cache_hit_threshold,
         )
 
     def _validate_model_inputs(

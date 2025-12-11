@@ -154,6 +154,17 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+def _validate_cache_hit_threshold(cls, data):
+    cache_hit_threshold = data.get("cache_hit_threshold")
+    if cache_hit_threshold is not None and (
+        cache_hit_threshold < 0.0 or cache_hit_threshold > 1.0
+    ):
+        raise ValueError(
+            "Parameter `cache_hit_threshold` must be between 0.0 and 1.0 if provided."
+        )
+    return data
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -344,6 +355,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    cache_hit_threshold: float | None = Field(
+        default=None,
+        description="Minimum required KV-cache hit ratio to process the request.",
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -646,6 +662,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Cannot set both `continue_final_message` and "
                 "`add_generation_prompt` to True."
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_cache_hit_threshold(cls, data):
+        cache_hit_threshold = data.get("cache_hit_threshold")
+        if cache_hit_threshold is not None and (
+            cache_hit_threshold < 0.0 or cache_hit_threshold > 1.0
+        ):
+            raise ValueError(
+                "`cache_hit_threshold` must be between 0.0 and 1.0 if provided."
             )
         return data
 
