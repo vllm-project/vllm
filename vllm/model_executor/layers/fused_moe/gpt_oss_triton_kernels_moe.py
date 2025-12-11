@@ -101,15 +101,15 @@ def _topk_softmax_kernel(
     RENORM: tl.constexpr,
     ROWS_PER_PID: tl.constexpr,
     num_stages: tl.constexpr,
+    bitmatrix,
+    bm_cols: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
 
     offs_n = tl.arange(0, N)
     offs_k = tl.arange(0, topk)
-
-    # impl topk<=2 and RENORM specialization by tl.constexpr,
-    # same as constexpr if in C++17
 
     rows = tl.arange(0, ROWS_PER_PID)
     for row_idx in tl.range(
@@ -150,6 +150,25 @@ def _topk_softmax_kernel(
         if RENORM:
             topk_vals = tl.softmax(topk_vals, dim=1, keep_dims=True)
 
+        experts_group_size: tl.constexpr = 32
+        div = topk_idxs // experts_group_size
+        rem = topk_idxs % experts_group_size
+        one = tl.cast(1, tl.uint32)
+
+        for i in tl.static_range(bm_cols):
+            offs = tl.arange(0, BLOCK_SIZE_K // experts_group_size) + i * (
+                BLOCK_SIZE_K // experts_group_size
+            )  # [BLOCKSIZEK//32]
+            x = tl.where(
+                div[:, :, None] == offs[None, None, :], (one << rem)[:, :, None], 0
+            )  # [ROWSPERPID, topk(global_gid),1] == [1,1,BLOCKSIZEK//32(local_gid)]
+            # -> [ROWSPERPID,topk(gid),BLOCKSIZEK//32]
+            y = tl.reduce_or(x, axis=1)  # [ROWSPERPID,BLOCKSIZEK//32]
+            bitmatrix_ptrs = (
+                bitmatrix + row_indices[:, None] * bm_cols + offs[None, :]
+            )  # [M,bm_cols] + [ROWSPERPID,1] + [1, BLOCKSIZEK//32]
+            tl.store(bitmatrix_ptrs, y, mask=row_indices[:, None] < M)
+
         # WB
         tl.store(
             weights_ptr
@@ -167,20 +186,24 @@ def _topk_softmax_kernel(
         )
 
 
-def fused_topk_softmax(
+def fused_routing(
     router_logits: torch.Tensor,
     topk: int,
     renormalize: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
     M, N = router_logits.shape  # num_tokens, num_experts
     weights = torch.empty(
         (M, topk), device=router_logits.device, dtype=router_logits.dtype
     )
-    indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int32)
+    indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int16)
 
     BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
     topk_padded = triton.next_power_of_2(topk)
     assert (BLOCK_N == N) and (topk_padded == topk)
+
+    BLOCK_SIZE_K = 32
+    bm_cols = triton.cdiv(N, BLOCK_SIZE_K)  # n_bitpacks
+    bitmatrix = torch.zeros((M, bm_cols), dtype=torch.uint32, device=indices.device)
 
     grid = lambda META: (triton.cdiv(M, META["ROWS_PER_PID"]),)
 
@@ -198,9 +221,19 @@ def fused_topk_softmax(
         stride_im=indices.stride(0),
         stride_ik=indices.stride(1),
         RENORM=renormalize,
+        bitmatrix=bitmatrix,
+        bm_cols=bm_cols,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
     )
 
-    return weights, indices
+    bitmatrix_shape = [M, bm_cols * 32]
+    bitmatrix_shape_max = [M, None]
+    bitmatrix = Bitmatrix(
+        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
+    )
+    weights = weights.to(torch.bfloat16)
+
+    return routing_from_bitmatrix(bitmatrix, weights, indices, N, topk)
 
 
 def triton_kernel_moe_forward(
@@ -216,9 +249,8 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    topk_weights, topk_indices = fused_topk_softmax(gating_output, topk, renormalize)
-    routing_data, gather_idx, scatter_idx = make_routing_data(
-        topk_indices, topk_weights, num_local_experts=gating_output.shape[-1]
+    routing_data, gather_idx, scatter_idx = fused_routing(
+        gating_output, topk, renormalize
     )
 
     output = torch.empty_like(hidden_states)

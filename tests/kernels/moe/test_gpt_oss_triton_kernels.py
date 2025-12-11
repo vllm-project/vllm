@@ -204,7 +204,10 @@ class GPTOSS120BModelConfig:
     rope_parameters_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
+
+
 ModelConfig = GPTOSS120BModelConfig
+
 
 @dataclass
 class GPTOSS20BModelConfig:
@@ -223,6 +226,7 @@ class GPTOSS20BModelConfig:
     rope_parameters_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
+
 
 def swiglu(x, alpha: float = 1.702, limit: float = 1.0):
     # Note we add an extra bias of 1 to the linear layer
@@ -285,9 +289,11 @@ class Case:
         ]
     ],
 )
-@pytest.mark.parametrize("num_token", [2])
+@pytest.mark.parametrize("num_token", [2, 128])
 @pytest.mark.parametrize("tp", [1, 2, 4, 8])
-@pytest.mark.parametrize("GPTOSSModelConfig", [GPTOSS120BModelConfig, GPTOSS20BModelConfig])
+@pytest.mark.parametrize(
+    "GPTOSSModelConfig", [GPTOSS120BModelConfig, GPTOSS20BModelConfig]
+)
 def test_equiv(num_token, a_dtype, w_dtype, tp, GPTOSSModelConfig):
     from triton_kernels.tensor_details import layout
 
