@@ -305,7 +305,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: int | None):
+def run_encode(model: str, modality: QueryModality, seed: int):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -335,7 +335,7 @@ def run_encode(model: str, modality: QueryModality, seed: int | None):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: int | None):
+def run_score(model: str, modality: QueryModality, seed: int):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -390,7 +390,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     return parser.parse_args()
