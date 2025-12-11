@@ -152,6 +152,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
 
         self.rotary_emb = Ernie4_5_VLRotaryEmbedding(
             head_size=self.head_dim,
+            rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
             base=rope_parameters["rope_theta"],
             is_neox_style=False,
