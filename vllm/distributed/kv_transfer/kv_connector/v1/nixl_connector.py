@@ -74,7 +74,6 @@ ReqId = str
 #   2: Add remote_request_id to kv_transfer_params
 #
 NIXL_CONNECTOR_VERSION: int = 2
-CROSS_LAYERS: bool = True
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -144,7 +143,7 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str, cross_layers: str
+    vllm_config: VllmConfig, attn_backend_name: str, cross_layers: bool
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
