@@ -699,4 +699,4 @@ def _map_new_expert_indices_with_rank_mapping(
     return mapped_expert_indices
 
 
-__all__ = ["transfer_layer", "move_from_buffer", "RecvMetadata", "MoveToBufferResult"]
+__all__ = ["transfer_layer", "move_from_buffer", "RecvMetadata"]
