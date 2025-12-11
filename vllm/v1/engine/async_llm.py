@@ -431,7 +431,7 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
-    def _validate_batch_requests(
+    def _validate_generate_requests(
         self,
         prompt: EngineCoreRequest
         | PromptType
@@ -445,7 +445,6 @@ class AsyncLLM(EngineClient):
         *,
         prompt_text: str | list[str] | None = None,
         lora_request: LoRARequest | Sequence[LoRARequest] | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
         priority: int | list[int] = 0,
         data_parallel_rank: int | list[int] | None = None,
@@ -500,7 +499,6 @@ class AsyncLLM(EngineClient):
         elif data_parallel_rank is not None:
             raise ValueError("data_parallel_rank must be a sequence.")
 
-
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -519,18 +517,18 @@ class AsyncLLM(EngineClient):
         request_id: str | Sequence[str],
         *,
         prompt_text: str | list[str] | None = None,
-        lora_request: LoRARequest | Sequence[LoRARequest] | None = None,
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
         priority: int | list[int] = 0,
         data_parallel_rank: int | list[int] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
-        Main function called by the API server to kick off a request
+        Main function called by the API server to kick off requests
             * 1) Making an AsyncStream corresponding to the Requests.
-            * 2) Processing the Input.
-            * 3) Adding the Request to the Detokenizer.
-            * 4) Adding the Request to the EngineCore (separate process).
+            * 2) Processing the Inputs.
+            * 3) Adding the Requests to the Detokenizer.
+            * 4) Adding the Requests to the EngineCore (separate process).
 
         A separate output_handler loop runs in a background AsyncIO task,
         pulling outputs from EngineCore and putting them into the AsyncStream.
@@ -553,27 +551,26 @@ class AsyncLLM(EngineClient):
                     "prompt logprobs"
                 )
 
-        if is_batch:
-            self._validate_batch_requests(
-                prompt,
-                sampling_params,
-                request_id,
-                prompt_text=prompt_text,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-                data_parallel_rank=data_parallel_rank,
-            )
-        else:
-            prompt = [prompt]
-            request_id = [request_id]
-            prompt_text = [prompt_text] if prompt_text is not None else None
-            trace_headers = [trace_headers] if trace_headers is not None else None
-            priority = [priority]
-            data_parallel_rank = [data_parallel_rank] if data_parallel_rank is not None else None
-
         try:
+            if is_batch:
+                self._validate_generate_requests(
+                    prompt,
+                    sampling_params,
+                    request_id,
+                    prompt_text=prompt_text,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=priority,
+                    data_parallel_rank=data_parallel_rank,
+                )
+            else:
+                prompt = [prompt]
+                request_id = [request_id]
+                prompt_text = [prompt_text] if prompt_text is not None else None
+                trace_headers = [trace_headers] if trace_headers is not None else None
+                priority = [priority]
+                data_parallel_rank = [data_parallel_rank] if data_parallel_rank is not None else None
+
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
@@ -785,35 +782,95 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
+    def _validate_encode_requests(
+        self,
+        prompt: PromptType | Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        request_id: str | Sequence[str],
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
+    ) -> None:
+        num_requests = len(prompt)
+
+        if isinstance(pooling_params, Sequence):
+            if len(pooling_params) != num_requests:
+                raise ValueError("The lengths of prompts and pooling_params must be the same.")
+
+        if isinstance(request_id, str):
+            raise ValueError("request_id must be a sequence.")
+        if isinstance(request_id, Sequence):
+            if len(request_id) != num_requests:
+                raise ValueError("The lengths of prompts and request_id must be the same.")
+
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and lora_request must be the same."
+                )
+        elif lora_request is not None:
+            raise ValueError("lora_request must be a sequence or None.")
+
+        if isinstance(trace_headers, list):
+            if len(trace_headers) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and trace_headers must be the same."
+                )
+        elif trace_headers is not None:
+            raise ValueError("trace_headers must be a list or None.")
+
+        if isinstance(priority, Sequence):
+            if len(priority) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and priority must be the same."
+                )
+
     async def encode(
         self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: LoRARequest | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        prompt: PromptType | Sequence[PromptType],
+        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        request_id: str | Sequence[str],
+        lora_request: LoRARequest | list[LoRARequest] | None = None,
+        trace_headers: Mapping[str, str] | list[Mapping[str, str]] | None = None,
+        priority: int | list[int] = 0,
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
-        Main function called by the API server to kick off a request
-            * 1) Making an AsyncStream corresponding to the Request.
-            * 2) Processing the Input.
-            * 3) Adding the Request to the EngineCore (separate process).
+        Main function called by the API server to kick off requests
+            * 1) Making an AsyncStream corresponding to the Requests.
+            * 2) Processing the Inputs.
+            * 3) Adding the Requests to the EngineCore (separate process).
 
         A separate output_handler loop runs in a background AsyncIO task,
-        pulling outputs from EngineCore and putting them into the
-        per-request AsyncStream.
+        pulling outputs from EngineCore and putting them into the AsyncStream.
 
-        The caller of generate() iterates the returned AsyncGenerator,
+        The caller of encode() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
 
         NOTE: truncate_prompt_tokens is deprecated in v0.14.
         TODO: Remove truncate_prompt_tokens in v0.15.
         """
+        is_batch = False
+        if not isinstance(prompt, (str, dict)) and isinstance(prompt, Sequence):
+            is_batch = True
 
         try:
+            if is_batch:
+                self._validate_encode_requests(
+                    prompt,
+                    pooling_params,
+                    request_id,
+                    lora_request,
+                    trace_headers,
+                    priority,
+                )
+            else:
+                prompt = [prompt]
+                request_id = [request_id]
+                trace_headers = [trace_headers] if trace_headers is not None else None
+                priority = [priority]
+
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
@@ -841,8 +898,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs,
             )
 
-            # TODO: fix api
-            q = await self.add_request(
+            q = await self.add_requests(
                 request_id,
                 prompt,
                 pooling_params,
@@ -854,17 +910,19 @@ class AsyncLLM(EngineClient):
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
-            # TODO: fix api
-            finished = False
-            while not finished:
+            running_reqs = set(request_id)
+            while len(running_reqs) > 0:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
-                out = q.get_nowait() or await q.get()
-                assert isinstance(out, PoolingRequestOutput)
-                # Note: both OutputProcessor and EngineCore handle their
-                # own request cleanup based on finished.
-                finished = out.finished
-                yield out
+                outs = q.mget_nowait() or await q.mget()
+
+                for out in outs:
+                    assert isinstance(out, PoolingRequestOutput)
+                    # Note: both OutputProcessor and EngineCore handle their
+                    # own request cleanup based on finished.
+                    if out.finished:
+                        running_reqs.remove(out.request_id)
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
