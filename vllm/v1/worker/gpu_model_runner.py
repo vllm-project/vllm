@@ -2240,6 +2240,7 @@ class GPUModelRunner(
                 assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
                     curr_embeds_start, curr_embeds_end = (
                         pos_info.get_embeds_indices_in_range(start_idx, end_idx)
                     )
