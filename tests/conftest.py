@@ -265,7 +265,7 @@ class HfRunner:
         if isinstance(x, dict):
             return {k: self.wrap_device(v, device) for k, v in x.items()}
 
-        if hasattr(x.device, "type") and x.device.type == device:
+        if hasattr(x, "device") and x.device.type == device:
             return x
 
         return x.to(device)
