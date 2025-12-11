@@ -63,7 +63,8 @@ For an optimized workflow when iterating on C++/CUDA kernels, see the [Increment
 vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
 
 ```bash
-uv pip install pre-commit -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+uv pip install pre-commit
+pre-commit install
 ```
 
 vLLM's `pre-commit` hooks will now run automatically every time you commit.
