@@ -6,6 +6,7 @@ from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
+import numpy as np
 import torch
 from typing_extensions import TypeVar
 
@@ -41,6 +42,7 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
+    routed_experts: np.ndarray | None  # [seq_len,layer_num,topk]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     finish_reason: str | None = None
@@ -55,6 +57,7 @@ class CompletionOutput:
             f"CompletionOutput(index={self.index}, "
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
+            f"routed_experts={self.routed_experts}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
