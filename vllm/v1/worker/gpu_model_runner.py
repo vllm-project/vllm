@@ -3876,12 +3876,13 @@ class GPUModelRunner(
          - during profile_run
          - during DP rank dummy run
         """
+        import functools
+
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
         if not randomize_inputs:
             yield
-        else:
-            import functools
+        elif input_ids is not None:
 
             @functools.cache
             def rand_input_ids() -> torch.Tensor:
@@ -3891,26 +3892,25 @@ class GPUModelRunner(
                     high=self.model_config.get_vocab_size(),
                 )
 
+            logger.debug_once("Randomizing dummy input_ids for DP Rank")
+            input_ids.copy_(rand_input_ids()[: input_ids.size(0)], non_blocking=True)
+            yield
+            input_ids.fill_(0)
+        else:
+
             @functools.cache
             def rand_inputs_embeds() -> torch.Tensor:
                 return torch.randn_like(
                     self.inputs_embeds.gpu,
                 )
 
-            logger.debug_once("Randomizing dummy data for DP Rank")
-            if input_ids is not None:
-                input_ids.copy_(
-                    rand_input_ids()[: input_ids.size(0)], non_blocking=True
-                )
-                yield
-                input_ids.fill_(0)
-            else:
-                assert inputs_embeds is not None
-                inputs_embeds.copy_(
-                    rand_inputs_embeds()[: inputs_embeds.size(0)], non_blocking=True
-                )
-                yield
-                inputs_embeds.fill_(0)
+            assert inputs_embeds is not None
+            logger.debug_once("Randomizing dummy inputs_embeds for DP Rank")
+            inputs_embeds.copy_(
+                rand_inputs_embeds()[: inputs_embeds.size(0)], non_blocking=True
+            )
+            yield
+            inputs_embeds.fill_(0)
 
     def _get_mm_dummy_batch(
         self,
