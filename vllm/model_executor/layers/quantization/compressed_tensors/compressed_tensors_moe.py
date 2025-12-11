@@ -1244,7 +1244,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     if self.disable_expert_map
                     else layer.expert_map,  # ???
                     quant_config=self.moe_quant_config,
-                    moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+                    moe_parallel_config=layer.moe_parallel_config,
                 )
             else:
                 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -1267,7 +1267,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
                     c_strides2=self.ab_strides1_c_strides2,
-                    moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+                    moe_parallel_config=layer.moe_parallel_config,
                 )
 
         else:
@@ -1287,7 +1287,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
-                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+                moe_parallel_config=layer.moe_parallel_config,
             )
 
     @property
@@ -1426,7 +1426,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
-            moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+            moe_parallel_config=layer.moe_parallel_config,
         )
 
 
@@ -2015,7 +2015,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             quant_config=self.moe_quant_config,
-            moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+            moe_parallel_config=layer.moe_parallel_config,
         )
 
     @property

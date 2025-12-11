@@ -334,7 +334,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
-                moe_parallel_config=getattr(layer, "moe_parallel_config", None),
+                moe_parallel_config=layer.moe_parallel_config,
             )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
