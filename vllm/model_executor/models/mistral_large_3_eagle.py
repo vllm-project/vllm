@@ -115,7 +115,7 @@ class EagleMistralLarge3ForCausalLM(MistralLarge3ForCausalLM):
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    embed_input_ids = SupportsMultiModal.embed_input_ids
+    embed_input_ids = SupportsMultiModal.embed_input_ids  # type: ignore
 
     def forward(
         self,
