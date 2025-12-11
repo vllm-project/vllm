@@ -649,9 +649,7 @@ class Qwen3CoderToolParser(ToolParser):
         # Get parameter configuration for type conversion and string checking
         param_config = self._get_arguments_config(
             self.current_function_name or "",
-            self.streaming_request.tools
-            if self.streaming_request
-            else None,
+            self.streaming_request.tools if self.streaming_request else None,
         )
 
         # handle strings via streaming.
@@ -749,18 +747,12 @@ class Qwen3CoderToolParser(ToolParser):
 
         # Build JSON fragment based on the converted type
         # Use json.dumps to properly serialize the value
-        serialized_value = json.dumps(
-            converted_value, ensure_ascii=False
-        )
+        serialized_value = json.dumps(converted_value, ensure_ascii=False)
 
         if self.param_count == 0:
-            json_fragment = (
-                f'"{self.current_param_name}": {serialized_value}'
-            )
+            json_fragment = f'"{self.current_param_name}": {serialized_value}'
         else:
-            json_fragment = (
-                f', "{self.current_param_name}": {serialized_value}'
-            )
+            json_fragment = f', "{self.current_param_name}": {serialized_value}'
 
         self.param_count += 1
 
