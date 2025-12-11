@@ -233,12 +233,16 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                     .block_table.cpu[0, block_idx]
                     .item()
                 )
-                kv_cache = self.compilation_config.static_forward_context[
-                    mamba_layer_name
-                ].kv_cache
-                mamba_kv_cache_dict[
-                    num_computed_tokens - num_computed_tokens % BLOCK_SIZE
-                ] = (kv_cache[0][0][block_id].clone(), kv_cache[0][1][block_id].clone())
+                if block_id != 0:
+                    kv_cache = self.compilation_config.static_forward_context[
+                        mamba_layer_name
+                    ].kv_cache
+                    mamba_kv_cache_dict[
+                        num_computed_tokens - num_computed_tokens % BLOCK_SIZE
+                    ] = (
+                        kv_cache[0][0][block_id].clone(),
+                        kv_cache[0][1][block_id].clone(),
+                    )
 
             last_num_computed_tokens = num_computed_tokens
 
@@ -421,7 +425,6 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     apply_patch(monkeypatch)
     full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
     tests = {
-        # test case 1: no hit, accept 1 token
         "accept_1": TestConfig(
             num_prompt_tokens=554,
             num_generated_tokens=20,
@@ -546,24 +549,55 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 StepAction(564, 4, [0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
             ],
         ),
-        # "prompt_block_size": TestConfig(
-        #     num_prompt_tokens=560,
-        #     num_generated_tokens=10,
-        #     num_accepted_tokens=4,
-        #     step_actions=[
-        #         StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
-        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
-        #     ],
-        # ),
-        # "prompt_2_block_size": TestConfig(
-        #     num_prompt_tokens=560 * 2,
-        #     num_generated_tokens=10,
-        #     num_accepted_tokens=4,
-        #     step_actions=[
-        #         StepAction(0, 560, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
-        #         StepAction(560, 4, [], (-1, -1), (-1, -1)),
-        #     ],
-        # ),
+        "prompt_block_size": TestConfig(
+            num_prompt_tokens=560,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+                StepAction(560, 4, [1, 1, 1, 1, 1], (0, 1), (-1, -1)),
+            ],
+        ),
+        "prompt_2_block_size": TestConfig(
+            num_prompt_tokens=560 * 2,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+                StepAction(560, 560, [1, 1, 1, 1, 1], (0, 1), (1, 1)),
+                StepAction(560 * 2, 4, [0, 1, 1, 1, 1, 1], (1, 2), (-1, -1)),
+            ],
+        ),
+        "prompt_2_block_size_10": TestConfig(
+            num_prompt_tokens=560 * 2 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560, [1, 1, 1, 1], (-1, -1), (0, 0)),
+                StepAction(560, 570, [1, 0, 1, 1, 1, 1], (0, 2), (-1, -1)),
+                StepAction(560 * 2 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "prompt_3_block_size": TestConfig(
+            num_prompt_tokens=560 * 3,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
+                StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (2, 2)),
+                StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "prompt_3_block_size_10": TestConfig(
+            num_prompt_tokens=560 * 3 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
+                StepAction(560 * 2, 570, [0, 1, 1, 1, 1, 1], (1, 2), (2, 2)),
+                StepAction(560 * 3 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
     }
 
     engine = LLM(
@@ -575,6 +609,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        max_num_batched_tokens=3072,
         hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
         seed=42,
     )
