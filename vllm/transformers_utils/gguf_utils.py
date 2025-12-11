@@ -5,6 +5,7 @@
 from functools import cache
 from os import PathLike
 from pathlib import Path
+from typing import Any
 
 import gguf
 import regex as re
@@ -197,6 +198,276 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
         logger.info("Extracted vision config from mmproj.gguf metadata")
 
     return config
+
+
+# Mapping from GGUF architecture names to HuggingFace model_type
+# GGUF metadata often uses different naming conventions than HuggingFace
+# (e.g., "qwen3moe" vs "qwen3_moe", no underscores in GGUF)
+GGUF_ARCH_TO_HF_MODEL_TYPE: dict[str, str] = {
+    "llama": "llama",
+    "phi3": "phi3",
+    "phi2": "phi",
+    "phi": "phi",
+    "phimoe": "phimoe",
+    "gemma": "gemma",
+    "gemma2": "gemma2",
+    "gemma3": "gemma3",
+    "qwen2": "qwen2",
+    "qwen2moe": "qwen2_moe",
+    "qwen3": "qwen3",
+    "qwen3moe": "qwen3_moe",
+    "starcoder2": "starcoder2",
+    "gpt2": "gpt2",
+    "mistral": "mistral",
+    "mixtral": "mixtral",
+    "falcon": "falcon",
+    "baichuan": "baichuan",
+    "internlm2": "internlm2",
+    "mamba": "mamba",
+    "nemotron": "nemotron",
+}
+
+
+def extract_hf_config_from_gguf(model: str) -> dict[str, Any] | None:
+    """Extract HuggingFace-compatible config dict from GGUF metadata.
+
+    This function reads GGUF metadata and constructs a config dictionary
+    that can be used to create a PretrainedConfig. Useful for GGUF repos
+    that don't include config.json (e.g., bartowski repos).
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        Dictionary with HF-compatible config values, or None if extraction fails
+
+    Raises:
+        Exception: Exceptions from GGUF reading propagate directly
+    """
+    # Use check_gguf_file to validate - it reads the header magic bytes
+    # This handles both .gguf extension and HuggingFace cache blob paths
+    if not check_gguf_file(model):
+        return None
+
+    try:
+        model_path = Path(model)
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        # Get architecture name
+        arch_field = reader.get_field(Keys.General.ARCHITECTURE)
+        if arch_field is None:
+            logger.warning("No architecture field found in GGUF metadata")
+            return None
+
+        arch = bytes(arch_field.parts[-1]).decode("utf-8")
+        logger.info("Extracting config from GGUF metadata (architecture: %s)", arch)
+
+        # Map GGUF architecture to HF model_type
+        model_type = GGUF_ARCH_TO_HF_MODEL_TYPE.get(arch, arch)
+
+        config_dict: dict[str, Any] = {
+            "model_type": model_type,
+        }
+
+        # Helper to extract field value
+        def get_field_value(key: str, default=None):
+            field = reader.get_field(key.format(arch=arch))
+            if field is not None:
+                val = field.parts[-1]
+                # Handle arrays vs scalars
+                if hasattr(val, "__len__") and len(val) == 1:
+                    return val[0]
+                return val
+            return default
+
+        # Extract core architecture parameters
+        # Using arch-specific keys from gguf.constants.Keys
+
+        # Context length -> max_position_embeddings
+        ctx_len = get_field_value(Keys.LLM.CONTEXT_LENGTH)
+        if ctx_len is not None:
+            config_dict["max_position_embeddings"] = int(ctx_len)
+
+        # Embedding length -> hidden_size
+        embed_len = get_field_value(Keys.LLM.EMBEDDING_LENGTH)
+        if embed_len is not None:
+            config_dict["hidden_size"] = int(embed_len)
+
+        # Feed forward length -> intermediate_size
+        ff_len = get_field_value(Keys.LLM.FEED_FORWARD_LENGTH)
+        if ff_len is not None:
+            config_dict["intermediate_size"] = int(ff_len)
+
+        # Block count -> num_hidden_layers
+        block_count = get_field_value(Keys.LLM.BLOCK_COUNT)
+        if block_count is not None:
+            config_dict["num_hidden_layers"] = int(block_count)
+
+        # Attention head count -> num_attention_heads
+        head_count = get_field_value(Keys.Attention.HEAD_COUNT)
+        if head_count is not None:
+            config_dict["num_attention_heads"] = int(head_count)
+
+        # KV head count -> num_key_value_heads
+        kv_head_count = get_field_value(Keys.Attention.HEAD_COUNT_KV)
+        if kv_head_count is not None:
+            config_dict["num_key_value_heads"] = int(kv_head_count)
+
+        # RoPE frequency base -> rope_theta
+        rope_freq = get_field_value(Keys.Rope.FREQ_BASE)
+        if rope_freq is not None:
+            config_dict["rope_theta"] = float(rope_freq)
+
+        # Layer norm epsilon
+        rms_eps = get_field_value(Keys.Attention.LAYERNORM_RMS_EPS)
+        if rms_eps is not None:
+            config_dict["rms_norm_eps"] = float(rms_eps)
+
+        # Sliding window attention
+        sliding_window = get_field_value(Keys.Attention.SLIDING_WINDOW)
+        if sliding_window is not None:
+            config_dict["sliding_window"] = int(sliding_window)
+
+        # Vocab size - from tokenizer tokens list or arch-specific field
+        vocab_size = get_field_value(Keys.LLM.VOCAB_SIZE)
+        if vocab_size is None:
+            tokens_field = reader.get_field(Keys.Tokenizer.LIST)
+            if tokens_field is not None:
+                vocab_size = len(tokens_field.parts[-1])
+        if vocab_size is not None:
+            config_dict["vocab_size"] = int(vocab_size)
+
+        # Token IDs
+        bos_id = get_field_value(Keys.Tokenizer.BOS_ID)
+        if bos_id is not None:
+            config_dict["bos_token_id"] = int(bos_id)
+
+        eos_id = get_field_value(Keys.Tokenizer.EOS_ID)
+        if eos_id is not None:
+            config_dict["eos_token_id"] = int(eos_id)
+
+        # Attention softcapping (for Gemma2, etc.)
+        attn_softcap = get_field_value(Keys.LLM.ATTN_LOGIT_SOFTCAPPING)
+        if attn_softcap is not None:
+            config_dict["attn_logit_softcapping"] = float(attn_softcap)
+
+        final_softcap = get_field_value(Keys.LLM.FINAL_LOGIT_SOFTCAPPING)
+        if final_softcap is not None:
+            config_dict["final_logit_softcapping"] = float(final_softcap)
+
+        logger.info(
+            "Extracted %d config fields from GGUF metadata for %s",
+            len(config_dict),
+            model_type,
+        )
+
+        return config_dict
+
+    except Exception as e:
+        logger.warning("Error extracting config from GGUF: %s", e)
+        return None
+
+
+def extract_softcap_from_gguf(model: str) -> dict[str, float]:
+    """Extract attention and final logit softcap values from GGUF metadata.
+
+    Reads softcap parameters from GGUF metadata using arch-specific keys.
+    These parameters are critical for models like Gemma2 where attention
+    logit softcapping prevents numerical instability.
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        Dictionary with 'attn_logit_softcapping' and/or 'final_logit_softcapping'
+        keys if found in GGUF metadata, empty dict otherwise
+    """
+    if not model.endswith(".gguf"):
+        return {}
+
+    try:
+        model_path = Path(model)
+        if not model_path.is_file():
+            return {}
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        # Get architecture name to build arch-specific keys
+        arch_field = reader.get_field(Keys.General.ARCHITECTURE)
+        if arch_field is None:
+            logger.debug("No architecture field found in GGUF metadata")
+            return {}
+
+        arch = bytes(arch_field.parts[-1]).decode("utf-8")
+
+        result = {}
+
+        # Extract attention logit softcapping
+        attn_key = Keys.LLM.ATTN_LOGIT_SOFTCAPPING.format(arch=arch)
+        attn_field = reader.get_field(attn_key)
+        if attn_field is not None:
+            result["attn_logit_softcapping"] = float(attn_field.parts[-1])
+            logger.info(
+                "Extracted attn_logit_softcapping=%.2f from GGUF metadata",
+                result["attn_logit_softcapping"],
+            )
+
+        # Extract final logit softcapping
+        final_key = Keys.LLM.FINAL_LOGIT_SOFTCAPPING.format(arch=arch)
+        final_field = reader.get_field(final_key)
+        if final_field is not None:
+            result["final_logit_softcapping"] = float(final_field.parts[-1])
+            logger.info(
+                "Extracted final_logit_softcapping=%.2f from GGUF metadata",
+                result["final_logit_softcapping"],
+            )
+
+        return result
+
+    except Exception as e:
+        logger.debug("Error extracting softcap from GGUF: %s", e)
+        return {}
+
+
+def extract_eos_token_id_from_gguf(model: str) -> int | None:
+    """Extract EOS token ID from GGUF metadata.
+
+    GGUF files store the EOS token ID in tokenizer.ggml.eos_token_id field.
+    This may differ from HuggingFace's tokenizer config (e.g., Gemma models
+    use <end_of_turn> token ID 106 as EOS in GGUF, but HF tokenizer reports
+    <eos> token ID 1).
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        EOS token ID from GGUF metadata, or None if not found
+    """
+    if not model.endswith(".gguf"):
+        return None
+
+    try:
+        model_path = Path(model)
+        if not model_path.is_file():
+            return None
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        eos_field = reader.get_field(Keys.Tokenizer.EOS_ID)
+        if eos_field is not None:
+            eos_token_id = int(eos_field.parts[-1][0])
+            logger.debug(
+                "Extracted eos_token_id=%d from GGUF metadata",
+                eos_token_id,
+            )
+            return eos_token_id
+
+        return None
+
+    except Exception as e:
+        logger.debug("Error extracting EOS token ID from GGUF: %s", e)
+        return None
 
 
 def maybe_patch_hf_config_from_gguf(

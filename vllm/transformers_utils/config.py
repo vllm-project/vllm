@@ -31,6 +31,7 @@ from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
     check_gguf_file,
+    extract_hf_config_from_gguf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -223,15 +224,87 @@ class MistralConfigParser(ConfigParserBase):
         return config_dict, config
 
 
+class GGUFConfigParser(ConfigParserBase):
+    """Config parser that extracts configuration from GGUF metadata.
+
+    This parser is used for GGUF models from repositories that don't include
+    config.json (e.g., bartowski repos). It reads the GGUF file metadata
+    directly to construct a HuggingFace-compatible configuration.
+    """
+
+    def parse(
+        self,
+        model: str | Path,
+        trust_remote_code: bool,
+        revision: str | None = None,
+        code_revision: str | None = None,
+        **kwargs,
+    ) -> tuple[dict, PretrainedConfig]:
+        # Get the GGUF file path from kwargs
+        gguf_file = kwargs.get("gguf_file")
+        gguf_path = str(Path(model) / gguf_file) if gguf_file else str(model)
+
+        # Extract config from GGUF metadata
+        config_dict = extract_hf_config_from_gguf(gguf_path)
+        if config_dict is None:
+            raise ValueError(
+                f"Failed to extract config from GGUF file: {gguf_path}. "
+                "The GGUF file may be corrupted or missing required metadata."
+            )
+
+        model_type = config_dict.get("model_type")
+
+        # Use hf_overrides if provided
+        if (hf_overrides := kwargs.pop("hf_overrides", None)) is not None:
+            config_dict.update(hf_overrides)
+            model_type = config_dict.get("model_type", model_type)
+
+        # Create config using AutoConfig with the extracted dict
+        # We need to create a config class based on model_type
+        if model_type is not None and model_type in _CONFIG_REGISTRY:
+            config_class = _CONFIG_REGISTRY[model_type]
+            config = config_class(**config_dict)
+        else:
+            # Use AutoConfig to get the appropriate config class
+            try:
+                config_class = AutoConfig.for_model(model_type)
+                # Filter config_dict to only include valid keys for this config
+                valid_keys = (
+                    set(config_class.__dataclass_fields__.keys())
+                    if hasattr(config_class, "__dataclass_fields__")
+                    else set(config_class().__dict__.keys())
+                )
+                filtered_dict = {
+                    k: v
+                    for k, v in config_dict.items()
+                    if k in valid_keys or k == "model_type"
+                }
+                config = config_class(**filtered_dict)
+            except Exception as e:
+                logger.warning(
+                    "Failed to create config with AutoConfig.for_model(%s): %s. "
+                    "Falling back to PretrainedConfig.",
+                    model_type,
+                    e,
+                )
+                # Fallback to basic PretrainedConfig
+                config = PretrainedConfig(**config_dict)
+
+        config = _maybe_remap_hf_config_attrs(config)
+        return config_dict, config
+
+
 _CONFIG_FORMAT_TO_CONFIG_PARSER: dict[str, type[ConfigParserBase]] = {
     "hf": HFConfigParser,
     "mistral": MistralConfigParser,
+    "gguf": GGUFConfigParser,
 }
 
 ConfigFormat = Literal[
     "auto",
     "hf",
     "mistral",
+    "gguf",
 ]
 
 
@@ -556,13 +629,18 @@ def get_config(
             # Transformers implementation.
             if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
                 config_format = "mistral"
-            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
-            ):
+            elif file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
                 config_format = "hf"
+            # Local GGUF files without config.json - extract config from GGUF metadata
+            elif _is_gguf and not _is_remote_gguf:
+                logger.info(
+                    "No config.json found for local GGUF model. "
+                    "Extracting config from GGUF metadata."
+                )
+                config_format = "gguf"
             # Remote GGUF models must have config.json in repo,
             # otherwise the config can't be parsed correctly.
-            # FIXME(Isotr0py): Support remote GGUF repos without config.json
+            # TODO(Isotr0py): Support remote GGUF repos without config.json
             elif _is_remote_gguf and not file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
             ):
