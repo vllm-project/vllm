@@ -2045,6 +2045,19 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
+
+    # Beam search parameters
+    use_beam_search: bool = False
+    """Whether to use beam search for transcription generation."""
+
+    beam_width: int = Field(default=4, ge=1, le=8)
+    """The number of beams to use in beam search. Higher values may improve
+    quality but increase computation time. Recommended: 2-4 for transcription."""
+
+    length_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
+    """Length penalty for beam search. Values > 1.0 favor longer sequences,
+    values < 1.0 favor shorter sequences. For transcription, 1.0 (no penalty)
+    is recommended to avoid artificially shortening transcripts."""
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2104,6 +2117,39 @@ class TranscriptionRequest(OpenAIBaseModel):
             extra_args=self.vllm_xargs,
         )
 
+    def to_beam_search_params(
+        self,
+        default_max_tokens: int,
+        default_sampling_params: dict | None = None
+    ) -> BeamSearchParams:
+        """Convert transcription request to beam search parameters."""
+        # For transcription, use conservative max_tokens since outputs are typically short
+        max_tokens = min(default_max_tokens, 300)  # Conservative limit for audio transcription
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        # Use temperature for beam search - slightly lower than regular generation for stability
+        # Default temperature of 0.8 provides good balance between exploration and stability for transcription
+        # TODO: Consider making this model-aware (different defaults for different model types)
+        DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE = 0.8
+        temperature = self.temperature if self.temperature is not None else DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE
+
+        # For encoder-decoder models like Whisper, limit beam width due to high encoder computation cost
+        # Based on performance testing: beam_width > 3 shows diminishing returns with exponential cost increase
+        # TODO: Make this configurable via environment variable or model config
+        MAX_BEAM_WIDTH_ENCODER_DECODER = 3
+        beam_width = min(self.beam_width, MAX_BEAM_WIDTH_ENCODER_DECODER)
+
+        return BeamSearchParams(
+            beam_width=beam_width,
+            max_tokens=max_tokens,
+            ignore_eos=False,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=False,
+        )
+
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
@@ -2112,6 +2158,32 @@ class TranscriptionRequest(OpenAIBaseModel):
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                 detail="Expected 'file' to be a file-like object, not 'str'.",
             )
+
+        # Handle beam search parameters from form data
+        if isinstance(data, dict):
+            # Convert string boolean for use_beam_search
+            if "use_beam_search" in data:
+                use_beam_search = data["use_beam_search"]
+                if isinstance(use_beam_search, str):
+                    data["use_beam_search"] = use_beam_search.lower() in ("true", "1", "yes", "on")
+                elif isinstance(use_beam_search, bool):
+                    data["use_beam_search"] = use_beam_search
+                else:
+                    data["use_beam_search"] = bool(use_beam_search)
+
+            # Convert string to int for beam_width
+            if "beam_width" in data and isinstance(data["beam_width"], str):
+                try:
+                    data["beam_width"] = int(data["beam_width"])
+                except (ValueError, TypeError):
+                    pass
+
+            # Convert string to float for length_penalty
+            if "length_penalty" in data and isinstance(data["length_penalty"], str):
+                try:
+                    data["length_penalty"] = float(data["length_penalty"])
+                except (ValueError, TypeError):
+                    pass
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)

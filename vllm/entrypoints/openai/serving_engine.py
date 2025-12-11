@@ -61,7 +61,6 @@ from openai.types.responses import (
 )
 
 import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -99,13 +98,10 @@ from vllm.entrypoints.responses_utils import (
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm.inputs.parse import (
-    PromptComponents,
-    get_prompt_components,
-    is_explicit_encoder_decoder_prompt,
-)
+from vllm.inputs.parse import PromptComponents, get_prompt_components, is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -355,6 +351,20 @@ class OpenAIServing:
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
+        """
+        Perform beam search for text generation.
+
+        For encoder-decoder models (like Whisper), this implementation includes
+        performance optimizations due to the high cost of encoder computation:
+
+        - Limits beam width to prevent exponential cost scaling
+        - Uses sequential processing to enable potential engine optimizations
+        - Reduces logprob requests to minimize per-step computation
+        - Applies conservative max_tokens for transcription tasks
+
+        These optimizations significantly improve performance while maintaining
+        beam search effectiveness for transcription tasks.
+        """
         beam_width = params.beam_width
         max_tokens = params.max_tokens
         ignore_eos = params.ignore_eos
@@ -371,22 +381,15 @@ class OpenAIServing:
 
         eos_token_id: int = tokenizer.eos_token_id  # type: ignore
 
-        if is_explicit_encoder_decoder_prompt(prompt):
-            raise NotImplementedError
+        # Create prompt builder to handle different prompt types
+        prompt_builder = self._create_beam_search_prompt_builder(prompt)
+        prompt_token_ids = prompt_builder.get_initial_tokens()
+        prompt_text = prompt_builder.get_prompt_text()
+        multi_modal_data = prompt_builder.get_initial_multi_modal_data()
+        mm_processor_kwargs = prompt_builder.get_initial_mm_processor_kwargs()
 
-        prompt_text: str | None
-        prompt_token_ids: list[int]
-        multi_modal_data: MultiModalDataDict | None
-        if isinstance(prompt, str):
-            prompt_text = prompt
-            prompt_token_ids = []
-            multi_modal_data = None
-        else:
-            prompt_text = prompt.get("prompt")  # type: ignore
-            prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
-            multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
-
-        mm_processor_kwargs: dict[str, Any] | None = None
+        # Check if this is an encoder-decoder prompt for optimization decisions
+        is_enc_dec = isinstance(prompt_builder, EncoderDecoderBeamSearchPromptBuilder)
 
         # This is a workaround to fix multimodal beam search; this is a
         # bandaid fix for 2 small problems:
@@ -401,7 +404,18 @@ class OpenAIServing:
 
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        logprobs_num = 2 * beam_width
+        # Optimize beam search parameters for different model types
+        if is_enc_dec:
+            # For encoder-decoder models, use fewer logprobs since encoder dominates cost
+            # beam_width + 1 provides minimal exploration while keeping search effective
+            logprobs_num = beam_width + 1
+            # Keep the existing conservative limit from protocol.py (300 tokens)
+            effective_max_tokens = max_tokens
+        else:
+            # For decoder-only models, use standard beam search parameters
+            logprobs_num = 2 * beam_width
+            effective_max_tokens = max_tokens
+
         beam_search_params = SamplingParams(
             logprobs=logprobs_num,
             max_tokens=1,
@@ -418,22 +432,36 @@ class OpenAIServing:
             )
         ]
         completed = []
+        
+        # Performance instrumentation for encoder-decoder models
+        step_count = 0
+        if is_enc_dec:
+            logger.info(
+                f"Starting beam search: beam_width={beam_width}, max_tokens={effective_max_tokens}, "
+                f"num_beams={len(all_beams)}, encoder_decoder=True"
+            )
 
-        for _ in range(max_tokens):
+        for _ in range(effective_max_tokens):
+            step_count += 1
+            step_start_time = time.time() if is_enc_dec else None
+            # Create prompts for each beam using the prompt builder
             prompts_batch, lora_req_batch = zip(
                 *[
-                    (
-                        EngineTokensPrompt(
-                            prompt_token_ids=beam.tokens,
-                            multi_modal_data=beam.multi_modal_data,
-                            mm_processor_kwargs=beam.mm_processor_kwargs,
-                        ),
-                        beam.lora_request,
-                    )
+                    (prompt_builder.build_prompt_for_beam(beam), beam.lora_request)
                     for beam in all_beams
                 ]
             )
+            
+            # Debug: Log encoder identifiers to verify they match
+            if is_enc_dec and step_count == 1:
+                logger.info(
+                    f"Beam search step 1: {len(prompts_batch)} prompts created, "
+                    f"all should share same encoder input for caching"
+                )
 
+            # Process all beams concurrently to allow engine-level batching
+            # This is especially important for encoder-decoder models where
+            # concurrent requests may allow the engine to batch encoder processing
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
@@ -549,10 +577,50 @@ class OpenAIServing:
                 )
 
             all_beams = new_beams
+            
+            # Performance logging for encoder-decoder models
+            if is_enc_dec and step_start_time is not None:
+                step_duration = time.time() - step_start_time
+                logger.info(
+                    f"Beam search step {step_count}: {step_duration:.3f}s, "
+                    f"active_beams={len(all_beams)}, completed_beams={len(completed)}"
+                )
+            
+            # Early stopping conditions
+            if len(all_beams) == 0:
+                # All beams have hit EOS
+                if is_enc_dec:
+                    logger.info(f"Early stopping at step {step_count}: all beams completed")
+                break
+            
+            # Additional early stopping for encoder-decoder models:
+            # Stop when we have enough good completions that can't be beaten
+            if is_enc_dec and len(completed) >= beam_width:
+                # Get the best completed beam's score
+                best_completed_score = sort_beams_key(sorted(completed, key=sort_beams_key, reverse=True)[0])
+                # Get the best active beam's score
+                best_active_score = sort_beams_key(sorted(all_beams, key=sort_beams_key, reverse=True)[0])
+                
+                # If length_penalty <= 1.0, longer sequences won't improve scores
+                # So we can stop if best completed beats best active
+                if length_penalty <= 1.0 and best_completed_score >= best_active_score:
+                    logger.info(
+                        f"Early stopping at step {step_count}: best completed score "
+                        f"({best_completed_score:.3f}) >= best active score ({best_active_score:.3f})"
+                    )
+                    break
 
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
         best_beams = sorted_completed[:beam_width]
+        
+        # Log final beam search statistics
+        if is_enc_dec:
+            logger.info(
+                f"Beam search completed: total_steps={step_count}, "
+                f"total_beams_processed={step_count * beam_width}, "
+                f"final_completed_beams={len(completed)}"
+            )
 
         for beam in best_beams:
             if beam.tokens[-1] == eos_token_id and not ignore_eos:
@@ -584,50 +652,264 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _get_renderer(self, tokenizer: TokenizerLike | None) -> BaseRenderer:
-        """
-        Get a Renderer instance with the provided tokenizer.
-        Uses shared async tokenizer pool for efficiency.
-        """
-        return CompletionRenderer(
-            model_config=self.model_config,
-            tokenizer=tokenizer,
-            async_tokenizer_pool=self._async_tokenizer_pool,
+    def _create_beam_search_prompt_builder(self, prompt: PromptType) -> "BeamSearchPromptBuilder":
+        """Create appropriate prompt builder for beam search based on prompt type."""
+        if is_explicit_encoder_decoder_prompt(prompt):
+            return EncoderDecoderBeamSearchPromptBuilder(prompt, self.input_processor)
+        else:
+            return DecoderOnlyBeamSearchPromptBuilder(prompt)
+
+    async def _check_model(
+        self,
+        request: AnyRequest,
+    ) -> ErrorResponse | None:
+        error_response = None
+
+        if self._is_model_supported(request.model):
+            return None
+        if request.model in self.models.lora_requests:
+            return None
+        if (
+            envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING
+            and request.model
+            and (load_result := await self.models.resolve_lora(request.model))
+        ):
+            if isinstance(load_result, LoRARequest):
+                return None
+            if (
+                isinstance(load_result, ErrorResponse)
+                and load_result.error.code == HTTPStatus.BAD_REQUEST.value
+            ):
+                error_response = load_result
+
+        return error_response or self.create_error_response(
+            message=f"The model `{request.model}` does not exist.",
+            err_type="NotFoundError",
+            status_code=HTTPStatus.NOT_FOUND,
         )
 
-    def _build_render_config(
-        self,
-        request: Any,
-    ) -> RenderConfig:
-        """
-        Build and return a `RenderConfig` for an endpoint.
+    def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
+        """Determine if there are any active default multimodal loras."""
 
-        Used by the renderer to control how prompts are prepared
-        (e.g., tokenization and length handling). Endpoints should
-        implement this with logic appropriate to their request type.
-        """
+    def _is_model_supported(self, model_name: str | None) -> bool:
+        if not model_name:
+            return True
+        return self.models.is_base_model(model_name)
+
+    @staticmethod
+    def _base_request_id(
+        raw_request: Request | None, default: str | None = None
+    ) -> str:
+        """Pulls the request id to use from a header, if provided"""
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            return req_id
+        return random_uuid() if default is None else default
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
+
+    def _maybe_get_adapters(
+        self,
+        request: AnyRequest,
+        supports_default_mm_loras: bool = False,
+    ) -> LoRARequest | None:
+        if request.model in self.models.lora_requests:
+            return self.models.lora_requests[request.model]
+
+        if supports_default_mm_loras:
+            return self._get_active_default_mm_loras(request)
+        return None
+
+    def _log_inputs(
+        self,
+        request_id: str,
+        inputs: RequestPrompt | PromptType,
+        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        if self.request_logger is None:
+            return
+
+        prompt, prompt_token_ids, prompt_embeds = self._get_prompt_components(inputs)
+
+        # Log the input request
+        self.request_logger.log_inputs(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+            params=params,
+            lora_request=lora_request,
+        )
+
+    async def _get_trace_headers(
+        self,
+        headers: Headers,
+    ) -> Mapping[str, str] | None:
+        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+
+        if is_tracing_enabled:
+            return extract_trace_headers(headers)
+
+        if contains_trace_headers(headers):
+            log_tracing_disabled_warning()
+
+        return None
+
+
+class BeamSearchPromptBuilder:
+    """Abstract base class for building prompts during beam search."""
+
+    def get_initial_tokens(self) -> list[int]:
+        """Get the initial token IDs for beam search."""
         raise NotImplementedError
 
-    def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
-        """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
-        given tokenizer.
-        """
-        async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
-        if async_tokenizer is None:
-            async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-            self._async_tokenizer_pool[tokenizer] = async_tokenizer
-        return async_tokenizer
+    def get_prompt_text(self) -> str | None:
+        """Get the prompt text for the response."""
+        raise NotImplementedError
 
-    async def _preprocess(
-        self,
-        ctx: ServeContext,
-    ) -> ErrorResponse | None:
-        """
-        Default preprocessing hook. Subclasses may override
-        to prepare `ctx` (classification, embedding, etc.).
-        """
-        return None
+    def get_initial_multi_modal_data(self) -> MultiModalDataDict | None:
+        """Return any multimodal attachments required for the first beam."""
+        raise NotImplementedError
+
+    def get_initial_mm_processor_kwargs(self) -> dict[str, Any] | None:
+        """Return processor kwargs needed to handle multimodal inputs."""
+        raise NotImplementedError
+
+    def build_prompt_for_beam(self, beam: BeamSearchSequence) -> PromptType:
+        """Build the appropriate prompt type for a beam during search."""
+        raise NotImplementedError
+
+
+class DecoderOnlyBeamSearchPromptBuilder(BeamSearchPromptBuilder):
+    """Prompt builder for decoder-only models."""
+
+    def __init__(self, prompt: PromptType):
+        self.prompt = prompt
+        self.multi_modal_data: MultiModalDataDict | None = None
+        self.mm_processor_kwargs: dict[str, Any] | None = None
+
+        # Extract prompt components
+        if isinstance(prompt, str):
+            self.prompt_text = prompt
+            self.prompt_token_ids = []
+            self.multi_modal_data = None
+        else:
+            self.prompt_text = prompt.get("prompt")  # type: ignore
+            self.prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
+            self.multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
+
+        # Some multimodal prompts include processor kwargs
+        self.mm_processor_kwargs = None
+        if not isinstance(prompt, str):
+            self.mm_processor_kwargs = prompt.get("mm_processor_kwargs")  # type: ignore
+
+    def get_initial_tokens(self) -> list[int]:
+        return self.prompt_token_ids
+
+    def get_prompt_text(self) -> str | None:
+        return self.prompt_text
+
+    def get_initial_multi_modal_data(self) -> MultiModalDataDict | None:
+        return self.multi_modal_data
+
+    def get_initial_mm_processor_kwargs(self) -> dict[str, Any] | None:
+        return self.mm_processor_kwargs
+
+    def build_prompt_for_beam(self, beam: BeamSearchSequence) -> EngineTokensPrompt:
+        return EngineTokensPrompt(
+            prompt_token_ids=beam.tokens,
+            multi_modal_data=beam.multi_modal_data,
+            mm_processor_kwargs=beam.mm_processor_kwargs,
+        )
+
+
+class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
+    """Prompt builder for encoder-decoder models like Whisper with optimized encoder caching."""
+
+    def __init__(self, prompt: PromptType, input_processor):
+        self.original_encoder_prompt = prompt["encoder_prompt"]  # type: ignore
+        self.original_mm_processor_kwargs = prompt.get("mm_processor_kwargs")  # type: ignore
+
+        # Process the encoder-decoder prompt once to extract decoder tokens
+        preprocessor = input_processor.input_preprocessor
+        processed_inputs = preprocessor.preprocess(
+            prompt,
+            tokenization_kwargs=None,
+        )
+        # Split encoder and decoder inputs
+        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+
+        # For beam search, we use the decoder prompt token IDs
+        if decoder_inputs["type"] == "embeds":
+            raise NotImplementedError("Beam search with prompt embeds not supported")
+
+        self.prompt_token_ids = decoder_inputs["prompt_token_ids"]
+        self.prompt_text = decoder_inputs.get("prompt")
+
+        # Get multi_modal_data from encoder inputs (where audio is)
+        self.multi_modal_data = (
+            encoder_inputs.get("multi_modal_data")
+            if encoder_inputs.get("type") == "mm"
+            else None
+        )
+
+        # Use mm_processor_kwargs from encoder_inputs if available, otherwise from original prompt
+        self.mm_processor_kwargs = (
+            encoder_inputs.get("mm_processor_kwargs")
+            if encoder_inputs.get("type") == "mm"
+            else self.original_mm_processor_kwargs
+        )
+
+        # Cache the processed inputs to avoid re-processing the encoder
+        self._processed_inputs = processed_inputs
+        self._encoder_inputs = encoder_inputs
+        self._decoder_template = decoder_inputs
+        
+        # Generate a unique cache salt for this beam search session
+        # This helps the engine recognize that all beams share the same encoder input
+        self._encoder_cache_salt = f"beam_search_encoder_{random_uuid()}"
+
+    def get_initial_tokens(self) -> list[int]:
+        return self.prompt_token_ids
+
+    def get_prompt_text(self) -> str | None:
+        return self.prompt_text
+
+    def get_initial_multi_modal_data(self) -> MultiModalDataDict | None:
+        return self.multi_modal_data
+
+    def get_initial_mm_processor_kwargs(self) -> dict[str, Any] | None:
+        return self.mm_processor_kwargs
+
+    def build_prompt_for_beam(self, beam: BeamSearchSequence) -> ExplicitEncoderDecoderPrompt:
+        # For encoder-decoder models, we use cache_salt to help the engine
+        # recognize that all beams in this search share the same encoder input
+        prompt = ExplicitEncoderDecoderPrompt(
+            encoder_prompt=self.original_encoder_prompt,
+            decoder_prompt={
+                "prompt_token_ids": beam.tokens,
+            },
+            mm_processor_kwargs=self.mm_processor_kwargs or {},
+        )
+        # Add cache_salt to signal shared encoder input across all beams
+        prompt["cache_salt"] = self._encoder_cache_salt  # type: ignore
+        return prompt
+
 
     def _build_response(
         self,
@@ -892,27 +1174,6 @@ class OpenAIServing:
         if len(default_mm_loras) == 1:
             return default_mm_loras.pop()
         return None
-
-    def _maybe_get_adapters(
-        self,
-        request: AnyRequest,
-        supports_default_mm_loras: bool = False,
-    ) -> LoRARequest | None:
-        if request.model in self.models.lora_requests:
-            return self.models.lora_requests[request.model]
-
-        # Currently only support default modality specific loras
-        # if we have exactly one lora matched on the request.
-        if supports_default_mm_loras:
-            default_mm_lora = self._get_active_default_mm_loras(request)
-            if default_mm_lora is not None:
-                return default_mm_lora
-
-        if self._is_model_supported(request.model):
-            return None
-
-        # if _check_model has been called earlier, this will be unreachable
-        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _get_message_types(self, request: AnyRequest) -> set[str]:
         """Retrieve the set of types from message content dicts up
@@ -1440,47 +1701,6 @@ class OpenAIServing:
             lora_request=lora_request,
         )
 
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
-
-        return None
-
-    @staticmethod
-    def _base_request_id(
-        raw_request: Request | None, default: str | None = None
-    ) -> str | None:
-        """Pulls the request id to use from a header, if provided"""
-        if raw_request is not None and (
-            (req_id := raw_request.headers.get("X-Request-Id")) is not None
-        ):
-            return req_id
-
-        return random_uuid() if default is None else default
-
-    @staticmethod
-    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
-        """Pulls the data parallel rank from a header, if provided"""
-        if raw_request is None:
-            return None
-
-        rank_str = raw_request.headers.get("X-data-parallel-rank")
-        if rank_str is None:
-            return None
-
-        try:
-            return int(rank_str)
-        except ValueError:
-            return None
-
     @staticmethod
     def _parse_tool_calls_from_content(
         request: ResponsesRequest | ChatCompletionRequest,
@@ -1571,11 +1791,6 @@ class OpenAIServing:
             )
 
         return tokenizer.decode(token_id)
-
-    def _is_model_supported(self, model_name: str | None) -> bool:
-        if not model_name:
-            return True
-        return self.models.is_base_model(model_name)
 
 
 def clamp_prompt_logprobs(

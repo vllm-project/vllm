@@ -946,14 +946,16 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if not self.is_encoder_decoder:
-                # We are not using the encoder cache for encoder-decoder models,
-                # yet.
-                if request.mm_features[i].identifier in mm_hashes_to_schedule:
-                    # The same encoder input has already been scheduled in the
-                    # current step.
-                    continue
+            # Check if this encoder input is already scheduled in the current step
+            # This enables concurrent beams in beam search to share encoder computation
+            if request.mm_features[i].identifier in mm_hashes_to_schedule:
+                # The same encoder input has already been scheduled in the
+                # current step (e.g., multiple beams with same audio).
+                continue
 
+            if not self.is_encoder_decoder:
+                # Encoder cache across requests is only enabled for non-encoder-decoder models
+                # For encoder-decoder models, we only deduplicate within the same scheduling step
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
                     # previous step.

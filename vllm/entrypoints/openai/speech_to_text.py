@@ -119,6 +119,11 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
+    def _is_model_supported(self, model_name: str | None) -> bool:
+        if not model_name:
+            return True
+        return self.models.is_base_model(model_name)
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
@@ -295,9 +300,18 @@ class OpenAISpeechToText(OpenAIServing):
             # constrained by the size of the input audio, which is mapped to a
             # fixed-size log-mel-spectogram.
             default_max_tokens = self.model_config.max_model_len
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params
-            )
+
+            # Check if beam search is requested
+            use_beam_search = getattr(request, "use_beam_search", False)
+            if use_beam_search:
+                from vllm.sampling_params import BeamSearchParams
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens, self.default_sampling_params
+                )
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params
+                )
 
             self._log_inputs(
                 request_id,
@@ -307,15 +321,41 @@ class OpenAISpeechToText(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            list_result_generator = [
-                self.engine_client.generate(
-                    prompt,
-                    sampling_params,
-                    f"{request_id}_{i}",
-                    lora_request=lora_request,
-                )
-                for i, prompt in enumerate(prompts)
-            ]
+            # Generate results for each prompt
+            list_result_generator = []
+            for i, prompt in enumerate(prompts):
+                if use_beam_search and isinstance(sampling_params, BeamSearchParams):
+                    # Beam search: single prompt only for now
+                    if len(prompts) > 1:
+                        return self.create_error_response(
+                            "Beam search currently only supports single audio input."
+                        )
+                    try:
+                        generator = self.beam_search(
+                            prompt,
+                            f"{request_id}_{i}",
+                            sampling_params,
+                            lora_request=lora_request,
+                        )
+                        list_result_generator.append(generator)
+                    except Exception as e:
+                        logger.exception(
+                            "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, error=%s",
+                            request_id,
+                            sampling_params.beam_width,
+                            sampling_params.length_penalty,
+                            e,
+                        )
+                        raise
+                else:
+                    # Regular generation
+                    generator = self.engine_client.generate(
+                        prompt,
+                        sampling_params,
+                        f"{request_id}_{i}",
+                        lora_request=lora_request,
+                    )
+                    list_result_generator.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
