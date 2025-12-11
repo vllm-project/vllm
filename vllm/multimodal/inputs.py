@@ -954,7 +954,7 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.13.")
+@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
 class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
@@ -964,7 +964,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_hf_inputs` and "
         "access the tensor data using `.get_data()`."
     )
@@ -977,7 +977,7 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     @staticmethod
     @deprecated(
         "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.13. "
+        "will be removed in v0.14. "
         "Please use `MultiModalKwargsItems.from_seq` and "
         "access the tensor data using `.get_data()`."
     )
