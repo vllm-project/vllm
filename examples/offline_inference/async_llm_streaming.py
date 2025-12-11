@@ -80,8 +80,7 @@ async def main(mode: Mode = Mode.SEQUENTIAL):
 
     # Create AsyncLLM engine with simple configuration
     engine_args = AsyncEngineArgs(
-        # model="meta-llama/Llama-3.2-1B-Instruct",
-        model="facebook/opt-125m",
+        model="meta-llama/Llama-3.2-1B-Instruct",
         enforce_eager=True,  # Faster startup for examples
     )
     engine = AsyncLLM.from_engine_args(engine_args)
