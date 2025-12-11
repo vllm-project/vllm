@@ -4686,8 +4686,14 @@ class GPUModelRunner(
 
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
-            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                if full_largest is not None:
+            full_first = 0
+            full_second = 0
+            piecewise_first = 0
+            piecewise_second = 0
+
+            # Profile FULL graphs
+            if full_largest is not None:
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(
                         full_largest,
                         cudagraph_runtime_mode=CUDAGraphMode.NONE,
@@ -4697,27 +4703,9 @@ class GPUModelRunner(
                         remove_lora=False,
                         activate_lora=False,
                     )
-                if piecewise_largest is not None:
-                    self._dummy_run(
-                        piecewise_largest,
-                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                        force_attention=False,
-                        uniform_decode=False,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                    )
-
-            torch.cuda.synchronize()
-            start_memory = torch.cuda.mem_get_info()[0]
-
-            full_first = 0
-            full_second = 0
-            piecewise_first = 0
-            piecewise_second = 0
-
-            # Profile FULL graphs
-            if full_largest is not None:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                before = torch.cuda.mem_get_info()[0]
                 self._dummy_run(
                     full_largest,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -4728,7 +4716,7 @@ class GPUModelRunner(
                     is_graph_capturing=True,
                 )
                 torch.cuda.synchronize()
-                full_first = start_memory - torch.cuda.mem_get_info()[0]
+                full_first = before - torch.cuda.mem_get_info()[0]
 
                 # Second FULL capture with smaller batch size
                 if full_count > 1:
@@ -4753,6 +4741,18 @@ class GPUModelRunner(
 
             # Profile PIECEWISE graphs
             if piecewise_largest is not None:
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                    self._dummy_run(
+                        piecewise_largest,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=False,
+                        uniform_decode=False,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        activate_lora=False,
+                    )
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
                 before = torch.cuda.mem_get_info()[0]
                 self._dummy_run(
                     piecewise_largest,
@@ -4814,7 +4814,7 @@ class GPUModelRunner(
         total_estimate = full_estimate + piecewise_estimate
 
         logger.info(
-            "Estimated CUDA graph memory: %.2f GiB total "
+            "Estimated CUDA graph pool memory: %.2f GiB total "
             "(FULL: %.2f MiB first + %d × %.2f MiB, "
             "PIECEWISE: %.2f MiB first + %d × %.2f MiB)",
             total_estimate / (1 << 30),
