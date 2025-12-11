@@ -111,13 +111,7 @@ class SupportsMultiModal(Protocol):
             the appearances of their corresponding multimodal data item in the
             input prompt.
         """
-        if hasattr(self, "get_multimodal_embeddings"):
-            logger.warning_once(
-                "`get_multimodal_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_multimodal`."
-            )
-            return self.get_multimodal_embeddings(**kwargs)
+        ...
 
     def get_language_model(self) -> VllmModel:
         """
@@ -196,12 +190,7 @@ class SupportsMultiModal(Protocol):
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        if is_multimodal is None:
-            raise ValueError(
-                "`embed_input_ids` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
+        assert is_multimodal is not None
 
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
