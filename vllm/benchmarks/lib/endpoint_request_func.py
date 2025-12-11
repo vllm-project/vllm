@@ -442,7 +442,10 @@ async def async_request_openai_audio(
 
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            chunk = message.decode("utf-8").removeprefix("data: ")
+                            if isinstance(message, bytes):  # message is in bytes format
+                                chunk = message.decode("utf-8").removeprefix("data: ")
+                            else:  # message is already a string
+                                chunk = message.removeprefix("data: ")
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
