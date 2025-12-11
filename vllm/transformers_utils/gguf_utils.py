@@ -329,16 +329,7 @@ def extract_hf_config_from_gguf(model: str) -> dict[str, Any] | None:
         if sliding_window is not None:
             config_dict["sliding_window"] = int(sliding_window)
 
-        # Vocab size - from tokenizer tokens list or arch-specific field
-        vocab_size = get_field_value(Keys.LLM.VOCAB_SIZE)
-        if vocab_size is None:
-            tokens_field = reader.get_field(Keys.Tokenizer.LIST)
-            if tokens_field is not None:
-                vocab_size = len(tokens_field.parts[-1])
-        if vocab_size is not None:
-            config_dict["vocab_size"] = int(vocab_size)
-
-        # Token IDs
+        # Token IDs - extract first so we can use for vocab_size inference
         bos_id = get_field_value(Keys.Tokenizer.BOS_ID)
         if bos_id is not None:
             config_dict["bos_token_id"] = int(bos_id)
@@ -346,6 +337,45 @@ def extract_hf_config_from_gguf(model: str) -> dict[str, Any] | None:
         eos_id = get_field_value(Keys.Tokenizer.EOS_ID)
         if eos_id is not None:
             config_dict["eos_token_id"] = int(eos_id)
+
+        # Vocab size - priority order:
+        # 1. Embedding tensor shape (most reliable - actual weights)
+        # 2. LLM.VOCAB_SIZE metadata field
+        # 3. Tokenizer tokens list (often incomplete in quantized files)
+        vocab_size = None
+
+        # Try to get vocab_size from embedding tensor shape
+        for tensor in reader.tensors:
+            if tensor.name == "token_embd.weight":
+                # Shape is [hidden_size, vocab_size] for GGUF
+                vocab_size = tensor.shape[-1]
+                logger.info(
+                    "Extracted vocab_size=%d from embedding tensor shape",
+                    vocab_size
+                )
+                break
+
+        # Fallback to metadata field
+        if vocab_size is None:
+            vocab_size = get_field_value(Keys.LLM.VOCAB_SIZE)
+
+        # Last resort: tokenizer tokens list (often incomplete)
+        if vocab_size is None:
+            tokens_field = reader.get_field(Keys.Tokenizer.LIST)
+            if tokens_field is not None:
+                token_count = len(tokens_field.parts[-1])
+                # Only use if it's plausible (more than eos_token_id)
+                if eos_id is not None and token_count > int(eos_id):
+                    vocab_size = token_count
+                else:
+                    logger.warning(
+                        "Tokenizer list has %d tokens but eos_token_id=%s. "
+                        "Skipping unreliable vocab_size.",
+                        token_count, eos_id
+                    )
+
+        if vocab_size is not None:
+            config_dict["vocab_size"] = int(vocab_size)
 
         # Attention softcapping (for Gemma2, etc.)
         attn_softcap = get_field_value(Keys.LLM.ATTN_LOGIT_SOFTCAPPING)

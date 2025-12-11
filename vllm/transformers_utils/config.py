@@ -14,7 +14,7 @@ from huggingface_hub import (
     get_safetensors_metadata,
 )
 from packaging.version import Version
-from transformers import GenerationConfig, PretrainedConfig
+from transformers import CONFIG_MAPPING, GenerationConfig, PretrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -265,24 +265,25 @@ class GGUFConfigParser(ConfigParserBase):
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class(**config_dict)
         else:
-            # Use AutoConfig to get the appropriate config class
+            # Use CONFIG_MAPPING to get the appropriate config class
             try:
-                config_class = AutoConfig.for_model(model_type)
-                # Filter config_dict to only include valid keys for this config
-                valid_keys = (
-                    set(config_class.__dataclass_fields__.keys())
-                    if hasattr(config_class, "__dataclass_fields__")
-                    else set(config_class().__dict__.keys())
-                )
-                filtered_dict = {
-                    k: v
-                    for k, v in config_dict.items()
-                    if k in valid_keys or k == "model_type"
-                }
-                config = config_class(**filtered_dict)
+                if model_type in CONFIG_MAPPING:
+                    config_class = CONFIG_MAPPING[model_type]
+                    # Filter config_dict to only include valid keys
+                    # Create a default instance to get valid keys
+                    default_config = config_class()
+                    valid_keys = set(default_config.__dict__.keys())
+                    filtered_dict = {
+                        k: v
+                        for k, v in config_dict.items()
+                        if k in valid_keys or k == "model_type"
+                    }
+                    config = config_class(**filtered_dict)
+                else:
+                    raise KeyError(f"model_type '{model_type}' not in CONFIG_MAPPING")
             except Exception as e:
                 logger.warning(
-                    "Failed to create config with AutoConfig.for_model(%s): %s. "
+                    "Failed to create config for model_type '%s': %s. "
                     "Falling back to PretrainedConfig.",
                     model_type,
                     e,
