@@ -280,10 +280,20 @@ def test_speculators_model_integration(
 
 
 @pytest.mark.parametrize(
-    ["model_setup", "mm_enabled", "enable_chunked_prefill"],
+    ["model_setup", "mm_enabled", "enable_chunked_prefill", "model_impl"],
     [
-        (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
-        (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, False),
+        (
+            ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
+            False,
+            False,
+            "auto",
+        ),
+        (
+            ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
+            False,
+            False,
+            "transformers",
+        ),
         pytest.param(
             (
                 "eagle3",
@@ -293,6 +303,7 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            "auto",
             marks=pytest.mark.skip(
                 reason="architecture of its eagle3 is LlamaForCausalLMEagle3"
             ),
@@ -306,6 +317,7 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            "auto",
             marks=pytest.mark.skip(
                 reason="Skipping due to its head_dim not being a a multiple of 32"
             ),
@@ -319,6 +331,7 @@ def test_speculators_model_integration(
             ),
             False,
             True,
+            "auto",
             marks=large_gpu_mark(min_gb=40),
         ),  # works on 4x H100
         (
@@ -330,6 +343,7 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            "auto",
         ),
         pytest.param(
             (
@@ -340,6 +354,7 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            "auto",
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
         pytest.param(
@@ -351,6 +366,7 @@ def test_speculators_model_integration(
             ),
             True,
             True,
+            "auto",
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
         (
@@ -362,6 +378,7 @@ def test_speculators_model_integration(
             ),
             False,
             False,
+            "auto",
         ),
     ],
     ids=[
@@ -383,8 +400,8 @@ def test_eagle_correctness(
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
     enable_chunked_prefill: bool,
+    model_impl: str,
     attn_backend: str,
-    request: pytest.FixtureRequest,
 ):
     if attn_backend == "TREE_ATTN":
         # TODO: Fix this flaky test
@@ -392,6 +409,17 @@ def test_eagle_correctness(
             "TREE_ATTN is flaky in the test disable for now until it can be "
             "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
         )
+    if model_impl == "transformers":
+        import transformers
+        from packaging.version import Version
+
+        installed = Version(transformers.__version__)
+        required = Version("5.0.0.dev")
+        if installed < required:
+            pytest.skip(
+                "Eagle3 with the Transformers modeling backend requires "
+                f"transformers>={required}, but got {installed}"
+            )
 
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
@@ -437,21 +465,6 @@ def test_eagle_correctness(
         del ref_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
-
-        test_id = request.node.callspec.id
-        model_impl = "transformers" if "transformers" in test_id else "auto"
-
-        if model_impl == "transformers":
-            import transformers
-            from packaging.version import Version
-
-            installed = Version(transformers.__version__)
-            required = Version("5.0.0.dev")
-            if installed < required:
-                pytest.skip(
-                    "Eagle3 with the Transformers modeling backend requires "
-                    f"transformers>={required}, but got {installed}"
-                )
 
         spec_llm = LLM(
             model=model_name,
