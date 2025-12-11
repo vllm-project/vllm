@@ -300,7 +300,11 @@ elif current_platform.is_rocm():
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
-    list(flat_product(BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]))
+    list(
+        flat_product(
+            BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+        )
+    )
     # quant_fp4 only has the custom impl
     + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
 )
