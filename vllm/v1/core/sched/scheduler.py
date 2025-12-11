@@ -496,8 +496,13 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
-                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
+
+                        self._update_connector_prefix_cache_stats(
+                            request,
+                            queries=request.num_tokens - num_new_local_computed_tokens,
+                            hits=num_external_computed_tokens,
+                        )
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -1521,13 +1526,21 @@ class Scheduler(SchedulerInterface):
     # KV Connector Related Methods
     ########################################################################
 
-    def _update_connector_prefix_cache_stats(self, request: Request) -> None:
+    def _update_connector_prefix_cache_stats(
+        self, request: Request, queries: int | None = None, hits: int | None = None
+    ):
         if self.connector_prefix_cache_stats is None:
             return
 
+        if queries is not None and hits is not None:
+            # Save the stats to be recorded once KV loaded and allocated
+            request.connector_prefix_cache_queries = queries
+            request.connector_prefix_cache_hits = hits
+            return
+
         self.connector_prefix_cache_stats.record(
-            num_tokens=request.num_tokens,
-            num_hits=request.num_external_computed_tokens,
+            num_tokens=request.connector_prefix_cache_queries,
+            num_hits=request.connector_prefix_cache_hits,
             preempted=request.num_preemptions > 0,
         )
 
@@ -1722,7 +1735,10 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+                if request.connector_prefix_cache_queries:
+                    request.connector_prefix_cache_queries -= num_affected_tokens
+                if request.connector_prefix_cache_hits:
+                    request.connector_prefix_cache_hits -= num_affected_tokens
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
