@@ -49,13 +49,7 @@ class VllmModel(Protocol[T_co]):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Apply token embeddings to `input_ids`."""
-        if hasattr(self, "get_input_embeddings"):
-            logger.warning_once(
-                "`get_input_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_input_ids`."
-            )
-            return self.get_input_embeddings(input_ids)
+        ...
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> T_co: ...
 
@@ -68,15 +62,6 @@ def _check_vllm_model_init(model: type[object] | object) -> bool:
 def _check_vllm_model_embed_input_ids(model: type[object] | object) -> bool:
     model_embed_input_ids = getattr(model, "embed_input_ids", None)
     if not callable(model_embed_input_ids):
-        model_get_input_embeddings = getattr(model, "get_input_embeddings", None)
-        if callable(model_get_input_embeddings):
-            logger.warning(
-                "`get_input_embeddings` for vLLM models is deprecated and will be "
-                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
-                "this method to `embed_input_ids`."
-            )
-            model.embed_input_ids = model_get_input_embeddings
-            return True
         logger.warning(
             "The model (%s) is missing the `embed_input_ids` method.",
             model,
