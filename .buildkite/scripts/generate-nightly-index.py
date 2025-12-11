@@ -27,6 +27,7 @@ def normalize_package_name(name: str) -> str:
     """
     return re.sub(r"[-_.]+", "-", name).lower()
 
+
 if not sys.version_info >= (3, 12):
     raise RuntimeError("This script requires Python 3.12 or higher.")
 
@@ -227,11 +228,14 @@ def generate_index_and_metadata(
     # All ROCm wheels should share the same variant as vllm
     rocm_variant = None
     for file in parsed_files:
-        if file.package_name == "vllm" and file.variant:
-            if file.variant.startswith("rocm"):
-                rocm_variant = file.variant
-                print(f"Detected ROCm variant from vllm: {rocm_variant}")
-                break
+        if (
+            file.package_name == "vllm"
+            and file.variant
+            and file.variant.startswith("rocm")
+        ):
+            rocm_variant = file.variant
+            print(f"Detected ROCm variant from vllm: {rocm_variant}")
+            break
 
     # Apply ROCm variant to all wheels without a variant
     if rocm_variant:
@@ -304,7 +308,9 @@ def generate_index_and_metadata(
 
         for package in packages:
             # filter files belonging to this package only (compare normalized names)
-            package_files = [f for f in files if normalize_package_name(f.package_name) == package]
+            package_files = [
+                f for f in files if normalize_package_name(f.package_name) == package
+            ]
             package_dir = variant_dir / package
             package_dir.mkdir(parents=True, exist_ok=True)
             index_str, metadata_str = generate_package_index_and_metadata(
@@ -372,7 +378,9 @@ if __name__ == "__main__":
     if "\\" in version:
         raise ValueError("Version string must not contain backslashes.")
     if "/" in version and not version.startswith("rocm/"):
-        raise ValueError("Version string must not contain slashes (except for 'rocm/' prefix).")
+        raise ValueError(
+            "Version string must not contain slashes (except for 'rocm/' prefix)."
+        )
     current_objects_path = Path(args.current_objects)
     output_dir = Path(args.output_dir)
     if not output_dir.exists():

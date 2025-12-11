@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Pin vLLM dependencies to exact versions of custom ROCm wheels.
 
@@ -12,7 +14,7 @@ instead of allowing pip to download different versions from PyPI.
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List
+
 
 def extract_version_from_wheel(wheel_name: str) -> str:
     """
@@ -22,8 +24,9 @@ def extract_version_from_wheel(wheel_name: str) -> str:
         torch-2.9.0a0+git1c57644-cp312-cp312-linux_x86_64.whl -> 2.9.0a0+git1c57644
         triton-3.4.0-cp312-cp312-linux_x86_64.whl -> 3.4.0
     """
-    # Wheel format: {distribution}-{version}(-{build tag})?-{python}-{abi}-{platform}.whl
-    parts = wheel_name.replace('.whl', '').split('-')
+    # Wheel format:
+    #    {distribution}-{version}(-{build tag})?-{python}-{abi}-{platform}.whl
+    parts = wheel_name.replace(".whl", "").split("-")
 
     if len(parts) < 5:
         raise ValueError(f"Invalid wheel filename format: {wheel_name}")
@@ -33,7 +36,7 @@ def extract_version_from_wheel(wheel_name: str) -> str:
     return version
 
 
-def get_custom_wheel_versions(install_dir: str) -> Dict[str, str]:
+def get_custom_wheel_versions(install_dir: str) -> dict[str, str]:
     """
     Read /install directory and extract versions of custom wheels.
 
@@ -48,20 +51,22 @@ def get_custom_wheel_versions(install_dir: str) -> Dict[str, str]:
     versions = {}
 
     # Map wheel prefixes to package names
-    # IMPORTANT: Use dashes to avoid matching substrings (e.g., 'torch' would match 'torchvision')
-    # ORDER MATTERS: This order is preserved when pinning dependencies in requirements files
+    # IMPORTANT: Use dashes to avoid matching substrings
+    #            (e.g., 'torch' would match 'torchvision')
+    # ORDER MATTERS: This order is preserved when pinning dependencies
+    #               in requirements files
     package_mapping = [
-        ('torch-', 'torch'),                    # Match torch- (not torchvision)
-        ('triton-', 'triton'),                  # Match triton- (not triton_kernels)
-        ('triton_kernels-', 'triton-kernels'),  # Match triton_kernels-
-        ('torchvision-', 'torchvision'),        # Match torchvision-
-        ('torchaudio-', 'torchaudio'),          # Match torchaudio-
-        ('amdsmi-', 'amdsmi'),                  # Match amdsmi-
-        ('flash_attn-', 'flash-attn'),          # Match flash_attn-
-        ('aiter-', 'aiter'),                    # Match aiter-
+        ("torch-", "torch"),  # Match torch- (not torchvision)
+        ("triton-", "triton"),  # Match triton- (not triton_kernels)
+        ("triton_kernels-", "triton-kernels"),  # Match triton_kernels-
+        ("torchvision-", "torchvision"),  # Match torchvision-
+        ("torchaudio-", "torchaudio"),  # Match torchaudio-
+        ("amdsmi-", "amdsmi"),  # Match amdsmi-
+        ("flash_attn-", "flash-attn"),  # Match flash_attn-
+        ("aiter-", "aiter"),  # Match aiter-
     ]
 
-    for wheel_file in install_path.glob('*.whl'):
+    for wheel_file in install_path.glob("*.whl"):
         wheel_name = wheel_file.name
 
         for prefix, package_name in package_mapping:
@@ -71,7 +76,10 @@ def get_custom_wheel_versions(install_dir: str) -> Dict[str, str]:
                     versions[package_name] = version
                     print(f"Found {package_name}=={version}", file=sys.stderr)
                 except Exception as e:
-                    print(f"WARNING: Could not extract version from {wheel_name}: {e}", file=sys.stderr)
+                    print(
+                        f"WARNING: Could not extract version from {wheel_name}: {e}",
+                        file=sys.stderr,
+                    )
                 break
 
     # Return versions in the order defined by package_mapping
@@ -82,7 +90,7 @@ def get_custom_wheel_versions(install_dir: str) -> Dict[str, str]:
     return ordered_versions
 
 
-def pin_dependencies_in_requirements(requirements_path: str, versions: Dict[str, str]):
+def pin_dependencies_in_requirements(requirements_path: str, versions: dict[str, str]):
     """
     Insert custom wheel pins at the TOP of requirements file.
 
@@ -103,16 +111,18 @@ def pin_dependencies_in_requirements(requirements_path: str, versions: Dict[str,
     requirements_file = Path(requirements_path)
 
     if not requirements_file.exists():
-        print(f"ERROR: Requirements file not found: {requirements_path}", file=sys.stderr)
+        print(
+            f"ERROR: Requirements file not found: {requirements_path}", file=sys.stderr
+        )
         sys.exit(1)
 
     # Backup original file
-    backup_file = requirements_file.with_suffix(requirements_file.suffix + '.bak')
-    with open(requirements_file, 'r') as f:
+    backup_file = requirements_file.with_suffix(requirements_file.suffix + ".bak")
+    with open(requirements_file) as f:
         original_lines = f.readlines()
 
     # Write backup
-    with open(backup_file, 'w') as f:
+    with open(backup_file, "w") as f:
         f.writelines(original_lines)
 
     # Build header with pinned custom wheels
@@ -135,11 +145,11 @@ def pin_dependencies_in_requirements(requirements_path: str, versions: Dict[str,
         should_keep = True
 
         # Check if this line is for one of our custom packages
-        if stripped and not stripped.startswith('#') and not stripped.startswith('-'):
-            for package_name in versions.keys():
+        if stripped and not stripped.startswith("#") and not stripped.startswith("-"):
+            for package_name in versions:
                 # Handle both hyphen and underscore variations
-                pattern_name = package_name.replace('-', '[-_]')
-                pattern = rf'^{pattern_name}\s*[=<>]=?\s*[\d.a-zA-Z+]+'
+                pattern_name = package_name.replace("-", "[-_]")
+                pattern = rf"^{pattern_name}\s*[=<>]=?\s*[\d.a-zA-Z+]+"
 
                 if re.match(pattern, stripped, re.IGNORECASE):
                     removed_packages.append(f"{package_name}: {stripped}")
@@ -153,7 +163,7 @@ def pin_dependencies_in_requirements(requirements_path: str, versions: Dict[str,
     final_lines = header_lines + filtered_lines
 
     # Write modified content
-    with open(requirements_file, 'w') as f:
+    with open(requirements_file, "w") as f:
         f.writelines(final_lines)
 
     # Print summary
@@ -172,8 +182,13 @@ def pin_dependencies_in_requirements(requirements_path: str, versions: Dict[str,
 
 def main():
     if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <install_dir> <requirements_file>", file=sys.stderr)
-        print(f"Example: {sys.argv[0]} /install /app/vllm/requirements/rocm.txt", file=sys.stderr)
+        print(
+            f"Usage: {sys.argv[0]} <install_dir> <requirements_file>", file=sys.stderr
+        )
+        print(
+            f"Example: {sys.argv[0]} /install /app/vllm/requirements/rocm.txt",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     install_dir = sys.argv[1]
@@ -202,5 +217,5 @@ def main():
     sys.exit(0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
