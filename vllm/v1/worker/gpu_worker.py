@@ -464,21 +464,20 @@ class Worker(WorkerBase):
                 self.model_runner.capture_model()
             )
 
-        # Compare actual vs estimated FULL CUDA graph memory (if we did profiling)
+        # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
             hasattr(self, "cudagraph_memory_estimate")
             and self.cudagraph_memory_estimate > 0
         ):
             GiB = lambda b: round(b / GiB_bytes, 2)
+            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
             logger.info(
-                "FULL CUDA graph memory: %s GiB (actual), %s GiB (estimated), "
+                "CUDA graph memory: %s GiB (actual), %s GiB (estimated), "
                 "difference: %s GiB (%.1f%%)",
-                GiB(full_graph_memory_bytes),
+                GiB(cuda_graph_memory_bytes),
                 GiB(self.cudagraph_memory_estimate),
-                GiB(abs(full_graph_memory_bytes - self.cudagraph_memory_estimate)),
-                100
-                * abs(full_graph_memory_bytes - self.cudagraph_memory_estimate)
-                / max(full_graph_memory_bytes, 1),
+                GiB(diff),
+                100 * diff / max(cuda_graph_memory_bytes, 1),
             )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
