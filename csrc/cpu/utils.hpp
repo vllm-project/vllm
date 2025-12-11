@@ -15,6 +15,16 @@
 namespace cpu_utils {
 enum class ISA { AMX, VEC };
 
+inline ISA get_isa(const std::string& isa) {
+  if (isa == "amx") {
+    return ISA::AMX;
+  } else if (isa == "vec") {
+    return ISA::VEC;
+  } else {
+    TORCH_CHECK(false, "Invalid isa type: " + isa);
+  }
+}
+
 template <typename T>
 struct VecTypeTrait {
   using vec_t = void;
@@ -67,6 +77,35 @@ inline int64_t get_l2_size() {
 #endif
   }();
   return size;
+}
+
+template <int32_t alignment_v, typename T>
+inline T round_up(T size) {
+  T alignment = alignment_v;
+  return (((size + alignment - 1) / alignment) * alignment);
+}
+
+template <int32_t alignment_v, typename T>
+inline T round_down(T size) {
+  T alignment = alignment_v;
+  return (size / alignment) * alignment;
+}
+
+template <typename T>
+inline void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
+                         int32_t stride) {
+  std::stringstream ss;
+  ss << std::fixed << std::setprecision(5) << name << ": [\n";
+  auto* curr_logits_buffer = ptr;
+  for (int32_t m = 0; m < row; ++m) {
+    for (int32_t n = 0; n < col; ++n) {
+      ss << curr_logits_buffer[n] << ", ";
+    }
+    ss << "\n";
+    curr_logits_buffer += stride;
+  }
+  ss << "]\n";
+  std::printf("%s", ss.str().c_str());
 }
 }  // namespace cpu_utils
 
