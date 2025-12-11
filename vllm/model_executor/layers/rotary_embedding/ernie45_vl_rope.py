@@ -54,7 +54,7 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
         query = query.view(num_tokens, -1, self.head_size)
         query_rot = query[..., : self.rotary_dim]
         query_pass = query[..., self.rotary_dim :]
-        query_rot = self.apply_rotary_emb(
+        query_rot = self.apply_rotary_emb.forward_native(
             query_rot,
             cos,
             sin,
@@ -65,7 +65,7 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., : self.rotary_dim]
         key_pass = key[..., self.rotary_dim :]
-        key_rot = self.apply_rotary_emb(
+        key_rot = self.apply_rotary_emb.forward_native(
             key_rot,
             cos,
             sin,

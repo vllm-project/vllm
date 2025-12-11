@@ -183,7 +183,6 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        logger.info_once("ApplyRotaryEmb forward_native().")
         output = self.forward_static(
             x, cos, sin, self.is_neox_style, self.enable_fp32_compute
         )
@@ -195,7 +194,6 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        logger.info_once("ApplyRotaryEmb forward_cuda().")
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
 
         origin_dtype = x.dtype
@@ -231,7 +229,6 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        logger.info_once("ApplyRotaryEmb forward_hip().")
         if self.apply_rotary_emb_flash_attn is not None:
             origin_dtype = x.dtype
             if self.enable_fp32_compute:
