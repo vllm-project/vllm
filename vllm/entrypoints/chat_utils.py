@@ -653,10 +653,7 @@ def _get_embeds_data(items_by_modality: dict[str, list[Any]], modality: str):
     if is_list_of(embeds, dict):
         return {k: _extract_embeds([item[k] for item in embeds]) for k in embeds[0]}
 
-    raise ValueError(
-        f"`{embeds_key}` should be a list of Tensor or list of dict, "
-        f"but got: {[type(item) for item in embeds]}"
-    )
+    return embeds
 
 
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
