@@ -303,7 +303,12 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
 
             return np.stack(
                 [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
-            ), {}
+            ), {
+                "total_num_frames": len(data.split(",")),
+                "frames_indices": list(range(len(data.split(",")))),
+                "fps": 24,
+                "duration": len(data.split(",")) // 24,
+            }
 
         return self.load_bytes(base64.b64decode(data))
 

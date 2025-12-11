@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
 import inspect
 import json
 from abc import ABC, abstractmethod
@@ -1305,6 +1306,7 @@ MM_PARSER_MAP: dict[
     "input_audio": lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal": lambda part: _RefusalParser(part).get("refusal", None),
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
+    "video": lambda part: _VideoParser(part).get("video", []),
 }
 
 
@@ -1516,6 +1518,18 @@ def _parse_chat_message_content_part(
         modality = "audio"
     elif part_type == "video_url":
         str_content = cast(str, content)
+        mm_parser.parse_video(str_content, uuid)
+        modality = "video"
+    elif part_type == "video":
+        str_content = "data:video/jpeg;base64,"
+        list_content = cast(list[str], content)
+        base64_list = []
+        for content in list_content:
+            with open(content, "rb") as f:
+                data = f.read()
+                base64_list.append(base64.b64encode(data).decode('utf-8'))
+        str_content += ",".join(base64_list)
+
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
     else:
