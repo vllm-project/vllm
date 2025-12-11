@@ -1135,7 +1135,7 @@ def test_parse_chat_messages_empty_dict_image_embeds(
                 "role": "user",
                 "content": [
                     {"type": "image_embeds", "image_embeds": {}},
-                    {"type": "text", "text": "Describe these two images."},
+                    {"type": "text", "text": "What's in this image?"},
                 ],
             }
         ],
@@ -1147,7 +1147,7 @@ def test_parse_chat_messages_empty_dict_image_embeds(
     assert conversation == [
         {
             "role": "user",
-            "content": "<|image_1|>\nDescribe these two images.",
+            "content": "<|image_1|>\nWhat's in this image?",
         }
     ]
 
