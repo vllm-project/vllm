@@ -2696,51 +2696,52 @@ class GPUModelRunner(
             self.mamba_state_idx[req_id] = curr_state_idx
             if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
                 # TODO: merge all these lines to copy_block
-                for mamba_group_id in mamba_group_ids:
-                    self._mamba_copy_block_for_qwen_next(
-                        self.kv_cache_config.kv_cache_groups[mamba_group_id],
-                        prev_state_idx,
-                        curr_state_idx,
-                        self.input_batch.num_accepted_tokens_cpu[i] - 1,
-                        req_state.block_ids[mamba_group_id],
-                    )
+                self._mamba_copy_block_for_qwen_next(
+                    mamba_group_ids,
+                    prev_state_idx,
+                    curr_state_idx,
+                    self.input_batch.num_accepted_tokens_cpu[i] - 1,
+                    req_state,
+                )
                 self.input_batch.num_accepted_tokens_cpu[i] = 1
 
     def _mamba_copy_block_for_qwen_next(
         self,
-        kv_cache_group_spec: KVCacheGroupSpec,
+        kv_cache_group_ids: list[int],
         src_block_idx: int,
         dest_block_idx: int,
         accept_token_bias: int,
-        block_ids: list[int],
+        req_state: CachedRequestState,
     ):
         # TODO: general impl for all models
         if src_block_idx == dest_block_idx and accept_token_bias == 0:
             return
         forward_context = self.compilation_config.static_forward_context
-        dest_block_id = block_ids[dest_block_idx]
-        for layer_name in kv_cache_group_spec.layer_names:
-            kv_caches: list[list[torch.Tensor]] = forward_context[layer_name].kv_cache[
-                0
-            ]
-            conv_state, gdn_state = kv_caches
-            # conv state
-            conv_state_block_id = block_ids[src_block_idx]
-            src_conv_state = conv_state[conv_state_block_id][accept_token_bias:]
-            dest_conv_state = conv_state[dest_block_id]
-            dest_conv_state[: len(src_conv_state)].copy_(src_conv_state.clone())
-            # gdn state
-            gdn_state_block_id = block_ids[src_block_idx + accept_token_bias]
-            src_gdn_state = gdn_state[gdn_state_block_id]
-            dest_gdn_state = gdn_state[dest_block_id]
-            dest_gdn_state.copy_(src_gdn_state)
-            if (
-                is_global_first_rank()
-                and layer_name == kv_cache_group_spec.layer_names[0]
-            ):
-                logger.info(
-                    f">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: {layer_name=}, idx {src_block_idx=} -> {dest_block_idx=} conv {conv_state_block_id=} -> {dest_block_id=} with bias {accept_token_bias}, {gdn_state_block_id=} -> {dest_block_id=}"
-                )
+        for kv_cache_group_id in kv_cache_group_ids:
+            block_ids = req_state.block_ids[kv_cache_group_id]
+            dest_block_id = block_ids[dest_block_idx]
+            layer_names = self.kv_cache_config.kv_cache_groups[
+                kv_cache_group_id
+            ].layer_names
+            for layer_name in layer_names:
+                kv_caches: list[list[torch.Tensor]] = forward_context[
+                    layer_name
+                ].kv_cache[0]
+                conv_state, gdn_state = kv_caches
+                # conv state
+                conv_state_block_id = block_ids[src_block_idx]
+                src_conv_state = conv_state[conv_state_block_id][accept_token_bias:]
+                dest_conv_state = conv_state[dest_block_id]
+                dest_conv_state[: len(src_conv_state)].copy_(src_conv_state.clone())
+                # gdn state
+                gdn_state_block_id = block_ids[src_block_idx + accept_token_bias]
+                src_gdn_state = gdn_state[gdn_state_block_id]
+                dest_gdn_state = gdn_state[dest_block_id]
+                dest_gdn_state.copy_(src_gdn_state)
+                if is_global_first_rank() and layer_name == layer_names[0]:
+                    logger.info(
+                        f">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: {layer_name=}, idx {src_block_idx=} -> {dest_block_idx=} conv {conv_state_block_id=} -> {dest_block_id=} with bias {accept_token_bias}, {gdn_state_block_id=} -> {dest_block_id=}"
+                    )
 
     def _postprocess_mamba(self, scheduler_output: "SchedulerOutput"):
         """
@@ -2790,14 +2791,13 @@ class GPUModelRunner(
                     logger.info(
                         f">>> [DEBUG] Worker: postprocess mamba copy: {req_id=}, {src_block_idx=} -> {dest_block_idx=} with bias {accept_token_bias}"
                     )
-                for mamba_group_id in mamba_group_ids:
-                    self._mamba_copy_block_for_qwen_next(
-                        self.kv_cache_config.kv_cache_groups[mamba_group_id],
-                        src_block_idx,
-                        dest_block_idx,
-                        accept_token_bias,
-                        req_state.block_ids[mamba_group_id],
-                    )
+                self._mamba_copy_block_for_qwen_next(
+                    mamba_group_ids,
+                    src_block_idx,
+                    dest_block_idx,
+                    accept_token_bias,
+                    req_state,
+                )
                 if src_block_idx == dest_block_idx:
                     num_accepted_tokens_cpu[i] = 1
 
