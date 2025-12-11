@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -708,7 +707,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -736,7 +734,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Expert selection
-        topk_weights, topk_ids, _ = router.select_experts(
+        topk_weights, topk_ids, _ = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -1493,7 +1491,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1524,7 +1521,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=params.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = router.select_experts(
+        topk_weights, topk_ids, _ = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

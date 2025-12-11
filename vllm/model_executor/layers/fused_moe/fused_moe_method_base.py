@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe_params import (
     FusedMoEParams,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -102,7 +99,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @abstractmethod
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,

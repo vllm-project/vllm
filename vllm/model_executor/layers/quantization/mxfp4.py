@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
     fused_marlin_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
     UnfusedOAITritonExperts,
@@ -890,7 +889,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -899,7 +897,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = router.select_experts(
+            topk_weights, topk_ids, _ = params.router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -993,7 +991,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids, _ = router.select_experts(
+            topk_weights, topk_ids, _ = params.router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -1120,7 +1118,6 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,

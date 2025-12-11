@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -627,7 +626,6 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -639,7 +637,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
                 "fused GGUF MoE method."
             )
 
-        topk_weights, topk_ids, _ = router.select_experts(
+        topk_weights, topk_ids, _ = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

@@ -19,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_params import FusedMoEParams
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -270,13 +269,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward(
-            router=router,
             params=params,
             x=x,
             router_logits=router_logits,
@@ -295,12 +292,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_cuda(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, zero_expert_result = router.select_experts(
+        topk_weights, topk_ids, zero_expert_result = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
@@ -351,7 +347,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_cpu(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -385,7 +380,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_xpu(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -410,7 +404,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def forward_tpu(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,

@@ -35,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -1233,7 +1232,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1295,7 +1293,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=params.apply_router_weight_on_input,
                 )
 
-        select_result = router.select_experts(
+        select_result = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

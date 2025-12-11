@@ -378,7 +378,8 @@ class FusedMoE(CustomOp, FusedMoEParams):
         n_shared_experts: int | None = None,
         routing_method_type: RoutingMethodType | None = None,
     ):
-        super().__init__()
+        CustomOp.__init__(self)
+        FusedMoEParams.__init__(self, router=FusedMoERouterImpl(self))
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -674,8 +675,6 @@ class FusedMoE(CustomOp, FusedMoEParams):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
-
-        self.router = FusedMoERouterImpl(self)
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
@@ -1834,7 +1833,6 @@ class FusedMoE(CustomOp, FusedMoEParams):
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
-                router=self.router,
                 params=self,
                 x=staged_hidden_states,
                 router_logits=staged_router_logits,
@@ -1978,7 +1976,6 @@ class FusedMoE(CustomOp, FusedMoEParams):
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
-                router=self.router,
                 params=self,
                 x=hidden_states_combined
                 if do_naive_dispatch_combine

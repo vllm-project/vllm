@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEConfig,
@@ -360,7 +359,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
@@ -368,7 +366,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         assert params.activation == "silu", "Only SiLU activation is supported."
-        topk_weights, topk_ids, _ = router.select_experts(
+        topk_weights, topk_ids, _ = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )

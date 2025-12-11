@@ -15,7 +15,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.fused_moe_params import (
     FusedMoEParams,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
@@ -97,12 +96,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
 
     def apply(
         self,
-        router: FusedMoERouter,
         params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, zero_expert_result = router.select_experts(
+        topk_weights, topk_ids, zero_expert_result = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
