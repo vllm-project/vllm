@@ -214,7 +214,7 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         tokens = getattr(config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, (
             "Try loading the original Qwen3 Reranker?, see: "
-            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py"
+            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
         )
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
