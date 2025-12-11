@@ -1139,7 +1139,9 @@ class OpenAIServing:
                 conversation=conversation,
                 messages=messages,
                 model_config=model_config,
-                reasoning=request.reasoning,
+                reasoning=getattr(
+                    request, "reasoning", getattr(request, "reasoning_effort", None)
+                ),
                 **_chat_template_kwargs,
             )
         else:
