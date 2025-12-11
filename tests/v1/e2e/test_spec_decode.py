@@ -441,6 +441,18 @@ def test_eagle_correctness(
         test_id = request.node.callspec.id
         model_impl = "transformers" if "transformers" in test_id else "auto"
 
+        if model_impl == "transformers":
+            import transformers
+            from packaging.version import Version
+
+            installed = Version(transformers.__version__)
+            required = Version("5.0.0.dev")
+            if installed < required:
+                pytest.skip(
+                    "Eagle3 with the Transformers modeling backend require "
+                    f"transformers>={required}, but got {installed}"
+                )
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
