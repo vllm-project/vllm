@@ -377,7 +377,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         quant_config: Quantization parameters for this experts instance.
         """
-        self.quant_config = quant_config
+        self.quant_config: FusedMoEQuantConfig = quant_config
 
     @property
     @abstractmethod
