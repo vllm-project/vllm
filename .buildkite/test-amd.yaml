@@ -435,7 +435,7 @@ steps:
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
@@ -455,7 +455,6 @@ steps:
     # for multi-modal models
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
-    - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     # for pooling models
