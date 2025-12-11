@@ -73,6 +73,10 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_config = kv_cache_config
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
+        self.sla_tier_enabled = self.scheduler_config.sla_tier_enabled
+        self.max_interactive_batch_tokens = (
+            self.scheduler_config.max_interactive_batch_tokens
+        )
         self.log_stats = log_stats
         self.observability_config = vllm_config.observability_config
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
@@ -106,7 +110,6 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
-        self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported with KV connectors"
@@ -118,10 +121,6 @@ class Scheduler(SchedulerInterface):
             )
             if self.log_stats:
                 self.connector_prefix_cache_stats = PrefixCacheStats()
-            kv_load_failure_policy = (
-                self.vllm_config.kv_transfer_config.kv_load_failure_policy
-            )
-            self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -150,8 +149,10 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting = create_request_queue(self.policy, use_sla=self.sla_tier_enabled)
         self.running: list[Request] = []
+        self.last_preempted_tier_counts: dict[str, int] = {}
+        self.last_interactive_limit_hits: int = 0
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -228,6 +229,11 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        interactive_token_budget = (
+            self.max_interactive_batch_tokens if self.sla_tier_enabled else None
+        )
+        interactive_tokens_scheduled = 0
+        interactive_limit_hits = 0
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -323,10 +329,17 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
+
+                        def _preempt_key(r: Request):
+                            if self.sla_tier_enabled:
+                                return (
+                                    r.priority,
+                                    self._sla_preemption_rank(r),
+                                    r.arrival_time,
+                                )
+                            return (r.priority, r.arrival_time)
+
+                        preempted_req = max(self.running, key=_preempt_key)
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             scheduled_running_reqs.remove(preempted_req)
@@ -368,6 +381,11 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks[request.request_id] = new_blocks
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if (
+                interactive_token_budget is not None
+                and getattr(request, "sla_tier", None) == "interactive"
+            ):
+                interactive_tokens_scheduled += num_new_tokens
             req_index += 1
 
             # Speculative decode related.
@@ -415,7 +433,9 @@ class Scheduler(SchedulerInterface):
 
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
-        skipped_waiting_requests = create_request_queue(self.policy)
+        skipped_waiting_requests = create_request_queue(
+            self.policy, use_sla=self.sla_tier_enabled
+        )
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
@@ -536,6 +556,19 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
+                if (
+                    interactive_token_budget is not None
+                    and getattr(request, "sla_tier", None) == "interactive"
+                    and interactive_tokens_scheduled + num_new_tokens
+                    > interactive_token_budget
+                ):
+                    # Defer interactive requests that would exceed the interactive
+                    # token budget; continue scheduling other tiers.
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    interactive_limit_hits += 1
+                    continue
+
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (
@@ -631,6 +664,11 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                if (
+                    interactive_token_budget is not None
+                    and getattr(request, "sla_tier", None) == "interactive"
+                ):
+                    interactive_tokens_scheduled += num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
@@ -729,6 +767,10 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
+
+        # Record per-step SLA metrics.
+        self.last_preempted_tier_counts = self._count_tiers(preempted_reqs)
+        self.last_interactive_limit_hits = interactive_limit_hits
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1071,7 +1113,7 @@ class Scheduler(SchedulerInterface):
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
-                # skip failed or rescheduled requests from KV load failure
+                # Skip requests that were recovered from KV load failure
                 continue
             request = self.requests.get(req_id)
             if request is None:
@@ -1181,21 +1223,6 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
-
-        if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
-            requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
-            for request in requests:
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=request.request_id,
-                        new_token_ids=[],
-                        finish_reason=request.get_finished_reason(),
-                        events=request.take_events(),
-                        trace_headers=request.trace_headers,
-                        num_cached_tokens=request.num_cached_tokens,
-                    )
-                )
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1318,6 +1345,26 @@ class Scheduler(SchedulerInterface):
                 )
             else:
                 request.spec_token_ids = spec_token_ids
+
+    def _sla_preemption_rank(self, request: Request) -> int:
+        tier = getattr(request, "sla_tier", None)
+        if tier == "background":
+            return 2
+        if tier == "batch":
+            return 1
+        return 0
+
+    def _tier_name(self, request: Request) -> str:
+        tier = getattr(request, "sla_tier", None)
+        if tier in ("interactive", "batch", "background"):
+            return tier
+        return "batch"
+
+    def _count_tiers(self, requests: Iterable[Request]) -> dict[str, int]:
+        counts: dict[str, int] = {"interactive": 0, "batch": 0, "background": 0}
+        for req in requests:
+            counts[self._tier_name(req)] = counts.get(self._tier_name(req), 0) + 1
+        return counts
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
@@ -1479,6 +1526,9 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+        waiting_tier_counts = (
+            self._count_tiers(self.waiting) if self.sla_tier_enabled else {}
+        )
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
@@ -1489,6 +1539,9 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
+            waiting_requests_per_tier=waiting_tier_counts,
+            preempted_requests_per_tier=self.last_preempted_tier_counts,
+            scheduler_interactive_batch_token_limit_hits=self.last_interactive_limit_hits,
         )
 
     def make_spec_decoding_stats(
@@ -1630,11 +1683,8 @@ class Scheduler(SchedulerInterface):
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
-        self,
-        requests: Iterable[Request],
-        invalid_block_ids: set[int],
-        evict_blocks: bool = True,
-    ) -> tuple[set[str], int, set[int]]:
+        self, requests: Iterable[Request], invalid_block_ids: set[int]
+    ) -> tuple[set[str], int]:
         """
         Identify and update requests affected by invalid KV cache blocks.
 
@@ -1646,21 +1696,16 @@ class Scheduler(SchedulerInterface):
         Args:
             requests: The set of requests to scan for invalid blocks.
             invalid_block_ids: IDs of invalid blocks.
-            evict_blocks: Whether to collect blocks for eviction (False for
-                async requests which aren't cached yet).
 
         Returns:
             tuple:
                 - affected_req_ids (set[str]): IDs of requests impacted by
                 invalid blocks.
                 - total_affected_tokens (int): Total number of tokens that must
-                be recomputed across all affected requests.
-                - blocks_to_evict (set[int]): Block IDs to evict from cache,
-                including invalid blocks and downstream dependent blocks.
+                be recomputed across all affected requests (for observability).
         """
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
-        blocks_to_evict: set[int] = set()
         # If a block is invalid and shared by multiple requests in the batch,
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
@@ -1718,9 +1763,6 @@ class Scheduler(SchedulerInterface):
                 )
                 total_affected_tokens += num_affected_tokens
                 request.num_external_computed_tokens -= num_affected_tokens
-                # collect invalid block and all downstream dependent blocks
-                if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
 
             if is_affected:
                 if not marked_invalid_block:
@@ -1736,70 +1778,47 @@ class Scheduler(SchedulerInterface):
 
                 affected_req_ids.add(request.request_id)
 
-        return affected_req_ids, total_affected_tokens, blocks_to_evict
+        return affected_req_ids, total_affected_tokens
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
-        """
-        Handle requests affected by invalid KV cache blocks.
+        total_requests_to_reschedule = 0
+        total_tokens_to_reschedule = 0
 
-        Returns:
-            Set of affected request IDs to skip in update_from_output main loop.
-        """
-        should_fail = not self.recompute_kv_load_failures
-
-        # handle async KV loads (not cached yet, evict_blocks=False)
+        # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
         async_load_reqs = (
             req
             for req in self.waiting
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_failed_req_ids, num_failed_tokens, _ = (
+        async_affected_req_ids, num_tokens_to_reschedule = (
             self._update_requests_with_invalid_blocks(
-                async_load_reqs, invalid_block_ids, evict_blocks=False
+                async_load_reqs, invalid_block_ids
             )
         )
 
-        total_failed_requests = len(async_failed_req_ids)
-        total_failed_tokens = num_failed_tokens
+        total_requests_to_reschedule += len(async_affected_req_ids)
+        total_tokens_to_reschedule += num_tokens_to_reschedule
 
-        # handle sync loads (may be cached, collect blocks for eviction)
-        sync_failed_req_ids, num_failed_tokens, sync_blocks_to_evict = (
-            self._update_requests_with_invalid_blocks(
-                self.running, invalid_block_ids, evict_blocks=True
-            )
+        # Mark requests with async KV load failures; they will be rescheduled
+        # once loading completes.
+        self.failed_recving_kv_req_ids |= async_affected_req_ids
+
+        # --- Handle sync KV loads (running requests) ---
+        sync_affected_req_ids, num_tokens_to_reschedule = (
+            self._update_requests_with_invalid_blocks(self.running, invalid_block_ids)
         )
 
-        total_failed_requests += len(sync_failed_req_ids)
-        total_failed_tokens += num_failed_tokens
+        total_requests_to_reschedule += len(sync_affected_req_ids)
+        total_tokens_to_reschedule += num_tokens_to_reschedule
 
-        if not total_failed_requests:
-            return set()
-
-        # evict invalid blocks and downstream dependent blocks from cache
-        # only when not using recompute policy (where blocks will be recomputed
-        # and reused by other requests sharing them)
-        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
-            self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
-
-        if should_fail:
-            all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
-            logger.error(
-                "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
-                total_failed_requests,
-                total_failed_tokens,
-                all_failed_req_ids,
+        if total_requests_to_reschedule:
+            logger.warning(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                total_requests_to_reschedule,
+                total_tokens_to_reschedule,
             )
-            return all_failed_req_ids
 
-        logger.warning(
-            "Recovered from KV load failure: "
-            "%d request(s) rescheduled (%d tokens affected).",
-            total_failed_requests,
-            total_failed_tokens,
-        )
-
-        # Mark async requests with KV load failures for retry once loading completes
-        self.failed_recving_kv_req_ids |= async_failed_req_ids
-        # Return sync affected IDs to skip in update_from_output
-        return sync_failed_req_ids
+        # Return the IDs of affected running requests to skip in
+        # update_from_output.
+        return sync_affected_req_ids
