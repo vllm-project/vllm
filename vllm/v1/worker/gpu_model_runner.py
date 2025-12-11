@@ -3423,14 +3423,13 @@ class GPUModelRunner(
         for async scheduling with spec decode + penalty/bad_words.
         Returns None if no draft tokens were copied in previous step.
         """
+        if not self._has_draft_tokens:
+            return None
+
         if isinstance(self._draft_token_ids, list):
             return self._draft_token_ids
 
-        if (
-            self.draft_token_ids_copy_event is None
-            or self.draft_token_ids_cpu is None
-            or not self._has_draft_tokens
-        ):
+        if self.draft_token_ids_copy_event is None or self.draft_token_ids_cpu is None:
             return None
 
         self._has_draft_tokens = False
@@ -3600,9 +3599,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
             )
 
-        self._copy_draft_token_ids(
-            self._draft_token_ids, self.input_batch.num_reqs
-        )
+        self._copy_draft_token_ids(draft_token_ids, self.input_batch.num_reqs)
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

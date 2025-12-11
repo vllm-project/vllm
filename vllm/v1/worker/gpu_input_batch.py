@@ -952,7 +952,18 @@ class InputBatch:
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
             # Replace placeholder token id(s) with actual sampled id(s).
             if sampled_ids := sampled_token_ids[prev_index]:
-                req_output_token_ids[-len(sampled_ids) :] = sampled_ids
+                num_placeholders = 0
+                for t in reversed(req_output_token_ids):
+                    if t == -1:
+                        num_placeholders += 1
+                    else:
+                        break
+                if num_placeholders == 0:
+                    continue
+                assert num_placeholders <= len(sampled_ids)
+                req_output_token_ids[-num_placeholders:] = sampled_ids[
+                    :num_placeholders
+                ]
 
     def update_async_spec_token_ids(
         self, draft_token_ids_cpu: list[list[int]] | None
@@ -971,13 +982,16 @@ class InputBatch:
             return
 
         for index, req_id in enumerate(self.req_ids):
-            prev_index = self.prev_req_id_to_index.get(req_id, default=None)
+            prev_index = self.prev_req_id_to_index.get(req_id)
             if prev_index is None:
                 continue
             assert prev_index < len(draft_token_ids_cpu)
             draft_ids = draft_token_ids_cpu[prev_index]
+            if not draft_ids:
+                continue
             assert index < len(spec_token_ids)
-            spec_token_ids[index] = draft_ids
+            spec_token_ids[index].clear()
+            spec_token_ids[index].extend(draft_ids)
 
     @property
     def num_reqs(self) -> int:
