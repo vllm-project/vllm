@@ -695,7 +695,9 @@ class OpenAIServing:
             )
             raise GenerationError("Internal server error")
         if finish_reason == "rejected":
-            logger.error("Request %s was rejected during generation", request_id)
+            logger.error(
+                "Request %s was rejected due to waiting queue is full", request_id
+            )
             raise GenerationError(
                 "Request was rejected",
                 err_type="ServiceUnavailableError",
