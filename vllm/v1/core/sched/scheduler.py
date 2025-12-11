@@ -988,7 +988,8 @@ class Scheduler(SchedulerInterface):
 
             curr_embeds_start, curr_embeds_end = (
                 mm_feature.mm_position.get_embeds_indices_in_range(
-                    num_computed_tokens, num_computed_tokens + num_new_tokens
+                    num_computed_tokens - start_pos,
+                    num_computed_tokens + num_new_tokens - start_pos,
                 )
             )
             curr_num_embeds = curr_embeds_end - curr_embeds_start
