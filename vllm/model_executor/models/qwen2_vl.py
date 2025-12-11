@@ -1122,6 +1122,12 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
 
+def disable_gme_mrope(config):
+    contains_gme = any('gme' in str(arch).lower() for arch in config.architectures)
+    if contains_gme:
+        if hasattr(config, 'rope_scaling') and config.rope_scaling is not None:
+            if "mrope_section" in config.rope_scaling:
+                del config.rope_scaling["mrope_section"]
 
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen2VLMultiModalProcessor,
@@ -1276,6 +1282,7 @@ class Qwen2VLForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        disable_gme_mrope(config)
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
         self.multimodal_config = multimodal_config
