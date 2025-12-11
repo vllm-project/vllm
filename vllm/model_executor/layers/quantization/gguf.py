@@ -54,10 +54,10 @@ class GGUFConfig(QuantizationConfig):
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # GGUF dequantization kernels use half precision (fp16) internally.
-        # bfloat16 has precision issues on SM 120+ devices (Blackwell).
-        if current_platform.has_device_capability(120):
+        # bfloat16 has precision issues on Blackwell (SM 10.0+) devices.
+        if current_platform.has_device_capability(100):
             logger.warning_once(
-                "GGUF has precision issues with bfloat16 on SM 120+ devices. "
+                "GGUF has precision issues with bfloat16 on Blackwell devices (SM 10.0+). "
                 "bfloat16 is unavailable for Blackwell devices."
             )
             return [torch.half, torch.float32]
