@@ -93,6 +93,7 @@ from .interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
+    _require_is_multimodal,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -1572,7 +1573,7 @@ class Qwen3VLForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        assert is_multimodal is not None
+        is_multimodal = _require_is_multimodal(is_multimodal)
 
         if self.use_deepstack:
             (
