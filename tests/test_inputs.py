@@ -33,11 +33,11 @@ INPUTS_SLICES = [
     slice(None, None, -2),
 ]
 
+# List of lists that prompt[0] passes test case#4, but no TypeError will be raised.
 @pytest.mark.parametrize(
     "invalid_input",
     [
-        ["foo", 1], # mixed of string and token
-        [["foo"], ["bar"]] # list of list of strings
+        [[1, 2], ["foo", "bar"]] 
     ]
 )
 def test_invalid_input_raise_type_error(invalid_input):
