@@ -4653,8 +4653,23 @@ class GPUModelRunner(
                 original_pool = self.model.cudagraph_wrapper.graph_pool
                 self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
+        @contextmanager
+        def freeze_gc():
+            # Prevent GC interference with graph capture and memory measurements
+            gc.collect()
+            should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+            if should_freeze:
+                gc.freeze()
+            try:
+                yield
+            finally:
+                if should_freeze:
+                    gc.unfreeze()
+                    gc.collect()
+
         set_cudagraph_capturing_enabled(True)
-        with graph_capture(device=self.device):
+        with freeze_gc(), graph_capture(device=self.device):
+            torch.cuda.empty_cache()
             torch.cuda.synchronize()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
@@ -4771,6 +4786,9 @@ class GPUModelRunner(
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
+            # Clear PyTorch's memory cache to get accurate graph memory measurement
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
