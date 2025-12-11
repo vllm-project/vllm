@@ -27,6 +27,7 @@ from vllm.config import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
