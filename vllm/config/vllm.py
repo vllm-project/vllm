@@ -820,11 +820,6 @@ class VllmConfig:
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
-        assert (
-            self.parallel_config.cp_kv_cache_interleave_size == 1
-            or self.speculative_config is None
-        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
-
         # Do this after all the updates to compilation_config.mode
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,
@@ -1014,7 +1009,7 @@ class VllmConfig:
         max_graph_size = min(max_num_seqs * 2, 512)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
-        cuda_graph_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
+        cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
