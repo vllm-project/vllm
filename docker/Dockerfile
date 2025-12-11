@@ -143,6 +143,7 @@ ARG PYTORCH_NIGHTLY
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
+COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
