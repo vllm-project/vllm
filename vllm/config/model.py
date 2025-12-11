@@ -788,6 +788,13 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
+        if convert == "reward":
+            logger.warning(
+                "`--convert reward` is deprecated and will be removed in a future "
+                "version. Please use `--convert embed` instead."
+            )
+            return "embed"
+
         if convert != "auto":
             return convert
 

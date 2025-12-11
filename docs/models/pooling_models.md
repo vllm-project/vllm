@@ -324,3 +324,5 @@ Pooling models now default support all pooling, you can use it without any setti
 
 - Extracting hidden states prefers using `token_embed` task.
 - Reward models prefers using `token_classify` task.
+
+We are going to remove `--convert reward`, use `--convert embed` instead.
