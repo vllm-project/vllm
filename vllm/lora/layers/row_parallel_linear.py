@@ -63,10 +63,6 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
-        # Only fuse bias add into GEMM for rank 0 (matches base
-        # RowParallelLinear behavior). This ensures bias will not get
-        # added more than once in TP>1 case and matches the numerical
-        # behavior of the unwrapped layer
         bias_ = (
             None
             if (self.tp_rank > 0 or self.base_layer.skip_bias_add)
