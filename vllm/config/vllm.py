@@ -750,27 +750,17 @@ class VllmConfig:
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
 
-        if self.model_config and self.model_config.is_encoder_decoder:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            self.scheduler_config.max_num_encoder_input_tokens = (
-                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+        if (
+            self.model_config
+            and self.model_config.architecture == "WhisperForConditionalGeneration"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            logger.warning(
+                "Whisper is known to have issues with "
+                "forked workers. If startup is hanging, "
+                "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                "to 'spawn'."
             )
-            logger.debug(
-                "Encoder-decoder model detected: setting "
-                "`max_num_encoder_input_tokens` to encoder length (%s)",
-                self.scheduler_config.max_num_encoder_input_tokens,
-            )
-            if (
-                self.model_config.architecture == "WhisperForConditionalGeneration"
-                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
-            ):
-                logger.warning(
-                    "Whisper is known to have issues with "
-                    "forked workers. If startup is hanging, "
-                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                    "to 'spawn'."
-                )
 
         if (
             self.kv_events_config is not None
