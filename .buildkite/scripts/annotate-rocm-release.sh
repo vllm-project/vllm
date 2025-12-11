@@ -7,10 +7,11 @@
 set -ex
 
 # Get build configuration from meta-data
-# Note: ROCm version is determined by BASE_IMAGE in docker/Dockerfile.rocm_base
-ROCM_VERSION="7.1"
+# Extract ROCm version dynamically from Dockerfile.rocm_base
+# BASE_IMAGE format: rocm/dev-ubuntu-22.04:7.1-complete -> extracts "7.1"
+ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E 's/.*:([0-9]+\.[0-9]+).*/\1/' || echo "unknown")
 PYTHON_VERSION=$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo "3.12")
-PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942")
+PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
 # S3 URLs
 S3_BUCKET="${S3_BUCKET:-vllm-rocm-wheels-embeddedllm-2}"

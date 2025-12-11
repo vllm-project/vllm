@@ -203,7 +203,7 @@ steps:
         key: "rocm-upload-wheels"
         default: "true"
         options:
-          - label: "No - Build only"
+          - label: "No - Build only (nightly/dev)"
             value: "false"
           - label: "Yes - Upload to S3 (release)"
             value: "true"
@@ -374,8 +374,9 @@ steps:
         # Download Docker image from S3 (too large for Buildkite artifacts)
         DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
         if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
-          # Fallback to default path based on current build
-          DOCKER_IMAGE_S3_PATH="s3://$${S3_BUCKET}/buildkite-artifacts/$${BUILDKITE_PIPELINE_SLUG}/$${BUILDKITE_BUILD_NUMBER}/rocm-base-image.tar.gz"
+          echo "ERROR: rocm-docker-image-s3-path metadata not found"
+          echo "This should have been set by the build-rocm-base-wheels job"
+          exit 1
         fi
         echo "Downloading Docker image from $${DOCKER_IMAGE_S3_PATH}"
         mkdir -p artifacts/rocm-docker-image
@@ -396,7 +397,7 @@ steps:
 
         # Get GPU architectures from meta-data
         PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
-        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942}"
+        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
 
         echo "========================================"
         echo "Building vLLM wheel with:"
@@ -461,7 +462,7 @@ steps:
 
         # Skip upload if not enabled
         if [ "$${ROCM_UPLOAD_WHEELS}" != "true" ]; then
-          echo "Skipping S3 upload (ROCM_UPLOAD_WHEELS != true)"
+          echo "Skipping S3 upload (ROCM_UPLOAD_WHEELS != true, NIGHTLY != 1, not a release branch)"
           echo "To enable upload, set 'Upload Wheels to S3' to 'Yes' in the build configuration"
           exit 0
         fi
