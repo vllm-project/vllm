@@ -703,7 +703,8 @@ class Qwen3CoderToolParser(ToolParser):
 
                 return False
 
-            # while streaming strings, the parser needs to watch for prefix and end tags.
+            # while streaming, the parser needs to watch for prefix and end tags
+            # that may be upcoming to avoid sending them as chunks.
             if (
                 ends_with_prefix_of(value_text, self.parameter_prefix)
                 or ends_with_prefix_of(value_text, self.parameter_end_token)

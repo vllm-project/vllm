@@ -906,7 +906,8 @@ TX
         if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
             arg_chunks.append(chunk.tool_calls[0].function.arguments)
 
-    # Arguments should be streamed incrementally and strings should be streamed per parameter
+    # Arguments should be streamed incrementally
+    # and strings should be streamed per parameter
     assert len(arg_chunks) == 9
 
     # Concatenated arguments should form valid JSON
