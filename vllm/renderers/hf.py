@@ -507,14 +507,9 @@ class HfRenderer(RendererLike):
 
         self._tokenizer = tokenizer
 
-    @property  # type: ignore[override]
+    @property
     def tokenizer(self) -> HfTokenizer | None:
         return self._tokenizer
-
-    # NOTE: Remove this once LLM.tokenizer.setter is removed
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: HfTokenizer | None) -> None:
-        self._tokenizer = tokenizer
 
     def get_tokenizer(self) -> HfTokenizer:
         tokenizer = self.tokenizer

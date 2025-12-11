@@ -81,14 +81,9 @@ class MistralRenderer(RendererLike):
             safe_apply_chat_template, executor=self._apply_chat_template_executor
         )
 
-    @property  # type: ignore[override]
+    @property
     def tokenizer(self) -> MistralTokenizer | None:
         return self._tokenizer
-
-    # NOTE: Remove this once LLM.tokenizer.setter is removed
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: MistralTokenizer | None) -> None:
-        self._tokenizer = tokenizer
 
     def get_tokenizer(self) -> MistralTokenizer:
         tokenizer = self.tokenizer

@@ -64,10 +64,6 @@ class InputProcessor:
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
 
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_preprocessor.tokenizer = tokenizer
-
     def get_tokenizer(self) -> TokenizerLike:
         return self.input_preprocessor.get_tokenizer()
 

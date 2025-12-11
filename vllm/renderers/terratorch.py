@@ -35,14 +35,9 @@ class TerratorchRenderer(RendererLike):
         if not config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
 
-    @property  # type: ignore[override]
+    @property
     def tokenizer(self) -> TokenizerLike | None:
         return None
-
-    # NOTE: Remove this once LLM.tokenizer.setter is removed
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self._tokenizer = tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
         raise ValueError("Tokenizer not available for Terratorch renderer")

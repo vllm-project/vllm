@@ -26,11 +26,6 @@ class RendererLike(Protocol):
     def tokenizer(self) -> TokenizerLike | None:
         raise NotImplementedError
 
-    # NOTE: Remove this once LLM.tokenizer.setter is removed
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        raise NotImplementedError
-
     def get_tokenizer(self) -> TokenizerLike:
         tokenizer = self.tokenizer
         if tokenizer is None:
