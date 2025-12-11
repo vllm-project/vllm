@@ -306,12 +306,12 @@ def _test_async_transfer_layer_without_mtp_worker(
         )
         cuda_stream.synchronize()
         move_from_buffer(
-            weights_group=[expert_weights[layer_idx]],
-            buffers_group=[expert_buffer],
+            expert_weights=expert_weights[layer_idx],
+            expert_weights_buffers=expert_buffer,
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
             recv_metadata=recv_metadata,
-            new_indices_group=new_indices_cpu[layer_idx : layer_idx + 1],
+            new_indices=new_indices_cpu[layer_idx],
             ep_group=ep_group,
         )
 
@@ -427,9 +427,8 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-@pytest.mark.parametrize("group_layers", [1, 2])
 def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts, group_layers
+    world_size, num_layers, num_local_experts, num_logical_experts
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
@@ -441,7 +440,6 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
-        max_grouped_layers=group_layers,
     )
 
 

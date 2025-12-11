@@ -514,7 +514,7 @@ class EplbState:
             is_received_locally=np.array([]),
             recv_metadata=RecvMetadata(
                 recv_primary_mask=np.array([]),
-                recv_counts=np.array([]),
+                recv_count=0,
                 recv_expert_ids=np.array([]),
                 recv_dst_rows=np.array([]),
             ),
@@ -989,24 +989,22 @@ class EplbState:
                 stream = torch.cuda.current_stream(device=device_index)
                 stream.wait_event(model_state.buffer_ready_event)
                 model_state.buffer_ready_event = None
-            weights_group = [
-                model_state.model.expert_weights[model_state.layer_to_transfer]
+            expert_weights = model_state.model.expert_weights[
+                model_state.layer_to_transfer
             ]
-            buffers_group = [model_state.expert_buffer]
-            new_indices_group = (
-                model_state.new_physical_to_logical_map[
-                    model_state.layer_to_transfer : model_state.layer_to_transfer + 1
-                ]
+            expert_weights_buffer = model_state.expert_buffer
+            new_indices = (
+                model_state.new_physical_to_logical_map[model_state.layer_to_transfer]
                 .cpu()
                 .numpy()
             )
             move_from_buffer(
-                weights_group=weights_group,
-                buffers_group=buffers_group,
+                expert_weights=expert_weights,
+                expert_weights_buffers=expert_weights_buffer,
                 is_unchanged=model_state.is_unchanged,
                 is_received_locally=model_state.is_received_locally,
                 recv_metadata=model_state.recv_metadata,
-                new_indices_group=new_indices_group,
+                new_indices=new_indices,
                 ep_group=ep_group,
             )
             transferred_layer = model_state.layer_to_transfer
