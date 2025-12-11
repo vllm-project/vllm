@@ -187,7 +187,7 @@ class PlaceholderRange:
     ) -> tuple[int, int]:
         """
         Returns the starting and ending indices of the embeddings of encoder outputs
-        in the range of [start_idx, end_idx) in the prompt token ids.
+        in the range of [start_idx, end_idx) in the placeholders.
 
         For example, given:
         PlaceholderRange(offset=2, length=5, is_embed=[False, True, False, True, True])
