@@ -369,10 +369,17 @@ class RayDistributedExecutor(Executor):
 
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_pcp_tp_workers.append([])
-            for pcp_tp_rank in range(self.parallel_config.prefill_context_parallel_size * self.parallel_config.tensor_parallel_size):
+            for pcp_tp_rank in range(
+                self.parallel_config.prefill_context_parallel_size
+                * self.parallel_config.tensor_parallel_size
+            ):
                 # PP=2, PCP=2, TP=4
                 # pp_pcp_tp_workers = [[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15]]
-                rank = (pp_rank * self.parallel_config.prefill_context_parallel_size * self.parallel_config.tensor_parallel_size) + pcp_tp_rank
+                rank = (
+                    pp_rank
+                    * self.parallel_config.prefill_context_parallel_size
+                    * self.parallel_config.tensor_parallel_size
+                ) + pcp_tp_rank
                 assert len(self.pp_pcp_tp_workers[pp_rank]) == pcp_tp_rank
                 assert pp_rank < len(self.pp_pcp_tp_workers)
                 self.pp_pcp_tp_workers[pp_rank].append(self.workers[rank])
