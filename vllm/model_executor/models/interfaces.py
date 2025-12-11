@@ -53,7 +53,7 @@ The output embeddings must be one of the following formats:
 """
 
 
-def _require_is_multimodal(is_multimodal: Tensor | None):
+def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
     """
     A helper function to be used in the context of
     [SupportsMultiModal.embed_input_ids][] to provide a better error message.
