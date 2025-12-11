@@ -4,13 +4,16 @@
 import asyncio
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager
 from http import HTTPStatus
 from io import StringIO
 from typing import Any, TypeAlias
 
+import aiofiles
 import aiohttp
 import torch
+from aiofiles.threadpool.text import AsyncTextIOWrapper
 from prometheus_client import start_http_server
 from pydantic import TypeAdapter, field_validator
 from pydantic_core.core_schema import ValidationInfo
@@ -213,24 +216,39 @@ def parse_args():
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 
-class BatchProgressTracker:
+class StreamingBatchProgressTracker:
+    """Progress tracker that doesn't require knowing total upfront."""
+
     def __init__(self):
-        self._total = 0
+        self._submitted = 0
+        self._completed = 0
         self._pbar: tqdm | None = None
+        self._finalized = False
 
     def submitted(self):
-        self._total += 1
+        self._submitted += 1
+        if self._pbar is not None and self._finalized:
+            self._pbar.total = self._submitted
+            self._pbar.refresh()
 
     def completed(self):
-        if self._pbar:
+        self._completed += 1
+        if self._pbar is not None:
             self._pbar.update()
+
+    def finalize_total(self):
+        """Called when all requests have been submitted"""
+        self._finalized = True
+        if self._pbar is not None:
+            self._pbar.total = self._submitted
+            self._pbar.refresh()
 
     def pbar(self) -> tqdm:
         enable_tqdm = (
             not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         )
         self._pbar = tqdm(
-            total=self._total,
+            total=None,
             unit="req",
             desc="Running batch",
             mininterval=5,
@@ -238,6 +256,156 @@ class BatchProgressTracker:
             bar_format=_BAR_FORMAT,
         )
         return self._pbar
+
+
+async def stream_file_lines(path_or_url: str) -> AsyncIterator[str]:
+    """Stream lines from a local file or URL without loading everything into memory."""
+    if path_or_url.startswith(("http://", "https://")):
+        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
+            resp.raise_for_status()
+
+            async for line_bytes in resp.content:
+                line = line_bytes.decode("utf-8")
+
+                if line:
+                    yield line
+    else:
+        async with aiofiles.open(path_or_url, encoding="utf-8") as f:
+            async for line in f:
+                line = line.strip()
+                if line:
+                    yield line
+
+
+class OrderedStreamingWriter(AbstractAsyncContextManager):
+    """
+    Writes batch outputs to a file in order, streaming results as they complete.
+
+    Buffers out-of-order results and flushes them as soon as preceding results
+    arrive. This bounds memory usage by the maximum "out-of-orderness" rather
+    than total batch size.
+    """
+
+    def __init__(self, output_path: str, max_buffer_size: int) -> None:
+        self.output_path = output_path
+        self.max_buffer_size = max_buffer_size
+        self.next_to_write = 0
+        self.buffer: dict[int, BatchRequestOutput] = {}
+        self.skipped_indices: set[int] = set()
+        self.out_of_order_count = 0
+        self.file_handle: AsyncTextIOWrapper | None = None
+        self._lock = asyncio.Lock()
+        self._is_url = False
+        self._temp_path: str | None = None
+
+    async def __aenter__(self):
+        # If the output file is a HTTP upload we write to a named temporary file
+        # a future implementation could use multipart uploads for S3-like storages.
+        if self.output_path.startswith(("http://", "https://")):
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", delete=False, suffix=".jsonl"
+            ) as temp_file:
+                self._temp_path = temp_file.name
+            self.file_handle = await aiofiles.open(
+                self._temp_path, mode="w", encoding="utf-8"
+            )
+            self._is_url = True
+        else:
+            self.file_handle = await aiofiles.open(
+                self.output_path, mode="w", encoding="utf-8"
+            )
+            self._is_url = False
+            self._temp_path = None
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type,
+        exc_value,
+        traceback,
+    ):
+        if self.file_handle:
+            await self.file_handle.close()
+
+        # If output is a URL, upload the temp file
+        if self._is_url and self._temp_path is not None:
+            try:
+                logger.info("Uploading outputs to %s", self.output_path)
+                await upload_data(self.output_path, self._temp_path, from_file=True)
+            finally:
+                import os
+
+                os.unlink(self._temp_path)
+
+        if self.out_of_order_count > 0:
+            logger.warning(
+                "Batch completed with %d out-of-order writes due to slow requests.",
+                self.out_of_order_count,
+            )
+
+    async def add_result(self, index: int, result: BatchRequestOutput) -> None:
+        """Add a result and flush any ready results to disk."""
+        async with self._lock:
+            if index in self.skipped_indices:
+                logger.info(
+                    "Late arrival for skipped index %d, writing out of order", index
+                )
+                self.skipped_indices.discard(index)
+                await self._write_single(result)
+                self.out_of_order_count += 1
+                return
+
+            self.buffer[index] = result
+            await self._flush()
+
+            # If buffer is too large, skip blocking requests
+            while len(self.buffer) > self.max_buffer_size:
+                await self._skip_blocking()
+
+    async def _skip_blocking(self) -> None:
+        """Skip the blocking index and flush everything we can."""
+        blocking_index = self.next_to_write
+        logger.warning(
+            "Buffer size %d exceeds max %d. Index %d is blocking - skipping.",
+            len(self.buffer),
+            self.max_buffer_size,
+            blocking_index,
+        )
+        self.skipped_indices.add(blocking_index)
+        self.next_to_write += 1
+        await self._flush()
+
+    async def _write_single(self, result: BatchRequestOutput) -> None:
+        """Write a single result to the file."""
+        if self.file_handle is None:
+            raise Exception("Cannot write without entering context")
+
+        await self.file_handle.write(result.model_dump_json() + "\n")
+        await self.file_handle.flush()
+
+    async def _flush(self) -> None:
+        """Write all consecutive ready results starting from next_to_write."""
+        if self.file_handle is None:
+            raise Exception(
+                "Flushed the streaming writer without entering into it's context"
+            )
+        while self.next_to_write in self.buffer:
+            result = self.buffer.pop(self.next_to_write)
+            await self.file_handle.write(result.model_dump_json() + "\n")
+            self.next_to_write += 1
+
+        # Periodically flush to disk to avoid buffering too much in the file handle
+        if self.next_to_write % 100 == 0:
+            await self.file_handle.flush()
+
+    @property
+    def buffered_count(self) -> int:
+        """Number of results currently buffered (waiting for earlier results)."""
+        return len(self.buffer)
+
+    @property
+    def written_count(self) -> int:
+        return self.next_to_write
 
 
 async def read_file(path_or_url: str) -> str:
@@ -382,39 +550,56 @@ async def make_async_error_request_output(
 async def run_request(
     serving_engine_func: Callable,
     request: BatchRequestInput,
-    tracker: BatchProgressTracker,
-) -> BatchRequestOutput:
-    response = await serving_engine_func(request.body)
+    index: int,
+    tracker: StreamingBatchProgressTracker,
+    writer: OrderedStreamingWriter,
+) -> None:
+    """Run a request and stream the result to the writer."""
+    try:
+        response = await serving_engine_func(request.body)
 
-    if isinstance(
-        response,
-        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse, RerankResponse),
-    ):
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(
-                body=response, request_id=f"vllm-batch-{random_uuid()}"
-            ),
-            error=None,
-        )
-    elif isinstance(response, ErrorResponse):
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(
-                status_code=response.error.code,
-                request_id=f"vllm-batch-{random_uuid()}",
-            ),
-            error=response,
-        )
-    else:
-        batch_output = make_error_request_output(
-            request, error_msg="Request must not be sent in stream mode"
-        )
+        if isinstance(
+            response,
+            (ChatCompletionResponse, EmbeddingResponse, ScoreResponse, RerankResponse),
+        ):
+            batch_output = BatchRequestOutput(
+                id=f"vllm-{random_uuid()}",
+                custom_id=request.custom_id,
+                response=BatchResponseData(
+                    body=response, request_id=f"vllm-batch-{random_uuid()}"
+                ),
+                error=None,
+            )
+        elif isinstance(response, ErrorResponse):
+            batch_output = BatchRequestOutput(
+                id=f"vllm-{random_uuid()}",
+                custom_id=request.custom_id,
+                response=BatchResponseData(
+                    status_code=response.error.code,
+                    request_id=f"vllm-batch-{random_uuid()}",
+                ),
+                error=response,
+            )
+        else:
+            batch_output = make_error_request_output(
+                request, error_msg="Request must not be sent in stream mode"
+            )
+    except Exception as e:
+        batch_output = make_error_request_output(request, error_msg=str(e))
 
+    await writer.add_result(index, batch_output)
     tracker.completed()
-    return batch_output
+
+
+async def run_request_with_error(
+    request: BatchRequestInput,
+    index: int,
+    error_msg: str,
+    writer: OrderedStreamingWriter,
+) -> None:
+    """Handle error case and stream to writer."""
+    batch_output = make_error_request_output(request, error_msg)
+    await writer.add_result(index, batch_output)
 
 
 def validate_run_batch_args(args):
@@ -500,104 +685,156 @@ async def run_batch(
         else None
     )
 
-    tracker = BatchProgressTracker()
+    tracker = StreamingBatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
-    # Submit all requests in the file to the engine "concurrently".
-    response_futures: list[Awaitable[BatchRequestOutput]] = []
-    for request_json in (await read_file(args.input_file)).strip().split("\n"):
-        # Skip empty lines.
-        request_json = request_json.strip()
-        if not request_json:
-            continue
+    async with OrderedStreamingWriter(
+        args.output_file,
+        max_buffer_size=engine_client.vllm_config.scheduler_config.max_num_seqs * 10,
+    ) as writer:
+        tasks: set[asyncio.Task] = set()
 
-        request = BatchRequestInput.model_validate_json(request_json)
+        max_num_seqs = engine_client.vllm_config.scheduler_config.max_num_seqs
+        semaphore = asyncio.Semaphore(2 * max_num_seqs)
 
-        # Determine the type of request and run it.
-        if request.url == "/v1/chat/completions":
-            chat_handler_fn = (
-                openai_serving_chat.create_chat_completion
-                if openai_serving_chat is not None
-                else None
-            )
-            if chat_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Chat Completions API",
-                    )
+        with tracker.pbar():
+            index = 0
+            async for request_json in stream_file_lines(args.input_file):
+                request = BatchRequestInput.model_validate_json(request_json)
+
+                # Create task for this request
+                task = await create_request_task(
+                    request=request,
+                    index=index,
+                    tracker=tracker,
+                    writer=writer,
+                    openai_serving_chat=openai_serving_chat,
+                    openai_serving_embedding=openai_serving_embedding,
+                    openai_serving_scores=openai_serving_scores,
                 )
-                continue
 
-            response_futures.append(run_request(chat_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url == "/v1/embeddings":
-            embed_handler_fn = (
-                openai_serving_embedding.create_embedding
-                if openai_serving_embedding is not None
-                else None
+                if task is not None:
+                    await semaphore.acquire()
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+                    task.add_done_callback(lambda _: semaphore.release())
+
+                index += 1
+
+            # All requests submitted
+            tracker.finalize_total()
+            logger.info("All %d requests submitted, waiting for completion...", index)
+
+            if tasks:
+                await asyncio.gather(*tasks)
+
+        logger.info(
+            "Batch complete. Written: %d, Final buffer: %d",
+            writer.written_count,
+            writer.buffered_count,
+        )
+
+
+async def create_request_task(
+    request: BatchRequestInput,
+    index: int,
+    tracker: StreamingBatchProgressTracker,
+    writer: OrderedStreamingWriter,
+    openai_serving_chat: OpenAIServingChat | None,
+    openai_serving_embedding: OpenAIServingEmbedding | None,
+    openai_serving_scores: ServingScores | None,
+) -> asyncio.Task | None:
+    """Create and return a task for processing a request."""
+
+    if request.url == "/v1/chat/completions":
+        if openai_serving_chat is None:
+            await run_request_with_error(
+                request,
+                index,
+                "The model does not support Chat Completions API",
+                writer,
             )
-            if embed_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Embeddings API",
-                    )
-                )
-                continue
-
-            response_futures.append(run_request(embed_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url.endswith("/score"):
-            score_handler_fn = (
-                openai_serving_scores.create_score
-                if openai_serving_scores is not None
-                else None
+            return None
+        tracker.submitted()
+        return asyncio.create_task(
+            run_request(
+                openai_serving_chat.create_chat_completion,
+                request,
+                index,
+                tracker,
+                writer,
             )
-            if score_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Scores API",
-                    )
-                )
-                continue
+        )
 
-            response_futures.append(run_request(score_handler_fn, request, tracker))
-            tracker.submitted()
-        elif request.url.endswith("/rerank"):
-            rerank_handler_fn = (
-                openai_serving_scores.do_rerank
-                if openai_serving_scores is not None
-                else None
+    elif request.url == "/v1/embeddings":
+        if openai_serving_embedding is None:
+            await run_request_with_error(
+                request,
+                index,
+                "The model does not support Embeddings API",
+                writer,
             )
-            if rerank_handler_fn is None:
-                response_futures.append(
-                    make_async_error_request_output(
-                        request,
-                        error_msg="The model does not support Rerank API",
-                    )
-                )
-                continue
-
-            response_futures.append(run_request(rerank_handler_fn, request, tracker))
-            tracker.submitted()
-        else:
-            response_futures.append(
-                make_async_error_request_output(
-                    request,
-                    error_msg=f"URL {request.url} was used. "
-                    "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
-                    " /score, /rerank ."
-                    "See vllm/entrypoints/openai/api_server.py for supported "
-                    "score/rerank versions.",
-                )
+            return None
+        tracker.submitted()
+        return asyncio.create_task(
+            run_request(
+                openai_serving_embedding.create_embedding,
+                request,
+                index,
+                tracker,
+                writer,
             )
+        )
 
-    with tracker.pbar():
-        responses = await asyncio.gather(*response_futures)
+    elif request.url.endswith("/score"):
+        if openai_serving_scores is None:
+            await run_request_with_error(
+                request,
+                index,
+                "The model does not support Scores API",
+                writer,
+            )
+            return None
+        tracker.submitted()
+        return asyncio.create_task(
+            run_request(
+                openai_serving_scores.create_score,
+                request,
+                index,
+                tracker,
+                writer,
+            )
+        )
 
-    await write_file(args.output_file, responses, args.output_tmp_dir)
+    elif request.url.endswith("/rerank"):
+        if openai_serving_scores is None:
+            await run_request_with_error(
+                request,
+                index,
+                "The model does not support Rerank API",
+                writer,
+            )
+            return None
+        tracker.submitted()
+        return asyncio.create_task(
+            run_request(
+                openai_serving_scores.do_rerank,
+                request,
+                index,
+                tracker,
+                writer,
+            )
+        )
+
+    else:
+        await run_request_with_error(
+            request,
+            index,
+            f"URL {request.url} was used. Supported endpoints: "
+            "/v1/chat/completions, /v1/embeddings, /score, /rerank.",
+            writer,
+        )
+        return None
 
 
 async def main(args: Namespace):
