@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
@@ -312,9 +313,9 @@ if __name__ == "__main__":
     test_basic_rebalance()
 
 
-def _make_phy_replicas_idx_from_phy2log(phy2log: torch.Tensor) -> torch.Tensor:
-    """Create replicas indices mapping from phy2log"""
-    pr = torch.zeros_like(phy2log)
+def _make_phy_replicas_idx_from_phy2log(phy2log: np.ndarray) -> np.ndarray:
+    """Create replicas indices mapping from phy2log."""
+    pr = np.zeros_like(phy2log, dtype=np.int64)
     for layer in range(phy2log.shape[0]):
         seen: dict[int, int] = {}
         row = phy2log[layer].tolist()
@@ -326,11 +327,11 @@ def _make_phy_replicas_idx_from_phy2log(phy2log: torch.Tensor) -> torch.Tensor:
 
 
 def _validate_intragpu_rearrangement(
-    old_global_expert_indices: torch.Tensor,
-    new_phy2log: torch.Tensor,
-    new_phy_replicas_idx: torch.Tensor,
-    post_phy2log: torch.Tensor,
-    post_phy_replicas_idx: torch.Tensor,
+    old_global_expert_indices: np.ndarray,
+    new_phy2log: np.ndarray,
+    new_phy_replicas_idx: np.ndarray,
+    post_phy2log: np.ndarray,
+    post_phy_replicas_idx: np.ndarray,
     num_ranks: int,
     slots_per_gpu: int,
 ):
@@ -345,7 +346,7 @@ def _validate_intragpu_rearrangement(
         post_rnk = post_phy_replicas_idx[0, start:end]
 
         # Pairwise equality for (expert, rank) pairs to ensure nothing is lost
-        def sorted_pairs(seg: torch.Tensor, rnk: torch.Tensor):
+        def sorted_pairs(seg, rnk):
             pairs = list(zip(seg.tolist(), rnk.tolist()))
             pairs.sort()
             return pairs
@@ -386,8 +387,8 @@ def _validate_intragpu_rearrangement(
             # GPU0 new -> [1,5,0,4]; GPU1 new -> [6,2,7,3]
             2,
             4,
-            torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]]),
-            torch.tensor([[1, 5, 0, 4, 6, 2, 7, 3]]),
+            np.array([[0, 1, 2, 3, 4, 5, 6, 7]]),
+            np.array([[1, 5, 0, 4, 6, 2, 7, 3]]),
             id="simple",
         ),
         pytest.param(
@@ -401,8 +402,8 @@ def _validate_intragpu_rearrangement(
             #   GPU1 new -> [6, 2, 3, 2, 1]  (expert 2 duplicated)
             2,
             5,
-            torch.tensor([[0, 1, 0, 2, 3, 4, 5, 6, 1, 2]]),
-            torch.tensor([[0, 5, 4, 0, 1, 6, 2, 3, 2, 1]]),
+            np.array([[0, 1, 0, 2, 3, 4, 5, 6, 1, 2]]),
+            np.array([[0, 5, 4, 0, 1, 6, 2, 3, 2, 1]]),
             id="duplicates",
         ),
         pytest.param(
@@ -418,8 +419,8 @@ def _validate_intragpu_rearrangement(
             #   GPU2 new -> [1, 2, 3, 0]
             3,
             4,
-            torch.tensor([[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]]),
-            torch.tensor([[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0]]),
+            np.array([[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]]),
+            np.array([[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 0]]),
             id="skewed_expert",
         ),
     ],
