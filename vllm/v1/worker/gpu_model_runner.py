@@ -3867,7 +3867,9 @@ class GPUModelRunner(
             return {}
 
     @contextmanager
-    def maybe_randomize_inputs(self, input_ids: torch.Tensor):
+    def maybe_randomize_inputs(
+        self, input_ids: torch.Tensor | None, inputs_embeds: torch.Tensor | None
+    ):
         """
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is to help balance expert-selection
@@ -3887,13 +3889,28 @@ class GPUModelRunner(
                     self.input_ids.gpu,
                     low=0,
                     high=self.model_config.get_vocab_size(),
-                    dtype=input_ids.dtype,
+                )
+
+            @functools.cache
+            def rand_inputs_embeds() -> torch.Tensor:
+                return torch.randn_like(
+                    self.inputs_embeds.gpu,
                 )
 
             logger.debug_once("Randomizing dummy data for DP Rank")
-            input_ids.copy_(rand_input_ids()[: input_ids.size(0)], non_blocking=True)
-            yield
-            input_ids.fill_(0)
+            if input_ids is not None:
+                input_ids.copy_(
+                    rand_input_ids()[: input_ids.size(0)], non_blocking=True
+                )
+                yield
+                input_ids.fill_(0)
+            else:
+                assert inputs_embeds is not None
+                inputs_embeds.copy_(
+                    rand_inputs_embeds()[: inputs_embeds.size(0)], non_blocking=True
+                )
+                yield
+                inputs_embeds.fill_(0)
 
     def _get_mm_dummy_batch(
         self,
@@ -4142,7 +4159,7 @@ class GPUModelRunner(
                     num_tokens_across_dp[:] = num_tokens_padded
 
             with (
-                self.maybe_randomize_inputs(input_ids),
+                self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
