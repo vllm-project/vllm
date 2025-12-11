@@ -329,8 +329,10 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             return at[0], at[1], at[2]
 
         inputs = [
+            empty_bf16(5, 4),  # result_rms
             empty_bf16(5, 4),  # input
             empty_bf16(5, 4),  # residual
+            empty_bf16(5, 4),  # residual_out
             empty_bf16(1, 5),  # weight
         ]
 
@@ -360,15 +362,15 @@ class RocmAiterRMSNormFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
-            for quant_op in self.QUANT_OPS:
-                #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
-                AiterRMSFp8GroupQuantPattern(epsilon, FP8_DTYPE, quant_op).register(
-                    self.patterns
-                )
-                # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
-                AiterFusedAddRMSFp8GroupQuantPattern(
-                    epsilon, FP8_DTYPE, quant_op
-                ).register(self.patterns)
+            # for quant_op in self.QUANT_OPS:
+            #     #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
+            #     AiterRMSFp8GroupQuantPattern(epsilon, FP8_DTYPE, quant_op).register(
+            #         self.patterns
+            #     )
+            #     # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
+            #     AiterFusedAddRMSFp8GroupQuantPattern(
+            #         epsilon, FP8_DTYPE, quant_op
+            #     ).register(self.patterns)
 
             # Fuse aiter rms_norm + vllm built-in dynamic per-token fp8 quant
             AiterRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
