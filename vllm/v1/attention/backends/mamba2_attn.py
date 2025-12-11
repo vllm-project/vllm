@@ -394,6 +394,7 @@ class Mamba2AttentionMetadataBuilder(
                 spec_query_start_loc = common_attn_metadata.query_start_loc
                 non_spec_query_start_loc = None
             else:
+                assert block_idx_first_scheduled_token is not None
                 if self.vllm_config.cache_config.enable_prefix_caching:
                     block_idx_first_scheduled_token = block_idx_first_scheduled_token[
                         ~spec_sequence_masks
@@ -462,6 +463,7 @@ class Mamba2AttentionMetadataBuilder(
         if num_prefills > 0:
             # [batch,]
             if spec_sequence_masks is not None:
+                assert num_decode_draft_tokens_cpu is not None
                 num_computed_tokens_cpu_non_spec = (
                     common_attn_metadata.num_computed_tokens_cpu[
                         ~(num_decode_draft_tokens_cpu >= 0)
@@ -499,6 +501,7 @@ class Mamba2AttentionMetadataBuilder(
                     common_attn_metadata.query_start_loc_cpu[1:]
                     - common_attn_metadata.query_start_loc_cpu[:-1]
                 )
+                assert num_decode_draft_tokens_cpu is not None
                 query_lens_cpu_non_spec = query_lens_cpu_all[
                     ~(num_decode_draft_tokens_cpu >= 0)
                 ]
@@ -631,6 +634,7 @@ class Mamba2AttentionMetadataBuilder(
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             # Copy and pad spec_query_start_loc
+            assert spec_query_start_loc is not None
             self.spec_query_start_loc_buffer[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
             )
@@ -736,6 +740,6 @@ class Mamba2AttentionMetadataBuilder(
 
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
-        m.num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
+        m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
 
         return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
