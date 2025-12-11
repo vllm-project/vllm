@@ -405,6 +405,7 @@ class EngineArgs:
     )
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    fault_tolerance: bool = ParallelConfig.fault_tolerance
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
@@ -1528,6 +1529,7 @@ class EngineArgs:
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            fault_tolerance=self.fault_tolerance,
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,

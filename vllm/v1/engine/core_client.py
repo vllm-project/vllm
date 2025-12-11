@@ -440,6 +440,15 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
+        
+        # Debug: Log fault tolerance config at initialization
+        logger.info(
+            "[FT] MPClient init: dp_size=%d, enable_eplb=%s, fault_tolerance=%s",
+            vllm_config.parallel_config.data_parallel_size,
+            vllm_config.parallel_config.enable_eplb,
+            getattr(vllm_config.parallel_config, 'fault_tolerance', 'NOT_SET')
+        )
+        
         # Serialization setup.
         self.encoder = MsgpackEncoder()
         self.decoder = MsgpackDecoder(EngineCoreOutputs)
@@ -583,10 +592,20 @@ class MPClient(EngineCoreClient):
         self_ref = weakref.ref(self)
         
         # Check if fault tolerance is enabled
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        enable_eplb = self.vllm_config.parallel_config.enable_eplb
+        ft_flag = getattr(self.vllm_config.parallel_config, 'fault_tolerance', False)
+        
         fault_tolerance_enabled = (
-            self.vllm_config.parallel_config.data_parallel_size > 1 and
-            self.vllm_config.parallel_config.enable_eplb and
-            getattr(self.vllm_config.parallel_config, 'fault_tolerance', False)
+            dp_size > 1 and
+            enable_eplb and
+            ft_flag
+        )
+        
+        logger.info(
+            "[FT] Fault tolerance check: dp_size=%d, enable_eplb=%s, "
+            "fault_tolerance=%s, enabled=%s",
+            dp_size, enable_eplb, ft_flag, fault_tolerance_enabled
         )
 
         # Monitor engine core process liveness. If any die unexpectedly,
