@@ -15,6 +15,21 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - label: "Build arm64 wheel - CUDA 13.0"
+    depends_on: ~
+    id: build-wheel-arm64-cuda-13-0
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
+      # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX 12.0' --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04  --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "mkdir artifacts"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+      - "bash .buildkite/scripts/upload-wheels.sh manylinux_2_35"
+    env:
+      DOCKER_BUILDKIT: "1"
+
   # aarch64 build
   - label: "Build arm64 CPU wheel"
     depends_on: ~
@@ -25,7 +40,7 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_BUILD_ACL=ON --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
+      - "bash .buildkite/scripts/upload-wheels.sh manylinux_2_35"
     env:
       DOCKER_BUILDKIT: "1"
 
@@ -39,7 +54,7 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
+      - "bash .buildkite/scripts/upload-wheels.sh manylinux_2_31"
     env:
       DOCKER_BUILDKIT: "1"
 
@@ -52,7 +67,7 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.1 --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      - "bash .buildkite/scripts/upload-wheels.sh"
+      - "bash .buildkite/scripts/upload-wheels.sh manylinux_2_35"
     env:
       DOCKER_BUILDKIT: "1"
 
