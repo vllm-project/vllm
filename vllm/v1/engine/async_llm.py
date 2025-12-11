@@ -192,7 +192,7 @@ class AsyncLLM(EngineClient):
     @property
     @deprecated(
         "`AsyncLLM.processor` has been renamed to `AsyncLLM.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
@@ -700,10 +700,6 @@ class AsyncLLM(EngineClient):
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     async def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:
