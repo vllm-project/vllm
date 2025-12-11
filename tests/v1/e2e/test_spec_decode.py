@@ -449,7 +449,7 @@ def test_eagle_correctness(
             required = Version("5.0.0.dev")
             if installed < required:
                 pytest.skip(
-                    "Eagle3 with the Transformers modeling backend require "
+                    "Eagle3 with the Transformers modeling backend requires "
                     f"transformers>={required}, but got {installed}"
                 )
 
