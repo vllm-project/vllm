@@ -1341,6 +1341,41 @@ def _max_memory_usage_bytes_from_groups(
     return group_size * page_size * blocks_needed
 
 
+def _estimate_max_model_len_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> int:
+    """
+    Binary search for the maximum model length that fits in available memory.
+    Returns 0 if even 1 token doesn't fit.
+    """
+    original_max = vllm_config.model_config.max_model_len
+
+    def fits(model_len: int) -> bool:
+        vllm_config.model_config.max_model_len = model_len
+        return (
+            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            <= available_memory
+        )
+
+    try:
+        left, right = 1, original_max
+        if not fits(left):
+            return 0
+        result = 1
+        while left <= right:
+            mid = (left + right) // 2
+            if fits(mid):
+                result = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+        return result
+    finally:
+        vllm_config.model_config.max_model_len = original_max
+
+
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1373,30 +1408,9 @@ def _auto_fit_max_model_len(
 
     # Use minimum available memory across all workers
     min_available_memory = min(available_memory)
-
-    # Binary search for max model length that fits
-    def fits_in_memory(model_len: int) -> bool:
-        vllm_config.model_config.max_model_len = model_len
-        return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
-            <= min_available_memory
-        )
-
-    try:
-        left, right = 1, original_max
-        if not fits_in_memory(left):
-            auto_fit_max = 0
-        else:
-            auto_fit_max = 1
-            while left <= right:
-                mid = (left + right) // 2
-                if fits_in_memory(mid):
-                    auto_fit_max = mid
-                    left = mid + 1
-                else:
-                    right = mid - 1
-    finally:
-        vllm_config.model_config.max_model_len = original_max
+    auto_fit_max = _estimate_max_model_len_from_groups(
+        vllm_config, kv_cache_groups, min_available_memory
+    )
 
     if auto_fit_max <= 0:
         raise ValueError(
@@ -1499,40 +1513,15 @@ def get_kv_cache_configs(
             vllm_config, global_kv_cache_groups
         )
         if needed_memory > min_available_memory:
-            # Estimate max model len that would fit
-            original_max = max_model_len
-
-            def fits(model_len: int) -> bool:
-                vllm_config.model_config.max_model_len = model_len
-                return (
-                    _max_memory_usage_bytes_from_groups(
-                        vllm_config, global_kv_cache_groups
-                    )
-                    <= min_available_memory
-                )
-
-            try:
-                left, right = 1, original_max
-                estimated_max_len = 0
-                if fits(left):
-                    estimated_max_len = 1
-                    while left <= right:
-                        mid = (left + right) // 2
-                        if fits(mid):
-                            estimated_max_len = mid
-                            left = mid + 1
-                        else:
-                            right = mid - 1
-            finally:
-                vllm_config.model_config.max_model_len = original_max
-
+            estimated_max_len = _estimate_max_model_len_from_groups(
+                vllm_config, global_kv_cache_groups, min_available_memory
+            )
             estimated_msg = ""
             if estimated_max_len > 0:
                 estimated_msg = (
                     f"Based on the available memory, the estimated maximum "
                     f"model length is {estimated_max_len}. "
                 )
-
             raise ValueError(
                 f"To serve at least one request with the models's max seq len "
                 f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
