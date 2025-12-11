@@ -150,7 +150,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && /opt/venv/bin/python3 use_existing_torch.py \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     fi
 
 # cuda arch list used by torch
