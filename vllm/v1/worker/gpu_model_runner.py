@@ -148,6 +148,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -4736,6 +4737,9 @@ class GPUModelRunner(
             attention_backend_list, kv_cache_config.kv_cache_groups
         )
 
+        # Check if attention backend supports PCP&DCP and related features.
+        check_attention_cp_compatibility(self.vllm_config)
+
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
@@ -5393,20 +5397,6 @@ class GPUModelRunner(
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
-
-        if self.dcp_world_size > 1:
-            layer_type = cast(type[Any], AttentionLayerBase)
-            layers = get_layers_from_vllm_config(self.vllm_config, layer_type)
-            for layer in layers.values():
-                layer_impl = getattr(layer, "impl", None)
-                if layer_impl is None:
-                    continue
-                assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
-                )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
