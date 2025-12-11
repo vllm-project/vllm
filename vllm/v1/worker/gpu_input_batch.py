@@ -954,6 +954,31 @@ class InputBatch:
             if sampled_ids := sampled_token_ids[prev_index]:
                 req_output_token_ids[-len(sampled_ids) :] = sampled_ids
 
+    def update_async_spec_token_ids(
+        self, draft_token_ids_cpu: list[list[int]] | None
+    ) -> None:
+        """
+        In async scheduling case, update spec_token_ids in sampling metadata
+        with real draft token ids from prior step.
+        This is called right before they are needed by the rejection sampler
+        for penalty/bad_words computation.
+        """
+        if draft_token_ids_cpu is None or self.prev_req_id_to_index is None:
+            return
+
+        spec_token_ids = self.sampling_metadata.spec_token_ids
+        if not spec_token_ids:
+            return
+
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id, default=None)
+            if prev_index is None:
+                continue
+            assert prev_index < len(draft_token_ids_cpu)
+            draft_ids = draft_token_ids_cpu[prev_index]
+            assert index < len(spec_token_ids)
+            spec_token_ids[index] = draft_ids
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
