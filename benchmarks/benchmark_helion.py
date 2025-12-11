@@ -227,7 +227,7 @@ def main():
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Run benchmark using the standardized API
+    # Run benchmark using the standardized API with hidden_size filtering
     results = benchmark.run(
         mode=args.mode,
         num_iterations=args.num_iterations,
