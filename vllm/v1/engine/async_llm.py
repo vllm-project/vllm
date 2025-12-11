@@ -590,7 +590,7 @@ class AsyncLLM(EngineClient):
                 await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
-                truncate_prompt_tokens = {}
+                tokenization_kwargs = {}
                 for sp in (
                     sampling_params
                     if isinstance(sampling_params, Sequence)
@@ -601,7 +601,7 @@ class AsyncLLM(EngineClient):
                     _validate_truncation_size(
                         self.model_config.max_model_len,
                         truncate_prompt_tokens,
-                        truncate_prompt_tokens,
+                        tokenization_kwargs,
                     )
 
             q = await self.add_requests(
