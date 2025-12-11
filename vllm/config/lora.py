@@ -55,7 +55,7 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
-    enable_mm_lora: bool = False
+    enable_tower_connector_lora: bool = False
     """If `True`, LoRA support for multimodal models will be enabled. Currently, 
     only the qwenvl series models support this feature. The default is False."""
 

@@ -15,7 +15,7 @@ class TestConfig:
     max_num_seqs: int = 2
     max_loras: int = 2
     max_lora_rank: int = 32
-    enable_mm_lora: bool = True
+    enable_tower_connector_lora: bool = True
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.85
     mm_processor_kwargs: dict[str, int] | None = None
@@ -50,7 +50,7 @@ class Qwen2VLTester:
             enable_lora=True,
             max_loras=self.config.max_loras,
             max_lora_rank=self.config.max_lora_rank,
-            enable_mm_lora=self.config.enable_mm_lora,
+            enable_tower_connector_lora=self.config.enable_tower_connector_lora,
             trust_remote_code=True,
             gpu_memory_utilization=self.config.gpu_memory_utilization,
             mm_processor_kwargs=self.config.mm_processor_kwargs,

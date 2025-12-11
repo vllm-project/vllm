@@ -128,7 +128,7 @@ class LoRAModelManager:
         if self.supports_mm and vllm_config is not None:
             model_config: ModelConfig = vllm_config.model_config
             self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
-            if self.lora_config.enable_mm_lora:
+            if self.lora_config.enable_tower_connector_lora:
                 self.info = MULTIMODAL_REGISTRY.create_processor(model_config).info
                 self.supports_mm_lora = self.supports_mm and hasattr(
                     self.info, "get_num_mm_encoder_tokens"
