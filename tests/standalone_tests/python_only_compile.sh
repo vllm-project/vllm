@@ -3,11 +3,44 @@
 # for users who do not have any compilers installed on their system
 
 set -e
-set -x
 
 merge_base_commit=$(git merge-base HEAD origin/main)
-echo "Current merge base commit with main: $merge_base_commit"
+echo "INFO: current merge base commit with main: $merge_base_commit"
 git show --oneline -s $merge_base_commit
+
+# test whether the metadata.json url is valid, retry each 3 minutes up to 5 times
+# this avoids cumbersome error messages & manual retries in case the precompiled wheel
+# for the given commit is still being built in the release pipeline
+meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
+echo "INFO: will use metadata.json from $meta_json_url"
+
+for i in {1..5}; do
+    echo "Checking metadata.json URL (attempt $i)..."
+    if curl --fail "$meta_json_url" > metadata.json; then
+        echo "INFO: metadata.json URL is valid."
+        # check whether it is valid json by python
+        if python3 -m json.tool metadata.json; then
+            echo "INFO: metadata.json is valid JSON. Proceeding with the test."
+        else
+            echo "CRITICAL: metadata.json exists but is not valid JSON, please do report in #sig-ci channel!"
+            exit 1
+        fi
+        break
+    fi
+    # failure handling
+    if [ $i -eq 5 ]; then
+        echo "ERROR: metadata.json URL is still not valid after 5 attempts."
+        echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit exists."
+        echo " NOTE: If $merge_base_commit is a new commit on main, maybe try again after its release pipeline finishes."
+        echo " NOTE: If it fails, please report in #sig-ci channel."
+        exit 1
+    else
+        echo "WARNING: metadata.json URL is not valid. Retrying in 3 minutes..."
+        sleep 180
+    fi
+done
+
+set -x
 
 cd /vllm-workspace/
 
@@ -29,6 +62,6 @@ python3 -c 'import vllm'
 
 # Check if the clangd log file was created
 if [ ! -f /tmp/changed.file ]; then
-    echo "changed.file was not created, python only compilation failed"
+    echo "ERROR: changed.file was not created, python only compilation failed"
     exit 1
 fi

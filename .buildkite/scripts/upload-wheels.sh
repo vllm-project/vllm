@@ -34,9 +34,10 @@ if [[ ${#wheel_files[@]} -ne 1 ]]; then
 fi
 wheel="${wheel_files[0]}"
 
-# current build image uses ubuntu 20.04, which corresponds to manylinux_2_31
+# default build image uses ubuntu 20.04, which corresponds to manylinux_2_31
+# we also accept params as manylinux tag
 # refer to https://github.com/mayeut/pep600_compliance?tab=readme-ov-file#acceptable-distros-to-build-wheels
-manylinux_version="manylinux_2_31"
+manylinux_version="${1:-manylinux_2_31}"
 
 # Rename 'linux' to the appropriate manylinux version in the wheel filename
 if [[ "$wheel" != *"linux"* ]]; then
@@ -96,8 +97,11 @@ if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; 
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
 fi
 
-# copy to /<pure_version>/ only if it does not have "dev" in the version
+# re-generate and copy to /<pure_version>/ only if it does not have "dev" in the version
 if [[ "$version" != *"dev"* ]]; then
-    echo "Uploading indices to overwrite /$pure_version/"
+    echo "Re-generating indices for /$pure_version/"
+    rm -rf "$INDICES_OUTPUT_DIR/*"
+    mkdir -p "$INDICES_OUTPUT_DIR"
+    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi
