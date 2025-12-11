@@ -25,7 +25,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
+from vllm.v1.attention.backends.mla.common import MLACommonImpl
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -378,7 +378,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
-class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(MLACommonImpl[FlashMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -469,6 +469,17 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         )
 
         return _attn_out
+
+    def _forward_decode(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        raise NotImplementedError(
+            "FlashMLASparseImpl overrides forward() and does not use _forward_decode()"
+        )
 
     def forward(
         self,

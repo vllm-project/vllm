@@ -12,7 +12,6 @@ import torch
 from tests.v1.attention.test_mla_backends import (
     BATCH_SPECS,
     BatchSpec,
-    MockAttentionLayer,
     create_and_prepopulate_kv_cache,
 )
 from tests.v1.attention.utils import (
@@ -21,6 +20,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
+from vllm.attention.layer import MLAAttention
 from vllm.attention.ops import flashmla
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.utils.math_utils import cdiv
@@ -117,6 +117,10 @@ def _quantize_dequantize_fp8_ds_mla(
 def test_sparse_backend_decode_correctness(
     dist_init, batch_name, kv_cache_dtype, tensor_parallel_size
 ):
+    ok, reason = flashmla.is_flashmla_sparse_supported()
+    if not ok:
+        pytest.skip(reason)
+
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
@@ -303,10 +307,6 @@ def test_sparse_backend_decode_correctness(
     debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
     mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
 
-    ok, reason = flashmla.is_flashmla_sparse_supported()
-    if not ok:
-        pytest.skip(reason)
-
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
     kv_b_proj_weight = kv_b_proj_weight.view(
         kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)
@@ -319,6 +319,27 @@ def test_sparse_backend_decode_correctness(
     ).to(device=device, dtype=dtype)
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
+    # Create the actual MLAAttention layer
+    torch.set_default_dtype(dtype)
+
+    # Set the global config for the duration of the test
+
+    mla_layer = MLAAttention(
+        num_heads=num_heads,
+        scale=scale,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        kv_b_proj=mock_kv_b_proj,
+        cache_config=vllm_config.cache_config,
+        prefix="mla",
+        use_sparse=True,
+        indexer=mock_indexer,
+    ).to(device=device, dtype=dtype)
+
+    # Replace the impl with the test's impl_cls
     impl_cls = FlashMLASparseBackend.get_impl_cls()
     impl = impl_cls(
         num_heads=num_heads,
@@ -340,17 +361,27 @@ def test_sparse_backend_decode_correctness(
         kv_b_proj=mock_kv_b_proj,
         indexer=mock_indexer,
     )
+    mla_layer.impl = impl
 
-    impl.process_weights_after_loading(dtype)
+    mla_layer.is_aiter_triton_fp8_bmm_enabled = getattr(
+        impl, "is_aiter_triton_fp8_bmm_enabled", False
+    )
+    mla_layer.dcp_world_size = getattr(impl, "dcp_world_size", None)
+    mla_layer.chunked_prefill_workspace_size = getattr(
+        impl, "chunked_prefill_workspace_size", 0
+    )
+    mla_layer._pad_v = getattr(impl, "_pad_v", False)
+    mla_layer._use_fi_prefill = getattr(impl, "_use_fi_prefill", False)
 
-    layer = MockAttentionLayer(device)
+    # Process weights on the layer (this also sets weights on impl)
+    mla_layer.process_weights_after_loading(dtype)
     out_buffer = torch.empty(
         metadata.num_actual_tokens, num_heads * v_head_dim, dtype=dtype, device=device
     )
 
     with torch.inference_mode():
         backend_output = impl.forward(
-            layer,
+            mla_layer,
             query_vllm,
             kv_c_vllm,
             k_pe_vllm,
