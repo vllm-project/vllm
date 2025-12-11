@@ -176,7 +176,7 @@ class FrontendArgs:
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
-    """Enable the /get_tokenizer_info endpoint. May expose chat
+    """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If True, log model outputs (generations).
