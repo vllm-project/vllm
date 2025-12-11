@@ -106,6 +106,9 @@ class Qwen3CoderToolParser(ToolParser):
         # Store accumulated parameters for type conversion
         self.accumulated_params = {}
         self.streaming_request = None
+        # Keep parser-inspected arrays in sync per streaming session
+        self.prev_tool_call_arr = []
+        self.streamed_args_for_tool = []
 
     def _get_arguments_config(
         self, func_name: str, tools: list[ChatCompletionToolsParam] | None
@@ -491,6 +494,8 @@ class Qwen3CoderToolParser(ToolParser):
                                 "arguments": "{}",  # Placeholder, will be updated later
                             }
                         )
+                        # Initialize streamed arguments tracker for this tool
+                        self.streamed_args_for_tool.append("")
 
                     # Send header with function info
                     return DeltaMessage(
@@ -512,6 +517,8 @@ class Qwen3CoderToolParser(ToolParser):
             # Send opening brace if not sent yet
             if not self.json_started and self.parameter_prefix not in delta_text:
                 self.json_started = True
+                if self.streamed_args_for_tool:
+                    self.streamed_args_for_tool[-1] += "{"
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -558,6 +565,8 @@ class Qwen3CoderToolParser(ToolParser):
                     except Exception:
                         pass  # Ignore parsing errors during streaming
 
+                if self.streamed_args_for_tool:
+                    self.streamed_args_for_tool[-1] += "}"
                 result = DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -674,6 +683,8 @@ class Qwen3CoderToolParser(ToolParser):
 
                         self.param_count += 1
 
+                        if self.streamed_args_for_tool:
+                            self.streamed_args_for_tool[-1] += json_fragment
                         return DeltaMessage(
                             tool_calls=[
                                 DeltaToolCall(
@@ -767,6 +778,8 @@ class Qwen3CoderToolParser(ToolParser):
                         delta_escaped = full_escaped[len(prev_escaped) :]
 
                         if delta_escaped:
+                            if self.streamed_args_for_tool:
+                                self.streamed_args_for_tool[-1] += delta_escaped
                             return DeltaMessage(
                                 tool_calls=[
                                     DeltaToolCall(
