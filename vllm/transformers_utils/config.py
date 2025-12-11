@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
@@ -240,22 +240,6 @@ def get_config_parser(config_format: str) -> ConfigParserBase:
     if config_format not in _CONFIG_FORMAT_TO_CONFIG_PARSER:
         raise ValueError(f"Unknown config format `{config_format}`.")
     return _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format]()
-
-
-def getattr_iter(obj: object, names: Iterable[str], default: Any) -> Any:
-    """
-    A helper function that retrieves an attribute from an object which may
-    have multiple possible names. This is useful when fetching attributes from
-    ``transformers.PretrainedConfig`` instances.
-
-    Note:
-        Duplicated from ``vllm.config.utils`` to avoid circular import
-        (vllm.transformers_utils.config <-> vllm.config.model).
-    """
-    for name in names:
-        if hasattr(obj, name):
-            return getattr(obj, name)
-    return default
 
 
 def register_config_parser(config_format: str):

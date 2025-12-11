@@ -194,20 +194,28 @@ class RocmPlatform(Platform):
     ) -> AttentionBackendEnum:
         from importlib.util import find_spec
 
-        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm._aiter_ops import if_aiter_supported
 
-        if rocm_aiter_ops.is_mha_enabled():
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
+        @if_aiter_supported
+        def _get_aiter_backend():
             return AttentionBackendEnum.ROCM_AITER_FA
+
+        # Note: Qwen3-VL models only support AITER FA.
+        # TODO: Add support for other backends.
+        aiter_backend = _get_aiter_backend()
+        if aiter_backend is not None:
+            logger.info("Using AITER Flash Attention backend for ViT model.")
+            return aiter_backend
 
         if (
             on_gfx9()
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
+            logger.info("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
+        logger.info("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
@@ -264,13 +272,18 @@ class RocmPlatform(Platform):
                 f"is not MLA type while requested for MLA backend."
             )
 
-        attn_backend_override = os.environ.get("VLLM_ATTENTION_BACKEND")
+        from vllm.config import AttentionConfig
+
+        attn_backend_override = AttentionConfig.backend
+        logger.info(
+            "Attention backend override from AttentionConfig: %s", attn_backend_override
+        )
         if selected_backend is None and attn_backend_override is not None:
             logger.info(
                 "Detected VLLM_ATTENTION_BACKEND=%s (set by model architecture).",
                 attn_backend_override,
             )
-            selected_backend = AttentionBackendEnum[attn_backend_override]
+            selected_backend = attn_backend_override
 
         if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info("Using FlexAttention backend.")

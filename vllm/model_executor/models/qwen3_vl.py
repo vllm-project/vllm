@@ -24,7 +24,6 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
-import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
@@ -370,28 +369,6 @@ class Qwen3_VisionTransformer(nn.Module):
                 for layer_idx in range(len(self.deepstack_visual_indexes))
             ]
         )
-
-        if attn_backend_override is None:
-            from vllm.platforms import current_platform
-
-            if current_platform.is_rocm():
-                # [12/04/2025] Qwen3-VL is only supported with ROCM_AITER_FA
-                # attention backend for ROCm for now.
-                # TODO: Add support for other backends [FLASH_ATTN, TORCH_SDPA]
-                # and test accuracy on ROCm with `Multi-Modal Models Test (Standard)`
-                # group.
-                from vllm._aiter_ops import IS_AITER_FOUND
-                from vllm.platforms.rocm import on_gfx9
-
-                if on_gfx9() and IS_AITER_FOUND:
-                    attn_backend_override = AttentionBackendEnum.ROCM_AITER_FA
-                    # Set also env variable for platform rocm to use ROCM_AITER_FA
-                    # for `selected_backend` in attention backend getter.
-                    os.environ["VLLM_ATTENTION_BACKEND"] = "ROCM_AITER_FA"
-                    logger.info(
-                        "Overriding with ROCM_AITER_FA attention "
-                        "backend for Qwen3-VL model."
-                    )
 
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
