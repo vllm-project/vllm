@@ -141,7 +141,7 @@ def rocm_unquantized_gemm_impl(
         and x.dtype in [torch.float16, torch.bfloat16]
         and ((n >= 16 and n <= 128) and k == 2880 and (m == 640 or m == 128))
     )
-    if use_skinny_reduce_counting is True:
+    if use_skinny_reduce_counting:
         cu_count = get_cu_count()
         x_view = x.reshape(-1, x.size(-1))
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)

@@ -288,7 +288,9 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   }
 
 // To avoid LLVM silently upcasting to double
-__device__ inline unsigned int min__(int a, int b) { return min(a, b); }
+__device__ inline unsigned int min__(uint32_t a, uint32_t b) {
+  return min(a, b);
+}
 
 #if defined(__HIP__GFX9__)  // TODO: Add NAVI support
 // This version targets cases where A[] fits LDS capacity
@@ -1545,7 +1547,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       const bool reloada = (!noreloada) &&
                            ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
                            (k1 < k_end);
-      // const bool reloada = true;
       if (reloada) {
   #endif
         constexpr int sprdN = 4;
@@ -1563,10 +1564,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
           constexpr int unrl = N / sprdN;
           bigType tmp[unrl];
-          // const unsigned int k_in = kOffcp + (unrl * (threadIdx.y % sprdN)) *
-          // K;
           for (unsigned int n = 0; n < unrl; n++) {
-            //__syncthreads();
             tmp[n].h8 = *(
                 (scalar8*)(&A[kOffcp +
                               K * min__(actlN - 1,
