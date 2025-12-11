@@ -69,7 +69,14 @@ def preprocess_w4a16_weights_for_aiter(
     if w2.dtype != torch.uint8:
         logger.warning("w2 dtype is %s, converting to uint8", w2.dtype)
         w2 = w2.view(torch.uint8)
-
+    def uint8_swap_high_low_4bits(tensor):
+        assert tensor.dtype == torch.uint8
+        low4 = tensor & 0x0F
+        high4 = (tensor >> 4) & 0x0F
+        swapped = (low4 << 4) | high4
+        return swapped
+    w1 = uint8_swap_high_low_4bits(w1)
+    w2 = uint8_swap_high_low_4bits(w2)
     # Use rocm_aiter_ops registered functions
     w1_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w1, NLane=16, gate_up=True)
     w2_aiter = rocm_aiter_ops.shuffle_weight_a16w4(w2, NLane=16, gate_up=False)

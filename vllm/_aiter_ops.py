@@ -94,7 +94,7 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
     # TODO: remove this after AITER supports silu
-    activation = ActivationType.Swiglu
+    #activation = ActivationType.Silu
 
     # TODO: remove this after AITER supports bias = None
     E, INTER_DIM, MODEL_DIM = w1.shape[0], w1.shape[1], w2.shape[1]
