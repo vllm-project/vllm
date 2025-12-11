@@ -22,7 +22,7 @@ _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 @CustomOp.register("quant_fp8")
 class QuantFP8(CustomOp):
     """
-    Quantize input tensor to FP8 (per-tensor, per-token, or per-group).
+    Quantize input tensor to FP8 (per-tensor, per-token, per-channel, or per-group).
     This CustomOp supports both static and dynamic quantization.
     """
 
@@ -37,7 +37,7 @@ class QuantFP8(CustomOp):
         """
         :param static: static or dynamic quantization
         :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            or arbitrary block size)
+            PER_CHANNEL, or arbitrary block size)
         :param num_token_padding: Pad the token dimension of output to this
             size
         :param column_major_scales: For group quantization, output scales in
@@ -55,19 +55,20 @@ class QuantFP8(CustomOp):
 
         self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
-            assert not static, "Group quantization only supports dynamic mode"
+            assert not static, "Group quantization only supports dynamic mode."
             self.group_size = group_shape.col
         else:
-            assert group_shape in {
-                GroupShape.PER_TOKEN,
-                GroupShape.PER_TENSOR,
-                GroupShape.PER_CHANNEL,
-            }
-            assert not static or group_shape in {
-                GroupShape.PER_TENSOR,
-                GroupShape.PER_CHANNEL,
-            }, "Only per-tensor or per-channel scales are supported for static quant."
-            self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
+            if static:
+                assert group_shape in (GroupShape.PER_TENSOR, GroupShape.PER_CHANNEL), (
+                    "Only per-tensor or per-channel scales are supported for static "
+                    "quantization."
+                )
+            else:  # dynamic non-group quant
+                assert group_shape in (GroupShape.PER_TOKEN, GroupShape.PER_TENSOR), (
+                    "Only per-token or per-tensor scales are supported for dynamic "
+                    "non-group quantization."
+                )
+                self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
 
     def forward_cuda(
         self,
