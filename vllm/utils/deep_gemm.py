@@ -381,8 +381,25 @@ def should_use_deepgemm_for_fp8_linear(
     )
 
 
+def should_use_deepgemm_for_fp8_linear_for_nk(
+    output_dtype: torch.dtype,
+    shape0: int,
+    shape1: int,
+    supports_deep_gemm: bool | None = None,
+):
+    if supports_deep_gemm is None:
+        supports_deep_gemm = is_deep_gemm_supported()
+    return (
+        supports_deep_gemm
+        and output_dtype == torch.bfloat16
+        and shape0 % 128 == 0
+        and shape1 % 128 == 0
+    )
+
+
 __all__ = [
     "calc_diff",
+    "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
@@ -394,6 +411,7 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
+    "should_use_deepgemm_for_fp8_linear_for_nk",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
 ]

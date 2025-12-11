@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
@@ -43,7 +43,6 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
-    flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
@@ -362,7 +361,8 @@ class FlashInferBackend(AttentionBackend):
             supports_trtllm_attention,
         )
 
-        # Respect explicit disable flag (e.g., VLLM_USE_TRTLLM_ATTENTION=0)
+        # Respect explicit disable flag (e.g.,
+        # --attention-config.use_trtllm_attention=0)
         if force_use_trtllm_attention() is False:
             return False
 
@@ -429,6 +429,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
+        self.attention_config = vllm_config.attention_config
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -482,9 +483,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_rank = 0
             self.dcp_kv_cache_interleave_size = 1
 
-        self.num_qo_heads = (
-            self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
-            * self.dcp_world_size
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
         )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
@@ -501,11 +501,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
         # Use model dtype as q dtype when TRTLLM attn is not supported, or
-        # VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION is set to 1. Otherwise, try to
-        # use fp8 q if kv cache is fp8, and will fall back to model dtype
+        # --attention-config.disable_flashinfer_q_quantization is set to 1. Otherwise,
+        # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-        if can_use_trtllm and not flashinfer_disable_q_quantization():
+        if (
+            can_use_trtllm
+            and not vllm_config.attention_config.disable_flashinfer_q_quantization
+        ):
             self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
@@ -777,6 +780,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
+            force_use_trtllm=self.attention_config.use_trtllm_attention,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
@@ -1036,6 +1040,11 @@ class FlashInferImpl(AttentionImpl):
             self.sinks = sinks
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
+        vllm_config = get_current_vllm_config()
+        self.supports_quant_query_input = (
+            self.support_trtllm_attn
+            and not vllm_config.attention_config.disable_flashinfer_q_quantization
+        )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
@@ -1046,12 +1055,6 @@ class FlashInferImpl(AttentionImpl):
             and self.kv_cache_dtype.startswith("fp8")
             and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
         )
-
-    def supports_quant_query_input(self) -> bool:
-        if flashinfer_disable_q_quantization():
-            return False
-
-        return self.support_trtllm_attn
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
