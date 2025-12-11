@@ -320,9 +320,10 @@ We are going to remove `softmax` and `activation` from `PoolingParams` in v0.15.
 
 ### as_reward_model
 
+!!! warning
+    We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
+
 Pooling models now default support all pooling, you can use it without any settings.
 
 - Extracting hidden states prefers using `token_embed` task.
 - Reward models prefers using `token_classify` task.
-
-We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
