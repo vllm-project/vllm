@@ -180,8 +180,7 @@ def move_to_buffer(
             p2p_ops += [
                 P2POp(
                     torch.distributed.isend,
-                    # Move to device in case the weights have been offloaded to CPU
-                    weight[src].to(torch.cuda.current_device()),
+                    weight[src],
                     dst_global,
                 )
                 for weight in expert_weights
@@ -221,7 +220,6 @@ def move_to_buffer(
         p2p_ops += [
             P2POp(
                 torch.distributed.irecv,
-                # expert_weights_buffer is guaranteed to be on device
                 weight[dst],
                 src_global,
             )
@@ -393,9 +391,7 @@ def rearrange_expert_weights_inplace(
     # A buffer to hold the expert weights in one layer during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    expert_weights_buffer = [
-        torch.empty_like(w).to(torch.cuda.current_device()) for w in expert_weights[0]
-    ]
+    expert_weights_buffer = [torch.empty_like(w) for w in expert_weights[0]]
 
     if is_profile:
         # Maximum send size is to send all local experts to all ranks,
@@ -408,8 +404,7 @@ def rearrange_expert_weights_inplace(
             torch.distributed.barrier()
             all_gather(
                 dummy_recv_buffer,
-                # Move to current device in case offloading has occurred
-                weight.to(torch.cuda.current_device()),
+                weight,
                 group=ep_group,
             )
         return
