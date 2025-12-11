@@ -1257,6 +1257,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
                     )
                 height = min(height, overrides.height)
 
+        num_frames = max(num_frames, 2)  # GLM 4.6V requires 2 frames
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
