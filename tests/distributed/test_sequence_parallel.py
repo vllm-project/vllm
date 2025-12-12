@@ -71,10 +71,7 @@ class SPTestSettings:
     ):
         parallel_setups = []
         if pp_multipliers is None:
-            # PP=2 + SP has a bug causing ~12% accuracy vs ~72% baseline
-            # PP=2 without SP works fine (71.88%), issue is SP+PP combination
-            # TODO: Fix SP+PP interaction bug and re-enable PP=2
-            pp_multipliers = [1]
+            pp_multipliers = [1, 2]
         for eager_mode_val in [False, True]:
             for pp_multiplier in pp_multipliers:
                 for chunked_prefill_val in [False, True]:
