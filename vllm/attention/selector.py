@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 from functools import cache
 from typing import NamedTuple, cast, get_args
 
@@ -94,23 +93,10 @@ def _cached_get_attn_backend(
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
-    sig = inspect.signature(current_platform.get_attn_backend_cls)
-    if "use_v1" in sig.parameters:
-        logger.warning_once(
-            "use_v1 parameter for get_attn_backend_cls is deprecated and will "
-            "be removed in v0.13.0 or v1.0.0, whichever is soonest. Please "
-            "remove it from your plugin code."
-        )
-        attention_cls = current_platform.get_attn_backend_cls(
-            backend,
-            use_v1=True,  # use_v1
-            **attn_selector_config._asdict(),
-        )
-    else:
-        attention_cls = current_platform.get_attn_backend_cls(
-            backend,
-            attn_selector_config=attn_selector_config,
-        )
+    attention_cls = current_platform.get_attn_backend_cls(
+        backend,
+        attn_selector_config=attn_selector_config,
+    )
     if not attention_cls:
         raise ValueError(
             f"Invalid attention backend for {current_platform.device_name}"
