@@ -482,7 +482,6 @@ class TestNixlHandshake:
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
         }
-        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
         worker.kv_cache_layout = "HND"
         num_xfers = 4
         while True:
@@ -561,9 +560,6 @@ class TestNixlHandshake:
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
-        # worker = connector.connector_worker
-        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
-
         metadata = NixlConnectorMetadata()
         metadata.add_new_req(
             request_id="id",
