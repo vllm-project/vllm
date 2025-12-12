@@ -3,8 +3,6 @@
 
 from typing import TYPE_CHECKING
 
-from vllm import envs
-
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -571,7 +569,7 @@ class MambaMixer2(MambaBase, CustomOp):
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         prefix_caching_enabled = (
-            not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            self.cache_config.mamba_cache_mode != "align"
             and self.cache_config.enable_prefix_caching
         )
         if attn_metadata is not None:

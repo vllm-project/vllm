@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -460,10 +459,10 @@ class Lfm2ForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-
-        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-            assert not cache_config.enable_prefix_caching, (
-                "Lfm2 currently does not support prefix caching"
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Lfm2 currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
             )
 
         super().__init__()

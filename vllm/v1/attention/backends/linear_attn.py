@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 
 import torch
-
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
@@ -59,8 +57,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
             state_indices_tensor = mamba_gather_indices(
                 common_attn_metadata,
                 self.kv_cache_spec,

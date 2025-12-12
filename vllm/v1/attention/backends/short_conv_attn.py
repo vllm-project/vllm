@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 
 import torch
-
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -50,12 +48,12 @@ class ShortConvAttentionMetadataBuilder(
     ) -> ShortConvAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
             state_indices_tensor = mamba_gather_indices(
                 common_attn_metadata,
                 self.kv_cache_spec,
             )[:, 0]
-        else:    
+        else:
             state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
 
         # for causal_conv1d

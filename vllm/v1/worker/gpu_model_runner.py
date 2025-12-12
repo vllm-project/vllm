@@ -1061,10 +1061,7 @@ class GPUModelRunner(
                 f">>> [DEBUG] Worker: _update_states: "
                 f"{self.input_batch.num_accepted_tokens_cpu[:len(num_accepted_tokens)]=}"
             )
-        if (
-            envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-            and self.cache_config.enable_prefix_caching
-        ):
+        if self.cache_config.mamba_cache_mode == "align":
             self._postprocess_mamba(scheduler_output)
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
@@ -1599,13 +1596,6 @@ class GPUModelRunner(
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
             slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
             blk_table_tensor[num_reqs:num_reqs_padded].fill_(-1)
-
-                # if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                #     and self.cache_config.enable_prefix_caching
-                #     and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-                # ):
-                #     # NOTE(Chen): where should we put this?
-                #     self._preprocess_mamba(kv_cache_gid, kv_cache_group)
 
             return blk_table_tensor, slot_mapping
 
@@ -3209,10 +3199,7 @@ class GPUModelRunner(
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
-                if (
-                    envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                    and self.cache_config.enable_prefix_caching
-                ):
+                if self.cache_config.mamba_cache_mode == "align":
                     # TODO: add limition: preprocess only have new blocks
                     self._preprocess_mamba(scheduler_output)
 
@@ -3389,11 +3376,6 @@ class GPUModelRunner(
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
-
-            # if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-            #     and self.cache_config.enable_prefix_caching
-            # ):
-            #     self._postprocess_mamba_cache(scheduler_output)
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)

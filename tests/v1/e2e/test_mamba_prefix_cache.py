@@ -394,7 +394,6 @@ class TestConfig:
 
 
 def apply_patch(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_LIGHTER_MAMBA_CACHE", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     fake_sample_fn = get_fake_sample_fn()
@@ -663,6 +662,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         enable_prefix_caching=True,
         enforce_eager=True,
         block_size=BLOCK_SIZE,
+        mamba_cache_mode="align",
         speculative_config={
             "method": "qwen3_next_mtp",
             "num_speculative_tokens": num_speculative_tokens,

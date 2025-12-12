@@ -12,8 +12,6 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
-from vllm import envs
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -289,7 +287,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+            if cache_config.mamba_cache_mode == "all":
                 if model_config.supports_mamba_prefix_caching:
                     logger.info(
                         "Warning: Prefix caching is currently enabled. "
@@ -302,12 +300,16 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                         "support for prefix caching: disabling."
                     )
                     cache_config.enable_prefix_caching = False
-            else:
+            elif cache_config.mamba_cache_mode == "align":
                 logger.info(
-                    "Warning: Lighter Mamba Prefix caching is currently"
-                    " enabled. Its support is experimental. "
+                    "Warning: Mamba cache mode 'align' with prefix caching is"
+                    " currently enabled. Its support is experimental. "
                     "Please report any issues you may observe."
-                )        
+                )
+            else:
+                raise ValueError(
+                    "unknown mamba cache mode: %s", cache_config.mamba_cache_mode
+                )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -393,7 +395,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             model_config=model_config,
         )
 
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE and cache_config.enable_prefix_caching:
+        if cache_config.enable_prefix_caching:
             block_size = cache_config.block_size
         else:
             block_size = model_config.max_model_len
@@ -411,7 +413,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if mamba_page_size == 0:
             return
 
-        if cache_config.enable_prefix_caching and not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if cache_config.mamba_cache_mode == "all":
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
