@@ -740,13 +740,6 @@ class MambaManager(SingleTypeKVCacheManager):
                     computed.append(cached)
                 break  # we just need the last match - early stopping
 
-        computed_blocks_fmt = [
-            format_blocks(computed_block) for computed_block in computed_blocks
-        ]
-        print(
-            f"Mamba.FindLongest: computed_blocks={computed_blocks_fmt}",
-            flush=True,
-        )
         return computed_blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -782,8 +775,6 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens_main_model: int,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        # mamba layers only exist in target model.
-        num_tokens = num_tokens_main_model
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -799,6 +790,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens_main_model,
             )
         else:
+            # We don't allocate blocks for lookahead tokens in align mode, because if
+            # x * block_size tokens are scheduled, num_tokens is
+            # x * block_size + num_lookahead_tokens and breaks the alignment.
+            # We can ignore lookahead tokens because current draft models don't have
+            # mamba layers.
+            num_tokens = num_tokens_main_model
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -808,16 +805,13 @@ class MambaManager(SingleTypeKVCacheManager):
                 - len(self.req_to_blocks[request_id])
             )
             if num_new_blocks > 0:
-                # (Chen): This may be possible. (block_size 4, 2 sps).
-                # [A, stoken1, stoken2] SBLOCK1 SBLOCK2 ->
-                # [A, ?, ?, ?]              NULL    NULL   [?, ?, ?, B] [stoken 1, stoken 2] SBLOCK1 SBLOCK2 -> need two blocks # noqa: E501
-                # but we do it as following:
-                # [A, ?, ?, ?]              NULL    NULL   NULL         [stoken 1, stoken 2] SBLOCK1 SBLOCK2 -> need 1 block # noqa: E501
                 if request_id in self._allocated_block_reqs:
-                    # previously allocated blocks
+                    # Old request. Needs at most 1 more blocks as we can reuse the
+                    # speculative blocks in previous step.
                     num_new_blocks = 1
                 else:
-                    # first prefill
+                    # First prefill. Allocate 1 block for running state and the
+                    # speculative blocks.
                     num_new_blocks = 1 + self.kv_cache_spec.num_speculative_blocks
 
             # If a computed block of a request is an eviction candidate (in the
@@ -850,8 +844,10 @@ class MambaManager(SingleTypeKVCacheManager):
             )
         else:
             # We don't allocate blocks for lookahead tokens in align mode, because if
-            # x * block_size tokens are scheduled, original num_tokens is
+            # x * block_size tokens are scheduled, num_tokens is
             # x * block_size + num_lookahead_tokens and breaks the alignment.
+            # We can ignore lookahead tokens because current draft models don't have
+            # mamba layers.
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
             num_required_blocks = (

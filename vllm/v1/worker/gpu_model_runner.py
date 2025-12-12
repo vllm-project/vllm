@@ -453,9 +453,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=(
-                self.parallel_config.cp_kv_cache_interleave_size
-            ),
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1057,15 +1055,6 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-        if is_global_first_rank():
-            logger.info(
-                ">>> [DEBUG] Worker: _update_states: output_token_ids=%s",
-                output_token_ids,
-            )
-            logger.info(
-                ">>> [DEBUG] Worker: _update_states: num_accepted_tokens_cpu=%s",
-                self.input_batch.num_accepted_tokens_cpu[: len(num_accepted_tokens)],
-            )
         if self.cache_config.mamba_cache_mode == "align":
             self._postprocess_mamba(scheduler_output)
 
@@ -2587,12 +2576,6 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
-        if is_global_first_rank():
-            logger.info(
-                ">>> [DEBUG] Worker: sampler_output: shape=%s tokens=%s",
-                sampler_output.sampled_token_ids.shape,
-                sampler_output.sampled_token_ids,
-            )
         return sampler_output
 
     def _bookkeeping_sync(
@@ -2955,10 +2938,6 @@ class GPUModelRunner(
         for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
             self.mamba_state_idx.pop(req_id, None)
         for i, req_id in enumerate(self.input_batch.req_ids):
-            if is_global_first_rank():
-                logger.info(
-                    ">>> [DEBUG] Worker: preprocess mamba for RUN: req_id=%s", req_id
-                )
             req_state = self.requests[req_id]
             prev_state_idx = self.mamba_state_idx.get(req_id)
             if prev_state_idx is None:
@@ -2967,19 +2946,20 @@ class GPUModelRunner(
                 prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
             num_blocks = len(req_state.block_ids[mamba_group_ids[0]])
+
             # We always save the current running state at the last
-            # (1 + num_speculative_blocks) block
+            # (1 + num_speculative_blocks) block.
+            # A corner case worth mention here: assume we have block_size = 4 and
+            # num_speculative_tokens = 2. The request is [A, B, C] and contains 2 draft
+            # tokens [draft 1, draft 2]. Then we will have:
+            # Block 0: [A, B, C, draft 1]
+            # Block 1: [draft 2, TOFILL, TOFILL, TOFILL]
+            # Block 2: speculative block
+            # Block 3: speculative block
+            # And use block 1 to save the running state.
             curr_state_idx = num_blocks - 1 - num_speculative_blocks
-            if is_global_first_rank():
-                logger.info(
-                    ">>> [DEBUG] Worker: preprocess mamba: req_id=%s, idx %s -> %s",
-                    req_id,
-                    prev_state_idx,
-                    curr_state_idx,
-                )
             self.mamba_state_idx[req_id] = curr_state_idx
             if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-                # TODO: merge all these lines to copy_block
                 self._mamba_copy_block_for_qwen_next(
                     mamba_group_ids,
                     prev_state_idx,
@@ -5130,10 +5110,8 @@ class GPUModelRunner(
 
         # if we have dedicated decode cudagraphs, and spec-decode is enabled,
         # we need to adjust the cudagraph sizes to be a multiple of the uniform
-        # decode query length to avoid:
-        # https://github.com/vllm-project/vllm/issues/28207
-        # temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
+        # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
         # Will be removed in the near future when we have separate cudagraph capture
         # sizes for decode and mixed prefill-decode.
         if (
@@ -5164,12 +5142,7 @@ class GPUModelRunner(
         as prefills.
         """
 
-        def min_none_high(a: int | None, b: int | None) -> int | None:
-            if b is None:
-                return a
-            if a is None:
-                return b
-            return min(a, b)
+        min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
         reorder_batch_thresholds: list[int | None] = [
             group.get_metadata_builder().reorder_batch_threshold
@@ -5180,9 +5153,7 @@ class GPUModelRunner(
         if len(reorder_batch_thresholds) == 0:
             self.reorder_batch_threshold = None
             return
-        self.reorder_batch_threshold = reduce(  # type: ignore[assignment]
-            min_none_high, reorder_batch_thresholds
-        )
+        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
     @staticmethod
     def select_common_block_size(
@@ -5293,9 +5264,7 @@ class GPUModelRunner(
                 kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=(
-                    self.input_batch.logitsprocs_need_output_token_ids
-                ),
+                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=self.num_spec_tokens,
             )
