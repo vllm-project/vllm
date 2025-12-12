@@ -1948,6 +1948,8 @@ class FusedMoE(CustomOp):
                             self, hidden_states, router_logits
                         )
                     )
+                else:
+                    hidden_states_to_dispatch = hidden_states
 
                 dispatch_res = get_ep_group().dispatch(
                     hidden_states_to_dispatch,
