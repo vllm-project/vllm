@@ -229,8 +229,8 @@ class EagleProposer:
         This should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
         eagle_cudagraph_mode = (
-            cudagraph_mode.mixed_mode()
-            if not self.speculative_config.enforce_eager
+            CUDAGraphMode.PIECEWISE
+            if not self.speculative_config.enforce_eager and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
             else CUDAGraphMode.NONE
         )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
