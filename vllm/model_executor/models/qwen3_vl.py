@@ -93,6 +93,7 @@ from .interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
+    _require_is_multimodal,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -339,9 +340,9 @@ class Qwen3_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.merger = Qwen3_VisionPatchMerger(
@@ -1572,7 +1573,7 @@ class Qwen3VLForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        assert is_multimodal is not None
+        is_multimodal = _require_is_multimodal(is_multimodal)
 
         if self.use_deepstack:
             (

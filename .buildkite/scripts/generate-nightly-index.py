@@ -372,6 +372,17 @@ if __name__ == "__main__":
 
     print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
 
+    # keep only "official" files for a non-nightly version (specifed by cli args)
+    PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
+    if PY_VERSION_RE.match(version):
+        # upload-wheels.sh ensures no "dev" is in args.version
+        wheel_files = list(
+            filter(lambda x: version in x and "dev" not in x, wheel_files)
+        )
+        print(f"Non-nightly version detected, wheel files used: {wheel_files}")
+    else:
+        print("Nightly version detected, keeping all wheel files.")
+
     # Generate index and metadata, assuming wheels and indices are stored as:
     # s3://vllm-wheels/{version}/<wheel files>
     # s3://vllm-wheels/<anything>/<index files>
