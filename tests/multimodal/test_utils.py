@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image, ImageChops
 
 from vllm.multimodal.image import convert_image_mode
@@ -408,6 +409,41 @@ def test_argsort_mm_positions(case):
     modality_idxs = argsort_mm_positions(mm_positions)
 
     assert modality_idxs == expected_modality_idxs
+
+
+@pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, 5),
+        (torch.tensor([True, True, True, True, True]), 5),
+        (torch.tensor([False, False, False, False, False]), 0),
+        (torch.tensor([True, False, True, False, True]), 3),
+        (torch.tensor([True]), 1),
+    ],
+)
+def test_placeholder_range_get_num_embeds(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_num_embeds() == expected
+
+
+@pytest.mark.parametrize(
+    "offset,is_embed,expected",
+    [
+        (0, None, [(0, 4)]),
+        (
+            2,
+            torch.tensor([False, True, False, True, True]),
+            [(3, 3), (5, 6)],
+        ),
+        (0, torch.tensor([True, True, True, True]), [(0, 3)]),
+        (0, torch.tensor([False, False, False, False]), []),
+    ],
+)
+def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+    assert pr.extract_embeds_range() == expected
 
 
 @pytest.mark.asyncio
