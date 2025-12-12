@@ -20,6 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.config.parallel import FaultToleranceMode
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -518,6 +519,11 @@ class MPClient(EngineCoreClient):
             assert parallel_config.data_parallel_size_local <= len(
                 self.engine_ranks_managed
             )
+            
+            # Track GPU assignments for fault tolerance
+            # Maps dp_rank → local_dp_rank (physical GPU assignment)
+            self.gpu_mapping: dict[int, int] = {}
+            self._initialize_gpu_mapping()
 
             # ZMQ identity of each engine that this client will talk to.
             self.core_engines: list[EngineIdentity] = [
@@ -607,6 +613,27 @@ class MPClient(EngineCoreClient):
             "fault_tolerance=%s, enabled=%s",
             dp_size, enable_eplb, ft_flag, fault_tolerance_enabled
         )
+        
+        # Create dedicated sync socket for FT notifications (if FT enabled)
+        ft_notification_socket = None
+        if fault_tolerance_enabled:
+            # Create separate address for FT notifications
+            self.ft_sock_addr = get_open_zmq_inproc_path()
+            
+            # IMPORTANT: For inproc://, sender and receiver MUST use same ZMQ context!
+            # Use sync context for PUSH socket (monitor thread is sync)
+            # PULL socket will use async wrapper of same context
+            ft_notification_socket = make_zmq_socket(
+                self.resources.ctx,  # Sync context
+                self.ft_sock_addr,
+                zmq.PUSH,
+                bind=True
+            )
+            
+            logger.info(
+                "[FT] Created dedicated sync PUSH socket for FT notifications at %s",
+                self.ft_sock_addr
+            )
 
         # Monitor engine core process liveness. If any die unexpectedly,
         # either trigger fault tolerance or shutdown depending on config.
@@ -632,17 +659,44 @@ class MPClient(EngineCoreClient):
                 )
                 
                 if fault_tolerance_enabled:
-                    # Fault tolerance: notify coordinator instead of shutdown
+                    # Fault tolerance: handle based on configured mode
+                    ft_mode = _self.vllm_config.parallel_config.fault_tolerance_mode
+                    
                     logger.info(
-                        "[FT] Fault tolerance enabled, notifying coordinator "
-                        "instead of shutting down all engines"
+                        "[FT] Fault tolerance enabled (mode=%s), handling failure of rank %d",
+                        ft_mode, failed_rank
                     )
                     
                     try:
-                        _self._send_ft_notification_to_coordinator(failed_rank)
+                        # Update GPU mapping and check if this is first detection
+                        surviving_gpus, was_removed = _self._update_gpu_mapping_after_failure(failed_rank)
+                        
+                        if not was_removed:
+                            # Duplicate detection - rank already handled
+                            logger.info(
+                                "[FT] Rank %d failure already processed. Skipping notification.",
+                                failed_rank
+                            )
+                            # Update sentinels but don't send duplicate notification
+                            engine_processes[:] = [p for p in engine_processes if p.is_alive()]
+                            sentinels = [p.sentinel for p in engine_processes]
+                            continue
+                        
+                        logger.info(
+                            "[FT %s] Notifying coordinator about rank %d failure. "
+                            "Surviving GPUs: %s",
+                            ft_mode, failed_rank, surviving_gpus
+                        )
+                        
+                        # Send notification to coordinator (first detection only)
+                        # Coordinator will broadcast appropriate message:
+                        # - lightweight: FT_SCALE_DOWN → engines call _execute_ft_reconfiguration (preserves KV)
+                        # - full_restart: FT_SCALE_DOWN → engines call _execute_ft_full_restart (clears KV)
+                        _self._send_ft_notification_to_coordinator(failed_rank, ft_mode, ft_notification_socket)
+                        
                     except Exception as e:
                         logger.error(
-                            "[FT] Failed to send notification: %s. "
+                            "[FT] Failed to handle failure: %s. "
                             "Falling back to shutdown.", e, exc_info=True
                         )
                         _self.resources.engine_dead = True
@@ -653,7 +707,7 @@ class MPClient(EngineCoreClient):
                     engine_processes[:] = [p for p in engine_processes if p.is_alive()]
                     sentinels = [p.sentinel for p in engine_processes]
                     
-                    # DON'T set engine_dead flag - let other engines continue!
+                    # DON'T set engine_dead flag - let recovery complete!
                 else:
                     # No fault tolerance: shutdown everything (old behavior)
                     _self.resources.engine_dead = True
@@ -672,32 +726,104 @@ class MPClient(EngineCoreClient):
             return int(match.group(1))
         raise ValueError(f"Cannot parse rank from process name: {proc.name}")
     
-    def _send_ft_notification_to_coordinator(self, failed_rank: int):
+    def _initialize_gpu_mapping(self):
+        """
+        Initialize GPU mapping from process configuration.
+        Maps dp_rank → local_dp_rank (physical GPU assignment).
+        """
+        parallel_config = self.vllm_config.parallel_config
+        
+        # For local processes
+        local_start_index = parallel_config.data_parallel_rank_local or 0
+        start_index = parallel_config.data_parallel_rank or 0
+        local_engine_count = parallel_config.data_parallel_size_local or parallel_config.data_parallel_size
+        
+        for i in range(local_engine_count):
+            dp_rank = start_index + i
+            local_dp_rank = local_start_index + i
+            self.gpu_mapping[dp_rank] = local_dp_rank
+        
+        logger.info("[FT] Initial GPU mapping: %s", self.gpu_mapping)
+    
+    def _get_current_gpu_mapping(self) -> dict[int, int]:
+        """Get current GPU mapping for all ranks."""
+        return self.gpu_mapping.copy()
+    
+    def _update_gpu_mapping_after_failure(self, failed_rank: int) -> tuple[list[int], bool]:
+        """
+        Update GPU mapping after a rank failure and return surviving GPUs in order.
+        
+        Args:
+            failed_rank: The rank that failed
+            
+        Returns:
+            Tuple of (surviving_gpus, was_removed):
+            - surviving_gpus: List of GPU indices for surviving ranks
+            - was_removed: True if this was first detection, False if duplicate
+        """
+        # Check if rank was already removed (duplicate detection)
+        was_removed = failed_rank in self.gpu_mapping
+        
+        if was_removed:
+            failed_gpu = self.gpu_mapping.pop(failed_rank)
+            logger.info(
+                "[FT] Removed rank %d (GPU %d) from mapping",
+                failed_rank, failed_gpu
+            )
+        else:
+            logger.info(
+                "[FT] Rank %d already removed (duplicate detection, skipping)",
+                failed_rank
+            )
+        
+        # Get surviving ranks and their GPUs (in order)
+        surviving_ranks = sorted(self.gpu_mapping.keys())
+        surviving_gpus = [self.gpu_mapping[rank] for rank in surviving_ranks]
+        
+        logger.info(
+            "[FT] Current GPU mapping: ranks %s → GPUs %s",
+            surviving_ranks, surviving_gpus
+        )
+        
+        return surviving_gpus, was_removed
+    
+    def _send_ft_notification_to_coordinator(
+        self, 
+        failed_rank: int, 
+        ft_mode: str | None = None,
+        ft_socket: Any = None
+    ):
         """
         Send fault tolerance notification to coordinator.
         Called from monitor thread (sync context).
-        Uses the first_req_send_socket to notify coordinator.
+        
+        Args:
+            failed_rank: The rank that failed
+            ft_mode: Fault tolerance mode ("lightweight" or "full_restart")
+                    If None, uses lightweight by default
+            ft_socket: Dedicated sync PUSH socket for FT notifications
         """
+        if ft_mode is None:
+            ft_mode = "lightweight"
         try:
             import msgspec.msgpack
-            import zmq
             
-            # Build notification message
-            ft_msg = msgspec.msgpack.encode(("FT_RANK_DIED", failed_rank))
+            # Build notification message with mode information
+            # Format: ("FT_RANK_DIED", failed_rank, mode)
+            ft_msg = msgspec.msgpack.encode(("FT_RANK_DIED", failed_rank, str(ft_mode)))
             
-            # Get sync socket from async socket
-            # The first_req_send_socket exists in DPLBAsyncMPClient
-            if not hasattr(self, 'first_req_send_socket'):
+            if ft_socket is None:
                 raise RuntimeError(
-                    "No first_req_send_socket available for FT notification"
+                    f"FT notification socket not available. "
+                    "Cannot send notification for failed rank {failed_rank}."
                 )
             
-            sync_socket = zmq.Socket.shadow(self.first_req_send_socket)
-            sync_socket.send(ft_msg, zmq.NOBLOCK)
+            # Use dedicated sync PUSH socket - simple blocking send
+            ft_socket.send(ft_msg)
             
             logger.info(
-                "[FT] Sent failure notification for rank %d to coordinator",
-                failed_rank
+                "[FT] Sent notification for rank %d (mode=%s) to coordinator",
+                failed_rank, ft_mode
             )
             
         except Exception as e:
@@ -1154,12 +1280,25 @@ class DPAsyncMPClient(AsyncMPClient):
         )
 
         async def run_engine_stats_update_task():
-            with (
-                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
-                make_zmq_socket(
-                    self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
-                ) as first_req_rcv_socket,
-            ):
+            # Build socket context managers
+            socket_managers = [
+                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0),
+                make_zmq_socket(self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0),
+            ]
+            
+            # Add FT notification receiver if FT enabled
+            # Uses self.ctx which wraps the same sync context as PUSH socket
+            if hasattr(self, 'ft_sock_addr'):
+                socket_managers.append(
+                    make_zmq_socket(self.ctx, self.ft_sock_addr, zmq.PULL, bind=False, linger=0)
+                )
+            
+            with contextlib.ExitStack() as stack:
+                sockets = [stack.enter_context(sm) for sm in socket_managers]
+                socket = sockets[0]
+                first_req_rcv_socket = sockets[1]
+                ft_rcv_socket = sockets[2] if len(sockets) > 2 else None
+                
                 assert isinstance(socket, zmq.asyncio.Socket)
                 assert isinstance(first_req_rcv_socket, zmq.asyncio.Socket)
                 self.resources.stats_update_socket = socket
@@ -1170,27 +1309,74 @@ class DPAsyncMPClient(AsyncMPClient):
                 poller = zmq.asyncio.Poller()
                 poller.register(socket, zmq.POLLIN)
                 poller.register(first_req_rcv_socket, zmq.POLLIN)
+                if ft_rcv_socket is not None:
+                    poller.register(ft_rcv_socket, zmq.POLLIN)
 
                 while True:
                     events = await poller.poll()
+                    
+                    # Check FT notification socket first (if enabled)
+                    if ft_rcv_socket is not None and any(sock == ft_rcv_socket for sock, _ in events):
+                        # Received FT notification from monitor thread
+                        ft_buf = await ft_rcv_socket.recv()
+                        ft_decoded = msgspec.msgpack.decode(ft_buf)
+                        
+                        if (
+                            isinstance(ft_decoded, (list, tuple))
+                            and len(ft_decoded) >= 2
+                            and ft_decoded[0] == "FT_RANK_DIED"
+                        ):
+                            # Forward to coordinator via stats socket (XSUB→XPUB)
+                            # The coordinator's publish_front (XPUB) receives this.
+                            # 
+                            # NOTE: Cannot use first_req_send_socket because:
+                            # - first_req_send_socket is a PAIR socket connected to first_req_rcv_socket
+                            # - PAIR sockets are internal to the client (client talks to itself)
+                            # - Coordinator receives on publish_front (XPUB), not first_req_rcv_socket
+                            # - Must use stats socket (XSUB) which is subscribed to coordinator's XPUB
+                            logger.info(
+                                "[FT] Received notification from monitor, forwarding to coordinator: %s",
+                                ft_decoded
+                            )
+                            await socket.send(ft_buf)  # Use stats_update_socket (XSUB)
+                    
                     if (
                         not self.engines_running
-                        and len(events) == 2
-                        or (events[0][0] == first_req_rcv_socket)
+                        and len(events) >= 2
+                        or any(sock == first_req_rcv_socket for sock, _ in events)
                     ):
-                        # Check if this is a regular request notification,
-                        # scale up notification, or FT notification
+                        # Check if this is a regular request notification or scale notification
                         buf = first_req_rcv_socket.recv(flags=zmq.NOBLOCK).result()
 
                         decoded = msgspec.msgpack.decode(buf)
                         if (
                             isinstance(decoded, (list, tuple))
-                            and len(decoded) == 2
+                            and len(decoded) >= 2
                             and decoded[0] == "SCALE_ELASTIC_EP"
                         ):
-                            # Extract new engine count from the decoded message
+                            # Extract new engine count and optional failed rank
                             new_engine_count = decoded[1]
-                            # Send scale up notification to coordinator
+                            failed_rank = decoded[2] if len(decoded) > 2 else None
+                            
+                            logger.info(
+                                "[Elastic EP] Received scale notification: new_size=%d, failed_rank=%s",
+                                new_engine_count, failed_rank
+                            )
+                            
+                            # Trigger scale operation
+                            # If failed_rank is provided (FT full restart), pass it to scale down
+                            if failed_rank is not None:
+                                # FT full restart case - include failed rank info
+                                logger.info(
+                                    "[FT Full Restart] Triggering scale down for failed rank %d",
+                                    failed_rank
+                                )
+                                await self.scale_elastic_ep(new_engine_count, failed_rank=failed_rank)
+                            else:
+                                # Normal scale case
+                                await self.scale_elastic_ep(new_engine_count)
+                            
+                            # Send notification to coordinator
                             scale_msg = msgspec.msgpack.encode(
                                 ("SCALE_ELASTIC_EP", new_engine_count)
                             )
@@ -1478,8 +1664,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             new_size
         )
 
-    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
-        """Scale elastic EP data parallel size"""
+    async def scale_elastic_ep(
+        self, 
+        new_data_parallel_size: int,
+        failed_rank: int | None = None
+    ) -> None:
+        """
+        Scale elastic EP data parallel size.
+        
+        Args:
+            new_data_parallel_size: Target DP size
+            failed_rank: Optional rank that failed (for FT full restart).
+                        If provided, this rank will be excluded from surviving processes.
+        """
         cur_data_parallel_size = len(self.core_engines)
 
         assert new_data_parallel_size != cur_data_parallel_size, (
@@ -1498,8 +1695,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 cur_data_parallel_size, new_data_parallel_size
             )
         else:
+            # For scale down with failed rank (FT full restart), calculate removed ranks
+            if failed_rank is not None:
+                removed_ranks = [failed_rank]
+                logger.info(
+                    "[FT Full Restart] Scale down excluding failed rank %d", 
+                    failed_rank
+                )
+            else:
+                # Normal scale down: remove last ranks
+                removed_ranks = list(range(new_data_parallel_size, cur_data_parallel_size))
+            
             await self._scale_down_elastic_ep(
-                cur_data_parallel_size, new_data_parallel_size
+                cur_data_parallel_size, new_data_parallel_size, removed_ranks
             )
 
     async def _scale_up_elastic_ep(
@@ -1574,34 +1782,69 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
     async def _scale_down_elastic_ep(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
+        self, 
+        cur_data_parallel_size: int, 
+        new_data_parallel_size: int,
+        removed_ranks: list[int] | None = None,
     ) -> None:
-        """Scale down the data parallel size by shutting down and
-        reconfiguring existing engine cores."""
+        """
+        Scale down the data parallel size by shutting down and reconfiguring existing engine cores.
+        
+        Args:
+            cur_data_parallel_size: Current DP size
+            new_data_parallel_size: Target DP size  
+            removed_ranks: Specific ranks to remove. If None, removes last ranks.
+                          For FT: [2] means remove rank 2, keep 0,1,3
+                          Normal: None means remove rank 3, keep 0,1,2
+        """
+        if removed_ranks is None:
+            # Normal elastic scale down: remove last ranks
+            removed_ranks = list(range(new_data_parallel_size, cur_data_parallel_size))
+        logger.info(
+            "[Scale Down] Removing ranks: %s (normal removes last, FT removes failed)",
+            removed_ranks
+        )
+        
         cur_data_parallel_size = len(self.core_engines)
 
         self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
 
+        # Build rank mapping
+        rank_mapping = {}
+        new_rank = 0
+        for old_rank in range(cur_data_parallel_size):
+            if old_rank in removed_ranks:
+                rank_mapping[old_rank] = -1  # Remove
+            else:
+                rank_mapping[old_rank] = new_rank
+                new_rank += 1
+        
+        logger.info("[Scale Down] Rank mapping: %s", rank_mapping)
+
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
+            new_rank_for_this_process = rank_mapping.get(cur_dp_rank, -1)
+            
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK if new_rank_for_this_process != -1 else ReconfigureRankType.SHUTDOWN_CURRENT_RANK,
                 new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
                 new_data_parallel_master_port=self.vllm_config.parallel_config.data_parallel_master_port,
             )
-            if cur_dp_rank >= new_data_parallel_size:
-                reconfig_request.new_data_parallel_rank = (
-                    ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-                )
+            
+            # Set specific new rank if not shutting down
+            if new_rank_for_this_process != -1:
+                reconfig_request.new_data_parallel_rank = new_rank_for_this_process
+            
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
             )
             reconfig_futures.append(asyncio.create_task(coro))
 
-        for _ in range(new_data_parallel_size, cur_data_parallel_size):
-            self.core_engines.pop()
+        # Remove engines in removed_ranks (reverse order to maintain indices)
+        for rank in sorted(removed_ranks, reverse=True):
+            self.core_engines.pop(rank)
 
         await asyncio.gather(*reconfig_futures)
 
@@ -1621,3 +1864,4 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
         )
+    

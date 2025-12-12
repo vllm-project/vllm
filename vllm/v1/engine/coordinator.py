@@ -269,21 +269,33 @@ class DPCoordinatorProc:
                     
                     if (
                         isinstance(decoded, (list, tuple))
-                        and len(decoded) == 2
+                        and len(decoded) >= 2
                         and decoded[0] == "FT_RANK_DIED"
                     ):
                         # Handle fault tolerance: rank failure
                         failed_rank = decoded[1]
+                        ft_mode = decoded[2] if len(decoded) > 2 else "lightweight"
+                        
                         logger.error(
-                            "[FT] Coordinator: Rank %d reported failure, "
-                            "broadcasting scale-down to surviving ranks",
-                            failed_rank
+                            "[FT] Coordinator: Rank %d reported failure (mode=%s), "
+                            "broadcasting appropriate scale-down message",
+                            failed_rank, ft_mode
                         )
                         
-                        # Broadcast FT_SCALE_DOWN to all engines
+                        # Both modes use FT_SCALE_DOWN broadcast
+                        # This ensures proper handling of collective timeouts
+                        preserve_kv_cache = (ft_mode == "lightweight")
+                        
+                        logger.info(
+                            "[FT] Using %s path (preserve_kv_cache=%s)",
+                            ft_mode, preserve_kv_cache
+                        )
+                        
+                        # Broadcast FT_SCALE_DOWN to all engines with mode flag
                         self._broadcast_ft_scale_down(
                             failed_rank=failed_rank,
-                            publish_back=publish_back
+                            publish_back=publish_back,
+                            preserve_kv_cache=preserve_kv_cache
                         )
                         
                         # Update coordinator state
@@ -431,14 +443,21 @@ class DPCoordinatorProc:
     def _broadcast_ft_scale_down(
         self, 
         failed_rank: int,
-        publish_back: zmq.Socket
+        publish_back: zmq.Socket,
+        preserve_kv_cache: bool = True
     ):
         """
         Broadcast FT_SCALE_DOWN message to all surviving engines.
         
+        Args:
+            failed_rank: The rank that failed
+            publish_back: Socket to broadcast on
+            preserve_kv_cache: If True, lightweight mode (preserve KV cache).
+                              If False, full restart mode (clear KV cache).
+        
         Message format:
             (EngineCoreRequestType.FT_SCALE_DOWN, 
-             {failed_rank, new_size, rank_mapping, new_master_port})
+             {failed_rank, new_size, rank_mapping, new_master_port, preserve_kv_cache})
         """
         from vllm.utils.network_utils import get_open_port
         from vllm.v1.engine import EngineCoreRequestType
@@ -465,6 +484,7 @@ class DPCoordinatorProc:
             'new_size': new_size,
             'rank_mapping': rank_mapping,
             'new_master_port': new_master_port,
+            'preserve_kv_cache': preserve_kv_cache,  # NEW!
         })
         
         publish_back.send_multipart((
@@ -473,6 +493,6 @@ class DPCoordinatorProc:
         ))
         
         logger.info(
-            "[FT] Coordinator: Broadcasted FT_SCALE_DOWN: %d→%d, rank_mapping=%s",
-            cur_size, new_size, rank_mapping
+            "[FT] Coordinator: Broadcasted FT_SCALE_DOWN: %d→%d, preserve_kv=%s, rank_mapping=%s",
+            cur_size, new_size, preserve_kv_cache, rank_mapping
         )

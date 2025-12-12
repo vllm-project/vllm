@@ -3,6 +3,7 @@
 
 import hashlib
 import os
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -36,6 +37,33 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+
+
+class FaultToleranceMode(str, Enum):
+    """
+    Fault tolerance strategy when a DP rank fails.
+    """
+    DISABLED = "disabled"
+    """Fail fast: Shutdown all processes when any rank fails (original behavior)."""
+    
+    LIGHTWEIGHT = "lightweight"
+    """
+    Lightweight reconfiguration: Surviving processes reconfigure in-place.
+    - Preserves KV cache and model state
+    - Fast recovery (~500ms)
+    - Surviving processes keep their GPUs, failed GPU becomes unused
+    - Example: DP 0,1,2,3 on GPUs 0,1,2,3 → DP 2 dies → DP 0,1,3 reconfigure (keep GPUs 0,1,3)
+    """
+    
+    FULL_RESTART = "full_restart"
+    """
+    Full restart: Shutdown ALL processes and restart fresh.
+    - Clears all state (KV cache, model state, requests)
+    - Complete reinitialization
+    - Slower recovery but clean state
+    - New processes preserve GPU assignments (skip failed GPU)
+    - Example: DP 0,1,2,3 on GPUs 0,1,2,3 → DP 2 dies → Shutdown all → Restart 3 processes on GPUs 0,1,3
+    """
 
 
 @config
@@ -148,6 +176,14 @@ class ParallelConfig:
     
     Note: This is experimental and adds ~500ms recovery time when failures occur.
     Disable for maximum performance when fault tolerance is not needed.
+    """
+    
+    fault_tolerance_mode: FaultToleranceMode | str = FaultToleranceMode.LIGHTWEIGHT
+    """
+    Fault tolerance mode (requires fault_tolerance=True):
+    - 'lightweight': Surviving processes reconfigure in-place. Preserves KV cache. Fast. (default)
+    - 'full_restart': Shutdown all and restart fresh. Clears all state. Slower but clean.
+    - 'disabled': Fail fast. Shutdown all on any failure. Original behavior.
     """
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
     """The expert placement strategy for MoE layers:\n
@@ -297,6 +333,26 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+
+    def __post_init__(self):
+        """Post-initialization validation and setup."""
+        # Convert string to enum if needed
+        if isinstance(self.fault_tolerance_mode, str):
+            self.fault_tolerance_mode = FaultToleranceMode(self.fault_tolerance_mode)
+        
+        # Validate FT configuration
+        if self.fault_tolerance and self.fault_tolerance_mode == FaultToleranceMode.DISABLED:
+            raise ValueError(
+                "fault_tolerance=True but fault_tolerance_mode='disabled'. "
+                "Either set fault_tolerance=False or choose 'lightweight' or 'full_restart' mode."
+            )
+        
+        if not self.fault_tolerance and self.fault_tolerance_mode != FaultToleranceMode.DISABLED:
+            logger.warning(
+                "fault_tolerance_mode=%s specified but fault_tolerance=False. "
+                "Fault tolerance will not be active. Mode will be ignored.",
+                self.fault_tolerance_mode
+            )
 
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:

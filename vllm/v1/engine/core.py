@@ -1271,9 +1271,20 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             return False  # Inconsistent state - should exit
         
+        # Check preserve_kv_cache flag to determine which path to use
+        scale_down_info = self.ft_scale_down_pending
+        preserve_kv_cache = scale_down_info.get('preserve_kv_cache', True)
+        
         try:
-            # Execute reconfiguration
-            self._execute_ft_reconfiguration(self.ft_scale_down_pending)
+            if preserve_kv_cache:
+                # Lightweight: Preserve KV cache
+                logger.info("[FT] Rank %d: Using lightweight reconfiguration", self.dp_rank)
+                self._execute_ft_reconfiguration(scale_down_info)
+            else:
+                # Full restart: Clear KV cache
+                logger.info("[FT] Rank %d: Using full restart reconfiguration", self.dp_rank)
+                self._execute_ft_full_restart(scale_down_info)
+            
             self.ft_scale_down_pending = None
             
             logger.info(
@@ -1556,12 +1567,33 @@ class DPEngineCoreProc(EngineCoreProc):
             # Get master IP from vllm_config
             master_ip = self.vllm_config.parallel_config.data_parallel_master_ip
             
+            # Preserve original local_rank for GPU assignment
+            # The local_rank determines which physical GPU this process uses.
+            # During FT scale-down, the global rank changes (e.g., DP 3→2 when DP 2 dies)
+            # but the GPU assignment must stay the same (GPU 3). The local_rank value
+            # identifies the physical device and must not change.
+            # See: gpu_worker.py:209 for actual GPU device selection.
+            original_local_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+            
+            if original_local_rank is None:
+                logger.error(
+                    "[FT] Rank %d: data_parallel_rank_local is None! "
+                    "Cannot preserve GPU assignment. Using new rank %d as fallback.",
+                    self.dp_rank, my_new_rank
+                )
+                original_local_rank = my_new_rank
+            
+            logger.info(
+                "[FT] Rank %d→%d: Preserving local_rank=%d for GPU assignment",
+                self.dp_rank, my_new_rank, original_local_rank
+            )
+            
             init_distributed_environment(
                 world_size=new_size,
                 rank=my_new_rank,
                 distributed_init_method=f"tcp://{master_ip}:{new_master_port}",
                 backend="nccl",
-                local_rank=my_new_rank,  # Simplified for now
+                local_rank=original_local_rank,
             )
             
             # Update config and dp_group (same logic as reinitialize_distributed)
@@ -1627,6 +1659,73 @@ class DPEngineCoreProc(EngineCoreProc):
             raise
         finally:
             # Always reset reconfiguration flag (cleanup)
+            self.in_reconfiguration = False
+    
+    def _execute_ft_full_restart(self, scale_down_info: dict):
+        """
+        Execute full restart reconfiguration after rank failure.
+        Similar to _execute_ft_reconfiguration but clears all state (KV cache, etc).
+        
+        Steps:
+        1. Call reinitialize_distributed which:
+           - Destroys comm groups
+           - Calls self.shutdown() (clears KV cache, model state)
+           - Rebuilds comm groups
+           - Reinitializes model executor
+        2. Rank mapping ensures correct rank assignment
+        3. GPU assignment preserved via KEEP_CURRENT_RANK for local_rank
+        """
+        # Use lock to ensure single execution (same as _execute_ft_reconfiguration)
+        with self.reconfiguration_lock:
+            if self.in_reconfiguration:
+                logger.debug("[FT] Rank %d: Already in reconfiguration", self.dp_rank)
+                return
+            
+            self.in_reconfiguration = True
+        
+        try:
+            failed_rank = scale_down_info['failed_rank']
+            new_size = scale_down_info['new_size']
+            rank_mapping = scale_down_info['rank_mapping']
+            new_master_port = scale_down_info['new_master_port']
+            my_new_rank = rank_mapping[self.dp_rank]
+            
+            if my_new_rank == -1:
+                # This rank is being removed
+                raise RuntimeError(
+                    f"Rank {self.dp_rank} received FT_FULL_RESTART but mapped to -1. "
+                    "This rank should have already died."
+                )
+            
+            logger.info(
+                "[FT Full Restart] Rank %d→%d: Starting full restart reconfiguration "
+                "(failed_rank=%d, new_size=%d, clears KV cache)",
+                self.dp_rank, my_new_rank, failed_rank, new_size
+            )
+            
+            # Use reinitialize_distributed which calls shutdown() (clears KV cache)
+            reconfig_request = ReconfigureDistributedRequest(
+                new_data_parallel_size=new_size,
+                new_data_parallel_rank=my_new_rank,
+                new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,  # Preserve GPU!
+                new_data_parallel_master_ip=self.vllm_config.parallel_config.data_parallel_master_ip,
+                new_data_parallel_master_port=new_master_port,
+            )
+            
+            # This will:
+            # 1. Call self.shutdown() - clears KV cache
+            # 2. Rebuild comm groups
+            # 3. Reinitialize model executor
+            # 4. GPU assignment preserved via KEEP_CURRENT_RANK
+            self.reinitialize_distributed(reconfig_request)
+            
+            logger.info(
+                "[FT Full Restart] Rank %d: Full restart complete! "
+                "KV cache cleared, GPU preserved.",
+                self.dp_rank
+            )
+        finally:
+            # Always reset reconfiguration flag
             self.in_reconfiguration = False
 
     def add_request(self, request: Request, request_wave: int = 0):

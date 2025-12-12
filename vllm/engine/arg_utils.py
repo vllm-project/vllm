@@ -406,6 +406,7 @@ class EngineArgs:
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     fault_tolerance: bool = ParallelConfig.fault_tolerance
+    fault_tolerance_mode: str = "lightweight"
     expert_placement_strategy: ExpertPlacementStrategy = (
         ParallelConfig.expert_placement_strategy
     )
@@ -829,6 +830,18 @@ class EngineArgs:
         parallel_group.add_argument(
             "--fault-tolerance",
             **parallel_kwargs["fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-mode",
+            type=str,
+            default="lightweight",
+            choices=["disabled", "lightweight", "full_restart"],
+            help=(
+                "Fault tolerance mode (requires --fault-tolerance): "
+                "'lightweight' (default) - Surviving processes reconfigure in-place, preserves KV cache, fast recovery. "
+                "'full_restart' - Shutdown all processes and restart fresh, clears all state, slower but clean. "
+                "'disabled' - Fail fast, shutdown all on any failure."
+            )
         )
         parallel_group.add_argument(
             "--expert-placement-strategy",
@@ -1530,6 +1543,7 @@ class EngineArgs:
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             fault_tolerance=self.fault_tolerance,
+            fault_tolerance_mode=self.fault_tolerance_mode,
             expert_placement_strategy=self.expert_placement_strategy,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
