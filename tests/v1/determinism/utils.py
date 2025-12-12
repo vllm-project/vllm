@@ -11,8 +11,10 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 skip_unsupported = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Requires CUDA and >= Hopper (SM90)",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    # Supports testing on Ampere and Ada Lovelace devices.
+    # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
+    reason="Requires CUDA and >= Ampere (SM80)",
 )
 
 BACKENDS: list[str] = [
@@ -97,3 +99,7 @@ def _extract_step_logprobs(request_output):
             return t, inner.token_ids
 
     return None, None
+
+
+def is_device_capability_below_90() -> bool:
+    return not current_platform.has_device_capability(90)
