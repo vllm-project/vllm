@@ -78,6 +78,7 @@ class LoRAConfig:
         factors.append(self.max_loras)
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
+        factors.append(self.enable_tower_connector_lora)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
