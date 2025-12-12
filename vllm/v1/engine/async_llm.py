@@ -648,7 +648,7 @@ class AsyncLLM(EngineClient):
             q = await self.add_requests(
                 request_ids=request_id,  # type: ignore[arg-type]
                 prompts=prompt,  # type: ignore[arg-type]
-                params=sampling_params,
+                params=sampling_params,  # type: ignore[arg-type]
                 lora_requests=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,  # type: ignore[arg-type]
@@ -939,7 +939,7 @@ class AsyncLLM(EngineClient):
             q = await self.add_requests(
                 request_id,  # type: ignore[arg-type]
                 prompt,  # type: ignore[arg-type]
-                pooling_params,
+                pooling_params,  # type: ignore[arg-type]
                 lora_requests=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,  # type: ignore[arg-type]
