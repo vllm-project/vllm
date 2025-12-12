@@ -6,6 +6,7 @@ import itertools
 import pytest
 import torch
 
+import vllm.config
 import vllm.plugins
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
@@ -21,8 +22,22 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+    CutlassFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
+    FlashInferScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+    ChannelWiseTorchScaledMMLinearKernel,
+    PerTensorTorchScaledMMLinearKernel,
+    RowWiseTorchScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
+    ROCmScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -30,15 +45,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_block_fp8_supported,
-    cutlass_fp8_supported,
-    maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 
-from ..utils import override_cutlass_fp8_supported
+from ..utils import TestBlockFP8Layer, TestFP8Layer
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -52,15 +64,29 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
+        force_kernel: FP8ScaledMMLinearKernel | None,
         group_shape: GroupShape,
-        cuda_force_torch: bool,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.cuda_force_torch = cuda_force_torch
+        self.group_shape = group_shape
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
-        if group_shape.is_per_group():
+        self.enable_rms_norm_custom_op = self.norm[0].enabled()
+
+        is_static = group_shape == GroupShape.PER_TENSOR
+        act_quant_scale_desc = ScaleDesc(torch.float32, is_static, group_shape)
+        w_quant_scale_desc = ScaleDesc(torch.float32, True, group_shape)
+        self.activation_quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=act_quant_scale_desc, symmetric=True
+        )
+        self.weight_quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=w_quant_scale_desc, symmetric=True
+        )
+
+        if group_shape.is_per_tensor():
+            self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
+        elif group_shape.is_per_group():
             self.wscale = [
                 torch.rand(
                     (hidden_size // group_shape[1], hidden_size // group_shape[1]),
@@ -68,15 +94,18 @@ class TestModel(torch.nn.Module):
                 )
                 for _ in range(3)
             ]
-        else:
-            self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        static = group_shape == GroupShape.PER_TENSOR
-        quant_scale = ScaleDesc(torch.float32, static, group_shape)
-        self.quant_key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
-        if static:
-            self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        else:
-            self.scale = [None for _ in range(3)]
+        else:  # PER_TOKEN
+            self.wscale = [
+                torch.rand((hidden_size, 1), dtype=torch.float32) for _ in range(3)
+            ]
+
+        self.act_scale = (
+            [torch.rand(1, dtype=torch.float32) for _ in range(3)]
+            if is_static
+            else [None for _ in range(3)]
+        )
+
+        # Initialize weights
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE) for _ in range(3)
         ]
@@ -84,57 +113,59 @@ class TestModel(torch.nn.Module):
             self.w = [self.w[0].t() for _ in range(3)]
 
         if group_shape.is_per_group():
-            self.fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
-                act_quant_group_shape=group_shape,
-                cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-                use_aiter_and_is_supported=False,
-            )
-            self.enable_quant_fp8_custom_op = self.fp8_linear.input_quant_op.enabled()
-        else:
-            with override_cutlass_fp8_supported(not cuda_force_torch):
-                self.fp8_linear = Fp8LinearOp(
-                    act_quant_static=static,
-                    act_quant_group_shape=group_shape,
+            self.fp8_linear_layers = [
+                TestBlockFP8Layer(
+                    group_shape=group_shape,
+                    weight=self.w[i],
+                    weight_scale=self.wscale[i],
+                    input_scale=self.act_scale[i],
                 )
-                self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
+                for i in range(3)
+            ]
+        else:
+            self.fp8_linear_layers = [
+                TestFP8Layer(
+                    self.activation_quant_key,
+                    self.weight_quant_key,
+                    self.w[i],
+                    self.wscale[i],
+                    input_scale=self.act_scale[i],
+                    force_kernel=force_kernel,
+                )
+                for i in range(3)
+            ]
 
-        self.enable_rms_norm_custom_op = self.norm[0].enabled()
-        self.group_shape = group_shape
+        self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
+            0
+        ].is_quant_fp8_enabled()
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
         x = resid = torch.relu(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear.apply(
-            y, self.w[0], self.wscale[0], input_scale=self.scale[0]
-        )
+        x2 = self.fp8_linear_layers[0](y)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(
-            y2, self.w[1], self.wscale[1], input_scale=self.scale[1]
-        )
+        x3 = self.fp8_linear_layers[1](y2)
 
         y3, resid = self.norm[2](x3, resid)  # use resid here
 
-        x4 = self.fp8_linear.apply(
-            y3, self.w[2], self.wscale[2], input_scale=self.scale[2]
-        )
+        x4 = self.fp8_linear_layers[2](y3)
 
         y4, resid = self.norm[3](x4, resid)  # use resid here
         return y4
 
     def ops_in_model_after(self):
         return [
-            FUSED_OPS[FusedRMSQuantKey(self.quant_key, True)],
-            FUSED_OPS[FusedRMSQuantKey(self.quant_key, False)],
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, True)],
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, False)],
         ]
 
     def ops_in_model_before(self):
         return (
-            [QUANT_OPS[self.quant_key]]
+            [QUANT_OPS[self.activation_quant_key]]
             if self.enable_quant_fp8_custom_op
             else [torch.ops.aten.reciprocal]
         )
@@ -147,23 +178,73 @@ class TestModel(torch.nn.Module):
         )
 
 
-GROUP_SHAPES = [
-    GroupShape.PER_TOKEN,
-    GroupShape.PER_TENSOR,
+ROCM_FP8_KERNELS = [
+    ROCmScaledMMLinearKernel,
+    PerTensorTorchScaledMMLinearKernel,
+    RowWiseTorchScaledMMLinearKernel,
+    ChannelWiseTorchScaledMMLinearKernel,
+]
+
+CUDA_FP8_KERNELS = [
+    FlashInferScaledMMLinearKernel,
+    CutlassFP8ScaledMMLinearKernel,
+    PerTensorTorchScaledMMLinearKernel,
+    ChannelWiseTorchScaledMMLinearKernel,
+]
+
+
+BLOCKWISE_GROUP_SHAPES = [
     GroupShape(1, 128),
     GroupShape(1, 64),
 ]
+
+NON_BLOCKWISE_GROUP_SHAPES = [
+    GroupShape.PER_TOKEN,
+    GroupShape.PER_TENSOR,
+]
+
+
+def _generate_kernel_groupshape_combinations():
+    """
+    Generate valid (kernel, group_shape) combinations for testing.
+    """
+    combinations = []
+
+    kernels = CUDA_FP8_KERNELS if current_platform.is_cuda() else ROCM_FP8_KERNELS
+
+    for kernel in kernels:
+        for group_shape in NON_BLOCKWISE_GROUP_SHAPES:
+            if (
+                kernel == PerTensorTorchScaledMMLinearKernel
+                and group_shape != GroupShape.PER_TENSOR
+            ):
+                continue
+            if (
+                kernel == ChannelWiseTorchScaledMMLinearKernel
+                and group_shape != GroupShape.PER_TOKEN
+            ):
+                continue
+            if (
+                kernel == RowWiseTorchScaledMMLinearKernel
+                and group_shape != GroupShape.PER_TOKEN
+            ):
+                continue
+            combinations.append((kernel, group_shape))
+
+    # Blockwise group shapes don't use FP8ScaledMMLinearKernel, so kernel is None
+    for group_shape in BLOCKWISE_GROUP_SHAPES:
+        combinations.append((None, group_shape))
+
+    return combinations
+
+
+KERNEL_GROUPSHAPE_COMBINATIONS = _generate_kernel_groupshape_combinations()
 
 
 class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, eps: float, **kwargs):
         super().__init__()
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(128, 128),
-            act_quant_group_shape=GroupShape(1, 128),
-            cutlass_block_fp8_supported=False,
-            use_aiter_and_is_supported=True,
-        )
+
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(3)
@@ -178,24 +259,35 @@ class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
         self.norm_weight = [torch.ones(hidden_size) for _ in range(4)]
         self.eps = eps
 
+        self.w8a8_block_fp8_linear = [
+            TestBlockFP8Layer(
+                GroupShape(128, 128),
+                self.w[i],
+                self.wscale[i],
+                cutlass_block_fp8_supported=False,
+                use_aiter_and_is_supported=True,
+            )
+            for i in range(3)
+        ]
+
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
         x = resid = torch.relu(x)
         y = rocm_aiter_ops.rms_norm(x, self.norm_weight[0], self.eps)
 
-        x2 = self.w8a8_block_fp8_linear.apply(y, self.w[0], self.wscale[0])
+        x2 = self.w8a8_block_fp8_linear[0](y)
         # make sure resid is used for replacement to work
         y2, resid = rocm_aiter_ops.rms_norm2d_with_add(
             x2, resid, self.norm_weight[1], self.eps
         )
 
-        x3 = self.w8a8_block_fp8_linear.apply(y2, self.w[1], self.wscale[1])
+        x3 = self.w8a8_block_fp8_linear[1](y2)
 
         y3, resid = rocm_aiter_ops.rms_norm2d_with_add(
             x3, resid, self.norm_weight[2], self.eps
         )
 
-        x4 = self.w8a8_block_fp8_linear.apply(y3, self.w[2], self.wscale[2])
+        x4 = self.w8a8_block_fp8_linear[2](y3)
 
         y4, resid = rocm_aiter_ops.rms_norm2d_with_add(
             x4, resid, self.norm_weight[3], self.eps
@@ -222,16 +314,11 @@ class TestRmsnormGroupFp8QuantModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
-@pytest.mark.parametrize("group_shape", GROUP_SHAPES)
+@pytest.mark.parametrize("kernel_groupshape", KERNEL_GROUPSHAPE_COMBINATIONS)
 @pytest.mark.parametrize(
     "model_class, enable_rms_norm_custom_op, enable_quant_fp8_custom_op",
     list(itertools.product([TestModel], [True, False], [True, False]))
     + [(TestRmsnormGroupFp8QuantModel, False, False)],
-)
-# cuda_force_torch used to test torch code path on platforms that
-# cutlass_fp8_supported() == True.
-@pytest.mark.parametrize(
-    "cuda_force_torch", [True, False] if cutlass_fp8_supported() else [True]
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test on CUDA and ROCm"
@@ -241,11 +328,10 @@ def test_fusion_rmsnorm_quant(
     hidden_size,
     num_tokens,
     eps,
-    group_shape,
+    kernel_groupshape,
     model_class,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
-    cuda_force_torch,
 ):
     if model_class is TestRmsnormGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
@@ -253,7 +339,9 @@ def test_fusion_rmsnorm_quant(
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
-    maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
+
+    # Unpack the (kernel, group_shape) combination
+    force_kernel, group_shape = kernel_groupshape
 
     if not enable_quant_fp8_custom_op and group_shape.is_per_group():
         pytest.skip("Unsupported unwrapped quant fp8 op for blockwise quantization")
@@ -294,12 +382,8 @@ def test_fusion_rmsnorm_quant(
 
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
         backend2 = TestBackend(noop_pass, cleanup_pass)
-        model = model_class(
-            hidden_size=hidden_size,
-            eps=eps,
-            group_shape=group_shape,
-            cuda_force_torch=cuda_force_torch,
-        )
+        model = TestModel(hidden_size, eps, force_kernel, group_shape)
+
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
         torch._dynamo.mark_dynamic(x, 0)
