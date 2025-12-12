@@ -355,7 +355,7 @@ def kernel_unified_attention_2d(
 @triton.jit
 def kernel_unified_attention_3d(
     segm_output_ptr,
-    # [num_tokens, num_query_heads, num_segments, head_size]
+    # [num_tokens, num_query_heads, num_segments, head_size_padded]
     segm_max_ptr,  # [num_tokens, num_query_heads, num_segments]
     segm_expsum_ptr,  # [num_tokens, num_query_heads, num_segments]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -749,6 +749,11 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    seq_threshold_3D=None,
+    num_par_softmax_segments=None,
+    softmax_segm_output=None,
+    softmax_segm_max=None,
+    softmax_segm_expsum=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -793,8 +798,19 @@ def unified_attention(
     TILE_SIZE_PREFILL = 32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
-    # if batch contains a prefill
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
+    # Launch the 2D kernel if
+    # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+    # 2. The batch includes at least one prefill request, or
+    # 3. The number of sequences exceeds the configured threshold
+    if (
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
+        or max_seqlen_q > 1
+        or num_seqs > seq_threshold_3D
+    ):
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
@@ -847,37 +863,12 @@ def unified_attention(
             USE_FP8=output_scale is not None,
         )
     else:
-        # for initial version, NUM_SEGMENTS = 16 is chosen as a default
-        # value that showed good performance in tests
-        NUM_SEGMENTS = 16
-
-        segm_output = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            triton.next_power_of_2(head_size),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_max = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_expsum = torch.empty(
-            q.shape[0],
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
-
-        kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)](
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
+        kernel_unified_attention_3d[
+            (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+        ](
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
@@ -917,13 +908,13 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
             seq_lens_ptr=seqused_k,
             num_seqs=num_seqs,
             num_query_heads=num_query_heads,
@@ -936,6 +927,6 @@ def unified_attention(
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
         )
