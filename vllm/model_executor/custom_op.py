@@ -40,8 +40,8 @@ class CustomOp(nn.Module):
 
     def __init__(self, enforce_enable: bool = False):
         super().__init__()
-        self._forward_method = self.dispatch_forward()
         self._enforce_enable = enforce_enable
+        self._forward_method = self.dispatch_forward()
 
     def forward(self, *args, **kwargs):
         return self._forward_method(*args, **kwargs)
