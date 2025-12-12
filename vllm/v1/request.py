@@ -5,6 +5,7 @@ import enum
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -26,6 +27,35 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+@dataclass
+class StreamingUpdate:
+    """Lightweight data for streaming session continuation.
+
+    Contains only the fields needed to update an existing streaming session
+    with new input data.
+    """
+
+    resumable: bool
+    mm_features: list[MultiModalFeatureSpec] | None
+    prompt_token_ids: list[int] | None
+    prompt_embeds: torch.Tensor | None
+    max_tokens: int
+    arrival_time: float
+    sampling_params: SamplingParams | None
+
+    @classmethod
+    def from_request(cls, request: "Request") -> "StreamingUpdate":
+        return cls(
+            resumable=request.resumable,
+            mm_features=request.mm_features,
+            prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
+            max_tokens=request.max_tokens,
+            arrival_time=request.arrival_time,
+            sampling_params=request.sampling_params,
+        )
 
 
 class Request:
@@ -136,7 +166,9 @@ class Request:
 
         # Used for streaming
         self.resumable = resumable
-        self.streaming_queue: deque[Request] | None = deque() if resumable else None
+        self.streaming_queue: deque[StreamingUpdate] | None = (
+            deque() if resumable else None
+        )
 
     @classmethod
     def from_engine_core_request(

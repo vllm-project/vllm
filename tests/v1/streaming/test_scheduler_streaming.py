@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 STOP_TOKEN = 128001
@@ -118,7 +118,7 @@ class TestStreamingScheduler(unittest.TestCase):
         new_request.sampling_params = SamplingParams(max_tokens=10)
         new_request.max_tokens = 10  # Additional max_tokens from new request
 
-        session.streaming_queue.append(new_request)
+        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
         scheduler._update_request_as_session(session)
 
         assert session.sampling_params.max_tokens == 10
@@ -134,7 +134,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         new_request2.sampling_params = SamplingParams(max_tokens=10)
         new_request2.max_tokens = 10
-        session.streaming_queue.append(new_request2)
+        session.streaming_queue.append(StreamingUpdate.from_request(new_request2))
         scheduler._update_request_as_session(session)
 
         assert session.sampling_params.max_tokens == 10
@@ -155,7 +155,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
         new_request.sampling_params = SamplingParams(max_tokens=10)
 
-        session.streaming_queue.append(new_request)
+        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
         scheduler._update_request_as_session(session)
 
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
@@ -190,7 +190,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[4, 5, 6, 7],
             mm_features=[mm_feature],
         )
-        session.streaming_queue.append(new_request)
+        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
         scheduler._update_request_as_session(session)
 
         assert len(session.mm_features) == 2
@@ -280,7 +280,7 @@ class TestStreamingScheduler(unittest.TestCase):
             prompt_token_ids=[4, 5],
         )
 
-        session.streaming_queue.append(new_request)
+        session.streaming_queue.append(StreamingUpdate.from_request(new_request))
         scheduler._update_request_as_session(session)
 
         # Verify the last output token (11) was removed, and new prompt tokens added

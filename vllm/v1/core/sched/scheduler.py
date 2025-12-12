@@ -51,7 +51,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -826,7 +826,7 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(self, session: Request) -> None:
         """
-        Updates the waiting session with the next streaming request.
+        Updates the waiting session with the next streaming update.
 
         Removes the last output token (not yet scheduled) from `_all_token_ids`
         because the new request's prompt tokens will replace it. Typically the decoded
@@ -836,7 +836,7 @@ class Scheduler(SchedulerInterface):
         ensures correct calculation of `num_new_tokens` in `schedule`.
         """
         assert session.streaming_queue is not None
-        request = session.streaming_queue.popleft()
+        update = session.streaming_queue.popleft()
 
         num_new_tokens = session.num_tokens - session.num_computed_tokens
         assert num_new_tokens in (0, 1), f"got {num_new_tokens=}"
@@ -844,29 +844,28 @@ class Scheduler(SchedulerInterface):
             assert session._all_token_ids[-1] == session._output_token_ids[-1]
             del session._all_token_ids[-1]
 
-        session.resumable = request.resumable
-        if request.mm_features:
+        session.resumable = update.resumable
+        if update.mm_features:
             base = session.num_tokens
-            for mm_feature in request.mm_features:
+            for mm_feature in update.mm_features:
                 mm_feature.mm_position = replace(
                     mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
                 )
-            session.mm_features.extend(request.mm_features)
+            session.mm_features.extend(update.mm_features)
 
-        session._all_token_ids.extend(request.prompt_token_ids or ())
+        session._all_token_ids.extend(update.prompt_token_ids or ())
         if session.prompt_token_ids is None:
             session.prompt_token_ids = []
-        session.prompt_token_ids.extend(request.prompt_token_ids or ())
-        if session.prompt_embeds is not None and request.prompt_embeds is not None:
+        session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        if session.prompt_embeds is not None and update.prompt_embeds is not None:
             session.prompt_embeds = torch.cat(
-                [session.prompt_embeds, request.prompt_embeds]
+                [session.prompt_embeds, update.prompt_embeds]
             )
-        elif request.prompt_embeds is not None:
-            session.prompt_embeds = request.prompt_embeds
-        session.max_tokens = session.num_output_tokens + request.max_tokens
-        session.arrival_time = request.arrival_time
-        assert session.priority == request.priority
-        session.sampling_params = request.sampling_params
+        elif update.prompt_embeds is not None:
+            session.prompt_embeds = update.prompt_embeds
+        session.max_tokens = session.num_output_tokens + update.max_tokens
+        session.arrival_time = update.arrival_time
+        session.sampling_params = update.sampling_params
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
@@ -1420,12 +1419,10 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        # Check for existing streaming session
         existing = self.requests.get(request.request_id)
         if existing is not None and existing.streaming_queue is not None:
-            existing.streaming_queue.append(request)
+            existing.streaming_queue.append(StreamingUpdate.from_request(request))
         else:
-            # New request or non-streaming request
             self.waiting.add_request(request)
             self.requests[request.request_id] = request
 
