@@ -8,6 +8,7 @@ import pytest
 
 import vllm.envs as envs
 from vllm.envs import (
+    disable_envs_cache,
     enable_envs_cache,
     env_list_with_choices,
     env_set_with_choices,
@@ -55,6 +56,43 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     # Reset envs.__getattr__ back to none-cached version to
     # avoid affecting other tests
     envs.__getattr__ = envs.__getattr__.__wrapped__
+
+
+def test_getattr_with_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
+    # __getattr__ is not decorated with functools.cache
+    assert not hasattr(envs.__getattr__, "cache_info")
+
+    # Enable envs cache and ignore ongoing environment changes
+    enable_envs_cache()
+    assert envs.VLLM_HOST_IP == "1.1.1.1"
+    # With cache enabled, the environment variable value is cached and unchanged
+    monkeypatch.setenv("VLLM_HOST_IP", "2.2.2.2")
+    assert envs.VLLM_HOST_IP == "1.1.1.1"
+
+    disable_envs_cache()
+    assert envs.VLLM_HOST_IP == "2.2.2.2"
+    # After cache disabled, the environment variable value would be synced
+    # with os.environ
+    monkeypatch.setenv("VLLM_HOST_IP", "3.3.3.3")
+    assert envs.VLLM_HOST_IP == "3.3.3.3"
+
+
+def test_is_envs_cache_enabled() -> None:
+    assert not envs._is_envs_cache_enabled()
+    enable_envs_cache()
+    assert envs._is_envs_cache_enabled()
+
+    # Only wrap one-layer of cache, so we only need to
+    # call disable once to reset.
+    enable_envs_cache()
+    enable_envs_cache()
+    enable_envs_cache()
+    disable_envs_cache()
+    assert not envs._is_envs_cache_enabled()
+
+    disable_envs_cache()
+    assert not envs._is_envs_cache_enabled()
 
 
 class TestEnvWithChoices:
