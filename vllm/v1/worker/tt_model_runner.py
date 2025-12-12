@@ -518,10 +518,12 @@ class TTModelRunner:
 
     def build_dp_decode_gather_input(
             self, model_input: Optional[TTModelInput],
-            max_blocks_decode_batch: int) -> dict[str, torch.Tensor]:
+            max_blocks_decode_batch: int,
+            any_structured_inputs: bool) -> dict[str, torch.Tensor]:
         """
         Called by each DP rank to build tensorized gather input for decode.
-        max_blocks_decode_batch is the max blocks in the global DP batch.
+        max_blocks_decode_batch: max blocks in the global DP batch.
+        any_structured_inputs: whether the global batch has structured inputs.
         Returns dict[str, torch.Tensor] with keys:
           - "int_inputs": flattened int tensor of constant size.
           - "float_inputs": flattened float tensor of constant size.
@@ -537,8 +539,6 @@ class TTModelRunner:
             temperature = torch.tensor([-1.0], dtype=torch.float32)
             top_k = torch.tensor([-1], dtype=torch.int32)
             top_p = torch.tensor([-1.0], dtype=torch.float32)
-            has_structured_inputs = torch.tensor([0], dtype=torch.int32)
-
         else:
             tokens = model_input.input_tokens
             positions = model_input.input_positions
@@ -561,10 +561,6 @@ class TTModelRunner:
             temperature = torch.tensor([sp.temperature], dtype=torch.float32)
             top_k = torch.tensor([sp.top_k], dtype=torch.int32)
             top_p = torch.tensor([sp.top_p], dtype=torch.float32)
-            has_structured_input = int(
-                model_input.grammar_bitmask[0] is not None)
-            has_structured_inputs = torch.tensor([has_structured_input],
-                                                 dtype=torch.int32)
 
         # Pack into flattened tensors to reduce number of collectives.
         # B = max batch size, W = max_num_blocks_per_req.
@@ -575,11 +571,22 @@ class TTModelRunner:
                 block_tables.contiguous().view(-1),  # B*W
                 unpadded_batch_size.contiguous().view(-1),  # 1
                 top_k.contiguous().view(-1),  # 1
-                # This needs to stay at the end so that DPEngineCoreProc
-                # can check it without doing the full unpacking
-                has_structured_inputs.contiguous().view(-1),  # 1
             ],
             dim=0).contiguous()
+
+        if any_structured_inputs:
+            if model_input is None or model_input.grammar_bitmask[0] is None:
+                has_structured_inputs = torch.tensor([0], dtype=torch.int32)
+                bitmasks = torch.zeros((max_batch, self.bitmask_size),
+                                       dtype=torch.int32)
+            else:
+                has_structured_inputs = torch.tensor([1], dtype=torch.int32)
+                bitmasks = model_input.grammar_bitmask[0]
+            bitmasks = bitmasks.contiguous().view(-1)  # B * bitmask_size
+            int_inputs = torch.cat(
+                [int_inputs, has_structured_inputs, bitmasks],
+                dim=0).contiguous()
+
         float_inputs = torch.cat(
             [
                 temperature.contiguous().view(-1),  # 1
@@ -592,17 +599,9 @@ class TTModelRunner:
             "float_inputs": float_inputs,
         }
 
-    def build_padded_bitmasks(
-            self, model_input: Optional[TTModelInput]) -> torch.Tensor:
-        if model_input is None or model_input.grammar_bitmask[0] is None:
-            max_batch = int(self.scheduler_config.max_num_seqs)
-            return torch.zeros((max_batch, self.bitmask_size),
-                               dtype=torch.int32)
-        return model_input.grammar_bitmask[0]
-
-    def concat_dp_model_inputs(
-            self, inputs, is_decode: bool,
-            max_blocks_decode_batch: Optional[int]) -> "TTModelInput":
+    def concat_dp_model_inputs(self, inputs, is_decode: bool,
+                               max_blocks_decode_batch: Optional[int],
+                               any_structured_inputs: bool) -> "TTModelInput":
         """
         Concatenate a DP-sized set of inputs into a single TTModelInput.
         inputs can be either:
@@ -610,8 +609,6 @@ class TTModelRunner:
         - For decode (optimized gather): dict[str, torch.Tensor] with keys:
           - "int_inputs": stacked int32 tensor of shape [world, -1]
           - "float_inputs": stacked float32 tensor of shape [world, -1]
-          - if any of the batches has structured inputs, 
-          "bitmasks": stacked int32 tensor of shape [world, -1]
         """
 
         input_tokens_list: list[torch.Tensor] = []
@@ -638,10 +635,11 @@ class TTModelRunner:
         if is_decode:
             # For decode, given gathered flattened tensors from all DP ranks.
             # Ints: [toks(B), positions(B), block_tables(B*W), bs(1), top_k(1)]
+            #   - If any_structured_inputs, also has at the end of the list:
+            #     [has_structured_inputs(1), bitmasks(B*bitmask_size)]
             # Floats: [temperature(1), top_p(1)]
             assert max_blocks_decode_batch is not None, (
                 "max_blocks_decode_batch must be provided for decode")
-            has_structured_list = []
             B = int(self.scheduler_config.max_num_seqs)
             W = max_blocks_decode_batch
             for batch_num, (int_inputs, float_inputs) in enumerate(
@@ -661,8 +659,18 @@ class TTModelRunner:
                 off += 1
                 top_k = int(int_inputs[off].item())
                 off += 1
-                has_structured_input = int(int_inputs[off].item())
-                off += 1
+                if any_structured_inputs:
+                    has_structured_input = int(int_inputs[off].item())
+                    off += 1
+                    stride = B * self.bitmask_size
+                    if has_structured_input > 0:
+                        bitmasks = int_inputs[off:off + stride].view(
+                            B, self.bitmask_size)
+                    else:
+                        bitmasks = None
+                    off += stride
+                else:
+                    bitmasks = None
 
                 temperature = float(float_inputs[0].item())
                 top_p = float(float_inputs[1].item())
@@ -678,22 +686,10 @@ class TTModelRunner:
                                          top_p=top_p))
                 else:
                     sampling_params_per_dp.append(None)
-                has_structured_list.append(has_structured_input)
+                grammar_bitmask_list.append(bitmasks)
 
             input_positions = torch.cat(input_positions_list, dim=0)
             prompt_lens = None
-
-            if any(has_structured_list):
-                bitmasks = inputs["bitmasks"]
-                for position, has_structured in enumerate(has_structured_list):
-                    if has_structured > 0:
-                        bitmask = bitmasks[position, :]
-                        bitmask = bitmask.view(B, self.bitmask_size)
-                        grammar_bitmask_list.append(bitmask)
-                    else:
-                        grammar_bitmask_list.append(None)
-            else:
-                grammar_bitmask_list = [None] * len(has_structured_list)
         else:
             active_inputs: list[TTModelInput] = [mi for mi in inputs if mi]
             if not active_inputs:

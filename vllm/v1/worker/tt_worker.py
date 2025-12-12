@@ -185,29 +185,29 @@ class TTWorker(WorkerBase):
 
     def build_dp_model_input(
         self, scheduler_output: Optional["SchedulerOutput"]
-    ) -> tuple[Optional[TTModelInput], int]:
+    ) -> tuple[Optional[TTModelInput], int, int]:
         """Called by each DP rank to build model input from scheduler output.
         """
         model_input = None
         if scheduler_output is not None:
             model_input = self.model_runner.build_model_input(scheduler_output)
         max_blocks = model_input.block_tables.shape[1] if model_input else 0
-        return model_input, max_blocks
-
-    def build_padded_bitmasks(
-            self, model_input: Optional[TTModelInput]) -> torch.Tensor:
-        return self.model_runner.build_padded_bitmasks(model_input)
+        has_structured_input = int(
+            model_input.grammar_bitmask[0] is not None) if model_input else 0
+        return model_input, max_blocks, has_structured_input
 
     def build_dp_decode_gather_input(
             self, model_input: Optional[TTModelInput],
-            max_blocks_decode_batch: int) -> dict[str, torch.Tensor]:
+            max_blocks_decode_batch: int,
+            any_structured_inputs: bool) -> dict[str, torch.Tensor]:
         return self.model_runner.build_dp_decode_gather_input(
-            model_input, max_blocks_decode_batch)
+            model_input, max_blocks_decode_batch, any_structured_inputs)
 
-    def concat_and_execute_dp(
-            self, inputs: Union[list[Optional[TTModelInput]],
-                                dict[str, torch.Tensor]], is_decode: bool,
-            max_blocks_decode_batch: Optional[int]) -> torch.Tensor:
+    def concat_and_execute_dp(self, inputs: Union[list[Optional[TTModelInput]],
+                                                  dict[str, torch.Tensor]],
+                              is_decode: bool,
+                              max_blocks_decode_batch: Optional[int],
+                              any_structured_inputs: bool) -> torch.Tensor:
         """Called by TT device ranks (local DP rank 0) to concatenate DP-sized
         inputs and execute. Returns a stacked tensor
         [world, max_num_seqs, 1] of sampled ids.
@@ -218,7 +218,7 @@ class TTWorker(WorkerBase):
             "concat_and_execute_dp must run on local DP rank 0 (device rank)"
         assert self.is_driver_worker, "concat_and_execute_dp must run on driver"
         merged = self.model_runner.concat_dp_model_inputs(
-            inputs, is_decode, max_blocks_decode_batch)
+            inputs, is_decode, max_blocks_decode_batch, any_structured_inputs)
         sampled_token_ids_per_dp: list[
             torch.Tensor] = self.model_runner.execute_with_model_input(merged)
 

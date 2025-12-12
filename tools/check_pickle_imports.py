@@ -47,6 +47,7 @@ ALLOWED_FILES = set([
     'benchmarks/fused_kernels/layernorm_rms_benchmarks.py',
     'benchmarks/cutlass_benchmarks/w8a8_benchmarks.py',
     'benchmarks/cutlass_benchmarks/sparse_benchmarks.py',
+    'vllm/v1/engine/core.py',  # for serializing inputs in DP gather path
     # cloudpickle
     'vllm/worker/worker_base.py',
     'vllm/executor/mp_distributed_executor.py',

@@ -2029,6 +2029,64 @@ class ParallelConfig:
         assert last_exc is not None
         raise last_exc
 
+    def normal_init_dp_group(self) -> "ProcessGroup":
+        """
+        Initialize a normal torch.distributed process group for data
+        parallelism. Uses torch.distributed.init_process_group() which
+        supports all collectives including gather/scatter. Unlike
+        stateless_init_dp_group(), this requires torch.distributed to not
+        be already initialized.
+        
+        Note: stateless_init_dp_group() is used by default because it
+        doesn't pollute global state and supports multiple independent
+        groups. Use this function only when you need gather/scatter
+        operations (rooted collectives) which stateless groups don't
+        support, and don't need to support multiple independent groups.
+        Multiple groups are needed when workers initialize TP/PP groups
+        (via normal torch dist init) and engine-level DP groups are created
+        independently.
+        """
+        import torch.distributed as dist
+        from torch.distributed import DistNetworkError
+
+        from vllm.utils import get_tcp_uri
+
+        if dist.is_initialized():
+            raise RuntimeError(
+                "torch.distributed is already initialized. "
+                "normal_init_dp_group() requires torch.distributed to not "
+                "be initialized. Use stateless_init_dp_group() instead if "
+                "you need to create a DP group when torch.distributed is "
+                "already initialized.")
+
+        # Initialize normally. Retry on port conflicts (EADDRINUSE) which
+        # can occur due to race conditions when multiple processes pick the
+        # same port.
+        max_retries = 5
+        last_exc: Optional[Exception] = None
+        for _ in range(max_retries):
+            init_method = get_tcp_uri(self.data_parallel_master_ip,
+                                      self.get_next_dp_init_port())
+            try:
+                dist.init_process_group(backend="gloo",
+                                        init_method=init_method,
+                                        rank=self.data_parallel_rank,
+                                        world_size=self.data_parallel_size)
+                # Return the default process group
+                return dist.group.WORLD
+            except DistNetworkError as e:
+                # We only want to retry when the root cause is EADDRINUSE.
+                if "EADDRINUSE" in str(e):
+                    logger.warning(
+                        "Address already in use. Retrying with a new port.")
+                    last_exc = e
+                    continue  # try again with a new port
+                raise e
+
+        # If we get here all retries have failed.
+        assert last_exc is not None
+        raise last_exc
+
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
                           has_unfinished: bool) -> bool:
