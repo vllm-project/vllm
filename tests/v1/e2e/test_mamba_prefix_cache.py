@@ -245,6 +245,9 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                     )
 
             last_num_computed_tokens = num_computed_tokens
+        else:
+            last_num_computed_tokens = 0
+            print(f"[UNIT TEST] fake_execute_model_fn: clear last_num_computed_tokens")
 
         ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
 
@@ -314,7 +317,7 @@ def get_fake_process_mamba_fn(
 
 def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    num_generated_tokens = 4000
+    num_generated_tokens = 8000
     num_prompt_tokens = 500
     sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
     full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
@@ -589,7 +592,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             step_actions=[
                 StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
                 StepAction(560 * 2, 560, [0, 1, 1, 1, 1, 1], (1, 2), (2, 2)),
-                StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560 * 3, 4, [0, 0, 1, 1, 1, 1, 1], (2, 3), (-1, -1)),
             ],
         ),
         "prompt_3_block_size_10": TestConfig(
@@ -598,8 +601,59 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
             num_accepted_tokens=4,
             step_actions=[
                 StepAction(0, 560 * 2, [0, 1, 1, 1, 1], (-1, -1), (1, 1)),
-                StepAction(560 * 2, 570, [0, 1, 1, 1, 1, 1], (1, 2), (2, 2)),
-                StepAction(560 * 3 + 10, 4, [0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+                StepAction(560 * 2, 570, [0, 1, 0, 1, 1, 1, 1], (1, 3), (-1, -1)),
+                StepAction(560 * 3 + 10, 4, [0, 0, 0, 1, 1, 1, 1], (-1, -1), (-1, -1)),
+            ],
+        ),
+        "prompt_10_block_size": TestConfig(
+            num_prompt_tokens=560 * 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (4, 4)),
+                StepAction(
+                    560 * 5,
+                    560 * 4,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 8),
+                    (8, 8),
+                ),
+                StepAction(
+                    560 * 9,
+                    560,
+                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (8, 9),
+                    (9, 9),
+                ),
+                StepAction(
+                    560 * 10,
+                    4,
+                    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1],
+                    (9, 10),
+                    (-1, -1),
+                ),
+            ],
+        ),
+        "prompt_10_block_size_10": TestConfig(
+            num_prompt_tokens=560 * 10 + 10,
+            num_generated_tokens=10,
+            num_accepted_tokens=4,
+            step_actions=[
+                StepAction(0, 560 * 5, [0, 0, 0, 0, 1, 1, 1, 1], (-1, -1), (4, 4)),
+                StepAction(
+                    560 * 5,
+                    560 * 4,
+                    [0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1],
+                    (4, 8),
+                    (8, 8),
+                ),
+                StepAction(
+                    560 * 9,
+                    560 + 10,
+                    [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 1],
+                    (8, 10),
+                    (-1, -1),
+                ),
             ],
         ),
     }
