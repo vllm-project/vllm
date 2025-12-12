@@ -2,7 +2,7 @@ FROM intel/deep-learning-essentials:2025.2.2-0-devel-ubuntu24.04 AS vllm-base
 
 RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
+    add-apt-repository -y ppa:kobuk-team/intel-graphics-staging
 
 RUN apt clean && apt-get update -y && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -78,6 +78,9 @@ RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 
 # PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
 RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
+
+# decrease triton kernel compilation scratch space for speculative decoding
+ENV IGC_ForceOCLSIMDWidth=16
 
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
