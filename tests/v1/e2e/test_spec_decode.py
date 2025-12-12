@@ -16,6 +16,16 @@ from vllm.platforms import current_platform
 MTP_SIMILARITY_RATE = 0.8
 
 
+def _skip_if_insufficient_gpus_for_tp(tp_size: int):
+    """Skip test if available GPUs < tp_size on ROCm."""
+    if current_platform.is_rocm():
+        available_gpus = torch.cuda.device_count()
+        if available_gpus < tp_size:
+            pytest.skip(
+                f"Test requires {tp_size} GPUs, but only {available_gpus} available"
+            )
+
+
 def get_test_prompts(mm_enabled: bool):
     prompt_types = ["repeat", "sentence"]
     if mm_enabled:
@@ -455,6 +465,8 @@ def test_eagle_correctness(
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
+        _skip_if_insufficient_gpus_for_tp(tp_size)
+
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
@@ -525,6 +537,7 @@ def test_mtp_correctness(
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         method, model_name, tp_size = model_setup
+        _skip_if_insufficient_gpus_for_tp(tp_size)
 
         ref_llm = LLM(
             model=model_name,
