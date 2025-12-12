@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     group_broadcast,
+    scaled_dequantize,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -466,15 +467,50 @@ def input_to_float8(
 def block_quant_to_tensor_quant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
+    group_shape: GroupShape | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """This function converts block-wise quantization to tensor-wise
-    quantization. The inputs are block-wise quantization tensor `x_q_block`,
-    block-wise quantization scale and the block size.
-    The outputs are tensor-wise quantization tensor and tensor-wise
-    quantization scale. Note only float8 is supported for now.
+    """Convert block-wise quantized FP8 tensor to tensor-wise quantization.
+
+    This function transforms block-quantized data (where different blocks have
+    different scales) into tensor-quantized data (where a single scale applies
+    to the entire tensor). The conversion involves:
+
+    1. Dequantizing: Multiplying block-quantized values by their per-block scales
+    2. Re-quantizing: Computing a single tensor-wide scale and requantizing
+
+    Args:
+        x_q_block: Block-quantized input tensor in float8 format.
+        x_s: Per-block quantization scales. Shape should be compatible with
+            block structure (e.g., for 128x128 blocks on a 1024x1024 tensor,
+            x_s would be shape (8, 8)).
+        group_shape: Optional shape hint for scale broadcasting when x_s is 1D.
+            Required when x_s.ndim == 1.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A tuple containing:
+            - x_q_tensor: Re-quantized tensor in float8 format with tensor-wise
+              (single) quantization scale.
+            - scale: The tensor-wise quantization scale (scalar tensor).
+
+    Note:
+        This operation is inherently lossy due to re-quantization. The output
+        precision is limited by FP8 dynamic range with a single scale factor.
+        Only float8 dtypes are supported.
+
+    Example:
+        >>> # Convert DeepSeek-style block quantization to tensor quantization
+        >>> x_q_block = torch.randn(1024, 1024).to(torch.float8_e4m3fn)
+        >>> x_s = torch.ones(8, 8)  # 128x128 block scales
+        >>> x_q_tensor, scale = block_quant_to_tensor_quant(x_q_block, x_s)
+        >>> assert x_q_tensor.shape == x_q_block.shape
+        >>> assert scale.ndim == 0  # Scalar scale
     """
-    x_dq_block = group_broadcast(x_q_block, x_s)
-    x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
+    # Step 1: Dequantize by multiplying quantized values with block scales
+    x_dq = scaled_dequantize(x_q_block, x_s, group_shape=group_shape)
+
+    # Step 2: Re-quantize with a single tensor-wide scale
+    x_q_tensor, scale = input_to_float8(x_dq, dtype=x_q_block.dtype)
+
     return x_q_tensor, scale
 
 
