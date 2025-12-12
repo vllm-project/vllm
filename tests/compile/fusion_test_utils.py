@@ -61,7 +61,7 @@ if current_platform.is_cuda():
             model_kwargs=dict(
                 max_model_len=1024,
                 kv_cache_dtype="fp8",
-                hf_overrides={"num_hidden_layers": 4},
+                hf_overrides={"text_config": {"num_hidden_layers": 4}},
                 load_format="dummy",
             ),
             # TODO FlashInfer attn broken on Hopper with kvcache=fp8:
