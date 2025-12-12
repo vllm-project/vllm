@@ -289,7 +289,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         return (
             is_deep_gemm_e8m0_used()
-            and current_platform.is_device_capability_family(10)
+            and current_platform.is_device_capability_family(100)
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:

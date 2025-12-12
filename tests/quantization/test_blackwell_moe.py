@@ -10,7 +10,7 @@ import pytest
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability_family(10):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "This test only runs on Blackwell GPUs (SM10x).", allow_module_level=True
     )
