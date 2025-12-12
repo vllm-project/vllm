@@ -56,8 +56,10 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
     enable_tower_connector_lora: bool = False
-    """If `True`, LoRA support for multimodal models will be enabled. Currently, 
-    only the qwenvl series models support this feature. The default is False."""
+    """If `True`, LoRA support for the tower (vision encoder) and connector 
+    of multimodal models will be enabled. This is an experimental feature and 
+    currently only supports some MM models such as the Qwen VL series. The default 
+    is False."""
 
     def compute_hash(self) -> str:
         """
