@@ -80,6 +80,100 @@ def write_zeros_to_output(
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
+@triton.jit
+def mm_k(
+    a_ptrs,
+    b_ptrs,
+    a_scale_ptrs,
+    b_scale_ptrs,
+    stride_ak,
+    stride_bk,
+    stride_ask,
+    stride_bsk,
+    token_mask,
+    base_k,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    SPLIT_K: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
+    b_dtype: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    use_int8_w8a16: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a8: tl.constexpr,
+    group_k: tl.constexpr,
+    group_n: tl.constexpr,
+    compute_type: tl.constexpr,
+):
+
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    STEP_K = BLOCK_K * SPLIT_K
+    num_iters = tl.cdiv(K, STEP_K)
+    for k in range(num_iters):
+        block_start_k = k * STEP_K + base_k
+        block_end_k = block_start_k + BLOCK_K
+
+        if EVEN_K:
+            # K is divisible by BLOCK_K, no masking ever needed
+            # pre-fetch lora weight
+            tiled_b = tl.load(b_ptrs)
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+            if CAST_TYPE:
+                tiled_a = tiled_a.to(b_dtype)
+        else:
+            # Check if we need element-wise masking
+            if block_start_k >= K:
+                # Entire block out of range, skip
+                pass
+            elif block_end_k <= K:
+                # Entire block in range, no masking needed (fast path)
+                tiled_b = tl.load(b_ptrs)
+                if USE_GDC:
+                    tl.extra.cuda.gdc_wait()
+                tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+                if CAST_TYPE:
+                    tiled_a = tiled_a.to(b_dtype)
+            else:
+                # Partial block, need masking (only last iteration)
+                k_offsets = tl.arange(0, BLOCK_K)
+                mask = block_start_k + k_offsets < K
+                tiled_b = tl.load(b_ptrs, mask=mask[:, None], other=0.0)
+                if USE_GDC:
+                    tl.extra.cuda.gdc_wait()
+                tiled_a = tl.load(a_ptrs, mask=token_mask[:, None] & mask[None, :], other=0.0)
+                if CAST_TYPE:
+                    tiled_a = tiled_a.to(b_dtype)
+
+        if use_int8_w8a16:
+            accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
+        elif use_fp8_w8a8 or use_int8_w8a8:
+            if group_k > 0 and group_n > 0:
+                offs_ks = block_start_k // group_k
+                a_scale = tl.load(
+                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+                )
+                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+
+                accumulator += tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+            else:
+                if use_fp8_w8a8:
+                    # acc used to enable fp8_fast_accum
+                    accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
+                else:
+                    accumulator += tl.dot(tiled_a, tiled_b)
+        else:
+            accumulator += tl.dot(tiled_a, tiled_b)
+        # Advance the ptrs to the next K block.
+        a_ptrs += STEP_K * stride_ak
+        b_ptrs += STEP_K * stride_bk
+
+    return accumulator
+
 
 @triton.jit
 def fused_moe_kernel_gptq_awq(
@@ -488,65 +582,35 @@ def fused_moe_kernel(
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
     # of fp32 values for higher accuracy.
     # `accumulator` will be converted back to fp16 after the loop.
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the
-        # K dimension.
-        block_start_k = k * BLOCK_SIZE_K
-        block_end = block_start_k + BLOCK_SIZE_K
+    base_k = 0
+    accumulator = mm_k(
+        a_ptrs,
+        b_ptrs,
+        a_scale_ptrs if a_scale_ptr else None,
+        b_scale_ptrs if b_scale_ptr else None,
+        stride_ak,
+        stride_bk,
+        stride_ask,
+        stride_bsk,
+        token_mask,
+        base_k,
+        K,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        EVEN_K,
+        SPLIT_K,
+        False,
+        None,
+        USE_GDC,
+        use_int8_w8a16,
+        use_fp8_w8a8,
+        use_int8_w8a8,
+        group_k,
+        group_n,
+        compute_type,
+    )
 
-        if EVEN_K:
-            b = tl.load(b_ptrs)
-            if USE_GDC:
-                tl.extra.cuda.gdc_wait()
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None],
-                other=0.0,
-            )
-        else:
-            if block_end <= K:
-                b = tl.load(b_ptrs)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                a = tl.load(
-                    a_ptrs,
-                    mask=token_mask[:, None],
-                    other=0.0,
-                )
-            else:
-                b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                a = tl.load(
-                    a_ptrs,
-                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                    other=0.0,
-                )
-        # We accumulate along the K dimension.
-        if use_int8_w8a16:
-            accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
-        elif use_fp8_w8a8 or use_int8_w8a8:
-            if group_k > 0 and group_n > 0:
-                k_start = k * BLOCK_SIZE_K
-                offs_ks = k_start // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                )
-                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
-            else:
-                if use_fp8_w8a8:
-                    # acc used to enable fp8_fast_accum
-                    accumulator = tl.dot(a, b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(a, b)
-        else:
-            accumulator += tl.dot(a, b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
     if HAS_BIAS:
         accumulator = accumulator + bias[None, :]
     if MUL_ROUTED_WEIGHT:
@@ -719,10 +783,6 @@ def invoke_fused_moe_kernel(
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
         use_gdc = supports_pdl(A.device)
         EVEN_K = K % (BLOCK_SIZE_K * config["SPLIT_K"]) == 0
-        with open("log.txt", "a") as f:
-            f.write(
-                f"invoke_fused_moe_kernel: use_gdc={use_gdc}, EVEN_K={EVEN_K}\n"
-            )
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
         fused_moe_kernel[grid](
