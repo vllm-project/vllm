@@ -1184,18 +1184,19 @@ def get_dcp_local_seq_lens(
     dcp_local_seq_lens = base + remainder
     return dcp_local_seq_lens.squeeze(1)
 
-# For Lighter Mamba Prefix-Caching
-@torch.compile
-def mamba_gather_indices(
+
+def mamba_get_block_table_tensor(
     common_attn_metadata: CommonAttentionMetadata,
     kv_cache_spec: MambaSpec,
+    mamba_cache_mode: str,
     num_blocks: int = 1,
 ) -> torch.Tensor:
-    assert isinstance(kv_cache_spec, MambaSpec)
-    block_table_tensor = common_attn_metadata.block_table_tensor
-    if not kv_cache_spec.enable_caching:
-        return block_table_tensor
-    start_indices = (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size
-    offsets = torch.arange(num_blocks, device=block_table_tensor.device)
-    indices_to_gather = start_indices.unsqueeze(1) + offsets
-    return torch.gather(block_table_tensor, 1, indices_to_gather)
+    if mamba_cache_mode in ("all", "none"):
+        return common_attn_metadata.block_table_tensor
+    else:
+        assert isinstance(kv_cache_spec, MambaSpec)
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        start_indices = (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size
+        offsets = torch.arange(num_blocks, device=block_table_tensor.device)
+        indices_to_gather = start_indices.unsqueeze(1) + offsets
+        return torch.gather(block_table_tensor, 1, indices_to_gather)

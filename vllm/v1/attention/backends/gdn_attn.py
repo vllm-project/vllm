@@ -5,20 +5,20 @@
 from dataclasses import dataclass
 
 import torch
+
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import is_global_first_rank
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
-    mamba_gather_indices,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -149,16 +149,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens = m.num_computed_tokens_cpu
         context_lens_tensor = context_lens.to(query_start_loc.device)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-        if self.vllm_config.cache_config.mamba_cache_mode == "align":
-            block_table_tensor = mamba_gather_indices(
-                common_attn_metadata,
-                self.kv_cache_spec,
-                1 + self.num_spec,
-            )
-            if is_global_first_rank():
-                logger.info(f"{block_table_tensor=}")
-        else:
-            block_table_tensor = m.block_table_tensor
+        block_table_tensor = mamba_get_block_table_tensor(
+            common_attn_metadata,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+            1 + self.num_spec,
+        )
 
         if (
             not self.use_spec_decode

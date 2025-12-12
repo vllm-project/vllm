@@ -4,6 +4,7 @@ import itertools
 from dataclasses import dataclass
 
 import torch
+
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -11,7 +12,7 @@ from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuil
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
-    mamba_gather_indices,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -189,9 +190,10 @@ class Mamba2AttentionMetadataBuilder(
             )
         else:
             # Always return just a single block per each request:
-            state_indices_tensor = mamba_gather_indices(
+            state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata,
                 self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
             )[:, 0]
 
             # Additional cache-related varaiables:
