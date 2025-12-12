@@ -112,7 +112,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
-            return None
+            return self._maybe_add_dp_ep_naive_fallback(None)
         else:
             return super().maybe_make_prepare_finalize(routing_tables)
 
