@@ -361,24 +361,23 @@ def move_from_buffer(
     is_received_locally: np.ndarray,
     recv_metadata: RecvMetadata,
     new_indices: np.ndarray,
-    ep_group: ProcessGroup,
+    ep_rank: int,
 ) -> None:
     """
     Copies expert weights from communication buffers back to the target weight tensors
     after EPLB rebalancing.
 
     Args:
-        expert_weights: List of weight tensors for a MoE layer.
-        expert_weights_buffers: Intermediate buffers matching ``expert_weights``.
+        expert_weights: List of the actual MoE layer weights used in the execution.
+        expert_weights_buffers: Intermediate buffers containing the experts weights
+            after the transfer is completed.
         is_unchanged: (num_local_experts,), True where an expert row is unchanged.
         is_received_locally: (num_local_experts,), True where a row is updated locally.
         recv_metadata: RecvMetadata containing remote receive metadata.
         new_indices: (num_experts_total,) mapping from local rows to desired
             (possibly global) expert id, after rebalance.
-        ep_group: torch.distributed.ProcessGroup for expert parallel communication
-            domain.
+        ep_rank: Rank of the process in the expert parallel group.
     """
-    ep_rank = ep_group.rank()
     recv_primary_mask = recv_metadata.recv_primary_mask
     recv_count = recv_metadata.recv_count
     recv_expert_ids = recv_metadata.recv_expert_ids
@@ -395,16 +394,17 @@ def move_from_buffer(
             for w, b in zip(expert_weights, expert_weights_buffers):
                 w[dst].copy_(b[dst], non_blocking=True)
 
-    # Duplicate remote received rows to non-primary duplicate dsts
     if recv_count == 0:
         return
 
+    # Duplicate remote received rows to non-primary duplicate dsts
     base = ep_rank * num_local_experts
     local_experts = new_indices[base + np.arange(num_local_experts, dtype=np.int32)]
     duplicate_mask = np.logical_and(
         np.logical_and(~is_unchanged, ~is_received_locally),
         np.logical_and(~recv_primary_mask, local_experts != -1),
     )
+    # All received experts are unique in the destination, so no need to copy duplicates
     if not bool(duplicate_mask.any()):
         return
 
@@ -607,7 +607,7 @@ def rearrange_expert_weights_inplace(
             is_received_locally=is_received_locally,
             recv_metadata=recv_metadata,
             new_indices=new_global_expert_indices_cpu[layer_idx],
-            ep_group=ep_group,
+            ep_rank=ep_group.rank(),
         )
 
 
