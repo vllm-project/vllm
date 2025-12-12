@@ -27,8 +27,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     get_system_message,
+    parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
-    parse_input_to_harmony_message,
     render_for_completion,
 )
 from vllm.entrypoints.openai.protocol import (
@@ -51,7 +51,11 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolCall
@@ -380,6 +384,8 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -816,6 +822,9 @@ class OpenAIServingChat(OpenAIServing):
 
                             if delta_message is not None:
                                 harmony_tools_streamed[i] = True
+                        elif cur_channel == "commentary":
+                            # Tool call preambles meant to be shown to the user
+                            delta_message = DeltaMessage(content=delta_text)
                         else:
                             delta_message = None
                     # handle streaming deltas for tools with named tool_choice
@@ -1120,6 +1129,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
+                        # check for error finish reason and abort streaming
+                        # finish_reason='error' indicates a retryable error
+                        self._raise_if_error(output.finish_reason, request_id)
+
                         # check to make sure we haven't "forgotten" to stream
                         #   any tokens that were generated but previously
                         #   matched by partial json parsing
@@ -1287,6 +1300,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta=False,
                     )
 
+        except GenerationError as e:
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in chat completion stream generator.")
@@ -1327,6 +1342,9 @@ class OpenAIServingChat(OpenAIServing):
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
+            # check for error finish reason and raise GenerationError
+            # finish_reason='error' indicates a retryable request-level internal error
+            self._raise_if_error(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
             tool_call_info = None
@@ -1755,6 +1773,11 @@ class OpenAIServingChat(OpenAIServing):
     ):
         messages: list[OpenAIMessage] = []
 
+        # because of issues with pydantic we need to potentially
+        # re-serialize the tool_calls field of the request
+        # for more info: see comment in `maybe_serialize_tool_calls`
+        maybe_serialize_tool_calls(request)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
@@ -1773,8 +1796,7 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(dev_msg)
 
         # Add user message.
-        for chat_msg in request.messages:
-            messages.extend(parse_input_to_harmony_message(chat_msg))
+        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
