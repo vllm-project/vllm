@@ -2403,6 +2403,29 @@ def cp_gather_cache(
     )
 
 
+def cp_gather_and_upconvert_fp8_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+) -> None:
+    """Gather and upconvert FP8 KV cache to BF16 workspace.
+
+    Args:
+        src_cache: FP8 KV cache [num_blocks, block_size, 656]
+        dst: BF16 output workspace [total_tokens, 576]
+        block_table: Block indices [num_reqs, max_blocks]
+        seq_lens: Sequence lengths [num_reqs]
+        workspace_starts: Workspace start offsets [num_reqs]
+        batch_size: Number of requests
+    """
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
+        src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
+    )
+
+
 def indexer_k_quant_and_cache(
     k: torch.Tensor,
     kv_cache: torch.Tensor,

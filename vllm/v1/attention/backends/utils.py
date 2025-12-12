@@ -937,6 +937,33 @@ def split_decodes_and_prefills(
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
 
+def split_prefill_chunks(
+    seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
+) -> list[tuple[int, int]]:
+    """
+    Split the prefill requests into chunks such that the total sequence length
+    of each chunk is less than or equal to the workspace size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests on CPU.
+        workspace_size: The maximum workspace size (in tokens) per chunk.
+        request_offset: The offset to add to the request indices.
+    Returns:
+        A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
+    """
+    chunk_bounds = []
+    i, n = 0, len(seq_lens_cpu)
+    assert torch.all(seq_lens_cpu <= workspace_size).item()
+
+    while i < n:
+        start, chunk_total = i, 0
+        while i < n and (chunk_total + (s := seq_lens_cpu[i].item())) <= workspace_size:
+            chunk_total += s
+            i += 1
+        chunk_bounds.append((start + request_offset, i + request_offset))
+    return chunk_bounds
+
+
 def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
