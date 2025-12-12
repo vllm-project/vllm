@@ -448,12 +448,28 @@ def download_weights_from_hf(
             fs = HfFileSystem()
             file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-            # Use the first pattern found in the HF repo's files.
-            for pattern in allow_patterns:
-                matching = fnmatch.filter(file_list, pattern)
-                if len(matching) > 0:
-                    allow_patterns = [pattern]
-                break
+            # If downloading safetensors and an index file exists, use the
+            # specific file names from the index to avoid downloading
+            # unnecessary files (e.g., from subdirectories like "original/").
+            index_file = f"{model_name_or_path}/model.safetensors.index.json"
+            if "*.safetensors" in allow_patterns and index_file in file_list:
+                index_path = hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename="model.safetensors.index.json",
+                    cache_dir=cache_dir,
+                    revision=revision,
+                )
+                with open(index_path) as f:
+                    weight_map = json.load(f)["weight_map"]
+                # Use specific files from index
+                allow_patterns = list(set(weight_map.values()))
+            else:
+                # Use the first pattern found in the HF repo's files.
+                for pattern in allow_patterns:
+                    matching = fnmatch.filter(file_list, pattern)
+                    if len(matching) > 0:
+                        allow_patterns = [pattern]
+                    break
         except Exception as e:
             logger.warning(
                 "Failed to get file list for '%s'. Trying each pattern in "
@@ -468,20 +484,35 @@ def download_weights_from_hf(
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        for allow_pattern in allow_patterns:
+        # Check if allow_patterns has specific filenames (no glob chars).
+        # If so, download all at once. Otherwise try patterns one by one.
+        has_globs = any(any(c in p for c in "*?[]") for p in allow_patterns)
+        if not has_globs:
+            # Specific files from index - download all at once
             hf_folder = snapshot_download(
                 model_name_or_path,
-                allow_patterns=allow_pattern,
+                allow_patterns=allow_patterns,
                 ignore_patterns=ignore_patterns,
                 cache_dir=cache_dir,
                 tqdm_class=DisabledTqdm,
                 revision=revision,
                 local_files_only=local_only,
             )
-            # If we have downloaded weights for this allow_pattern,
-            # we don't need to check the rest.
-            if any(Path(hf_folder).glob(allow_pattern)):
-                break
+        else:
+            for allow_pattern in allow_patterns:
+                hf_folder = snapshot_download(
+                    model_name_or_path,
+                    allow_patterns=allow_pattern,
+                    ignore_patterns=ignore_patterns,
+                    cache_dir=cache_dir,
+                    tqdm_class=DisabledTqdm,
+                    revision=revision,
+                    local_files_only=local_only,
+                )
+                # If we have downloaded weights for this allow_pattern,
+                # we don't need to check the rest.
+                if any(Path(hf_folder).glob(allow_pattern)):
+                    break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info(
