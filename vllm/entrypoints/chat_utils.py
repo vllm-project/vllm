@@ -740,7 +740,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         if "audio" in uuids_by_modality and "audio_embeds" in uuids_by_modality:
             raise ValueError("Mixing raw audio and embedding inputs is not allowed")
 
-        mm_uuids: MultiModalUUIDDict = {}
+        mm_uuids = {}
         if "image_embeds" in uuids_by_modality:
             mm_uuids["image"] = uuids_by_modality["image_embeds"]
         if "image" in uuids_by_modality:
