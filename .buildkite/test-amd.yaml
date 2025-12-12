@@ -326,10 +326,10 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-- label: V1 Test e2e + engine # 30min
-  timeout_in_minutes: 45
+- label: V1 Test e2e + engine # 65min
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_1
+  agent_pool: mi325_4
   # grade: Blocking
   source_file_dependencies:
     - vllm/
