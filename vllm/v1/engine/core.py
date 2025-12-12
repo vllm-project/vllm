@@ -1058,19 +1058,17 @@ class EngineCoreProc(EngineCore):
                     else:
                         request = generic_decoder.decode(data_frames)
                     
-                    # Special handling for FT_SCALE_DOWN: Set flag immediately
-                    # This allows detection even when main thread is blocked in NCCL
+                    # Special handling for FT_SCALE_DOWN: Set flag AND queue for immediate processing
+                    # This triggers reconfiguration BEFORE any collective can timeout and cause std::terminate
                     if request_type == EngineCoreRequestType.FT_SCALE_DOWN:
-                        # Set flag for immediate detection by collective wrappers
+                        # Set flag for safety (in case exception happens first)
                         self.ft_scale_down_pending = request
                         logger.warning(
-                            "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread "
-                            "(main thread should be in collective)",
+                            "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread, "
+                            "queueing for immediate processing to avoid NCCL std::terminate",
                             self.engine_index
                         )
-                        # Don't queue it - processing happens via exception handler
-                        # when the collective times out (Scenario B - common case)
-                        continue  # Skip queueing
+                        # Fall through to queue it (don't skip!)
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1216,34 +1214,35 @@ class DPEngineCoreProc(EngineCoreProc):
         """
         Execute a collective operation with fault tolerance awareness.
         
-        This wrapper checks if FT is in progress and skips the collective if so.
-        Otherwise, just executes the collective normally.
-        
-        The caller (run_busy_loop) will check ft_scale_down_pending flag
-        to distinguish FT errors from GPU errors.
+        This wrapper checks if FT is pending/in-progress and skips the collective.
+        This is CRITICAL to avoid NCCL std::terminate when a rank has died.
         
         Args:
             collective_fn: Lambda/function that performs the collective
             operation_name: Name for logging
             
         Returns:
-            Result from collective_fn if successful
+            Result from collective_fn if successful, or dummy value if skipped
             
         Raises:
             RuntimeError: If collective fails (timeout or GPU error)
         """
-        # Skip collective if FT reconfiguration is already in progress
-        if self.in_reconfiguration:
+        # Skip collective if FT reconfiguration is pending or in progress
+        # This prevents NCCL timeout → std::terminate by avoiding collectives
+        # when we know a rank has died
+        if self.ft_scale_down_pending or self.in_reconfiguration:
             logger.debug(
-                "[FT] Rank %d: Skipping %s - FT reconfiguration in progress",
-                self.dp_rank, operation_name
+                "[FT] Rank %d: Skipping %s - FT pending/in-progress "
+                "(ft_pending=%s, in_reconfig=%s)",
+                self.dp_rank, operation_name,
+                self.ft_scale_down_pending is not None,
+                self.in_reconfiguration
             )
-            # Return a dummy value - caller should handle in_reconfiguration
+            # Return a dummy value - caller should handle gracefully
             return True  # Assume has unfinished work during reconfiguration
         
         # Execute the collective operation
-        # If it times out due to rank failure, the exception will be caught
-        # by run_busy_loop which will check ft_scale_down_pending
+        # If it times out, exception will be caught by run_busy_loop
         return collective_fn()
     
     def _handle_ft_reconfiguration_exception(self, exception: Exception) -> bool:
@@ -1753,9 +1752,47 @@ class DPEngineCoreProc(EngineCoreProc):
                 if not self.engines_running:
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
+        
+        elif request_type == EngineCoreRequestType.FT_SCALE_DOWN:
+            # Handle FT_SCALE_DOWN immediately to avoid NCCL std::terminate
+            # Processing here happens BEFORE any collective, preventing timeout crashes
+            logger.warning(
+                "[FT] Rank %d: Processing FT_SCALE_DOWN from queue immediately",
+                self.dp_rank
+            )
+            
+            scale_down_info = request
+            preserve_kv_cache = scale_down_info.get('preserve_kv_cache', True)
+            
+            # Set reconfiguration flag to skip any collectives
+            self.in_reconfiguration = True
+            
+            try:
+                if preserve_kv_cache:
+                    # Lightweight mode
+                    self._execute_ft_reconfiguration(scale_down_info)
+                else:
+                    # Full restart mode
+                    self._execute_ft_full_restart(scale_down_info)
+                
+                # Clear flag
+                self.ft_scale_down_pending = None
+                
+                logger.info(
+                    "[FT] Rank %d: Proactive reconfiguration complete",
+                    self.dp_rank
+                )
+            except Exception as e:
+                logger.error(
+                    "[FT] Rank %d: Reconfiguration failed: %s",
+                    self.dp_rank, e, exc_info=True
+                )
+                # Don't clear in_reconfiguration - let exception handler deal with it
+                raise
+            finally:
+                self.in_reconfiguration = False
+        
         else:
-            # FT_SCALE_DOWN is NOT queued - it's handled via exception handler
-            # when collective times out
             super()._handle_client_request(request_type, request)
 
     def _maybe_publish_request_counts(self):

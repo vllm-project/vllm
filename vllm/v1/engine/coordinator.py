@@ -115,7 +115,8 @@ class DPCoordinatorProc:
         set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
 
-        self.engines = [EngineState() for _ in range(engine_count)]
+        # Use dict to avoid index confusion when ranks fail
+        self.engines = {i: EngineState() for i in range(engine_count)}
 
         self.stats_update_interval_ms = min_stats_update_interval_ms
 
@@ -179,7 +180,7 @@ class DPCoordinatorProc:
             ) as publish_back,
         ):
             # Wait until all engines subscribe.
-            for _ in self.engines:
+            for _ in range(len(self.engines)):
                 if publish_back.recv() != b"\x01":
                     logger.error(
                         "DP Coordinator received unexpected message while "
@@ -240,8 +241,8 @@ class DPCoordinatorProc:
                         new_engine_count = decoded[1]
                         current_count = len(self.engines)
                         if new_engine_count > current_count:
-                            for _ in range(new_engine_count - current_count):
-                                self.engines.append(EngineState())
+                            for i in range(current_count, new_engine_count):
+                                self.engines[i] = EngineState()
                             # NOTE(yongji): handle the case
                             # where newly started engines have current_wave = 0
                             # if existing engines just finished a wave
@@ -259,7 +260,10 @@ class DPCoordinatorProc:
                                 new_engine_count,
                             )
                         else:
-                            self.engines = self.engines[:new_engine_count]
+                            # Remove engines beyond new_engine_count
+                            ranks_to_remove = [r for r in self.engines.keys() if r >= new_engine_count]
+                            for r in ranks_to_remove:
+                                del self.engines[r]
                             logger.info(
                                 "DPCoordinator scaled down from %s to %s engines",
                                 current_count,
@@ -275,6 +279,15 @@ class DPCoordinatorProc:
                         # Handle fault tolerance: rank failure
                         failed_rank = decoded[1]
                         ft_mode = decoded[2] if len(decoded) > 2 else "lightweight"
+                        
+                        # Check if this rank was already processed (prevent duplicates)
+                        if failed_rank not in self.engines:
+                            logger.warning(
+                                "[FT] Coordinator: Rank %d not in engines (already processed or invalid). "
+                                "Current engines: %s. Skipping.",
+                                failed_rank, sorted(self.engines.keys())
+                            )
+                            continue
                         
                         logger.error(
                             "[FT] Coordinator: Rank %d reported failure (mode=%s), "
@@ -298,8 +311,8 @@ class DPCoordinatorProc:
                             preserve_kv_cache=preserve_kv_cache
                         )
                         
-                        # Update coordinator state
-                        self.engines.pop(failed_rank)
+                        # Update coordinator state (remove failed engine)
+                        del self.engines[failed_rank]
                         
                         logger.info(
                             "[FT] Coordinator: Scaled down from %d to %d engines",
@@ -432,13 +445,15 @@ class DPCoordinatorProc:
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int]]:
         """Return list of [waiting, running] count lists for each engine."""
+        # Return in rank order
+        ranks = sorted(self.engines.keys())
         if do_copy:
-            return [copy.copy(e.request_counts) for e in self.engines]
-        return [e.request_counts for e in self.engines]
+            return [copy.copy(self.engines[r].request_counts) for r in ranks]
+        return [self.engines[r].request_counts for r in ranks]
     
     def _get_masked_ranks(self) -> list[int]:
         """Return list of masked rank indices."""
-        return [i for i, e in enumerate(self.engines) if e.is_masked]
+        return [rank for rank, engine in self.engines.items() if engine.is_masked]
     
     def _broadcast_ft_scale_down(
         self, 
