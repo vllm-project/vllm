@@ -398,15 +398,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             model_config=model_config,
         )
 
-        if cache_config.enable_prefix_caching:
-            block_size = cache_config.block_size
-        else:
-            block_size = model_config.max_model_len
         # get mamba page size
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=block_size,
+            block_size=-1,  # block_size doesn't matter for mamba page size
         ).page_size_bytes
 
         # Model may be marked as is_hybrid

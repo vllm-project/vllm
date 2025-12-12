@@ -238,14 +238,24 @@ class Scheduler(SchedulerInterface):
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
         )
-        # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-        # must be a multiple of `block_size`.
-        # As an exception, if `num_new_tokens` is less than `block_size`, the
-        # state is simply not cached, requiring no special handling.
-        # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-        # matching block. To prevent this from causing a Mamba cache miss, the
-        # last chunk must be larger than `block_size`.
         if request.num_output_tokens == 0:  # prefill
+            # Ensure new tokens for a request in the prefill phase do not contain
+            # sps tokens, especially in the last prefill chunk. For a hybrid-model,
+            # extra sps tokens would corrupt the generated Mamba state.
+            # TODO: This logic does not yet handle resumed requests.
+            if request.num_computed_tokens < request.num_prompt_tokens:
+                num_new_tokens = min(
+                    request.num_prompt_tokens - request.num_computed_tokens,
+                    num_new_tokens,
+                )
+
+            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+            # must be a multiple of `block_size`.
+            # As an exception, if `num_new_tokens` is less than `block_size`, the
+            # state is simply not cached, requiring no special handling.
+            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
+            # matching block. To prevent this from causing a Mamba cache miss, the
+            # last chunk must be larger than `block_size`.
             block_size = self.cache_config.block_size
             last_cache_position = (
                 request.num_prompt_tokens - request.num_prompt_tokens % block_size
@@ -324,24 +334,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            # Ensure new tokens for a request in the prefill phase do not contain
-            # sps tokens, especially in the last prefill chunk. For a hybrid-model,
-            # extra sps tokens would corrupt the generated Mamba state.
-            # TODO: This logic does not yet handle resumed requests.
-            if request.num_computed_tokens < request.num_prompt_tokens:
-                num_new_tokens = (
-                    min(
-                        request.num_tokens_with_spec + request.num_output_placeholders,
-                        request.num_prompt_tokens,
-                    )
-                    - request.num_computed_tokens
-                )
-            else:
-                num_new_tokens = (
-                    request.num_tokens_with_spec
-                    + request.num_output_placeholders
-                    - request.num_computed_tokens
-                )
+            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
 
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
