@@ -116,7 +116,7 @@ def test_cpu_fused_moe(
 ):
     current_platform.seed_everything(0)
 
-    topk_num = expert_num // 2
+    topk_num = max(expert_num // 2, 1)
     up_dim = 2 * intermediate_size
 
     input = torch.randn((batch_size, hidden_size), dtype=dtype) / (

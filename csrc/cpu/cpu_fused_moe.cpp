@@ -581,61 +581,79 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
         scalar_t* __restrict__ curr_output_buffer =
             output + token_id * output_size_2;
 
-        {
-          int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
-          float* __restrict__ w2_output_iter =
-              w2_gemm_output_buffer + w2_output_idx * output_size_2;
-          float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
-          vec_op::FP32Vec16 weight_vec(curr_weight[0]);
-          for (int32_t i = 0; i < output_size_2; i += 16) {
-            vec_op::FP32Vec16 vec(w2_output_iter);
-            vec = vec * weight_vec;
-            vec.save(ws_output_buffer_iter);
-
-            // update
-            w2_output_iter += 16;
-            ws_output_buffer_iter += 16;
-          }
-        }
-
-        {
-          for (int32_t idx = 1; idx < topk_num - 1; ++idx) {
-            int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
+        if (topk_num > 1) {
+          {
+            int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
             float* __restrict__ w2_output_iter =
                 w2_gemm_output_buffer + w2_output_idx * output_size_2;
             float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
-            vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
+            vec_op::FP32Vec16 weight_vec(curr_weight[0]);
             for (int32_t i = 0; i < output_size_2; i += 16) {
               vec_op::FP32Vec16 vec(w2_output_iter);
-              vec_op::FP32Vec16 sum(ws_output_buffer_iter);
-              sum = sum + vec * weight_vec;
-              sum.save(ws_output_buffer_iter);
+              vec = vec * weight_vec;
+              vec.save(ws_output_buffer_iter);
 
               // update
               w2_output_iter += 16;
               ws_output_buffer_iter += 16;
             }
           }
-        }
 
-        {
-          int32_t idx = topk_num - 1;
-          int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
+          {
+            for (int32_t idx = 1; idx < topk_num - 1; ++idx) {
+              int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
+              float* __restrict__ w2_output_iter =
+                  w2_gemm_output_buffer + w2_output_idx * output_size_2;
+              float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
+              vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
+              for (int32_t i = 0; i < output_size_2; i += 16) {
+                vec_op::FP32Vec16 vec(w2_output_iter);
+                vec_op::FP32Vec16 sum(ws_output_buffer_iter);
+                sum = sum + vec * weight_vec;
+                sum.save(ws_output_buffer_iter);
+
+                // update
+                w2_output_iter += 16;
+                ws_output_buffer_iter += 16;
+              }
+            }
+          }
+
+          {
+            int32_t idx = topk_num - 1;
+            int32_t w2_output_idx = curr_expand_token_id_index_buffer[idx];
+            float* __restrict__ w2_output_iter =
+                w2_gemm_output_buffer + w2_output_idx * output_size_2;
+            float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
+            scalar_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
+            vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
+            for (int32_t i = 0; i < output_size_2; i += 16) {
+              vec_op::FP32Vec16 vec(w2_output_iter);
+              vec_op::FP32Vec16 sum(ws_output_buffer_iter);
+              sum = sum + vec * weight_vec;
+              scalar_vec_t out_vec(sum);
+              out_vec.save(curr_output_buffer_iter);
+
+              // update
+              w2_output_iter += 16;
+              ws_output_buffer_iter += 16;
+              curr_output_buffer_iter += 16;
+            }
+          }
+        } else {
+          int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
           float* __restrict__ w2_output_iter =
               w2_gemm_output_buffer + w2_output_idx * output_size_2;
-          float* __restrict__ ws_output_buffer_iter = ws_output_buffer;
           scalar_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
-          vec_op::FP32Vec16 weight_vec(curr_weight[idx]);
+          vec_op::FP32Vec16 weight_vec(curr_weight[0]);
           for (int32_t i = 0; i < output_size_2; i += 16) {
             vec_op::FP32Vec16 vec(w2_output_iter);
-            vec_op::FP32Vec16 sum(ws_output_buffer_iter);
-            sum = sum + vec * weight_vec;
-            scalar_vec_t out_vec(sum);
+            vec = vec * weight_vec;
+            scalar_vec_t out_vec(vec);
             out_vec.save(curr_output_buffer_iter);
 
             // update
             w2_output_iter += 16;
-            ws_output_buffer_iter += 16;
             curr_output_buffer_iter += 16;
           }
         }
