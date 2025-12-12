@@ -23,11 +23,13 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+from vllm.entrypoints.pooling.classify.protocol import (
+    ClassificationCompletionRequest,
+)
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingCompletionRequest
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
-from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+from vllm.entrypoints.pooling.pooling.protocol import PoolingCompletionRequest
 from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
 from vllm.entrypoints.pooling.score.serving import ServingScores
@@ -151,7 +153,7 @@ async def _run_embedding_warmup(
     request_payload.setdefault("model", model)
     request_payload.setdefault("request_id", request_id)
 
-    request = EmbeddingRequest(**request_payload)
+    request = EmbeddingCompletionRequest(**request_payload)
     result = await handler.create_embedding(request, raw_request=None)
 
     # Consume if generator
@@ -171,7 +173,7 @@ async def _run_pooling_warmup(
     request_payload.setdefault("model", model)
     request_payload.setdefault("request_id", request_id)
 
-    request = PoolingRequest(**request_payload)
+    request = PoolingCompletionRequest(**request_payload)
     result = await handler.create_pooling(request, raw_request=None)
 
     if hasattr(result, "__anext__"):
@@ -189,7 +191,7 @@ async def _run_classify_warmup(
     request_payload = payload.copy()
     request_payload.setdefault("model", model)
 
-    request = ClassificationRequest(**request_payload)
+    request = ClassificationCompletionRequest(**request_payload)
     result = await handler.create_classify(request, raw_request=None)
 
     if hasattr(result, "__anext__"):
