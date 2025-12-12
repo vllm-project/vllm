@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -451,11 +452,11 @@ def download_weights_from_hf(
             # If downloading safetensors and an index file exists, use the
             # specific file names from the index to avoid downloading
             # unnecessary files (e.g., from subdirectories like "original/").
-            index_file = f"{model_name_or_path}/model.safetensors.index.json"
+            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
             if "*.safetensors" in allow_patterns and index_file in file_list:
                 index_path = hf_hub_download(
                     repo_id=model_name_or_path,
-                    filename="model.safetensors.index.json",
+                    filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
                     revision=revision,
                 )
