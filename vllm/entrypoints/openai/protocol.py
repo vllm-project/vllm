@@ -88,6 +88,50 @@ logger = init_logger(__name__)
 _LONG_INFO = torch.iinfo(torch.long)
 
 
+# Service tier to priority mapping
+SERVICE_TIER_PRIORITY_MAP: dict[str, int] = {
+    "auto": 0,  # Default priority
+    "default": 0,  # Default priority
+    "flex": 2,  # Lower priority
+    "scale": -1,  # Higher priority
+    "priority": -2,  # Highest priority
+}
+
+
+def get_effective_priority(
+    explicit_priority: int,
+    service_tier: str | None,
+) -> int:
+    """
+    Calculate effective priority considering both explicit priority and service tier.
+
+    Explicit priority takes precedence over service_tier.
+    If explicit_priority is non-zero, it is used.
+    Otherwise, service_tier is mapped to a priority value.
+
+    Args:
+        explicit_priority: Explicit priority value from request
+        service_tier: Service tier string from request
+
+    Returns:
+        Effective priority integer (lower = higher priority)
+    """
+    # TODO: raise error if both priority (non-zero) and service_tier are specified?
+    #  Currently service_tier is silently ignored when explicit_priority != 0,
+    #  which may confuse users.
+
+    # Explicit priority takes precedence
+    if explicit_priority != 0:
+        return explicit_priority
+
+    # Map service tier to priority
+    if service_tier and service_tier in SERVICE_TIER_PRIORITY_MAP:
+        return SERVICE_TIER_PRIORITY_MAP[service_tier]
+
+    # Default priority
+    return 0
+
+
 class OpenAIBaseModel(BaseModel):
     # OpenAI API does allow extra fields
     model_config = ConfigDict(extra="allow")
@@ -512,6 +556,14 @@ class ResponsesRequest(OpenAIBaseModel):
         data["input"] = processed_input
         return data
 
+    @property
+    def effective_priority(self) -> int:
+        """
+        Get the effective priority for this request
+        based on service_tier and priority.
+        """
+        return get_effective_priority(self.priority, self.service_tier)
+
 
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -548,6 +600,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = (
+        "auto"
+    )
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
@@ -996,6 +1051,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "Parameter 'cache_salt' must be a non-empty string if provided."
             )
         return data
+
+    @property
+    def effective_priority(self) -> int:
+        """
+        Get the effective priority for this request based on service_tier and priority.
+        """
+        return get_effective_priority(self.priority, self.service_tier)
 
 
 class CompletionRequest(OpenAIBaseModel):

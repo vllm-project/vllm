@@ -179,6 +179,11 @@ class OpenAIServingChat(OpenAIServing):
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
+        # Validate priority scheduling when non-zero priorities are used
+        priority_error = self._validate_priority_scheduling(request.effective_priority)
+        if priority_error is not None:
+            return priority_error
+
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
@@ -339,7 +344,7 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        priority=request.priority,
+                        priority=request.effective_priority,
                     )
 
                     generator = self.engine_client.generate(
@@ -348,7 +353,7 @@ class OpenAIServingChat(OpenAIServing):
                         sub_request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        priority=request.priority,
+                        priority=request.effective_priority,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
@@ -1601,6 +1606,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            service_tier=request.service_tier,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
