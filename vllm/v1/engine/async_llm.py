@@ -475,30 +475,30 @@ class AsyncLLM(EngineClient):
         if isinstance(prompt_text, Sequence) and len(prompt_text) != num_requests:
             raise ValueError("The lengths of prompts and prompt_text must be the same.")
 
-        if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
-            raise ValueError(
-                "The lengths of prompts and lora_request must be the same."
-            )
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and lora_request must be the same."
+                )
         elif lora_request is not None:
             raise ValueError("lora_request must be a sequence or None.")
 
-        if isinstance(trace_headers, list) and len(trace_headers) != num_requests:
-            raise ValueError(
-                "The lengths of prompts and trace_headers must be the same."
-            )
+        if isinstance(trace_headers, list):
+            if len(trace_headers) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and trace_headers must be the same."
+                )
         elif trace_headers is not None:
             raise ValueError("trace_headers must be a list or None.")
 
         if isinstance(priority, Sequence) and len(priority) != num_requests:
             raise ValueError("The lengths of prompts and priority must be the same.")
 
-        if (
-            isinstance(data_parallel_rank, Sequence)
-            and len(data_parallel_rank) != num_requests
-        ):
-            raise ValueError(
-                "The lengths of prompts and data_parallel_rank must be the same."
-            )
+        if isinstance(data_parallel_rank, Sequence):
+            if len(data_parallel_rank) != num_requests:
+                raise ValueError(
+                    "The lengths of prompts and data_parallel_rank must be the same."
+                )
         elif data_parallel_rank is not None:
             raise ValueError("data_parallel_rank must be a sequence.")
 
