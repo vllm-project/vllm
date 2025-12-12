@@ -519,8 +519,7 @@ class GPUModelRunner(
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
-            # See detailed explanation in
-            # https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
             # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
             # the modality of inputs. For text-only inputs, each dimension has
@@ -1737,12 +1736,10 @@ class GPUModelRunner(
             if isinstance(attn_metadata, list):
                 for ub_metadata in attn_metadata:
                     for _metadata in ub_metadata.values():
-                        # type: ignore[attr-defined]
-                        _metadata.mm_prefix_range = req_doc_ranges
+                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
             else:
                 for _metadata in attn_metadata.values():
-                    # type: ignore[attr-defined]
-                    _metadata.mm_prefix_range = req_doc_ranges
+                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -2193,7 +2190,7 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)  # type: ignore[assignment]
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
