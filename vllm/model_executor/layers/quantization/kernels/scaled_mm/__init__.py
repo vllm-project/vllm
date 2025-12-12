@@ -69,7 +69,7 @@ def choose_scaled_mm_linear_kernel(
             continue
 
         # If the current platform uses compute_capability,
-        # make sure the kernel supports the compute cability.
+        # make sure the kernel supports the compute capability.
         if compute_capability is not None:
             kernel_min_capability = kernel.get_min_capability()
             if (
