@@ -455,6 +455,13 @@ def test_eagle_correctness(
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
         method, model_name, spec_model_name, tp_size = model_setup
+        if current_platform.is_rocm() and tp_size > 1:
+            available_gpus = torch.cuda.device_count()
+            if available_gpus < tp_size:
+                pytest.skip(
+                    f"Test requires {tp_size} GPUs, but only {available_gpus} available"
+                )
+
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
@@ -525,6 +532,12 @@ def test_mtp_correctness(
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         method, model_name, tp_size = model_setup
+        if current_platform.is_rocm() and tp_size > 1:
+            available_gpus = torch.cuda.device_count()
+            if available_gpus < tp_size:
+                pytest.skip(
+                    f"Test requires {tp_size} GPUs, but only {available_gpus} available"
+                )
 
         ref_llm = LLM(
             model=model_name,
