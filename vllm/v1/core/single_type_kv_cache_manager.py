@@ -808,19 +808,18 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
     def free(self, request_id: str) -> None:
         """Free cross-attention blocks, handling shared blocks properly."""
-        # Get encoder hash if this request was sharing blocks
+        # Get encoder hash if this request was sharing blocks  
         encoder_hash = self.req_to_encoder_hash.pop(request_id, None)
         
         # Free blocks normally (decrements ref_cnt)
         super().free(request_id)
         
-        # If this was the last request using this encoder, clean up mapping
+        # Clean up encoder mapping only if ALL references are gone
         if encoder_hash and encoder_hash in self.encoder_hash_to_blocks:
             blocks = self.encoder_hash_to_blocks[encoder_hash]
-            # Check if any blocks still have references
-            if all(block.ref_cnt == 0 for block in blocks):
+            # Only remove mapping if no blocks have any references left
+            if blocks and all(block.ref_cnt == 0 for block in blocks):
                 del self.encoder_hash_to_blocks[encoder_hash]
-                logger.info(f"[CROSS-ATTN CLEANUP] Removed shared blocks for encoder {encoder_hash[:16]}")
     
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         # Cross-attention blocks contain request-specific encoder states
