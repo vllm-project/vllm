@@ -81,7 +81,6 @@ class Glm4Attention(nn.Module):
         config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim or hidden_size // self.total_num_heads
-        self.rotary_dim = self.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -103,7 +102,6 @@ class Glm4Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
