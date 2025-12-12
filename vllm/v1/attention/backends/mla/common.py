@@ -1735,7 +1735,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
 
-            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod):
                 from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
                 from aiter.ops.triton.quant import dynamic_mxfp4_quant
                 input = kv_c_normed
@@ -1783,13 +1783,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
                 k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-                attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                    prefill=prefill_metadata,
-                    chunk_idx=i,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
+            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                prefill=prefill_metadata,
+                chunk_idx=i,
+                q=q,
+                k=k,
+                v=v,
+            )
 
             if output is None:
                 output = attn_output
@@ -1881,7 +1881,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 toks=toks,
             )
 
-            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+            if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod):
                 from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
                 from aiter.ops.triton.quant import dynamic_mxfp4_quant
                 input = kv_c_normed
@@ -1928,13 +1928,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
                 k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-                attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                    prefill=prefill_metadata,
-                    chunk_idx=i,
-                    q=q,
-                    k=k,
-                    v=v,
-                )
+            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                prefill=prefill_metadata,
+                chunk_idx=i,
+                q=q,
+                k=k,
+                v=v,
+            )
 
             if output is None:
                 output = attn_output
@@ -1972,7 +1972,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_context = attn_metadata.prefill.chunked_context is not None
 
 
-        if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod) and False:
+        if self.is_aiter_enabled and isinstance(self.kv_b_proj.quant_method, QuarkLinearMethod):
             from aiter.ops.triton.fused_gemm_afp4wfp4_split_cat import fused_gemm_afp4wfp4_split_cat
             from aiter.ops.triton.quant import dynamic_mxfp4_quant
             input = kv_c_normed

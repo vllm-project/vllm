@@ -26,6 +26,8 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
+from vllm.model_executor.parameter import ModelWeightParameter
+from vllm.model_executor.utils import set_weight_attrs
 
 from .quark_scheme import QuarkScheme
 
@@ -349,3 +351,55 @@ class QuarkOCP_MX(QuarkScheme):
                 self.rocm_use_aiter_fp4_asm_gemm,
                 self.out_dtype,
             )
+
+
+class QuarkW16OCP_MX(QuarkOCP_MX):
+    def __init__(self, weight_quant_spec: dict[str, Any],
+                 input_quant_spec: dict[str, Any]):
+        self.out_dtype = torch.get_default_dtype()
+        self.qscheme = "per_group"
+        self.weight_quant_spec = weight_quant_spec
+        self.input_quant_spec = input_quant_spec
+        self.emulate = not current_platform.supports_mx()
+        self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
+        if not self.emulate and (dynamic_mxfp4_quant is None
+                                 or gemm_afp4wfp4 is None):
+            # Currently need these kernels if not emulating
+            raise NotImplementedError(
+                f"{self.__class__.__name__} requires AITER to be installed "
+                "for non-emulation mode! Please refer to "
+                "https://github.com/ROCm/aiter for installation details.")
+        
+    def create_weights(self, layer: torch.nn.Module,
+                       output_partition_sizes: list[int],
+                       input_size_per_partition: int,
+                       params_dtype: torch.dtype, weight_loader: Callable,
+                       **kwargs):
+                # This method creates unquantized linear weights.
+        # The weights are not quantized, and they are not sharded.
+        # The amount of memory allocated for the weights is
+        # sum(output_partition_sizes) * input_size_per_partition.
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                sum(output_partition_sizes),
+                input_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        # set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0, "weight_loader": weight_loader})
+        layer.register_parameter("weight", weight)
+        set_weight_attrs(weight, kwargs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        layer.weight = torch.nn.Parameter(layer.weight.data,
+                                                requires_grad=False)
+        w_q, w_s = dynamic_mxfp4_quant(layer.weight)
+        layer.weight_scale = torch.nn.Parameter(
+                    w_s.T.contiguous(),
+                    requires_grad=False)
+        layer.weight = torch.nn.Parameter(w_q,
+                                        requires_grad=False)
+        #super().process_weights_after_loading(layer)

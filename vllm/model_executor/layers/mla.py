@@ -109,7 +109,6 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self.use_aiter_triton = rocm_aiter_ops.is_enabled()
         self.use_triton_qkv_a_proj_layernrom_fp8 = rocm_aiter_ops.is_enabled() and quant_config.get_name() == 'fp8'
         self.use_triton_qkv_a_proj_layernrom_fp4 = rocm_aiter_ops.is_enabled() and quant_config.get_name() == 'quark'
-        self.use_triton_qkv_a_proj_layernrom_fp4 = False
 
         self.prefix = prefix
 

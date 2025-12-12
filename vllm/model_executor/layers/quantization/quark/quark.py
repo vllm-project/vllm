@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkOCP_MX,
+    QuarkW16OCP_MX,
     QuarkScheme,
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
@@ -108,7 +109,16 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            return UnquantizedLinearMethod()
+            if current_platform.is_rocm():
+                if prefix == "lm_head":
+                    return UnquantizedLinearMethod()
+
+                scheme = self.get_scheme(layer=layer, layer_name=prefix)
+                layer.scheme = scheme
+                return QuarkLinearMethod(self)
+            else:
+                return UnquantizedLinearMethod()
+            
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
@@ -376,7 +386,7 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: dict[str, Any]) -> "QuarkScheme":
+    def _get_scheme_from_config(self, config: dict[str, Any], layer_name: str) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -399,6 +409,14 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_ocp_mx(weight_config, input_config):
+            if current_platform.is_rocm():
+                exclude_layers = cast(list[str], self.quant_config.get("exclude"))
+                if should_ignore_layer(
+                    layer_name, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
+                ):
+                    return QuarkW16OCP_MX(weight_config, input_config)
+                return QuarkOCP_MX(weight_config, input_config)
+            
             return QuarkOCP_MX(weight_config, input_config)
 
         raise NotImplementedError(
@@ -411,7 +429,7 @@ class QuarkConfig(QuantizationConfig):
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
         # Find the quant_scheme
-        scheme = self._get_scheme_from_config(layer_quant_config)
+        scheme = self._get_scheme_from_config(layer_quant_config, layer_name)
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())

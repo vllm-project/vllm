@@ -310,7 +310,6 @@ class DeepseekV2MoE(nn.Module):
                     self.use_triton_fused_shared_expert_fp4 = True
                     self.rocm_aiter_triton_fused_shared_expert_func = torch.ops.vllm.rocm_aiter_triton_fused_shared_expert_fp4
                     self.rocm_aiter_triton_fused_down_proj_mul_add_func = torch.ops.vllm.rocm_aiter_triton_fused_down_proj_mul_add_fp4
-                    self.is_fusion_triton_shared_experts_enabled = False
                 else:
                     raise NotImplementedError(f"{quant_config.get_name()=} which is not supported for VLLM_ROCM_USE_AITER_TRITON_FUSION_SHARED_EXPERTS")
                 logger.info(f"[Aiter] {self.__class__.__name__} is registered with {self.rocm_aiter_triton_fused_shared_expert_func.__name__} and {self.rocm_aiter_triton_fused_down_proj_mul_add_func.__name__}")
@@ -458,9 +457,6 @@ class DeepseekV2MoE(nn.Module):
         if self.is_fusion_triton_shared_experts_enabled and hidden_states.dtype != torch.float16:
             assert shared_output is None
             final_hidden_states = self.rocm_aiter_triton_fused_down_proj_mul_add_func(shared_output_q, shared_output_s, self.shared_experts.down_proj.weight, self.shared_experts.down_proj.weight_scale, self.routed_scaling_factor, final_hidden_states)
-            # assert shared_output is not None
-            # final_hidden_states *= self.routed_scaling_factor
-            # final_hidden_states += shared_output
         else:
             if hidden_states.dtype != torch.float16:
                 if not self.is_rocm_aiter_moe_enabled:
@@ -1232,7 +1228,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 self.use_triton_fused_rmsnorm_fp8_quant = True
             elif quant_config.get_name() == 'quark':
                 self.use_triton_fused_rmsnorm_fp4_quant = True
-                self.use_triton_fused_rmsnorm_fp4_quant = False
             else:
                 raise NotImplementedError(f"{quant_config.get_name()=} which is not supported with the current version of AITER")
             logger.info(f"[Aiter] {self.__class__.__name__} has {quant_config.get_name()=}")
