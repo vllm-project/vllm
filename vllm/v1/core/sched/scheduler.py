@@ -839,7 +839,7 @@ class Scheduler(SchedulerInterface):
         request = session.streaming_queue.popleft()
 
         num_new_tokens = session.num_tokens - session.num_computed_tokens
-        assert num_new_tokens in {0, 1}, f"got {num_new_tokens=}"
+        assert num_new_tokens in (0, 1), f"got {num_new_tokens=}"
         if num_new_tokens == 1:
             assert session._all_token_ids[-1] == session._output_token_ids[-1]
             del session._all_token_ids[-1]
@@ -853,10 +853,10 @@ class Scheduler(SchedulerInterface):
                 )
             session.mm_features.extend(request.mm_features)
 
-        session._all_token_ids.extend(request.prompt_token_ids or [])
+        session._all_token_ids.extend(request.prompt_token_ids or ())
         if session.prompt_token_ids is None:
             session.prompt_token_ids = []
-        session.prompt_token_ids.extend(request.prompt_token_ids or [])
+        session.prompt_token_ids.extend(request.prompt_token_ids or ())
         if session.prompt_embeds is not None and request.prompt_embeds is not None:
             session.prompt_embeds = torch.cat(
                 [session.prompt_embeds, request.prompt_embeds]
@@ -1420,15 +1420,14 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        if request.request_id not in self.requests:
+        # Check for existing streaming session
+        existing = self.requests.get(request.request_id)
+        if existing is not None and existing.streaming_queue is not None:
+            existing.streaming_queue.append(request)
+        else:
+            # New request or non-streaming request
             self.waiting.add_request(request)
             self.requests[request.request_id] = request
-        else:
-            session = self.requests[request.request_id]
-            assert session.streaming_queue is not None, (
-                "streaming queue must be initialized for session"
-            )
-            session.streaming_queue.append(request)
 
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
