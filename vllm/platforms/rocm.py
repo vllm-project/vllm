@@ -226,9 +226,6 @@ class RocmPlatform(Platform):
                 raise ValueError(
                     "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                 )
-            assert block_size == 1, (
-                "Sparse MLA backend on ROCm only supports block size 1 for now."
-            )
             logger.info_once("Using Sparse MLA backend on V1 engine.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
@@ -380,6 +377,8 @@ class RocmPlatform(Platform):
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
+        hf_config = model_config.hf_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enaled()
@@ -431,6 +430,11 @@ class RocmPlatform(Platform):
 
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
+
+        # Default dispatch to rocm's sparse_attn_indexer implementation
+        if hf_config is not None and hasattr(hf_config, "index_topk"):
+            print("add sparse attn indexer to rocm custom ops", flush=True)
+            compilation_config.custom_ops.append("+sparse_attn_indexer")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

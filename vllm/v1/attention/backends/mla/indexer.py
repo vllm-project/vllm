@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -24,9 +23,7 @@ logger = init_logger(__name__)
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1 if current_platform.is_rocm() else 64]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -62,6 +59,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seqlen_ks: torch.Tensor
     cu_seqlen_ke: torch.Tensor
     cu_seq_lens: torch.Tensor
+    token_to_seq: torch.Tensor
     total_seq_lens: int
     token_start: int
     token_end: int
@@ -258,6 +256,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         token_start = query_start_loc_cpu[reqs_start].item()
         token_end = query_start_loc_cpu[reqs_end].item()
         total_seq_lens = seq_lens_cpu[reqs_start:reqs_end].sum()
+        seq_idx = torch.arange(0, reqs_end - reqs_start, dtype=torch.int32)
+        token_to_seq = torch.repeat_interleave(
+            seq_idx, seq_lens_cpu[reqs_start:reqs_end]
+        ).to(self.device)
         assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = (
             torch.cat(
@@ -273,6 +275,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             cu_seqlen_ks=cu_seqlen_ks,
             cu_seqlen_ke=cu_seqlen_ke,
             cu_seq_lens=cu_seq_lens,
+            token_to_seq=token_to_seq,
             total_seq_lens=total_seq_lens,
             block_table=block_table[reqs_start:reqs_end],
             token_start=token_start,
