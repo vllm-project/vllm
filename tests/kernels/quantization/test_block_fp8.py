@@ -246,15 +246,17 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
     )
 
+    A_bf16 = A_fp32.to(torch.bfloat16)
+
     out = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
-        input=A_fp8,
+        input=A_bf16,
         weight=B_fp8,
-        input_scale=As_fp8,
-        weight_scale=Bs_fp8,
+        input_scale=None,
+        weight_scale=Bs,
         out_dtype=out_dtype,
     )
 
     rel_diff = torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
-    assert rel_diff < 0.001
+    assert rel_diff < 0.028

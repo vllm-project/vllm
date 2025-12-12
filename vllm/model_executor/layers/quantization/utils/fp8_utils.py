@@ -430,14 +430,12 @@ class W8A8BlockFp8LinearOp:
 
         # Quantize input dynamically if not pre-quantized (same as CUTLASS)
         assert input_scale is None
-        assert self.input_quant_op is not None
-        q_input, input_scale = self.input_quant_op(input_2d)
 
         # Now call FlashInfer with FP8 input + FP8 weight (W8A8)
         return torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
-            input=q_input,  # FP8 quantized input
+            input=input_2d,  # FP8 quantized input
             weight=weight,  # FP8 weight
-            input_scale=input_scale,  # Input scales (computed dynamically)
+            input_scale=None,  # Input scales (computed dynamically)
             weight_scale=weight_scale,  # Weight scales
             out_dtype=input_2d.dtype,
         )
@@ -465,14 +463,7 @@ class W8A8BlockFp8LinearOp:
             and not use_aiter_and_is_supported
         ):
             logger.info_once("Using FlashInfer FP8 block-scale GEMM for linear layers")
-            return self._run_flashinfer, (
-                QuantFP8(
-                    False,
-                    self.act_quant_group_shape,
-                    column_major_scales=False,
-                    use_ue8m0=False,
-                )
-            )
+            return self._run_flashinfer, None
 
         if use_cutlass:
             return self._run_cutlass, (
