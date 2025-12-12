@@ -3403,12 +3403,7 @@ class GPUModelRunner(
     def _copy_draft_token_ids(
         self, draft_token_ids: torch.Tensor, num_reqs: int
     ) -> None:
-        """Copy draft token ids to CPU asynchronously.
-
-        This is used for async scheduling with spec decode + penalty/bad_words.
-        The draft_token_ids will be used in the next step to update
-        input_batch.spec_token_ids for correct penalty/bad_words computation.
-        """
+        """Copy draft token ids to CPU asynchronously."""
         if self.draft_token_ids_copy_event is None or not isinstance(
             draft_token_ids, torch.Tensor
         ):
@@ -3426,12 +3421,7 @@ class GPUModelRunner(
             self.draft_token_ids_copy_event.record()
 
     def _get_draft_token_ids_cpu(self) -> list[list[int]] | None:
-        """Get previously copied draft token ids from CPU.
-
-        Called at the beginning of the next step to update spec_token_ids
-        for async scheduling with spec decode + penalty/bad_words.
-        Returns None if no draft tokens were copied in previous step.
-        """
+        """Get previously copied draft token ids from CPU."""
         if isinstance(self._draft_token_ids, list):
             return self._draft_token_ids
 

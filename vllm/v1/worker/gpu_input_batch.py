@@ -971,10 +971,9 @@ class InputBatch:
         num_draft_tokens: list[int] | None = None,
     ) -> None:
         """
-        In async scheduling case, update spec_token_ids in sampling metadata
-        with real draft token ids from prior step.
-        This is called right before they are needed by the rejection sampler
-        for penalty/bad_words computation.
+        In async scheduling case, update spec_token_ids in sampling metadata with
+        real draft token ids from prior step. This is called right before they are
+        needed by the rejection sampler for penalty/bad_words computation.
         """
         if draft_token_ids_cpu is None or self.prev_req_id_to_index is None:
             return
