@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
+import functools
 from collections.abc import Callable
 from typing import cast
 
@@ -525,11 +526,13 @@ class MultiHeadAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self.fa_version = (
-            get_flash_attn_version()
-            if self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            else None
-        )
+        self.fa_version = None
+        if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
+            self.fa_version = get_flash_attn_version()
+            assert self._flash_attn_varlen_func is not None
+            self._flash_attn_varlen_func = functools.partial(
+                self._flash_attn_varlen_func, fa_version=self.fa_version
+            )
 
         logger.info_once(
             f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
@@ -566,10 +569,6 @@ class MultiHeadAttention(nn.Module):
                 0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
             )
 
-            # Only pass fa_version for FLASH_ATTN backend (not ROCM_AITER_FA)
-            extra_kwargs = (
-                {"fa_version": self.fa_version} if self.fa_version is not None else {}
-            )
             out = self._flash_attn_varlen_func(
                 query.flatten(0, 1),
                 key.flatten(0, 1),
@@ -579,7 +578,6 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
-                **extra_kwargs,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
