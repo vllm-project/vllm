@@ -143,10 +143,12 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
-            num_tokens_main_model: w/o spec decode, this should be the same as
-            num_tokens, with spec decode, TODO more comments here.
+            num_tokens_main_model: The number of tokens for the main model (aka target
+                model in spec decode). w/o spec decode, it is num_tokens;
+                with spec decode, it is num_tokens - num_lookahead_tokens.
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+
         Returns:
             The new allocated blocks.
         """
