@@ -191,19 +191,19 @@ class Base(
             )
             # Create a dummy model to get the decoder class
             model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
-            decoder = model.get_decoder()
-            decoder_cls = type(decoder)
+            language_model = model.get_decoder()
+            language_model_cls = type(language_model)
 
-            # Decorate the decoder_cls for torch compile and patch it where it came from
+            # Decorate the language_model_cls for torch compile and patch it
             @support_torch_compile(
                 dynamic_arg_dims=self._dynamic_arg_dims,
                 enable_if=can_enable_torch_compile,
             )
-            class Wrapper(decoder_cls):
+            class Wrapper(language_model_cls):
                 pass
 
-            module = sys.modules[decoder_cls.__module__]
-            setattr(module, decoder_cls.__name__, Wrapper)
+            module = sys.modules[language_model_cls.__module__]
+            setattr(module, language_model_cls.__name__, Wrapper)
             del model
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
