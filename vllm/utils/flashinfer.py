@@ -254,6 +254,16 @@ def has_nvidia_artifactory() -> bool:
 
 
 @functools.cache
+def is_sm90_supported() -> bool:
+    return current_platform.is_device_capability(90)
+
+
+@functools.cache
+def is_sm100f_supported() -> bool:
+    return any(current_platform.is_device_capability(cap) for cap in [100, 103])
+
+
+@functools.cache
 def supports_trtllm_attention() -> bool:
     """
     TRTLLM attention is supported if the platform is SM100,

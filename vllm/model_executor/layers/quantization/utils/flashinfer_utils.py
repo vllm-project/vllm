@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
-from vllm.platforms import current_platform
+from vllm.utils.flashinfer import is_sm90_supported, is_sm100f_supported
 
 logger = init_logger(__name__)
 
@@ -288,10 +288,7 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
 
     flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
     if flashinfer_moe_backend in backend_map:
-        if (
-            flashinfer_moe_backend == "latency"
-            and not current_platform.has_device_capability(100)
-        ):
+        if flashinfer_moe_backend == "latency" and not is_sm100f_supported():
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
                 "SM100 and later, using CUTLASS backend instead",
@@ -299,7 +296,7 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
             )
             return FlashinferMoeBackend.CUTLASS
         return backend_map[flashinfer_moe_backend]
-    elif current_platform.is_device_capability(90):
+    elif is_sm90_supported():
         return FlashinferMoeBackend.CUTLASS
 
     raise ValueError(

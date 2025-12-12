@@ -220,7 +220,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_nvidia_artifactory
+from vllm.utils.flashinfer import has_nvidia_artifactory, is_sm100f_supported
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
@@ -446,7 +446,7 @@ def use_flashinfer_prefill() -> bool:
         and flashinfer_available
         and not vllm_config.attention_config.use_cudnn_prefill
         and not vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
-        and current_platform.is_device_capability(100)
+        and is_sm100f_supported()
     )
 
 
@@ -457,7 +457,7 @@ def use_cudnn_prefill() -> bool:
     return (
         flashinfer_available
         and vllm_config.attention_config.use_cudnn_prefill
-        and current_platform.is_device_capability(100)
+        and is_sm100f_supported()
         and has_nvidia_artifactory()
     )
 
@@ -470,7 +470,7 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     return (
         flashinfer_available
         and vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill
-        and current_platform.is_device_capability(100)
+        and is_sm100f_supported()
     )
 
 
