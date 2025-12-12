@@ -17,7 +17,7 @@ from tests.compile.fusion_test_utils import (
     is_blackwell,
     run_model,
 )
-from tests.utils import flat_product
+from tests.utils import cuda_device_count_stateless, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.backends.abstract import AttentionMetadata
@@ -543,6 +543,8 @@ def test_attn_quant(
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition requires torch>=2.9")
+    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
+        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
