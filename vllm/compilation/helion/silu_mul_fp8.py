@@ -297,7 +297,7 @@ class SiluMulFp8Benchmark(KernelBenchmark):
             Input shapes are (batch, 2 * hidden_dim).
         """
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-        hidden_dims = [4096, 5120, 5504, 6912, 7168, 8192, 10240, 14336, 16384]
+        hidden_dims = [4096, 5120, 5504, 6912, 7168, 8192, 10240]
 
         shapes_bf16 = []
         shapes_fp16 = []
