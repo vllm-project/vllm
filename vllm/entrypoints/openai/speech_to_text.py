@@ -357,7 +357,10 @@ class OpenAISpeechToText(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        if request.stream:
+        # We do not stream the results when using beam search.
+        stream = request.stream and not request.use_beam_search
+
+        if stream:
             return stream_generator_method(
                 request, list_result_generator, request_id, request_metadata, duration_s
             )
@@ -427,7 +430,9 @@ class OpenAISpeechToText(OpenAIServing):
                     )
             return final_response
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            # Client cancelled - no need to return response, just log and re-raise
+            logger.info(f"Client disconnected for request {request_id}")
+            raise
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -473,8 +478,14 @@ class OpenAISpeechToText(OpenAIServing):
                     # the result_generator, it needs to be sent as the FIRST
                     # response (by the try...catch).
 
-                    # Just one output (n=1) supported.
-                    assert len(res.outputs) == 1
+                    # Streaming only supports single output (n=1).
+                    # Note: Beam search is disabled for streaming (see above),
+                    # so this should always be 1.
+                    if len(res.outputs) != 1:
+                        raise ValueError(
+                            f"Streaming expects exactly 1 output, got {len(res.outputs)}. "
+                            "Note: Beam search is not supported with streaming."
+                        )
                     output = res.outputs[0]
 
                     delta_message = DeltaMessage(content=output.text)
