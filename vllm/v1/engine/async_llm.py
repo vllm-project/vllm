@@ -494,13 +494,13 @@ class AsyncLLM(EngineClient):
         if isinstance(priority, Sequence) and len(priority) != num_requests:
             raise ValueError("The lengths of prompts and priority must be the same.")
 
-        if isinstance(data_parallel_rank, Sequence):
-            if len(data_parallel_rank) != num_requests:
-                raise ValueError(
-                    "The lengths of prompts and data_parallel_rank must be the same."
-                )
-        elif data_parallel_rank is not None:
-            raise ValueError("data_parallel_rank must be a sequence.")
+        if (
+            isinstance(data_parallel_rank, Sequence)
+            and len(data_parallel_rank) != num_requests
+        ):
+            raise ValueError(
+                "The lengths of prompts and data_parallel_rank must be the same."
+            )
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -575,10 +575,6 @@ class AsyncLLM(EngineClient):
                 request_id = [request_id]  # type: ignore[list-item]
                 prompt_text = [prompt_text] if prompt_text is not None else None  # type: ignore[list-item]
                 trace_headers = [trace_headers] if trace_headers is not None else None  # type: ignore[list-item]
-                priority = [priority]  # type: ignore[list-item]
-                data_parallel_rank = (
-                    [data_parallel_rank] if data_parallel_rank is not None else None  # type: ignore[list-item]
-                )
 
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
