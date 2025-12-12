@@ -230,7 +230,8 @@ class EagleProposer:
         """
         eagle_cudagraph_mode = (
             CUDAGraphMode.PIECEWISE
-            if not self.speculative_config.enforce_eager and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
+            if not self.speculative_config.enforce_eager
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE
             else CUDAGraphMode.NONE
         )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
