@@ -8,6 +8,12 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
 class FusedMoERouter(ABC):
+    """
+    FusedMoERouter is an abstract class that primarily provides a
+    'select_experts' method that is used for routing hidden states based
+    on router logits.
+    """
+
     @property
     @abstractmethod
     def routing_method_type(self) -> RoutingMethodType:
@@ -19,4 +25,17 @@ class FusedMoERouter(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """
+        Route the input hidden states to the top-k experts based on the
+        router logits.
+
+        Returns:
+            (topk_weights, topk_ids, zero_expert_result)
+            (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+            The weights, expert ids, and (optional) zero expert computation result.
+
+            **Compatibility**: When EPLB is not enabled, the returned ids are
+            equivalent to global logical ids, so should be compatible with
+            plain MoE implementations without redundant experts.
+        """
         raise NotImplementedError
