@@ -2131,7 +2131,7 @@ class GPUModelRunner(
         )
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_logits, piecewise_or_eager_only=True
+            num_logits, disable_full=True
         )
         num_logits_padded = batch_desc.num_tokens
         logits_indices_padded = self.kv_sharing_fast_prefill_logits_indices[
