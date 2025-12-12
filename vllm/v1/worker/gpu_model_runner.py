@@ -2245,6 +2245,8 @@ class GPUModelRunner(
                         pos_info.get_embeds_indices_in_range(start_idx, end_idx)
                     )
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
+                else:
+                    mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
