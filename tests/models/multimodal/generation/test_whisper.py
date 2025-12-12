@@ -141,6 +141,34 @@ def test_models(
     )
 
 
+@pytest.mark.cpu_model
+@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("num_logprobs", [5])
+@create_new_process_for_each_test("spawn")
+def test_models_cpu(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    dtype: str,
+    num_logprobs: int,
+    input_audios,
+) -> None:
+    # @create_new_process_for_each_test() does not work for some runners
+    # TODO: to fix cpu privilege issues in run-cpu-test-arm.sh
+    run_test(
+        hf_runner,
+        vllm_runner,
+        input_audios,
+        model,
+        dtype=dtype,
+        max_model_len=448,
+        max_tokens=200,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=1,
+    )
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
