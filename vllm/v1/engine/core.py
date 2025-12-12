@@ -1058,17 +1058,18 @@ class EngineCoreProc(EngineCore):
                     else:
                         request = generic_decoder.decode(data_frames)
                     
-                    # Special handling for FT_SCALE_DOWN: Set flag AND queue for immediate processing
-                    # This triggers reconfiguration BEFORE any collective can timeout and cause std::terminate
+                    # Special handling for FT_SCALE_DOWN: Set flag for proactive handling
+                    # The busy loop checks this flag and triggers reconfiguration immediately
+                    # This prevents NCCL std::terminate by reconfiguring before any collective
                     if request_type == EngineCoreRequestType.FT_SCALE_DOWN:
-                        # Set flag for safety (in case exception happens first)
                         self.ft_scale_down_pending = request
                         logger.warning(
                             "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread, "
-                            "queueing for immediate processing to avoid NCCL std::terminate",
+                            "flag set for proactive reconfiguration",
                             self.engine_index
                         )
-                        # Fall through to queue it (don't skip!)
+                        # Don't queue - handled via flag check in busy loop
+                        continue
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1539,7 +1540,27 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         
         try:
-            # ===== STEP 1: Update EPLB State =====
+            # ===== STEP 1: Abort Existing Process Groups =====
+            # This releases ranks stuck in NCCL collectives!
+            # Only works if NCCL was configured with blocking=0
+            logger.info("[FT] Rank %d: Aborting existing process groups", self.dp_rank)
+            
+            if hasattr(self, 'dp_group') and self.dp_group:
+                try:
+                    if hasattr(self.dp_group, 'device_group'):
+                        logger.info("[FT] Rank %d: Aborting DP device group (NCCL)", self.dp_rank)
+                        self.dp_group.device_group.abort()
+                    
+                    if hasattr(self.dp_group, 'cpu_group'):
+                        logger.info("[FT] Rank %d: Aborting DP CPU group (Gloo)", self.dp_rank)
+                        self.dp_group.cpu_group.abort()
+                except Exception as abort_err:
+                    logger.warning(
+                        "[FT] Rank %d: Error aborting groups (may not support abort): %s",
+                        self.dp_rank, abort_err
+                    )
+            
+            # ===== STEP 2: Update EPLB State =====
             eplb_state = self._get_eplb_state()
             if eplb_state:
                 # Clear masked_ranks (failed rank is being removed)
@@ -1548,14 +1569,14 @@ class DPEngineCoreProc(EngineCoreProc):
                 
                 logger.info("[FT] Rank %d: Cleared EPLB masked_ranks", self.dp_rank)
             
-            # ===== STEP 2: Destroy Old Communication Groups =====
+            # ===== STEP 3: Destroy Old Communication Groups =====
             from vllm.distributed.parallel_state import destroy_distributed_environment
             
             logger.info("[FT] Rank %d: Destroying old comm groups", self.dp_rank)
             destroy_distributed_environment()
             
-            # ===== STEP 3: Rebuild New Communication Groups =====
-            # Reuse the logic from reinitialize_distributed but WITHOUT shutdown
+            # ===== STEP 4: Rebuild New Communication Groups =====
+            # Rebuild with fault tolerance enabled (NCCL blocking=0)
             logger.info(
                 "[FT] Rank %d→%d: Rebuilding comm groups (size=%d)",
                 self.dp_rank, my_new_rank, new_size
@@ -1587,12 +1608,14 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.dp_rank, my_new_rank, original_local_rank
             )
             
+            # Initialize with FT enabled (NCCL blocking=0)
             init_distributed_environment(
                 world_size=new_size,
                 rank=my_new_rank,
                 distributed_init_method=f"tcp://{master_ip}:{new_master_port}",
                 backend="nccl",
                 local_rank=original_local_rank,
+                enable_fault_tolerance=True,  # Enable NCCL blocking=0
             )
             
             # Update config and dp_group (same logic as reinitialize_distributed)
@@ -1754,43 +1777,13 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.engines_running = True
         
         elif request_type == EngineCoreRequestType.FT_SCALE_DOWN:
-            # Handle FT_SCALE_DOWN immediately to avoid NCCL std::terminate
-            # Processing here happens BEFORE any collective, preventing timeout crashes
-            logger.warning(
-                "[FT] Rank %d: Processing FT_SCALE_DOWN from queue immediately",
+            # FT_SCALE_DOWN is handled proactively in run_busy_loop (checks ft_scale_down_pending flag)
+            # If it reaches here via queue, just skip - it will be processed at loop start
+            logger.debug(
+                "[FT] Rank %d: FT_SCALE_DOWN in queue, will be handled by busy loop flag check",
                 self.dp_rank
             )
-            
-            scale_down_info = request
-            preserve_kv_cache = scale_down_info.get('preserve_kv_cache', True)
-            
-            # Set reconfiguration flag to skip any collectives
-            self.in_reconfiguration = True
-            
-            try:
-                if preserve_kv_cache:
-                    # Lightweight mode
-                    self._execute_ft_reconfiguration(scale_down_info)
-                else:
-                    # Full restart mode
-                    self._execute_ft_full_restart(scale_down_info)
-                
-                # Clear flag
-                self.ft_scale_down_pending = None
-                
-                logger.info(
-                    "[FT] Rank %d: Proactive reconfiguration complete",
-                    self.dp_rank
-                )
-            except Exception as e:
-                logger.error(
-                    "[FT] Rank %d: Reconfiguration failed: %s",
-                    self.dp_rank, e, exc_info=True
-                )
-                # Don't clear in_reconfiguration - let exception handler deal with it
-                raise
-            finally:
-                self.in_reconfiguration = False
+            return
         
         else:
             super()._handle_client_request(request_type, request)
@@ -1840,6 +1833,37 @@ class DPEngineCoreProc(EngineCoreProc):
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             try:
+                # PRIORITY: Check if FT reconfiguration is pending
+                # Process immediately to avoid NCCL std::terminate
+                if self.ft_scale_down_pending and not self.in_reconfiguration:
+                    logger.warning(
+                        "[FT] Rank %d: FT_SCALE_DOWN pending, triggering reconfiguration immediately",
+                        self.dp_rank
+                    )
+                    scale_down_info = self.ft_scale_down_pending
+                    preserve_kv_cache = scale_down_info.get('preserve_kv_cache', True)
+                    
+                    # Set flag to skip collectives
+                    self.in_reconfiguration = True
+                    
+                    try:
+                        if preserve_kv_cache:
+                            self._execute_ft_reconfiguration(scale_down_info)
+                        else:
+                            self._execute_ft_full_restart(scale_down_info)
+                        
+                        self.ft_scale_down_pending = None
+                        logger.info("[FT] Rank %d: Proactive reconfiguration complete", self.dp_rank)
+                    except Exception as e:
+                        logger.error(
+                            "[FT] Rank %d: Proactive reconfiguration failed: %s",
+                            self.dp_rank, e, exc_info=True
+                        )
+                        # Let exception handler deal with it
+                        raise
+                    finally:
+                        self.in_reconfiguration = False
+                
                 # 1) Poll the input queue until there is work to do.
                 self._process_input_queue()
                 

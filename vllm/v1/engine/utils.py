@@ -96,7 +96,16 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        explicit_local_dp_ranks: list[int] | None = None,
     ):
+        """
+        Args:
+            ...existing args...
+            explicit_local_dp_ranks: Optional explicit GPU assignments for each process.
+                If provided, overrides the default sequential assignment.
+                Used for FT full restart to preserve GPU assignments (skip failed GPU).
+                Example: [0, 1, 3] creates 3 processes on GPUs 0, 1, 3 (skipping GPU 2).
+        """
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,
@@ -111,9 +120,28 @@ class CoreEngineProcManager:
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
+        
+        # Validate explicit_local_dp_ranks if provided
+        if explicit_local_dp_ranks is not None:
+            if len(explicit_local_dp_ranks) != local_engine_count:
+                raise ValueError(
+                    f"explicit_local_dp_ranks length ({len(explicit_local_dp_ranks)}) "
+                    f"must match local_engine_count ({local_engine_count})"
+                )
+            logger.info(
+                "[FT] Creating %d processes with explicit GPU assignments: %s",
+                local_engine_count, explicit_local_dp_ranks
+            )
+        
         for index in range(local_engine_count):
-            local_index = local_start_index + index
             global_index = start_index + index
+            
+            # Use explicit GPU assignment if provided (for FT full restart)
+            # Otherwise use sequential assignment (normal case)
+            if explicit_local_dp_ranks is not None:
+                local_index = explicit_local_dp_ranks[index]
+            else:
+                local_index = local_start_index + index
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
@@ -756,6 +784,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     num_api_servers: int = 1,
+    explicit_local_dp_ranks: list[int] | None = None,
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,
@@ -888,6 +917,7 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
+                explicit_local_dp_ranks=explicit_local_dp_ranks,  # Pass through for FT
             )
         else:
             local_engine_manager = None

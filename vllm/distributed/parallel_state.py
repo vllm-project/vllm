@@ -312,6 +312,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        enable_fault_tolerance: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -323,10 +324,27 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        # Configure NCCL options for fault tolerance
+        pg_options = None
+        if torch_distributed_backend == "nccl" and enable_fault_tolerance:
+            import os
+            options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
+            # Set non-blocking mode to enable process group abort
+            # This prevents std::terminate on NCCL timeout
+            options.config.blocking = 0
+            os.environ["NCCL_COMM_BLOCKING"] = "0"
+            pg_options = options
+            logger.info("[FT] NCCL configured with blocking=0 for fault tolerance")
+
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
-            )
+            if pg_options is not None:
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend, pg_options=pg_options
+                )
+            else:
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend
+                )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
@@ -1006,7 +1024,7 @@ def get_world_group() -> GroupCoordinator:
 
 
 def init_world_group(
-    ranks: list[int], local_rank: int, backend: str
+    ranks: list[int], local_rank: int, backend: str, enable_fault_tolerance: bool = False
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1014,6 +1032,7 @@ def init_world_group(
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
+        enable_fault_tolerance=enable_fault_tolerance,
     )
 
 
@@ -1131,6 +1150,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
+    enable_fault_tolerance: bool = False,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1195,7 +1215,7 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        _WORLD = init_world_group(ranks, local_rank, backend, enable_fault_tolerance)
         _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
     else:
