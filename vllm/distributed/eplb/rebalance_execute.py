@@ -322,6 +322,9 @@ async def transfer_layer(
     num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
     assert num_physical_experts == ep_size * num_local_physical_experts
+    # A buffer to hold the expert weights in one layer during the exchange.
+    # NOTE: Currently we assume the same weights across different layers
+    # have the same shape.
 
     is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
         num_local_experts=num_local_physical_experts,

@@ -316,9 +316,12 @@ We have split the `encode` task into two more specific token-wise tasks: `token_
 
 ### Remove softmax from PoolingParams
 
-We are going to remove `softmax` and `activation` from `PoolingParams`. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+We are going to remove `softmax` and `activation` from `PoolingParams` in v0.15. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
 
 ### as_reward_model
+
+!!! warning
+    We are going to remove `--convert reward` in v0.15, use `--convert embed` instead.
 
 Pooling models now default support all pooling, you can use it without any settings.
 

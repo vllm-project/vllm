@@ -133,6 +133,15 @@ from vllm.utils.async_utils import (
 from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
+
+class GenerationError(Exception):
+    """raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 logger = init_logger(__name__)
 
 CompletionLikeRequest: TypeAlias = (
@@ -456,6 +465,29 @@ class OpenAIServing:
             # Iterate through all beam inference results
             for i, result in enumerate(output):
                 current_beam = all_beams[i]
+
+                # check for error finish reason and abort beam search
+                if result.outputs[0].finish_reason == "error":
+                    # yield error output and terminate beam search
+                    yield RequestOutput(
+                        request_id=request_id,
+                        prompt=prompt_text,
+                        outputs=[
+                            CompletionOutput(
+                                index=0,
+                                text="",
+                                token_ids=[],
+                                cumulative_logprob=None,
+                                logprobs=None,
+                                finish_reason="error",
+                            )
+                        ],
+                        finished=True,
+                        prompt_token_ids=prompt_token_ids,
+                        prompt_logprobs=None,
+                    )
+                    return
+
                 if result.outputs[0].logprobs is not None:
                     logprobs = result.outputs[0].logprobs[0]
                     all_beams_token_id.extend(list(logprobs.keys()))
@@ -779,6 +811,35 @@ class OpenAIServing:
             ).model_dump()
         )
         return json_str
+
+    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+        """Raise GenerationError if finish_reason indicates an error."""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            raise GenerationError("Internal server error")
+
+    def _convert_generation_error_to_response(
+        self, e: GenerationError
+    ) -> ErrorResponse:
+        """Convert GenerationError to ErrorResponse."""
+        return self.create_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
+
+    def _convert_generation_error_to_streaming_response(
+        self, e: GenerationError
+    ) -> str:
+        """Convert GenerationError to streaming error response."""
+        return self.create_streaming_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
 
     async def _check_model(
         self,
