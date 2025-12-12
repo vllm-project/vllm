@@ -163,6 +163,10 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # Counter for requests waiting for streaming input. Used to calculate
+        # number of unfinished requests
+        self.num_waiting_for_streaming: int = 0
+
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
@@ -866,6 +870,8 @@ class Scheduler(SchedulerInterface):
         session.max_tokens = session.num_output_tokens + update.max_tokens
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            self.num_waiting_for_streaming -= 1
         session.status = RequestStatus.WAITING
 
         if self.log_stats:
@@ -1220,6 +1226,7 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 if request.resumable:
                     request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+                    self.num_waiting_for_streaming += 1
                     self.waiting.add_request(request)
                 else:
                     kv_transfer_params = self._free_request(request)
@@ -1460,6 +1467,8 @@ class Scheduler(SchedulerInterface):
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    self.num_waiting_for_streaming -= 1
                 waiting_requests_to_remove.append(request)
 
         # Remove all requests from queues at once for better efficiency
@@ -1494,10 +1503,7 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        num_waiting = sum(
-            req.status != RequestStatus.WAITING_FOR_STREAMING_REQ
-            for req in self.waiting
-        )
+        num_waiting = len(self.waiting) - self.num_waiting_for_streaming
         return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
