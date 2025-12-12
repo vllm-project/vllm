@@ -5,41 +5,42 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
+import numpy as np
 import torch
 
+from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.core.sched.output import SchedulerOutput
+
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
+    KVConnectorKVEvents = object
 
 
 class LogprobsLists(NamedTuple):
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
-    logprob_token_ids: list[list[int]]
+    logprob_token_ids: np.ndarray
     # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
-    logprobs: list[list[float]]
+    logprobs: np.ndarray
     # [num_reqs x num_generated_tokens]
-    sampled_token_ranks: list[int]
+    sampled_token_ranks: np.ndarray
     # [num_reqs]
     # Used for slicing the logprobs in cases like speculative
     # decoding where the number of generated tokens may be
     # different for each request.
     cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start_req_idx: int, end_req_idx: int):
-        if self.cu_num_generated_tokens:
-            start = self.cu_num_generated_tokens[start_req_idx]
-            end = self.cu_num_generated_tokens[end_req_idx]
-        else:
-            start = start_req_idx
-            end = end_req_idx
+    def slice_request(self, req_idx: int, num_positions: int):
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
         return LogprobsLists(
-            self.logprob_token_ids[start:end],
-            self.logprobs[start:end],
-            self.sampled_token_ranks[start:end],
-            self.cu_num_generated_tokens[start_req_idx:end_req_idx]
-            if self.cu_num_generated_tokens
-            else None,
+            self.logprob_token_ids[req_idx:end_idx],
+            self.logprobs[req_idx:end_idx],
+            self.sampled_token_ranks[req_idx:end_idx],
+            None,
         )
 
 
@@ -53,9 +54,9 @@ class LogprobsTensors(NamedTuple):
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
-            self.logprob_token_ids.tolist(),
-            self.logprobs.tolist(),
-            self.selected_token_ranks.tolist(),
+            self.logprob_token_ids.cpu().numpy(),
+            self.logprobs.cpu().numpy(),
+            self.selected_token_ranks.cpu().numpy(),
             cu_num_generated_tokens,
         )
 
@@ -90,7 +91,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = torch.Tensor | list[torch.Tensor]
+PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
 
 
 @dataclass
@@ -109,6 +110,7 @@ class KVConnectorOutput:
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
+    kv_cache_events: KVConnectorKVEvents | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -124,8 +126,16 @@ class KVConnectorOutput:
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
+            and not self.kv_cache_events
             and not self.invalid_block_ids
         )
+
+
+@dataclass
+class ECConnectorOutput:
+    # [mm_hash]
+    finished_sending: set[str] | None = None
+    finished_recving: set[str] | None = None
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -159,8 +169,13 @@ class ModelRunnerOutput:
 
     kv_connector_output: KVConnectorOutput | None = None
 
+    ec_connector_output: ECConnectorOutput | None = None
+
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # information related to cudagraph execution
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.
@@ -182,6 +197,41 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+
+
+def make_empty_encoder_model_runner_output(
+    scheduler_output: "SchedulerOutput",
+) -> ModelRunnerOutput:
+    """
+    Create a ModelRunnerOutput stub that contains the correct
+    per-request bookkeeping but no generated data yet.
+    """
+    if not scheduler_output.num_scheduled_tokens:
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    # Convert to list so we get a deterministic, indexable sequence
+    req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
+
+    # Give every request its own contiguous index
+    req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
+
+    # No tokens generated yet ⇒ one empty list per request
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+
+    # Pooler outputs are not available yet ⇒ use None placeholders
+    pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]
+
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=pooler_output,
+        kv_connector_output=None,
+        ec_connector_output=None,
+        num_nans_in_logits=None,
+    )
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
     from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
+    ECConnectorMetadata = object
     KVConnectorMetadata = object
     LoRARequest = object
     MultiModalFeatureSpec = object
@@ -42,11 +44,15 @@ class NewRequestData:
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
+    # Only used for v2 model runner.
+    prefill_token_ids: list[int] | None = None
+
     @classmethod
     def from_request(
         cls,
         request: Request,
         block_ids: tuple[list[int], ...],
+        prefill_token_ids: list[int] | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -58,14 +64,18 @@ class NewRequestData:
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
+            prefill_token_ids=prefill_token_ids,
         )
 
     def __repr__(self) -> str:
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids={self.prompt_token_ids},"
+            f"prefill_token_ids={self.prefill_token_ids},"
             f"mm_features={self.mm_features},"
             f"sampling_params={self.sampling_params},"
             f"block_ids={self.block_ids},"
@@ -80,7 +90,9 @@ class NewRequestData:
         prompt_token_ids_len = (
             len(self.prompt_token_ids) if self.prompt_token_ids is not None else None
         )
-        prompt_embeds_shape = self.prompt_embeds.shape if self.prompt_embeds else None
+        prompt_embeds_shape = (
+            self.prompt_embeds.shape if self.prompt_embeds is not None else None
+        )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
@@ -118,12 +130,12 @@ class CachedRequestData:
         return len(self.req_ids)
 
     @cached_property
-    @deprecated("use resumed_req_ids field")
+    @deprecated("This will be removed in v0.14, use `resumed_req_ids` instead.")
     def resumed_from_preemption(self) -> list[bool]:
         return [req_id in self.resumed_req_ids for req_id in self.req_ids]
 
     @cached_property
-    @deprecated("use all_token_ids field")
+    @deprecated("This will be removed in v0.14, use `all_token_ids` instead.")
     def resumed_req_token_ids(self) -> list[list[int] | None]:
         return [
             self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
@@ -181,12 +193,33 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    # Request IDs that are preempted in this step.
+    # Only used for v2 model runner.
+    preempted_req_ids: set[str] | None = None
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+    # EC Cache Connector metadata
+    ec_connector_metadata: ECConnectorMetadata | None = None
+
+    @classmethod
+    def make_empty(cls) -> "SchedulerOutput":
+        return cls(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
 
 
 @dataclass

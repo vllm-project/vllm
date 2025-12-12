@@ -17,7 +17,6 @@
 """Qwen3-Next model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig, layer_type_validation
-from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -66,13 +65,12 @@ class Qwen3NextConfig(PretrainedConfig):
             relevant if `config.is_decoder=True`.
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be tied.
-        rope_theta (`float`, *optional*, defaults to 10000.0):
-            The base period of the RoPE embeddings.
-        rope_scaling (`Dict`, *optional*):
+        rope_parameters (`dict`, *optional*):
             Dictionary containing the scaling configuration for the RoPE embeddings. NOTE: if you apply new rope type
             and you expect the model to work on longer `max_position_embeddings`, we recommend you to update this value
             accordingly.
             Expected contents:
+                `rope_theta` (`float`): The base period of the RoPE embeddings.
                 `rope_type` (`str`):
                     The sub-variant of RoPE to use. Can be one of ['default', 'linear', 'dynamic', 'yarn', 'longrope',
                     'llama3'], with 'default' being the original RoPE implementation.
@@ -105,8 +103,8 @@ class Qwen3NextConfig(PretrainedConfig):
                     Only used with 'llama3'. Scaling factor applied to low frequency components of the RoPE
                 `high_freq_factor` (`float`, *optional*):
                     Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
-        partial_rotary_factor (`float`, *optional*, defaults to 0.25):
-            Percentage of the query and keys which will have rotary embedding.
+                `partial_rotary_factor` (`float`, *optional*, defaults to 0.25):
+                    Percentage of the query and keys which will have rotary embedding.
         attention_bias (`bool`, *optional*, defaults to `False`):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
@@ -199,9 +197,7 @@ class Qwen3NextConfig(PretrainedConfig):
         rms_norm_eps=1e-6,
         use_cache=True,
         tie_word_embeddings=False,
-        rope_theta=10000.0,
-        rope_scaling=None,
-        partial_rotary_factor=0.25,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         head_dim=256,
@@ -236,13 +232,20 @@ class Qwen3NextConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
+        rope_theta = kwargs.pop("rope_theta", 10000.0)
+        if "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
+        partial_rotary_factor = kwargs.pop("partial_rotary_factor", 0.25)
+        if "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+        self.rope_parameters = rope_parameters
         self.partial_rotary_factor = partial_rotary_factor
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.head_dim = head_dim
-        rope_config_validation(self)
 
         self.layer_types = layer_types
         if self.layer_types is None:

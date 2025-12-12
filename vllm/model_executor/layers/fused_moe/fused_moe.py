@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -54,8 +55,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
-
-from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 
 logger = init_logger(__name__)
 
@@ -819,8 +818,8 @@ def get_config_file_name(
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     # Set device_name to H200 if a device from the H200 family is detected
-    if "H200" in device_name:
-        device_name = "H200"
+    if "H200" in device_name.split("_"):
+        device_name = "NVIDIA_H200"
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
         "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
@@ -873,8 +872,10 @@ def get_moe_configs(
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info(
-                    "Using configuration from %s for MoE layer.", config_file_path
+                logger.info_once(
+                    "Using configuration from %s for MoE layer.",
+                    config_file_path,
+                    scope="global",
                 )
                 # If a configuration has been found, return it
                 tuned_config = json.load(f)
@@ -892,6 +893,48 @@ def get_moe_configs(
         config_file_paths,
     )
     return None
+
+
+def _ensure_block_size_k_divisible(
+    size_k: int, block_size_k: int, group_size: int
+) -> int:
+    """Ensure block_size_k is a divisor of size_k and divisible by group_size.
+
+    This ensures BLOCK_SIZE_K compatibility with MoeWNA16 CUDA kernel which
+    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K % group_size == 0.
+
+    Args:
+        size_k: The size_k dimension that must be divisible by result.
+        block_size_k: Preferred block size (will be adjusted if needed).
+        group_size: The result must be divisible by this.
+
+    Returns:
+        A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
+    """
+    # Fast path: already valid
+    if size_k % block_size_k == 0 and block_size_k % group_size == 0:
+        return block_size_k
+
+    # Find the largest value that:
+    # 1. Divides size_k (size_k % candidate == 0)
+    # 2. Is divisible by group_size (candidate % group_size == 0)
+    # 3. Is <= block_size_k (prefer smaller values close to block_size_k)
+    #
+    # Strategy: Search from min(block_size_k, size_k) down to group_size,
+    # stepping by group_size to ensure divisibility by group_size
+    max_search = min(block_size_k, size_k)
+    start = (max_search // group_size) * group_size
+    for candidate in range(start, group_size - 1, -group_size):
+        if size_k % candidate == 0:
+            return candidate
+
+    # Fallback: if group_size divides size_k, use it
+    # This should always be true with correct group_size configuration
+    if size_k % group_size == 0:
+        return group_size
+
+    # This should not happen with correct group_size, but ensure divisibility
+    return size_k
 
 
 def get_moe_wna16_block_config(
@@ -958,6 +1001,9 @@ def get_moe_wna16_block_config(
             # Not sure why, maybe it force the CUDA SM process only one block
             # at the same time.
             block_size_n = 1024
+
+        # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
+        block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
 
@@ -1089,11 +1135,11 @@ def vllm_topk_softmax(
     return topk_weights, topk_indices
 
 
-def dispatch_topk_func() -> Callable[..., tuple[torch.Tensor, ...]]:
-    if is_rocm_aiter_moe_enabled():
-        from .rocm_aiter_fused_moe import rocm_aiter_topk_softmax
-
-        return rocm_aiter_topk_softmax
+def dispatch_topk_func(
+    use_rocm_aiter: bool = False,
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
+        return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
 
 
@@ -1121,7 +1167,7 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func()
+    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
     topk_weights, topk_ids = topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
@@ -1247,7 +1293,6 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1261,7 +1306,6 @@ def eplb_map_to_physical_and_record(
         expert_load_view: The expert load view.
         logical_to_physical_map: The logical to physical map.
         logical_replica_count: The logical replica count.
-        indices_type: The indices type.
 
     Returns:
         The physical expert ids.
@@ -1311,9 +1355,6 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-
-    if indices_type is not None:
-        topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
 
 
@@ -1330,24 +1371,37 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    if scoring_func == "softmax":
+    if scoring_func == "sigmoid":
+        # Fully fused kernel path for sigmoid
+        topk_values, topk_indices = ops.grouped_topk(
+            gating_output,  # raw logits
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias.to(gating_output.dtype),
+            1,  # scoring_func=1 for sigmoid
+        )
+    elif scoring_func == "softmax":
+        # Apply softmax in Python, then use fused kernel
+        # TODO: Add support for softmax in kernel
         scores = torch.softmax(gating_output, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        topk_values, topk_indices = ops.grouped_topk(
+            scores,  # pre-computed scores
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias.to(gating_output.dtype),
+            0,  # scoring_func=0 (no activation, scores already computed)
+        )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
-    topk_values, topk_indices = ops.grouped_topk(
-        scores,
-        scores_with_bias.to(scores.dtype),
-        num_expert_group,
-        topk_group,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-    )
-    return topk_values.to(torch.float32), topk_indices.to(torch.int32)
+    # Fused kernel outputs float32 values and int32 indices directly
+    return topk_values, topk_indices
 
 
 def inplace_fused_experts(
@@ -1878,7 +1932,11 @@ def fused_experts_impl(
         )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            curr_topk_ids,
+            config["BLOCK_SIZE_M"],
+            global_num_experts,
+            expert_map,
+            ignore_invalid_experts=True,
         )
 
         invoke_fused_moe_kernel(
@@ -1936,6 +1994,9 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        if expert_map is not None:
+            intermediate_cache3.zero_()
 
         invoke_fused_moe_kernel(
             qintermediate_cache2,

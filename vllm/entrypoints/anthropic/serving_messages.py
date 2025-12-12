@@ -183,7 +183,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         if anthropic_request.stream:
             req.stream = anthropic_request.stream
-            req.stream_options = StreamOptions.validate({"include_usage": True})
+            req.stream_options = StreamOptions.validate(
+                {"include_usage": True, "continuous_usage_stats": True}
+            )
 
         if anthropic_request.tool_choice is None:
             req.tool_choice = None
@@ -231,9 +233,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
-        logger.debug("Received messages request %s", request.model_dump_json())
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Received messages request %s", request.model_dump_json())
         chat_req = self._convert_anthropic_to_openai_request(request)
-        logger.debug("Convert to OpenAI request %s", request.model_dump_json())
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
         generator = await self.create_chat_completion(chat_req, raw_request)
 
         if isinstance(generator, ErrorResponse):
@@ -320,6 +324,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     id=origin_chunk.id,
                                     content=[],
                                     model=origin_chunk.model,
+                                ),
+                                usage=AnthropicUsage(
+                                    input_tokens=origin_chunk.usage.prompt_tokens
+                                    if origin_chunk.usage
+                                    else 0,
+                                    output_tokens=0,
                                 ),
                             )
                             first_item = False

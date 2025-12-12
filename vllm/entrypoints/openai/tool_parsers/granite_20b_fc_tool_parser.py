@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import (
     consume_space,
@@ -30,12 +29,11 @@ from vllm.entrypoints.openai.tool_parsers.utils import (
     partial_json_loads,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("granite-20b-fc")
 class Granite20bFCToolParser(ToolParser):
     """
     Tool call parser for the granite-20b-functioncalling model intended
@@ -46,7 +44,7 @@ class Granite20bFCToolParser(ToolParser):
     are all set
     """
 
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
 
         self.bot_token = "<function_call>"

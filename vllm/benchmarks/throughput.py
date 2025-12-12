@@ -14,13 +14,14 @@ from typing import Any
 import torch
 import uvloop
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
+    MultiModalConversationDataset,
     PrefixRepetitionRandomDataset,
     RandomDataset,
     SampleRequest,
@@ -34,6 +35,7 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
 
 
@@ -245,12 +247,15 @@ async def run_vllm_async(
 def run_hf(
     requests: list[SampleRequest],
     model: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     n: int,
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
 ) -> float:
+    assert isinstance(tokenizer, PreTrainedTokenizerBase), (
+        "the hf backend only supports HF tokenizers"
+    )
     llm = AutoModelForCausalLM.from_pretrained(
         model, dtype=torch.float16, trust_remote_code=trust_remote_code
     )
@@ -367,6 +372,11 @@ def get_requests(args, tokenizer):
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = MultiModalConversationDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["enable_multimodal_chat"] = True
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = ConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
@@ -456,6 +466,7 @@ def validate_args(args):
     elif args.dataset_name == "hf":
         if args.dataset_path in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (
@@ -644,8 +655,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--profile",
         action="store_true",
         default=False,
-        help="Use Torch Profiler. The env variable "
-        "VLLM_TORCH_PROFILER_DIR must be set to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
 
     # prefix repetition dataset
@@ -685,15 +695,21 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.tokenizer is None:
-        args.tokenizer = args.model
     validate_args(args)
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
     # Sample the requests.
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=args.trust_remote_code
+    if (
+        args.backend == "hf" or args.backend == "mii"
+    ) and args.tokenizer_mode == "auto":
+        # mistral_common tokenizer is only supported on vllm and vllm-chat backends;
+        # for hf and mii backends, we use hf tokenizer
+        args.tokenizer_mode = "hf"
+    tokenizer = get_tokenizer(
+        args.tokenizer,
+        tokenizer_mode=args.tokenizer_mode,
+        trust_remote_code=args.trust_remote_code,
     )
     requests = get_requests(args, tokenizer)
     is_multi_modal = any(request.multi_modal_data is not None for request in requests)
