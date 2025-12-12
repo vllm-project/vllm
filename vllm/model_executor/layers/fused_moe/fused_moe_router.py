@@ -7,13 +7,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
-# TODO: add eplb stuff here
 class FusedMoERouter(ABC):
-    @property
-    @abstractmethod
-    def enable_eplb(self) -> bool:
-        raise NotImplementedError
-
     @property
     @abstractmethod
     def routing_method_type(self) -> RoutingMethodType:

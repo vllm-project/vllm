@@ -6,7 +6,6 @@ from typing import Any
 
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -51,7 +50,6 @@ __all__ = [
     "FusedMoE",
     "FusedMoERouter",
     "FusedMoEConfig",
-    "FusedMoEQuantConfig",
     "FusedMoEMethodBase",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",

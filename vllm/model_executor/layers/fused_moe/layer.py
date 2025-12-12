@@ -304,10 +304,6 @@ class FusedMoERouterImpl(FusedMoERouter):
         self.layer = layer
 
     @property
-    def enable_eplb(self) -> bool:
-        return self.layer.enable_eplb
-
-    @property
     def routing_method_type(self) -> RoutingMethodType:
         return self.layer.routing_method_type
 
@@ -316,7 +312,7 @@ class FusedMoERouterImpl(FusedMoERouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        return self.layer.select_experts(hidden_states, router_logits)
+        return self.layer._select_experts(hidden_states, router_logits)
 
 
 @CustomOp.register("fused_moe")
@@ -1538,7 +1534,7 @@ class FusedMoE(CustomOp):
             logits_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
         )
 
-    def select_experts(
+    def _select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
