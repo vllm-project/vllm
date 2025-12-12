@@ -349,6 +349,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
             per_act_token_quant=self.input_qscheme == "per_channel",
             per_out_ch_quant=self.weight_qscheme == "per_channel",
         )
@@ -445,6 +447,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
+                allow_deep_gemm=True,
             )
 
 
@@ -645,6 +648,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             weight_dtype=self.weight_dtype,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
             a1_scale=None,
             a2_scale=None,
             block_shape=None,
@@ -726,5 +731,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
+
             )
         return out
