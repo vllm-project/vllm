@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -181,11 +181,6 @@ class SchedulerOutput:
     # E.g., if a request has [0, 1], it could mean the vision encoder needs
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
-    # req_id -> encoder input indices that are deduplicated (reuse cached output).
-    # For beam search optimization: when multiple requests share the same encoder
-    # input (e.g., all beams from same audio), deduplicated requests skip encoder
-    # computation but still need cross-attention KV cache allocated.
-    deduplicated_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
@@ -201,6 +196,13 @@ class SchedulerOutput:
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
+
+    # req_id -> encoder input indices that are deduplicated (reuse cached output).
+    # For beam search optimization: when multiple requests share the same encoder
+    # input (e.g., all beams from same audio), deduplicated requests skip encoder
+    # computation but still need cross-attention KV cache allocated.
+    # BC: New optional field added for encoder deduplication (Dec 2025)
+    deduplicated_encoder_inputs: dict[str, list[int]] = field(default_factory=dict)
 
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
