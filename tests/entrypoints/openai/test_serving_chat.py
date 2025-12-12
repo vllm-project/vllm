@@ -82,6 +82,56 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
+async def test_gpt_oss_chat_tool_call_required(
+    gptoss_client: OpenAI, with_tool_parser: bool
+):
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
+                    },
+                    "required": ["city", "state", "unit"],
+                },
+            },
+        }
+    ]
+
+    messages = [
+        {
+            "role": "user",
+            "content": "I live in Dallas, TX. What is the population of the state?",
+        },
+    ]
+
+    response = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, tool_choice="required"
+    )
+
+    if with_tool_parser:
+        assert len(response.choices[0].message.tool_calls) > 0
+        tool_call = response.choices[0].message.tool_calls[0]
+        name = tool_call.function.name
+        arguments = tool_call.function.arguments
+        assert name is not None
+        assert len(arguments) > 0
+    else:
+        assert len(response.choices[0].message.tool_calls) == 0
+        content = response.choices[0].message.content
+        assert len(content) > 0
+
+
+@pytest.mark.asyncio
 async def test_gpt_oss_chat_tool_call_streaming(
     gptoss_client: OpenAI, with_tool_parser: bool
 ):
