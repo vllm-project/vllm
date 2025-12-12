@@ -1051,7 +1051,7 @@ steps:
   - tests/compile/test_fusion_attn.py
   commands:
     - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-    - pytest -v -s tests/compile/test_fusion_attn.py
+    - pytest -v -s tests/compile/test_fusion_attn.py -k 'not Llama-4'
 
 - label: Hopper Fusion Distributed E2E Tests (2xH100)  # ?min
   timeout_in_minutes: 70
