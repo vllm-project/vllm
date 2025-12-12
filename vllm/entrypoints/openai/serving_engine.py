@@ -350,6 +350,7 @@ class OpenAIServing:
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Perform beam search for text generation.
@@ -467,7 +468,7 @@ class OpenAIServing:
                             request_id_item,
                             lora_request=lora_req,
                             trace_headers=trace_headers,
-                            priority=0,
+                            priority=priority,  # Propagate original request priority
                         )
                     )
                 )

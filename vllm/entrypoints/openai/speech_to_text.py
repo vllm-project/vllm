@@ -326,12 +326,18 @@ class OpenAISpeechToText(OpenAIServing):
             for i, prompt in enumerate(prompts):
                 if use_beam_search and isinstance(sampling_params, BeamSearchParams):
                     # Beam search: Run on each chunk independently
+                    # Extract priority from raw_request if available
+                    priority = 0
+                    if raw_request and hasattr(raw_request.state, "priority"):
+                        priority = raw_request.state.priority
+                    
                     try:
                         generator = self.beam_search(
                             prompt,
                             f"{request_id}_{i}",
                             sampling_params,
                             lora_request=lora_request,
+                            priority=priority,
                         )
                         list_result_generator.append(generator)
                     except Exception as e:
