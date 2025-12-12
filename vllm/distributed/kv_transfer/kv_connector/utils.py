@@ -209,6 +209,7 @@ class TpKVTopology:
     Helper class for tensor parallel and KV topology information for
     mapping between local and remote TP workers.
     """
+
     tp_rank: int
     remote_tp_size: dict[EngineId, int]
     is_mla: bool
@@ -239,9 +240,7 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (
-            self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first
-        )
+        return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
 
     @property
     def tp_size(self) -> int:
@@ -269,13 +268,13 @@ class TpKVTopology:
                 f"by remote tensor parallel size {remote_tp_size}."
             )
             return self.tp_size // remote_tp_size
-        else:
-            assert remote_tp_size % self.tp_size == 0, (
-                f"Remote tensor parallel size {remote_tp_size} is not divisible "
-                f"by local tensor parallel size {self.tp_size}."
-            )
-            # P TP > D TP case, return the ratio as negative
-            return -remote_tp_size // self.tp_size
+
+        assert remote_tp_size % self.tp_size == 0, (
+            f"Remote tensor parallel size {remote_tp_size} is not divisible "
+            f"by local tensor parallel size {self.tp_size}."
+        )
+        # P TP > D TP case, return the ratio as negative
+        return -remote_tp_size // self.tp_size
 
     def block_size_ratio(
         self,
@@ -328,10 +327,10 @@ class TpKVTopology:
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
-        else:
-            # P TP > D TP case, D reads from |tp_ratio| remote workers.
-            tp_ratio = -tp_ratio
-            return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
+
+        # P TP > D TP case, D reads from |tp_ratio| remote workers.
+        tp_ratio = -tp_ratio
+        return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
 
     def get_target_remote_ranks_from_engine_id(
         self,

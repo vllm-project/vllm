@@ -23,7 +23,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology, EngineId
+from vllm.distributed.kv_transfer.kv_connector.utils import EngineId, TpKVTopology
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
@@ -874,9 +874,8 @@ class NixlConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         self.device_id: int = 0
         # Current rank may pull from multiple remote TP workers.
-        self.kv_caches_base_addr: defaultdict[EngineId, dict[int, list[int]]] = (
-            defaultdict(dict)
-        )
+        # EngineId, dict[int, list[int]] -> engine_id, tp_rank, base_addr_for_layer
+        self.kv_caches_base_addr = defaultdict[EngineId, dict[int, list[int]]](dict)
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -889,9 +888,7 @@ class NixlConnectorWorker:
         # Keep track of regions at different tp_ratio values. tp_ratio->handles
         self.src_xfer_handles_by_tp_ratio: dict[int, list[int]] = {}
         # Map of engine_id -> {tp_rank: nixl_prepped_dlist_handle (int)}.
-        self.dst_xfer_side_handles: defaultdict[EngineId, dict[int, int]] = defaultdict(
-            dict
-        )
+        self.dst_xfer_side_handles = defaultdict[EngineId, dict[int, int]](dict)
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
@@ -994,7 +991,9 @@ class NixlConnectorWorker:
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_rank in p_remote_ranks:
                 logger.debug(
-                    "Querying metadata on path: %s at remote tp rank %s", path, remote_rank
+                    "Querying metadata on path: %s at remote tp rank %s",
+                    path,
+                    remote_rank,
                 )
 
                 start_time = time.perf_counter()
@@ -1030,9 +1029,9 @@ class NixlConnectorWorker:
                         f"NIXL compatibility hash mismatch. "
                         f"Local: {self.compat_hash}, "
                         f"Remote: {handshake_payload.compatibility_hash}. "
-                        f"Prefill and decode instances have incompatible configurations. "
-                        f"This may be due to: different vLLM versions, models, dtypes, "
-                        f"KV cache layouts, attention backends, etc. "
+                        f"Prefill and decode instances have incompatible "
+                        f"configurations. This may be due to: different vLLM versions,"
+                        f" models, dtypes, KV cache layouts, attention backends, etc. "
                         f"Both instances must use identical configurations."
                         f"Disable this check using "
                         f'--kv-transfer-config \'{{"kv_connector_extra_config": '
@@ -1063,10 +1062,6 @@ class NixlConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                # FIXME move to _validate
-                assert metadata.block_size <= self.block_size, (
-                    "nP > nD is not supported yet."
-                )
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
                     raise RuntimeError(
@@ -1922,8 +1917,8 @@ class NixlConnectorWorker:
                     continue
 
                 # NOTE: `tp_ratio` is the opposite when swapping local<>remote
-                tp_ratio = self.kv_topo.tp_ratio(int(tp_size))
                 n_consumers = int(tp_size)
+                tp_ratio = self.kv_topo.tp_ratio(n_consumers)
 
                 # Number of reads *per producer* to wait for.
                 # When remote D TP > local P TP we expect `tp_ratio` reads.
@@ -2116,9 +2111,8 @@ class NixlConnectorWorker:
                 # ..but we still need to notify the other remote ranks that we
                 # have the blocks we need so they can update the request state.
                 notif_id = f"{req_id}:{self.world_size}".encode()
-                for rank_to_notify, agent in self._remote_agents[
-                    meta.remote.engine_id
-                ].items():
+                remote_agents = self._remote_agents[meta.remote.engine_id]
+                for rank_to_notify, agent in remote_agents.items():
                     if rank_to_notify != remote_rank:
                         self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
