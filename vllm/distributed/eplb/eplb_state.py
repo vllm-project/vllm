@@ -56,6 +56,35 @@ logger = init_logger(__name__)
 
 
 @dataclass
+class EplbStats:
+    """
+    Model stats used in EPLB rebalanding algorithm.
+    """
+
+    global_expert_load_window: torch.Tensor
+    """
+    Experts load window.
+    Shape: (window_size, num_moe_layers, num_physical_experts)
+    """
+    num_replicas: int
+    """
+    Number of physical experts.
+    """
+    num_groups: int
+    """
+    Number of expert groups.
+    """
+    num_nodes: int
+    """
+    Number of nodes.
+    """
+    num_gpus: int
+    """
+    Number of GPUs.
+    """
+
+
+@dataclass
 class EplbModelState:
     """EPLB metrics."""
 
@@ -167,6 +196,14 @@ class EplbModelState:
     pending_global_ready_check: bool
     """
     Whether the async EPLB needs to poll peers for buffer readiness.
+    """
+    new_indices_computed: bool
+    """
+    The flag indicates whether the new indices have been computed.
+    """
+    eplb_stats: EplbStats | None
+    """
+    EPLB stats for the model.
     """
     is_unchanged: np.ndarray
     """
@@ -506,6 +543,8 @@ class EplbState:
             layer_to_transfer=0,
             rebalanced=False,
             pending_global_ready_check=False,
+            new_indices_computed=False,
+            eplb_stats=None,
             is_unchanged=np.array([]),
             is_received_locally=np.array([]),
             recv_metadata=RecvMetadata(
@@ -796,21 +835,21 @@ class EplbState:
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
-            # Get new expert mappings for the model
-            (
-                new_physical_to_logical_map,
-                new_logical_to_physical_map,
-                new_logical_replica_count,
-            ) = self.policy.rebalance_experts(
-                global_expert_load_window,
-                num_replicas,
-                num_groups,
-                num_nodes,
-                num_gpus,
-                eplb_model_state.physical_to_logical_map,
-            )
-
             if not self.is_async or is_profile:
+                # Get new expert mappings for the model
+                (
+                    new_physical_to_logical_map,
+                    new_logical_to_physical_map,
+                    new_logical_replica_count,
+                ) = self.policy.rebalance_experts(
+                    global_expert_load_window,
+                    num_replicas,
+                    num_groups,
+                    num_nodes,
+                    num_gpus,
+                    eplb_model_state.physical_to_logical_map,
+                )
+
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
@@ -867,27 +906,17 @@ class EplbState:
                         gpu_elapsed,
                     )
             else:
-                max_slots = eplb_model_state.logical_to_physical_map.shape[-1]
-                padded_logical = torch.nn.functional.pad(
-                    new_logical_to_physical_map,
-                    (0, max(0, max_slots - new_logical_to_physical_map.shape[-1])),
-                    value=-1,
-                ).to(eplb_model_state.logical_to_physical_map.device)
-                new_replica = new_logical_replica_count.to(
-                    eplb_model_state.logical_replica_count.device
+                eplb_model_state.eplb_stats = EplbStats(
+                    global_expert_load_window=global_expert_load_window,
+                    num_replicas=num_replicas,
+                    num_groups=num_groups,
+                    num_nodes=num_nodes,
+                    num_gpus=num_gpus,
                 )
-
-                # Move map to cpu in advance
-                eplb_model_state.new_physical_to_logical_map = (
-                    new_physical_to_logical_map.cpu()
-                )
-                eplb_model_state.new_logical_to_physical_map = padded_logical
-                eplb_model_state.new_logical_replica_count = new_replica
-
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
-
+                eplb_model_state.new_indices_computed = False
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.set()
@@ -983,11 +1012,9 @@ class EplbState:
                 model_state.layer_to_transfer
             ]
             expert_weights_buffer = model_state.expert_buffer
-            new_indices = (
-                model_state.new_physical_to_logical_map[model_state.layer_to_transfer]
-                .cpu()
-                .numpy()
-            )
+            new_indices = model_state.new_physical_to_logical_map[
+                model_state.layer_to_transfer
+            ].numpy()
             move_from_buffer(
                 expert_weights=expert_weights,
                 expert_weights_buffers=expert_weights_buffer,
