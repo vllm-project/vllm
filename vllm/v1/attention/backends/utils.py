@@ -387,7 +387,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
-    @abstractmethod
     def update_block_table(
         self,
         metadata: M,
@@ -398,6 +397,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         Update the block table for the attention metadata.
         Faster when theres multiple kv-cache groups that create virtually the
         same metadata but just with different block tables.
+
+        Only needs to be implemented if supports_update_block_table is True.
         """
         raise NotImplementedError
 
