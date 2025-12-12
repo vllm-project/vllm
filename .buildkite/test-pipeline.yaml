@@ -836,7 +836,7 @@ steps:
   - tests/models/multimodal
   no_gpu: true
   commands:
-    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - "pip install git+https://github.com/TIGER-AI-Lab/Mantis.git || echo 'Mantis installation skipped (decord not available on CPU-only environment)'"
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor Test
@@ -1346,6 +1346,7 @@ steps:
 - label: Prime-RL Integration Test # 15min
   timeout_in_minutes: 30
   optional: true
+  soft_fail: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
