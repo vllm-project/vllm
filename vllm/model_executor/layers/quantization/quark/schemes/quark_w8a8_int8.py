@@ -29,6 +29,7 @@ class QuarkW8A8Int8(QuarkScheme):
         qscheme: str,
         is_static_input_scheme: bool | None,
         input_symmetric: bool | None,
+        is_online_quant: bool = False
     ):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme

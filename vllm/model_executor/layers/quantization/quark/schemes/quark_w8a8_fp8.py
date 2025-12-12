@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, cast, Tuple
 
 import torch
 from torch.nn import Parameter
@@ -26,7 +26,10 @@ __all__ = ["QuarkW8A8Fp8"]
 
 class QuarkW8A8Fp8(QuarkScheme):
     def __init__(
-        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+        self, 
+        weight_config: dict[str, Any], 
+        input_config: dict[str, Any] | None,
+        is_online_quant: bool = False
     ):
         self.weight_qscheme = cast(str, weight_config.get("qscheme"))
         self.is_static_input_scheme: bool = False
@@ -34,7 +37,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         if input_config is not None:
             self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
-
+        self.is_online_quant: bool = is_online_quant
         per_token = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
@@ -51,12 +54,35 @@ class QuarkW8A8Fp8(QuarkScheme):
     def get_min_capability(cls) -> int:
         # lovelace and up
         return 89
+    
+    def quant_per_tensor(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        splited_weights = weight.split(self.output_partition_sizes, dim=0)
+        fp8_type = torch.float8_e4m3fn
+        max_fp8_value = torch.finfo(fp8_type).max
+        weight_scales = []
+        for idx, part in enumerate(splited_weights):
+            max_value = abs(part).max().float()
+            weight_scales.append(max_value / max_fp8_value)
+            splited_weights[idx] = (part / weight_scales[-1]).to(fp8_type)
+        return torch.stack(splited_weights, dim=0), torch.tensor(weight_scales, dtype=torch.float32)
+
+    def quant_per_channel(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        fp8_type = torch.float8_e4m3fn
+        max_fp8_value = torch.finfo(fp8_type).max
+        max_value = weight.max(dim=1).values
+        scale = (max_value / max_fp8_value).float()
+        weight = (weight / scale.unsqueeze(-1)).to(fp8_type)
+        return weight, scale
 
     def process_weights_after_loading(self, layer) -> None:
         # If per tensor, when we have a fused module (e.g. QKV) with per
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.weight_qscheme == "per_tensor":
+            if self.is_online_quant:
+                weight, weight_scale = self.quant_per_tensor(layer.weight.data)
+                layer.weight.data = weight
+                layer.weight_scale.data = weight_scale
             if current_platform.is_fp8_fnuz():
                 input_scale = getattr(layer, "input_scale", None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
@@ -81,6 +107,10 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.weight_qscheme == "per_channel":
+            if self.is_online_quant:
+                weight, weight_scale = self.quant_per_channel(layer.weight.data)
+                layer.weight.data = weight
+                layer.weight_scale.data = weight_scale
             weight = layer.weight
 
             if current_platform.is_fp8_fnuz():
@@ -118,6 +148,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         weight_loader: Callable,
         **kwargs,
     ):
+        self.input_size_per_partition = input_size_per_partition
+        self.output_partition_sizes = output_partition_sizes
+
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
@@ -126,7 +159,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
-                dtype=torch.float8_e4m3fn,
+                dtype= params_dtype if self.is_online_quant else torch.float8_e4m3fn,
             ),
             input_dim=1,
             output_dim=0,
