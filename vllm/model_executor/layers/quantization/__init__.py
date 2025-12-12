@@ -129,12 +129,10 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .ptpc_fp8 import PTPCFp8Config
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
-    from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
-        "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
