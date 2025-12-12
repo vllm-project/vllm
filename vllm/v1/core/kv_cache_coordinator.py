@@ -118,8 +118,11 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0,
-        encoder_hash: str | None = None
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_encoder_tokens: int = 0,
+        encoder_hash: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`

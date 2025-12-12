@@ -307,10 +307,12 @@ class KVCacheManager:
         encoder_hash = None
         if num_encoder_tokens > 0 and request.mm_features:
             encoder_hash = request.mm_features[0].identifier
-        
+
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_encoder_tokens,
-            encoder_hash=encoder_hash
+            request.request_id,
+            num_tokens_need_slot,
+            num_encoder_tokens,
+            encoder_hash=encoder_hash,
         )
 
         # P/D: delay caching blocks if we have to recv from

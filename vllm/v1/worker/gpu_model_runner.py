@@ -2091,7 +2091,7 @@ class GPUModelRunner(
             A tuple of (mm_kwargs, req_ids_pos) where:
             - mm_kwargs: List of multimodal kwargs items to be batched
             - mm_hashes_pos: List of (mm_hash, position_info) tuples
-            
+
         Note: Deduplicated encoder inputs are skipped here (won't be computed).
         """
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -2208,7 +2208,7 @@ class GPUModelRunner(
         if self.model_config.is_encoder_decoder:
             # Build list of all requests needing encoder outputs (in batch order)
             all_encoder_outputs = []
-            
+
             # Process new requests first
             for req_data in scheduler_output.scheduled_new_reqs:
                 if req_data.req_id in self.requests and req_data.mm_features:
@@ -2217,7 +2217,7 @@ class GPUModelRunner(
                     if mm_hash in self.encoder_cache:
                         encoder_out = self.encoder_cache[mm_hash]
                         all_encoder_outputs.append(encoder_out)
-                    
+
             # Process cached/resumed requests
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 if req_id in self.requests:
@@ -2227,10 +2227,10 @@ class GPUModelRunner(
                         if mm_hash in self.encoder_cache:
                             encoder_out = self.encoder_cache[mm_hash]
                             all_encoder_outputs.append(encoder_out)
-            
+
             if all_encoder_outputs:
                 return all_encoder_outputs
-        
+
         return encoder_outputs
 
     def _gather_mm_embeddings(

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="attr-defined"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
@@ -305,6 +306,7 @@ class OpenAISpeechToText(OpenAIServing):
             use_beam_search = getattr(request, "use_beam_search", False)
             if use_beam_search:
                 from vllm.sampling_params import BeamSearchParams
+
                 sampling_params = request.to_beam_search_params(
                     default_max_tokens, self.default_sampling_params
                 )
@@ -330,7 +332,7 @@ class OpenAISpeechToText(OpenAIServing):
                     priority = 0
                     if raw_request and hasattr(raw_request.state, "priority"):
                         priority = raw_request.state.priority
-                    
+
                     try:
                         generator = self.beam_search(
                             prompt,
@@ -342,7 +344,11 @@ class OpenAISpeechToText(OpenAIServing):
                         list_result_generator.append(generator)
                     except Exception as e:
                         logger.exception(
-                            "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, chunk=%s, error=%s",
+                            (
+                                "Error in beam_search: request_id=%s, "
+                                "beam_width=%s, length_penalty=%s, "
+                                "chunk=%s, error=%s"
+                            ),
                             request_id,
                             sampling_params.beam_width,
                             sampling_params.length_penalty,
@@ -437,7 +443,7 @@ class OpenAISpeechToText(OpenAIServing):
             return final_response
         except asyncio.CancelledError:
             # Client cancelled - no need to return response, just log and re-raise
-            logger.info(f"Client disconnected for request {request_id}")
+            logger.info("Client disconnected for request %s", request_id)
             raise
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -489,8 +495,9 @@ class OpenAISpeechToText(OpenAIServing):
                     # so this should always be 1.
                     if len(res.outputs) != 1:
                         raise ValueError(
-                            f"Streaming expects exactly 1 output, got {len(res.outputs)}. "
-                            "Note: Beam search is not supported with streaming."
+                            f"Streaming expects exactly 1 output, got "
+                            f"{len(res.outputs)}. Note: Beam search is "
+                            "not supported with streaming."
                         )
                     output = res.outputs[0]
 

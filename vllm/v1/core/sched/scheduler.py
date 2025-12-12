@@ -406,7 +406,9 @@ class Scheduler(SchedulerInterface):
                 )
                 # Track deduplicated inputs
                 if deduplicated_inputs:
-                    deduplicated_encoder_inputs[request.request_id] = deduplicated_inputs
+                    deduplicated_encoder_inputs[request.request_id] = (
+                        deduplicated_inputs
+                    )
                 # Allocate the encoder cache (only for non-deduplicated inputs).
                 # Deduplicated inputs already had their reference added in
                 # _try_schedule_encoder_inputs.
@@ -662,7 +664,9 @@ class Scheduler(SchedulerInterface):
                     )
                     # Track deduplicated inputs
                     if deduplicated_inputs:
-                        deduplicated_encoder_inputs[request.request_id] = deduplicated_inputs
+                        deduplicated_encoder_inputs[request.request_id] = (
+                            deduplicated_inputs
+                        )
                     # Allocate the encoder cache (only for non-deduplicated inputs).
                     # Deduplicated inputs already had their reference added in
                     # _try_schedule_encoder_inputs.
@@ -970,29 +974,28 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            # Check if this encoder input is already scheduled in the current batch
-            # For encoder-decoder beam search, deduplicated requests skip computation
-            # but still need cross-attention KV cache allocated
-            if request.mm_features[i].identifier in mm_hashes_scheduled_in_batch:
+            # Check if encoder already scheduled (enables beam search dedup)
+            # Deduplicated requests skip computation but need cross-attn KV
+            mm_hash = request.mm_features[i].identifier
+            if mm_hash in mm_hashes_scheduled_in_batch:
                 # Track as deduplicated
                 deduplicated_inputs.append(i)
-                # Still add to encoder_inputs_to_schedule for cross-attention KV allocation
+                # Still add for cross-attention KV allocation
                 encoder_inputs_to_schedule.append(i)
-                # Add request reference to cached encoder (without allocating new cache memory)
-                mm_hash = request.mm_features[i].identifier
+                # Add reference to cached encoder (no new memory)
                 if mm_hash not in self.encoder_cache_manager.cached:
                     self.encoder_cache_manager.cached[mm_hash] = set()
                 self.encoder_cache_manager.cached[mm_hash].add(request.request_id)
-                # Don't deduct from encoder_compute_budget (we're not computing)
-                # Don't add to num_tokens_to_schedule (we're reusing cached output)
+                # Skip: don't deduct budget, don't add to token schedule
                 continue
 
-            if not self.is_encoder_decoder:
-                # Encoder cache across requests is only enabled for non-encoder-decoder models
-                if self.encoder_cache_manager.check_and_update_cache(request, i):
-                    # The encoder input is already computed and cached from a
-                    # previous step.
-                    continue
+            # Encoder cache across requests (non-encoder-decoder only)
+            if (
+                not self.is_encoder_decoder
+                and self.encoder_cache_manager.check_and_update_cache(request, i)
+            ):
+                # Encoder input already computed and cached
+                continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would

@@ -1,3 +1,4 @@
+# mypy: disable-error-code="attr-defined"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
@@ -61,6 +62,7 @@ from openai.types.responses import (
 )
 
 import vllm.envs as envs
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -92,16 +94,19 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
-from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
 )
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm.inputs.parse import PromptComponents, get_prompt_components, is_explicit_encoder_decoder_prompt, split_enc_dec_inputs
+from vllm.inputs.parse import (
+    PromptComponents,
+    get_prompt_components,
+    is_explicit_encoder_decoder_prompt,
+    split_enc_dec_inputs,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
@@ -359,11 +364,13 @@ class OpenAIServing:
         performance optimizations:
 
         - Encoder deduplication: Encoder computed once, shared across all beams
-        - Request batching: Multiple beams processed together in single forward pass  
+        - Request batching: Multiple beams processed together in single forward pass
         - Early stopping: Terminates when completed beams outperform active ones
-        - Cross-attention block sharing: Deduplicated requests share KV cache blocks
+        - Cross-attention block sharing: Deduplicated requests share
+          KV cache blocks
 
-        These optimizations provide ~3x speedup for beam search on encoder-decoder models.
+        These optimizations provide ~3x speedup for beam search on
+        encoder-decoder models.
         """
         beam_width = params.beam_width
         max_tokens = params.max_tokens
@@ -406,8 +413,8 @@ class OpenAIServing:
 
         # Optimize beam search parameters for different model types
         if is_enc_dec:
-            # For encoder-decoder models, use fewer logprobs since encoder dominates cost
-            # beam_width + 1 provides minimal exploration while keeping search effective
+            # For encoder-decoder: fewer logprobs (encoder dominates cost)
+            # beam_width + 1 gives minimal exploration efficiently
             logprobs_num = beam_width + 1
             # Keep the existing conservative limit from protocol.py (300 tokens)
             effective_max_tokens = max_tokens
@@ -432,18 +439,9 @@ class OpenAIServing:
             )
         ]
         completed = []
-        
-        # Performance instrumentation for encoder-decoder models
-        step_count = 0
-        if is_enc_dec:
-            logger.info(
-                f"Starting beam search: beam_width={beam_width}, max_tokens={effective_max_tokens}, "
-                f"num_beams={len(all_beams)}, encoder_decoder=True"
-            )
 
-        for _ in range(effective_max_tokens):
-            step_count += 1
-            step_start_time = time.time() if is_enc_dec else None
+        # Process each beam search step
+        for step_count in range(1, effective_max_tokens + 1):
             # Create prompts for each beam using the prompt builder
             prompts_batch, lora_req_batch = zip(
                 *[
@@ -451,7 +449,6 @@ class OpenAIServing:
                     for beam in all_beams
                 ]
             )
-            
 
             # Submit all beams concurrently
             request_id_batch = f"{request_id}-{random_uuid()}"
@@ -473,7 +470,7 @@ class OpenAIServing:
                     )
                 )
                 tasks.append(task)
-            
+
             output = [x[0] for x in await asyncio.gather(*tasks)]
 
             new_beams = []
@@ -569,22 +566,26 @@ class OpenAIServing:
                 )
 
             all_beams = new_beams
-            
+
             # Track step duration (removed per-step logging for production)
-            
+
             # Early stopping conditions
             if len(all_beams) == 0:
                 # All beams have hit EOS
                 break
-            
+
             # Additional early stopping for encoder-decoder models:
             # Stop when we have enough good completions that can't be beaten
             if is_enc_dec and len(completed) >= beam_width:
                 # Get the best completed beam's score
-                best_completed_score = sort_beams_key(sorted(completed, key=sort_beams_key, reverse=True)[0])
+                best_completed_score = sort_beams_key(
+                    sorted(completed, key=sort_beams_key, reverse=True)[0]
+                )
                 # Get the best active beam's score
-                best_active_score = sort_beams_key(sorted(all_beams, key=sort_beams_key, reverse=True)[0])
-                
+                best_active_score = sort_beams_key(
+                    sorted(all_beams, key=sort_beams_key, reverse=True)[0]
+                )
+
                 # If length_penalty <= 1.0, longer sequences won't improve scores
                 # So we can stop if best completed beats best active
                 if length_penalty <= 1.0 and best_completed_score >= best_active_score:
@@ -593,7 +594,7 @@ class OpenAIServing:
         completed.extend(all_beams)
         sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
         best_beams = sorted_completed[:beam_width]
-        
+
         # Log final beam search statistics
         # Beam search completed (removed verbose logging for production)
 
@@ -627,7 +628,9 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _create_beam_search_prompt_builder(self, prompt: PromptType) -> "BeamSearchPromptBuilder":
+    def _create_beam_search_prompt_builder(
+        self, prompt: PromptType
+    ) -> "BeamSearchPromptBuilder":
         """Create appropriate prompt builder for beam search based on prompt type."""
         if is_explicit_encoder_decoder_prompt(prompt):
             return EncoderDecoderBeamSearchPromptBuilder(prompt, self.input_processor)
@@ -814,7 +817,10 @@ class DecoderOnlyBeamSearchPromptBuilder(BeamSearchPromptBuilder):
 
 
 class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
-    """Prompt builder for encoder-decoder models like Whisper with optimized encoder caching."""
+    """Prompt builder for encoder-decoder models.
+
+    Optimized for encoder caching (e.g., Whisper, T5).
+    """
 
     def __init__(self, prompt: PromptType, input_processor):
         self.original_encoder_prompt = prompt["encoder_prompt"]  # type: ignore
@@ -843,7 +849,7 @@ class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
             else None
         )
 
-        # Use mm_processor_kwargs from encoder_inputs if available, otherwise from original prompt
+        # Use mm_processor_kwargs from encoder_inputs if available
         self.mm_processor_kwargs = (
             encoder_inputs.get("mm_processor_kwargs")
             if encoder_inputs.get("type") == "mm"
@@ -854,7 +860,7 @@ class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
         self._processed_inputs = processed_inputs
         self._encoder_inputs = encoder_inputs
         self._decoder_template = decoder_inputs
-        
+
         # Generate a unique cache salt for this beam search session
         # This helps the engine recognize that all beams share the same encoder input
         self._encoder_cache_salt = f"beam_search_encoder_{random_uuid()}"
@@ -871,7 +877,9 @@ class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
     def get_initial_mm_processor_kwargs(self) -> dict[str, Any] | None:
         return self.mm_processor_kwargs
 
-    def build_prompt_for_beam(self, beam: BeamSearchSequence) -> ExplicitEncoderDecoderPrompt:
+    def build_prompt_for_beam(
+        self, beam: BeamSearchSequence
+    ) -> ExplicitEncoderDecoderPrompt:
         # For encoder-decoder models, we use cache_salt to help the engine
         # recognize that all beams in this search share the same encoder input
         prompt = ExplicitEncoderDecoderPrompt(
@@ -884,7 +892,6 @@ class EncoderDecoderBeamSearchPromptBuilder(BeamSearchPromptBuilder):
         # Add cache_salt to signal shared encoder input across all beams
         prompt["cache_salt"] = self._encoder_cache_salt  # type: ignore
         return prompt
-
 
     def _build_response(
         self,

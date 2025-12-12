@@ -2127,9 +2127,7 @@ class TranscriptionRequest(OpenAIBaseModel):
         )
 
     def to_beam_search_params(
-        self,
-        default_max_tokens: int,
-        default_sampling_params: dict | None = None
+        self, default_max_tokens: int, default_sampling_params: dict | None = None
     ) -> BeamSearchParams:
         """Convert transcription request to beam search parameters."""
         # Use full default_max_tokens to support longer audio files
@@ -2140,7 +2138,11 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         # Use temperature for beam search
         DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE = 0.8
-        temperature = self.temperature if self.temperature is not None else DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE
+        temperature = (
+            self.temperature
+            if self.temperature is not None
+            else DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE
+        )
 
         return BeamSearchParams(
             beam_width=self.beam_width,
@@ -2166,25 +2168,27 @@ class TranscriptionRequest(OpenAIBaseModel):
             if "use_beam_search" in data:
                 use_beam_search = data["use_beam_search"]
                 if isinstance(use_beam_search, str):
-                    data["use_beam_search"] = use_beam_search.lower() in ("true", "1", "yes", "on")
+                    data["use_beam_search"] = use_beam_search.lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                        "on",
+                    )
                 elif isinstance(use_beam_search, bool):
                     data["use_beam_search"] = use_beam_search
                 else:
                     data["use_beam_search"] = bool(use_beam_search)
 
-            # Convert string to int for beam_width
-            if "beam_width" in data and isinstance(data["beam_width"], str):
-                try:
-                    data["beam_width"] = int(data["beam_width"])
-                except (ValueError, TypeError):
-                    pass
+            # Convert string to int/float for beam search params
+            import contextlib
 
-            # Convert string to float for length_penalty
+            if "beam_width" in data and isinstance(data["beam_width"], str):
+                with contextlib.suppress(ValueError, TypeError):
+                    data["beam_width"] = int(data["beam_width"])
+
             if "length_penalty" in data and isinstance(data["length_penalty"], str):
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     data["length_penalty"] = float(data["length_penalty"])
-                except (ValueError, TypeError):
-                    pass
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)
