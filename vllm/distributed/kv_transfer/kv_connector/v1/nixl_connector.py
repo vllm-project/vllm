@@ -1049,10 +1049,6 @@ class NixlConnectorWorker:
                         f"Expected {expected_engine_id},"
                         f"received {metadata.engine_id}."
                     )
-                # FIXME move to _validate
-                assert metadata.block_size <= self.block_size, (
-                    "nP > nD is not supported yet."
-                )
                 # Ensure engine id matches.
                 if metadata.engine_id != expected_engine_id:
                     raise RuntimeError(
