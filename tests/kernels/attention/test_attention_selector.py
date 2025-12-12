@@ -287,7 +287,7 @@ def test_flash_attn(monkeypatch: pytest.MonkeyPatch):
 def test_invalid_backend():
     """Test that invalid attention backend names raise ValueError."""
     with (
-        pytest.raises(KeyError),
+        pytest.raises(ValueError),
     ):
-        # Invalid backend name should raise KeyError when creating enum
+        # Invalid backend name should raise ValueError when creating enum
         AttentionConfig(backend=AttentionBackendEnum["INVALID"])
