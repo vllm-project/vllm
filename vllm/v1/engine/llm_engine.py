@@ -139,7 +139,7 @@ class LLMEngine:
     @property
     @deprecated(
         "`LLMEngine.processor` has been renamed to `LLMEngine.input_processor`. "
-        "The old name will be removed in v0.13."
+        "The old name will be removed in v0.14."
     )
     def processor(self):
         return self.input_processor
@@ -357,10 +357,6 @@ class LLMEngine:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_processor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_processor.tokenizer = tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
         if self.tokenizer is None:

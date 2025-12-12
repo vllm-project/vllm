@@ -128,14 +128,12 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
 
 class TestRotaryEmbedding(torch.nn.Module):
-    def __init__(self, head_dim=64, rotary_dim=None, max_position=2048, base=10000):
+    def __init__(self, head_dim=64, max_position=2048, base=10000):
         super().__init__()
         self.head_dim = head_dim
-        self.rotary_dim = rotary_dim or head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=max_position,
             rope_parameters={"rope_type": "default", "rope_theta": base},
         )
@@ -170,7 +168,6 @@ class TestRotaryEmbeddingSliceScatter(torch.nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
             rope_parameters={"rope_type": "default", "rope_theta": base},
         )
