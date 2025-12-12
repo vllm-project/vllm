@@ -17,11 +17,12 @@ from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfi
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        raise NotImplementedError(
-            "TPU platform does have a concept of compute capability, "
-            "this method should not be called."
-        )
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_tpu():
+            return False, "Requires TPU."
+        return True, None
 
     @classmethod
     def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
