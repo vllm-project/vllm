@@ -315,7 +315,7 @@ class Platform:
         if current_capability is None:
             return False
         return (current_capability.to_int() // 10) == (capability // 10)
-    
+
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
