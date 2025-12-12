@@ -1110,17 +1110,3 @@ def test_hybrid_cache_integration(model_runner, dist_init):
     runner._update_states(scheduler_output)
     assert _is_req_scheduled(runner, req_id)
     assert _is_req_state_block_table_match(runner, req_id)
-
-
-def test_encoder_cache_storage_format():
-    encoder_cache = {}
-
-    mock_encoder_output = torch.randn(8, 768)
-
-    mm_hash = "test_image_hash"
-    encoder_cache[mm_hash] = mock_encoder_output
-
-    assert isinstance(encoder_cache[mm_hash], torch.Tensor)
-    assert encoder_cache[mm_hash].shape == (8, 768)
-    assert not isinstance(encoder_cache[mm_hash], dict)
-    assert torch.equal(encoder_cache[mm_hash], mock_encoder_output)

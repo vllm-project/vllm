@@ -2254,15 +2254,15 @@ class GPUModelRunner(
                     ]
 
                     # Update the is_embed mask for the scheduled tokens
-                    is_embed_slice = is_embed[start_idx:end_idx]
+                    is_embed = is_embed[start_idx:end_idx]
                 else:
                     # No mask: all positions are embeddings
                     mm_embeds_item = encoder_output[start_idx:end_idx]
-                    is_embed_slice = None
+                    is_embed = None
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
-                    True if is_embed_slice is None else is_embed_slice
+                    True if is_embed is None else is_embed
                 )
 
                 mm_embeds_req.append(mm_embeds_item)
