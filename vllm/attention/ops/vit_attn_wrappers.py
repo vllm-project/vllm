@@ -19,6 +19,80 @@ import torch.nn.functional as F
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+def llama4_flash_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    is_rocm_aiter: bool,
+) -> torch.Tensor:
+    if is_rocm_aiter:
+        from aiter import flash_attn_varlen_func
+    else:
+        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+
+    return flash_attn_varlen_func(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+    )
+
+
+def llama4_flash_attn_wrapper_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    softmax_scale: float,
+    is_rocm_aiter: bool,
+) -> torch.Tensor:
+    bs, h, d = q.shape
+    return torch.empty_like(q)
+
+
+direct_register_custom_op(
+    op_name="llama4_flash_attn_wrapper",
+    op_func=llama4_flash_attn_wrapper,
+    fake_impl=llama4_flash_attn_wrapper_fake,
+)
+
+
+def llama4_flash_attn_wrapper_call(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    max_seqlen_q: torch.Tensor,
+    max_seqlen_k: torch.Tensor,
+    softmax_scale: float,
+    is_rocm_aiter: bool = False,
+) -> torch.Tensor:
+    return torch.ops.vllm.llama4_flash_attn_wrapper(
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        is_rocm_aiter=is_rocm_aiter,
+    )
+
+
 def flash_attn_maxseqlen_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
