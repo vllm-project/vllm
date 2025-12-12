@@ -564,10 +564,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = (
-            self.cache_config.mamba_cache_mode != "align"
-            and self.cache_config.enable_prefix_caching
-        )
+        return_intermediate_states = self.cache_config.mamba_cache_mode == "all"
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -619,7 +616,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if prefix_caching_enabled:
+        if return_intermediate_states:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -698,7 +695,7 @@ class MambaMixer2(MambaBase, CustomOp):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 kernel_ssm_indices = state_indices_tensor_p
-                if prefix_caching_enabled:
+                if return_intermediate_states:
                     kernel_ssm_indices = state_indices_tensor_p.gather(
                         1, block_idx_last_computed_token_p.unsqueeze(1)
                     ).squeeze(1)
@@ -726,14 +723,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=prefix_caching_enabled,
+                return_intermediate_states=return_intermediate_states,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
 
-            if prefix_caching_enabled:
+            if return_intermediate_states:
                 # The chunk_stride is the number of chunks per mamba block
                 # e.g., if mamba_block_size = 512 and chunk_size = 256,
                 # then chunk_stride = 2
@@ -812,7 +809,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            if prefix_caching_enabled:
+            if return_intermediate_states:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
