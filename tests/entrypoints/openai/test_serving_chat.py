@@ -1402,9 +1402,6 @@ class MockVllmConfig:
         ("flex", 10, 10),  # Explicit priority takes precedence
         ("priority", 5, 5),  # Explicit priority takes precedence
         ("scale", -10, -10),  # Explicit priority takes precedence
-        # Test None/default cases
-        (None, 0, 0),
-        ("auto", 0, 0),
     ],
     ids=[
         "service_tier_auto",
@@ -1415,8 +1412,6 @@ class MockVllmConfig:
         "explicit_overrides_flex",
         "explicit_overrides_priority",
         "explicit_overrides_scale",
-        "none_service_tier",
-        "default_zero_priority",
     ],
 )
 async def test_service_tier_priority_mapping(

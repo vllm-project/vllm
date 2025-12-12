@@ -600,9 +600,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     reasoning_effort: Literal["low", "medium", "high"] | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
-    service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = (
-        "auto"
-    )
+    service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
