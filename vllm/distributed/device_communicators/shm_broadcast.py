@@ -31,7 +31,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
-    get_open_port,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
@@ -324,13 +323,18 @@ class MessageQueue:
                 connect_ip = get_ip()
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
-            remote_subscribe_port = get_open_port()
+
+            # Use late binding to avoid port conflicts.
+            # Bind to wildcard address and let OS assign port.
             if is_valid_ipv6_address(connect_ip):
                 self.remote_socket.setsockopt(IPV6, 1)
                 remote_addr_ipv6 = True
                 connect_ip = f"[{connect_ip}]"
-            socket_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
-            self.remote_socket.bind(socket_addr)
+            wildcard_addr = f"tcp://{connect_ip}:0"
+            self.remote_socket.bind(wildcard_addr)
+            # Discover the actual bound port.
+            actual_endpoint = self.remote_socket.last_endpoint.decode("utf-8")
+            remote_subscribe_port = int(actual_endpoint.split(":")[-1])
             remote_subscribe_addr = f"tcp://{connect_ip}:{remote_subscribe_port}"
         else:
             remote_subscribe_addr = None
