@@ -192,7 +192,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        # NOTE: 
+        # NOTE:
         # 1. For MXFP4 x FP16, the value of the UE8M0 scale is required to be
         #    between 2 ** -15 and 2 ** 16.
         # 2. MXFP4 x FP16 only support Marlin Kernel.

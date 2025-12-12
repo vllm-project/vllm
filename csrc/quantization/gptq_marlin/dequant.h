@@ -550,7 +550,6 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
 template <>
 __device__ inline void dequant_fp8_scales<half2, vllm::kFE8M0fnu.id()>(
     int q, half2* frag_b) {
-  
   // The scales is actual UE5M0 now
   int Out1 = (q & 0x1F001F00) << 2;
   q <<= 10;
