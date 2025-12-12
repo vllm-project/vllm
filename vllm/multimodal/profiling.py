@@ -330,8 +330,8 @@ class MultiModalProfiler(Generic[_I]):
         mm_counts: Mapping[str, int] | None = None,
     ) -> Mapping[str, int]:
         """
-        Returns the maximum length of the multimodal tokens, excluding
-        any break/text tokens in-between multimodal embeddings.
+        Returns the maximum number of embeddings per item of each modality, excluding
+        any break/text tokens in-between multimodal embeddings/encoder outputs.
         """
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
