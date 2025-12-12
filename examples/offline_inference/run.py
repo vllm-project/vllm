@@ -1,5 +1,8 @@
-from vllm import LLM, SamplingParams
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+
+from vllm import LLM, SamplingParams
 
 
 def main():

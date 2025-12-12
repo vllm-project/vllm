@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 import torch
 

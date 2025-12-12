@@ -5,7 +5,6 @@ from collections.abc import Sequence
 from math import lcm
 
 from vllm.config.cache import CacheConfig
-from vllm.config.vllm import VllmConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -102,7 +101,7 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, []
+                    request_id, num_encoder_tokens, [], num_encoder_tokens
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
