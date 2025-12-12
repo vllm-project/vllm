@@ -240,8 +240,8 @@ class Scheduler(SchedulerInterface):
         )
         if request.num_output_tokens == 0:  # prefill
             # Ensure new tokens for a request in the prefill phase do not contain
-            # sps tokens, especially in the last prefill chunk. For a hybrid-model,
-            # extra sps tokens would corrupt the generated Mamba state.
+            # draft tokens, especially in the last prefill chunk. For a hybrid-model,
+            # extra draft tokens would corrupt the generated Mamba state.
             # TODO: This logic does not yet handle resumed requests.
             if request.num_computed_tokens < request.num_prompt_tokens:
                 num_new_tokens = min(
