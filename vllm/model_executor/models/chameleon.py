@@ -314,7 +314,6 @@ class ChameleonAttention(nn.Module):
         self.k_norm = ChameleonLayerNorm((self.num_kv_heads, self.head_dim))
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
