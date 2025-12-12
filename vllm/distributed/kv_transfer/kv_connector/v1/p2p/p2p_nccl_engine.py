@@ -9,7 +9,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 import msgpack
 import torch
@@ -161,8 +161,10 @@ class P2pNcclEngine:
                 )
                 self._send_thread.start()
 
-        # tensor_id: torch.Tensor/(addr, dtype, shape)
-        self.recv_store: dict[str, Any] = {}
+        # tensor_id: torch.Tensor/(addr, dtype, shape) or None
+        self.recv_store: dict[
+            str, Union[torch.Tensor, tuple[int, torch.dtype, torch.Size], None]
+        ] = {}
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
@@ -760,7 +762,7 @@ class P2pNcclEngine:
         tensor: torch.Tensor,
         remote_address: str,
         metadata: dict[str, Any],
-    ) -> Any:
+    ) -> Union[torch.Tensor, tuple[int, torch.dtype, torch.Size]]:
         tensor_size = tensor.element_size() * tensor.numel()
         if self.buffer_size + tensor_size > self.buffer_size_threshold:
             addr = self.pool.store_tensor(tensor)
