@@ -341,7 +341,7 @@ COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
+    uv pip install --pre --python /opt/venv/bin/python3 -r requirements/dev.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 #################### DEV IMAGE ####################
 
@@ -533,7 +533,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
-        uv pip install --system -r requirements/dev.txt \
+        uv pip install --pre --system -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
