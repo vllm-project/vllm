@@ -98,7 +98,7 @@ class DefaultFusedMoERouter(FusedMoERouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return self.routing_method_type
+        return self._routing_method_type
 
     def select_experts(
         self,
