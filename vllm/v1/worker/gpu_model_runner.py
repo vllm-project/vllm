@@ -2582,7 +2582,10 @@ class GPUModelRunner(
 
         # Update spec_token_ids with real draft tokens from previous step
         draft_token_ids_cpu = self._get_draft_token_ids_cpu()
-        self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
+        self.input_batch.update_async_spec_token_ids(
+            draft_token_ids_cpu,
+            num_draft_tokens=spec_decode_metadata.num_draft_tokens,
+        )
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,

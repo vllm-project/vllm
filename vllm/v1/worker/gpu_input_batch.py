@@ -966,7 +966,9 @@ class InputBatch:
                 ]
 
     def update_async_spec_token_ids(
-        self, draft_token_ids_cpu: list[list[int]] | None
+        self,
+        draft_token_ids_cpu: list[list[int]] | None,
+        num_draft_tokens: list[int] | None = None,
     ) -> None:
         """
         In async scheduling case, update spec_token_ids in sampling metadata
@@ -985,11 +987,14 @@ class InputBatch:
             prev_index = self.prev_req_id_to_index.get(req_id)
             if prev_index is None:
                 continue
-            assert prev_index < len(draft_token_ids_cpu)
             draft_ids = draft_token_ids_cpu[prev_index]
             if not draft_ids:
                 continue
-            assert index < len(spec_token_ids)
+
+            if num_draft_tokens is not None:
+                scheduled_count = num_draft_tokens[index]
+                assert scheduled_count <= len(draft_ids)
+                draft_ids = draft_ids[:scheduled_count]
             spec_token_ids[index].clear()
             spec_token_ids[index].extend(draft_ids)
 
