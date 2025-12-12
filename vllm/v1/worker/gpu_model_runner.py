@@ -1293,6 +1293,10 @@ class GPUModelRunner(
         self.encoder_seq_lens.copy_to_gpu(num_reqs)
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
         encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
+        
+        # Debug: Log encoder sequence lengths for each request
+        if num_reqs > 1 and self.model_config.is_encoder_decoder:
+            logger.info(f"[ENCODER SEQ LENS] num_reqs={num_reqs}, encoder_seq_lens={encoder_seq_lens_cpu.tolist()}")
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
@@ -2199,7 +2203,6 @@ class GPUModelRunner(
                 output,
                 is_embed=pos_info.is_embed,
             )
-            logger.info(f"[ENCODER CACHE] Cached encoder for mm_hash={mm_hash[:16]}... output_shape={output.shape}")
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
         # For encoder-decoder models, we need to return encoder outputs for ALL
@@ -2218,7 +2221,6 @@ class GPUModelRunner(
                     if mm_hash in self.encoder_cache:
                         encoder_out = self.encoder_cache[mm_hash]
                         all_encoder_outputs.append(encoder_out)
-                        logger.info(f"[ENCODER SERVE] Serving encoder for new req {req_data.req_id} from cache mm_hash={mm_hash[:16]}...")
                     
             # Process cached/resumed requests
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
@@ -2229,10 +2231,8 @@ class GPUModelRunner(
                         if mm_hash in self.encoder_cache:
                             encoder_out = self.encoder_cache[mm_hash]
                             all_encoder_outputs.append(encoder_out)
-                            logger.info(f"[ENCODER SERVE] Serving encoder for cached req {req_id} from cache mm_hash={mm_hash[:16]}...")
             
             if all_encoder_outputs:
-                logger.info(f"[ENCODER RETURN] Returning {len(all_encoder_outputs)} encoder outputs for batch")
                 return all_encoder_outputs
         
         return encoder_outputs
@@ -2581,12 +2581,7 @@ class GPUModelRunner(
             # simpler, because the outputs are just passed to the decoder.
             # We are not doing any prompt replacement. We also will only
             # ever have a single encoder input.
-            logger.info(
-                f"[ENCODER EXEC] Executing encoder for requests: {list(scheduler_output.scheduled_encoder_inputs.keys())}, "
-                f"total_requests_in_batch={len(scheduler_output.num_scheduled_tokens)}"
-            )
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
-            logger.info(f"[ENCODER EXEC] Encoder execution complete, outputs={len(encoder_outputs)}")
             model_kwargs.update({"encoder_outputs": encoder_outputs})
 
         return (
@@ -2793,16 +2788,6 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-        # Log encoder info for debugging beam search deduplication
-        if self.model_config.is_encoder_decoder and "encoder_outputs" in model_kwargs:
-            encoder_outputs = model_kwargs["encoder_outputs"]
-            logger.info(
-                f"[MODEL FORWARD] is_encoder_decoder=True, "
-                f"encoder_outputs={len(encoder_outputs) if encoder_outputs else 0}, "
-                f"input_ids_shape={input_ids.shape if input_ids is not None else 'None'}, "
-                f"inputs_embeds_shape={inputs_embeds.shape if inputs_embeds is not None else 'None'}"
-            )
-        
         return self.model(
             input_ids=input_ids,
             positions=positions,

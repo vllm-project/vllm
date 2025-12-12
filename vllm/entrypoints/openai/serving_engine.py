@@ -459,19 +459,13 @@ class OpenAIServing:
                     f"all should share same encoder input for caching"
                 )
 
-            # Submit all beams concurrently but with priorities for encoder-decoder models
-            # This ensures they're in the same scheduling batch while first beam executes first
-            tasks = []
+            # Submit all beams concurrently
             request_id_batch = f"{request_id}-{random_uuid()}"
-
+            tasks = []
             for i, (individual_prompt, lora_req) in enumerate(
                 zip(prompts_batch, lora_req_batch)
             ):
                 request_id_item = f"{request_id_batch}-beam-{i}"
-                # For encoder-decoder: Use SAME priority for all beams so they batch together
-                # But submit first beam FIRST so it schedules encoder before others arrive
-                priority = 0
-                
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.engine_client.generate(
@@ -480,12 +474,12 @@ class OpenAIServing:
                             request_id_item,
                             lora_request=lora_req,
                             trace_headers=trace_headers,
-                            priority=priority,
+                            priority=0,
                         )
                     )
                 )
                 tasks.append(task)
-
+            
             output = [x[0] for x in await asyncio.gather(*tasks)]
 
             new_beams = []

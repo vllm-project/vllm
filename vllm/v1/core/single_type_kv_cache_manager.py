@@ -5,9 +5,12 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
+
+logger = init_logger(__name__)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
@@ -739,7 +742,57 @@ class MambaManager(SingleTypeKVCacheManager):
 
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
-    """Manager for cross-attention KV cache in encoder-decoder models."""
+    """Manager for cross-attention KV cache in encoder-decoder models.
+    
+    Supports sharing blocks between requests with identical encoder inputs
+    (e.g., beam search where all beams share the same audio/image input).
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Map mm_hash -> list of blocks for shared encoder KV cache
+        self.encoder_hash_to_blocks: dict[str, list[KVCacheBlock]] = {}
+        # Map request_id -> mm_hash for tracking which encoder each request uses
+        self.req_to_encoder_hash: dict[str, str] = {}
+    
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, encoder_hash: str | None = None
+    ) -> list[KVCacheBlock]:
+        """Allocate new blocks for cross-attention, or reuse existing blocks
+        if the encoder is shared (deduplicated).
+        
+        Args:
+            request_id: The request ID.
+            num_tokens: Number of encoder tokens.
+            encoder_hash: The mm_hash of the encoder input. If provided and
+                blocks already exist for this hash, those blocks are reused.
+        
+        Returns:
+            List of KV cache blocks (newly allocated or shared).
+        """
+        # Check if we can share blocks for this encoder
+        if encoder_hash and encoder_hash in self.encoder_hash_to_blocks:
+            # Reuse existing blocks for this encoder
+            shared_blocks = self.encoder_hash_to_blocks[encoder_hash]
+            # Increment ref count for shared blocks
+            for block in shared_blocks:
+                block.ref_cnt += 1
+            # Assign shared blocks to this request
+            self.req_to_blocks[request_id] = shared_blocks.copy()
+            self.req_to_encoder_hash[request_id] = encoder_hash
+            logger.info(f"[CROSS-ATTN SHARE] Request {request_id[:32]} sharing {len(shared_blocks)} cross-attention blocks for encoder {encoder_hash[:16]}")
+            return []  # No NEW blocks allocated
+        
+        # Allocate new blocks normally
+        new_blocks = super().allocate_new_blocks(request_id, num_tokens)
+        
+        # If encoder_hash provided, store blocks for future sharing
+        if encoder_hash and new_blocks:
+            self.encoder_hash_to_blocks[encoder_hash] = self.req_to_blocks[request_id]
+            self.req_to_encoder_hash[request_id] = encoder_hash
+            logger.info(f"[CROSS-ATTN ALLOC] Request {request_id[:32]} allocated {len(new_blocks)} NEW cross-attention blocks for encoder {encoder_hash[:16]}")
+        
+        return new_blocks
 
     def save_new_computed_blocks(
         self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
@@ -753,6 +806,22 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")
 
+    def free(self, request_id: str) -> None:
+        """Free cross-attention blocks, handling shared blocks properly."""
+        # Get encoder hash if this request was sharing blocks
+        encoder_hash = self.req_to_encoder_hash.pop(request_id, None)
+        
+        # Free blocks normally (decrements ref_cnt)
+        super().free(request_id)
+        
+        # If this was the last request using this encoder, clean up mapping
+        if encoder_hash and encoder_hash in self.encoder_hash_to_blocks:
+            blocks = self.encoder_hash_to_blocks[encoder_hash]
+            # Check if any blocks still have references
+            if all(block.ref_cnt == 0 for block in blocks):
+                del self.encoder_hash_to_blocks[encoder_hash]
+                logger.info(f"[CROSS-ATTN CLEANUP] Removed shared blocks for encoder {encoder_hash[:16]}")
+    
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         # Cross-attention blocks contain request-specific encoder states
         # and are not shared between different requests

@@ -240,6 +240,9 @@ class Scheduler(SchedulerInterface):
         # Track which multimodal hashes have been scheduled in this batch
         # to avoid recomputing encoders for concurrent requests with same input
         mm_hashes_scheduled_in_batch: set[str] = set()
+        # Map mm_hash -> request_id for tracking which request first allocated
+        # cross-attention blocks for a given encoder (for block sharing)
+        encoder_hash_to_first_request: dict[str, str] = {}
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 

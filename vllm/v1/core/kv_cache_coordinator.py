@@ -4,11 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
-from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-
-logger = init_logger(__name__)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
@@ -97,11 +94,9 @@ class KVCacheCoordinator(ABC):
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
-                cross_attn_blocks = manager.get_num_blocks_to_allocate(
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id, num_encoder_tokens, []
                 )
-                logger.info(f"[CROSS-ATTN ALLOC] Request {request_id[:32]} allocating {cross_attn_blocks} cross-attention blocks for {num_encoder_tokens} encoder tokens")
-                num_blocks_to_allocate += cross_attn_blocks
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id, num_tokens, new_computed_blocks[i]
@@ -123,7 +118,8 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0,
+        encoder_hash: str | None = None
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -135,6 +131,8 @@ class KVCacheCoordinator(ABC):
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            encoder_hash: The mm_hash of the encoder input, used for sharing
+                cross-attention blocks between requests with identical encoders.
 
         Returns:
             The new allocated blocks.
@@ -142,10 +140,11 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
+                num_encoder_tokens,
+                encoder_hash=encoder_hash,
             )
+            if isinstance(manager, CrossAttentionManager)
+            else manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers
         )
 
