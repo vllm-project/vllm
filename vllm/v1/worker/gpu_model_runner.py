@@ -2951,7 +2951,7 @@ class GPUModelRunner(
         assert self.cache_config.enable_prefix_caching
         block_size = mamba_spec.block_size
         finished_req_ids = scheduler_output.finished_req_ids
-        preempted_req_ids = scheduler_output.preempted_req_ids or []
+        preempted_req_ids = scheduler_output.preempted_req_ids or set()
         for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
             self.mamba_state_idx.pop(req_id, None)
         for i, req_id in enumerate(self.input_batch.req_ids):
