@@ -339,10 +339,8 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -516,6 +514,10 @@ class Scheduler(SchedulerInterface):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
+                        logger.debug(
+                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                            request.request_id,
+                        )
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
@@ -1876,7 +1878,7 @@ class Scheduler(SchedulerInterface):
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: 328",
+                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
                 total_failed_requests,
                 total_failed_tokens,
                 all_failed_req_ids,
