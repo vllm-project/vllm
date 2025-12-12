@@ -378,9 +378,10 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
     mamba_group_ids: list[int] = []
     mamba_specs: list[MambaSpec] = []
     for i in range(len(kv_cache_config.kv_cache_groups)):
-        if isinstance(kv_cache_config.kv_cache_groups[i].kv_cache_spec, MambaSpec):
+        kv_cache_spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
+        if isinstance(kv_cache_spec, MambaSpec):
             mamba_group_ids.append(i)
-            mamba_specs.append(kv_cache_config.kv_cache_groups[i].kv_cache_spec)
+            mamba_specs.append(kv_cache_spec)
     assert len(mamba_group_ids) > 0, "no mamba layers in the model"
     assert all(mamba_specs[0] == spec for spec in mamba_specs)
     return mamba_group_ids, mamba_specs[0]
