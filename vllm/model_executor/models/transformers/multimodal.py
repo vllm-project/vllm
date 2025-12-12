@@ -308,6 +308,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
         # Other models will not have `token_type_ids` in kwargs
         kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
+        # Positions shape handling for MRoPE models
+        if self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len]
+            positions = positions[:, None]
         model_output = super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
