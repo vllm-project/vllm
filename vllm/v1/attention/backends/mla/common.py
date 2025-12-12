@@ -1147,7 +1147,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(
             self.kv_b_proj, out_dtype=act_dtype
-        )
+        ).T
 
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
@@ -1537,7 +1537,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(
             self.kv_b_proj, out_dtype=act_dtype
-        )
+        ).T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),

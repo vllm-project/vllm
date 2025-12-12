@@ -254,6 +254,7 @@ def get_layer_weight(layer):
 def get_and_maybe_dequant_weights(
     layer: "LinearBase", out_dtype: torch.dtype = torch.float32
 ):
+    """Return layer's unquantized weigths in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
@@ -262,7 +263,7 @@ def get_and_maybe_dequant_weights(
 
     # Unquantized layer: just return base weights
     if isinstance(layer.quant_method, UnquantizedLinearMethod):
-        return weight
+        return weight.to(out_dtype)
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if isinstance(layer.quant_method, Fp8LinearMethod):
@@ -272,7 +273,8 @@ def get_and_maybe_dequant_weights(
             layer.weight_block_size,
             out_dtype=out_dtype,
         )
-        if layer.weight_block_size is not None:
+        # per-tensor scaling stores weights in [in, out] layout
+        if not layer.quant_method.block_quant:
             dequant_weights = dequant_weights.T
         return dequant_weights
 
@@ -287,7 +289,7 @@ def get_and_maybe_dequant_weights(
         dtype=out_dtype,
         device=weight.device,
     )
-    dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
+    dequant_weights = layer.quant_method.apply(layer, eye, bias=None).to(out_dtype)
     return dequant_weights.T
 
 
