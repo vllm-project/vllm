@@ -15,8 +15,8 @@ from openai_harmony import (
 )
 
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers import OpenAIToolParser
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.entrypoints.openai.tool_parsers.openai_tool_parser import OpenAIToolParser
+from vllm.tokenizers import get_tokenizer
 
 MODEL = "gpt2"
 

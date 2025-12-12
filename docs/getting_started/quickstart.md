@@ -63,6 +63,17 @@ This guide will help you quickly get started with vLLM to perform:
         rocm/vllm-dev:nightly
         ```
 
+=== "Google TPU"
+
+    To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
+    
+    ```bash
+    uv pip install vllm-tpu
+    ```
+
+    !!! note
+        For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
 !!! note
     For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
 
@@ -272,10 +283,10 @@ Currently, vLLM supports multiple backends for efficient Attention computation a
 
 If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options:
 
-- On NVIDIA CUDA: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
+- On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
 - On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA` or `ROCM_AITER_UNIFIED_ATTN`.
 
-For AMD ROCm, you can futher control the specific Attention implementation using the following variables:
+For AMD ROCm, you can further control the specific Attention implementation using the following variables:
 
 - Triton Unified Attention: `VLLM_ROCM_USE_AITER=0 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`
 - AITER Unified Attention: `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_V1_USE_PREFILL_DECODE_ATTENTION=0 VLLM_ROCM_USE_AITER_MHA=0`

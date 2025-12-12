@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from math import prod
 
 import torch
@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
@@ -43,6 +43,12 @@ class KVCacheSpec:
             The KV cache size in bytes
         """
         raise NotImplementedError
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        """
+        Create a new KVCacheSpec from self but replacing the block size.
+        """
+        return replace(self, block_size=block_size)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -89,10 +95,11 @@ class FullAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         # Note(hc): each dcp rank only need save
         # (max_model_len//dcp_world_size) tokens locally.
-        if dcp_world_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size)
+        if dcp_world_size * pcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod

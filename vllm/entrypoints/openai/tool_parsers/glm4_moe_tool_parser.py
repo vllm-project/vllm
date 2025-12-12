@@ -20,17 +20,15 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("glm45")
 class Glm4MoeModelToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
@@ -80,7 +78,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         .get("type", None)
                     )
                     return arg_type == "string"
-            logger.warning("No tool named '%s'.", tool_name)
+            logger.debug("No tool named '%s'.", tool_name)
             return False
 
         def _deserialize(value: str) -> Any:

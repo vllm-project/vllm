@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
@@ -27,8 +27,12 @@ def server():
 
 
 @pytest.mark.asyncio
-async def test_basic_completion_with_emoji(server):
+@pytest.mark.parametrize("return_token_ids", [True, False, None])
+async def test_basic_completion_with_emoji(server, return_token_ids: bool | None):
     """Test basic completion with emoji to verify token_ids field."""
+    extra_body = None
+    if return_token_ids is not None:
+        extra_body = {"return_token_ids": return_token_ids}
     async with server.get_async_client() as client:
         # Test with return_token_ids enabled
         completion = await client.completions.create(
@@ -37,7 +41,7 @@ async def test_basic_completion_with_emoji(server):
             max_tokens=10,
             temperature=0,
             logprobs=1,
-            extra_body={"return_token_ids": True},
+            extra_body=extra_body,
         )
 
         # Check the raw response to see the structure
@@ -45,6 +49,12 @@ async def test_basic_completion_with_emoji(server):
 
         # Verify prompt_token_ids field is present in the completion response
         assert "prompt_token_ids" in completion_dict["choices"][0]
+        if not return_token_ids:
+            # If return_token_ids is False, token_ids should not be present
+            assert completion_dict["choices"][0].get("token_ids") is None
+            assert completion_dict["choices"][0].get("prompt_token_ids") is None
+            # Skip further checks
+            return
         assert isinstance(completion.choices[0].prompt_token_ids, list)
 
         # Check against the expected prompt token IDs

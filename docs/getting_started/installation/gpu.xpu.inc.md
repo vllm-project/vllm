@@ -2,9 +2,6 @@
 
 vLLM initially supports basic model inference and serving on Intel GPU platform.
 
-!!! warning
-    There are no pre-built wheels for this device, so you need build vLLM from source. Or you can use pre-built images which are based on vLLM released versions.
-
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
 
@@ -56,8 +53,10 @@ docker build -f docker/Dockerfile.xpu -t vllm-xpu-env --shm-size=4g .
 docker run -it \
              --rm \
              --network=host \
-             --device /dev/dri \
+             --device /dev/dri:/dev/dri \
              -v /dev/dri/by-path:/dev/dri/by-path \
+             --ipc=host \
+             --privileged \
              vllm-xpu-env
 ```
 

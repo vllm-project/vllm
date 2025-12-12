@@ -10,9 +10,8 @@ import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_mp_context
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import set_process_title
+from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown

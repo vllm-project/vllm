@@ -26,16 +26,13 @@ TOP_KS = [6, 8]
 
 MNK_FACTORS = [
     (2, 1024, 1024),
-    (2, 1024, 1536),
     (2, 3072, 1024),
     (2, 3072, 1536),
     (7, 3072, 1536),
     (64, 1024, 1024),
     (64, 1024, 1536),
     (64, 3072, 1024),
-    (64, 3072, 1536),
     (224, 1024, 1024),
-    (224, 1024, 1536),
     (224, 3072, 1024),
     (224, 3072, 1536),
     (32768, 1024, 1024),
@@ -45,8 +42,6 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 @dataclasses.dataclass

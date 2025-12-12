@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, TypeAlias
 
-import pandas as pd
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
 from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
 from torch.autograd.profiler import FunctionEvent
@@ -21,6 +20,12 @@ from vllm.profiler.utils import (
     event_torch_op_stack_trace,
     indent_string,
 )
+from vllm.utils.import_utils import PlaceholderModule
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 @dataclass
