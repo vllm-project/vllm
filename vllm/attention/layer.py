@@ -17,6 +17,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -524,6 +525,12 @@ class MultiHeadAttention(nn.Module):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
+        self.fa_version = (
+            get_flash_attn_version()
+            if self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            else None
+        )
+
         logger.info_once(
             f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
@@ -559,6 +566,10 @@ class MultiHeadAttention(nn.Module):
                 0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
             )
 
+            # Only pass fa_version for FLASH_ATTN backend (not ROCM_AITER_FA)
+            extra_kwargs = (
+                {"fa_version": self.fa_version} if self.fa_version is not None else {}
+            )
             out = self._flash_attn_varlen_func(
                 query.flatten(0, 1),
                 key.flatten(0, 1),
@@ -568,6 +579,7 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
+                **extra_kwargs,
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
