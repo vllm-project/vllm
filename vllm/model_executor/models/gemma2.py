@@ -266,6 +266,8 @@ class Gemma2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -364,6 +366,10 @@ class Gemma2Model(nn.Module):
                 if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
+                    continue
+                # Skip parameters not in the model (e.g., GGUF quantization
+                # metadata like qweight_type for embeddings)
+                if name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
