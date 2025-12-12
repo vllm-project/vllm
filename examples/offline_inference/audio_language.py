@@ -99,6 +99,34 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# AudioFlamingo3
+def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "nvidia/audio-flamingo-3-hf"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    # AudioFlamingo3 uses <sound> token for audio
+    audio_placeholder = "<sound>" * audio_count
+
+    prompt = (
+        "<|im_start|>system\n"
+        "You are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_placeholder}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     model_name = "google/gemma-3n-E2B-it"
@@ -382,6 +410,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
+    "audioflamingo3": run_audioflamingo3,
     "voxtral": run_voxtral,
     "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,

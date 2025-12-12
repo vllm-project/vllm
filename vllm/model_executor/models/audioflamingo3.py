@@ -56,7 +56,12 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     init_vllm_registered_model,
@@ -433,13 +438,20 @@ class AudioFlamingo3MultiModalProcessor(
     info=AudioFlamingo3ProcessingInfo,
     dummy_inputs=AudioFlamingo3DummyInputsBuilder,
 )
-class AudioFlamingo3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class AudioFlamingo3ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+):
     """
     AudioFlamingo3 model for conditional generation.
 
     This model integrates a Whisper-based audio encoder with a Qwen2 language model.
     It supports multi-chunk audio processing.
     """
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
