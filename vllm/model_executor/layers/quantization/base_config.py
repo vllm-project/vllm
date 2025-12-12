@@ -168,3 +168,10 @@ class QuantizationConfig(ABC):
         Interface to update values after config initialization.
         """
         pass
+
+    @staticmethod
+    def get_default_quant_config_by_quantization_scheme(quantization_scheme: str):
+        """
+        Return default quant_config according to quant_scheme
+        """
+        raise NotImplementedError

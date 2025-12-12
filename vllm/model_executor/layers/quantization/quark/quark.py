@@ -43,6 +43,62 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
+quant_scheme_quant_config_map = {
+    "quark_online_fp8_ptpc": {
+        "is_online_quant": True,
+        "algo_config": None,
+        "exclude": ["lm_head"],
+        "export": {
+            "kv_cache_group": [],
+            "min_kv_scale": 0.0,
+            "pack_method": "reorder",
+            "weight_format": "real_quantized",
+            "weight_merge_groups": None,
+        },
+        "global_quant_config": {
+            "bias": None,
+            "input_tensors": {
+                "ch_axis": 1,
+                "dtype": "fp8_e4m3",
+                "group_size": None,
+                "is_dynamic": True,
+                "is_scale_quant": False,
+                "mx_element_dtype": None,
+                "observer_cls": "PerChannelMinMaxObserver",
+                "qscheme": "per_channel",
+                "round_method": None,
+                "scale_calculation_mode": None,
+                "scale_format": None,
+                "scale_type": None,
+                "symmetric": None,
+            },
+            "output_tensors": None,
+            "target_device": None,
+            "weight": {
+                "ch_axis": 0,
+                "dtype": "fp8_e4m3",
+                "group_size": None,
+                "is_dynamic": False,
+                "is_scale_quant": False,
+                "mx_element_dtype": None,
+                "observer_cls": "PerChannelMinMaxObserver",
+                "qscheme": "per_channel",
+                "round_method": None,
+                "scale_calculation_mode": None,
+                "scale_format": None,
+                "scale_type": None,
+                "symmetric": None,
+            },
+        },
+        "layer_quant_config": {},
+        "layer_type_quant_config": {},
+        "quant_method": "quark",
+        "quant_mode": "eager_mode",
+        "softmax_quant_spec": None,
+        "version": "0.10+82f969537f",
+    }
+}
+
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -433,16 +489,25 @@ class QuarkConfig(QuantizationConfig):
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
-                return QuarkW8A8Fp8(weight_config, input_config)
+                return QuarkW8A8Fp8(
+                    weight_config,
+                    input_config,
+                    is_online_quant=self.quant_config.get("is_online_quant", False),
+                )
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
             return QuarkW8A8Int8(
                 qscheme=weight_qscheme,
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
+                is_online_quant=self.quant_config.get("is_online_quant", False),
             )
         elif self._is_ocp_mx(weight_config, input_config):
-            return QuarkOCP_MX(weight_config, input_config)
+            return QuarkOCP_MX(
+                weight_config,
+                input_config,
+                is_online_quant=self.quant_config.get("is_online_quant", False),
+            )
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
@@ -481,6 +546,13 @@ class QuarkConfig(QuantizationConfig):
 
         # If no matches, return None
         return None
+
+    @staticmethod
+    def get_default_quant_config_by_quantization_scheme(quantization_scheme: str):
+        assert quantization_scheme in quant_scheme_quant_config_map, (
+            f"Unknown quantization_scheme: {quantization_scheme}"
+        )
+        return quant_scheme_quant_config_map[quantization_scheme]
 
 
 class QuarkLinearMethod(LinearMethodBase):

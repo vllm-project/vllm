@@ -245,6 +245,10 @@ def get_quant_config(
     if hf_quant_config is None:
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config", None)
+        if model_config.quantization in ["quark_online_fp8_ptpc"]:
+            hf_quant_config = quant_cls.get_default_quant_config_by_quantization_scheme(
+                model_config.quantization
+            )
 
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)

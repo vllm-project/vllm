@@ -159,8 +159,15 @@ except (ImportError, AttributeError):
 
 class QuarkOCP_MX(QuarkScheme):
     def __init__(
-        self, weight_quant_spec: dict[str, Any], input_quant_spec: dict[str, Any]
+        self,
+        weight_quant_spec: dict[str, Any],
+        input_quant_spec: dict[str, Any],
+        is_online_quant: bool = False,
     ):
+        if is_online_quant:
+            raise NotImplementedError(
+                "Quark online ocp_mx quant has not been supported yet!"
+            )
         self.out_dtype = torch.get_default_dtype()
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
