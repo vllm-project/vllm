@@ -1005,7 +1005,7 @@ class EplbState:
                 is_received_locally=model_state.is_received_locally,
                 recv_metadata=model_state.recv_metadata,
                 new_indices=new_indices,
-                ep_group=ep_group,
+                ep_rank=ep_group.rank(),
             )
             transferred_layer = model_state.layer_to_transfer
             self._update_layer_mapping_from_new(model_state, transferred_layer)
