@@ -153,7 +153,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             common_attn_metadata,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
-            1 + self.num_spec,
         )
 
         if (

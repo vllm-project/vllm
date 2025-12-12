@@ -1189,14 +1189,29 @@ def mamba_get_block_table_tensor(
     common_attn_metadata: CommonAttentionMetadata,
     kv_cache_spec: MambaSpec,
     mamba_cache_mode: str,
-    num_blocks: int = 1,
 ) -> torch.Tensor:
+    """
+    Get the block table tensor for mamba kernels from the input
+    common_attn_metadata.block_table_tensor given different mamba cache modes.
+
+    - "all":   input  (#requests, cdiv(max_model_len, block_size));
+               output (#requests, cdiv(max_model_len, block_size)).
+
+    - "none":  input  (#requests, 1 + num_speculative_blocks);
+               output (#requests, 1 + num_speculative_blocks).
+
+    - "align": input  (#requests, cdiv(max_model_len, block_size));
+               output (#requests, 1 + num_speculative_blocks), which are the last
+               1 + num_speculative_blocks of each request.
+    """
     if mamba_cache_mode in ("all", "none"):
         return common_attn_metadata.block_table_tensor
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
         block_table_tensor = common_attn_metadata.block_table_tensor
         start_indices = (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size
-        offsets = torch.arange(num_blocks, device=block_table_tensor.device)
+        offsets = torch.arange(
+            1 + kv_cache_spec.num_speculative_blocks, device=block_table_tensor.device
+        )
         indices_to_gather = start_indices.unsqueeze(1) + offsets
         return torch.gather(block_table_tensor, 1, indices_to_gather)
