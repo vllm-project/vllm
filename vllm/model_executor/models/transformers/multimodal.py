@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.compilation.decorators import ignore_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
@@ -44,14 +43,6 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
-
-DYNAMIC_ARG_DIMS = {
-    "input_ids": 0,
-    # set `positions` to last dim to support Qwen-mrope
-    "positions": -1,
-    "intermediate_tensors": 0,
-    "inputs_embeds": 0,
-}
 
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
@@ -291,11 +282,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     )
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        # Set dynamic arg dims for MRoPE models.
+        if vllm_config.model_config.uses_mrope:
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            self._dynamic_arg_dims = {
+                "input_ids": 1,  # shape: [1, seq_len]
+                "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
+                "position_ids": 2,  # shape: [3, 1, seq_len]
+            }
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
-        # Ensure encoder is not compiled
-        encoder = self.model.get_encoder("image")
-        encoder.__class__ = ignore_torch_compile(type(encoder))
 
     def forward(
         self,

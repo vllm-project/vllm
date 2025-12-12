@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
+import sys
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
@@ -44,6 +46,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
 from vllm.model_executor.models.transformers.utils import (
+    can_enable_torch_compile,
     get_feature_request_tip,
     init_on_device_without_buffers,
     log_replacement,
@@ -151,6 +154,13 @@ class Base(
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
 
+        # Attrs for torch compile (see support_torch_compile)
+        self._dynamic_arg_dims: dict[str, int] = {
+            "input_ids": 1,
+            "inputs_embeds": 1,
+            "position_ids": 1,
+        }
+
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
         """Target class for Eagle3 aux hidden state recording."""
@@ -174,11 +184,28 @@ class Base(
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"):
-            self.model: PreTrainedModel = AutoModel.from_config(
-                self.config,
+            from_config_kwargs = dict(
+                config=self.config,
                 dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
+            # Create a dummy model to get the decoder class
+            model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+            decoder = model.get_decoder()
+            decoder_cls = type(decoder)
+
+            # Decorate the decoder_cls for torch compile and patch it where it came from
+            @support_torch_compile(
+                dynamic_arg_dims=self._dynamic_arg_dims,
+                enable_if=can_enable_torch_compile,
+            )
+            class Wrapper(decoder_cls):
+                pass
+
+            module = sys.modules[decoder_cls.__module__]
+            setattr(module, decoder_cls.__name__, Wrapper)
+            del model
+            self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
