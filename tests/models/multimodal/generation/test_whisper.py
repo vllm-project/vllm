@@ -9,6 +9,7 @@ import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.assets.audio import AudioAsset
+from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
 from ....utils import create_new_process_for_each_test, multi_gpu_test
@@ -111,6 +112,7 @@ def check_model_available(model: str) -> None:
 
 
 @pytest.mark.core_model
+@pytest.mark.cpu_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -126,7 +128,8 @@ def test_models(
     enforce_eager: bool,
 ) -> None:
     check_model_available(model)
-
+    if current_platform.is_cpu() and not enforce_eager:
+        pytest.skip("Skipping test for CPU with non-eager mode")
     run_test(
         hf_runner,
         vllm_runner,
@@ -138,34 +141,6 @@ def test_models(
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
         enforce_eager=enforce_eager,
-    )
-
-
-@pytest.mark.cpu_model
-@pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
-@pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("num_logprobs", [5])
-@create_new_process_for_each_test("spawn")
-def test_models_cpu(
-    hf_runner,
-    vllm_runner,
-    model: str,
-    dtype: str,
-    num_logprobs: int,
-    input_audios,
-) -> None:
-    # @create_new_process_for_each_test() does not work for some runners
-    # TODO: to fix cpu privilege issues in run-cpu-test-arm.sh
-    run_test(
-        hf_runner,
-        vllm_runner,
-        input_audios,
-        model,
-        dtype=dtype,
-        max_model_len=448,
-        max_tokens=200,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=1,
     )
 
 
