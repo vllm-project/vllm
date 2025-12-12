@@ -614,6 +614,7 @@ def invoke_fused_moe_kernel(
             bit=4 if use_int4_w4a16 else 8,
         )
         config = config.copy()
+        config["SPLIT_K"] = 1
         config.update(
             get_moe_wna16_block_config(
                 config=config,
