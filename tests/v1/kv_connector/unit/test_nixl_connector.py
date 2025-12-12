@@ -1559,10 +1559,8 @@ def test_shutdown_cleans_up_resources(dist_init):
         patch.object(nixl_wrapper, "deregister_memory") as mock_dereg,
     ):
         worker._recving_transfers = {"req1": [123]}
-        worker.src_xfer_side_handle = 456
-        worker.src_xfer_side_chunked_handles = {-2: [456]}
         # Mock register_kv_cache which registers local handle
-        # worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
+        worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
         # P TP = 2 * D TP case, we should register 2 local handles
         worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
         worker.dst_xfer_side_handles = {"engine1": {0: 789}}
