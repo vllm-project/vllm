@@ -27,7 +27,7 @@ from vllm.platforms import PlatformEnum, current_platform
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
-    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
+    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
@@ -55,41 +55,25 @@ def choose_scaled_mm_linear_kernel(
         type[ScaledMMLinearKernel]: Chosen kernel.
     """
 
-    if compute_capability is None:
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc[0] * 10 + _cc[1]
-
     failure_reasons = []
     for kernel in _POSSIBLE_KERNELS[current_platform._enum]:
         if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
-            failure_reasons.append(
-                f" {kernel.__name__} disabled by environment variable"
-            )
+            failure_reasons.append(f"{kernel.__name__}: disabled by env var")
             continue
 
         # If the current platform uses compute_capability,
         # make sure the kernel supports the compute cability.
-        if compute_capability is not None:
-            kernel_min_capability = kernel.get_min_capability()
-            if (
-                kernel_min_capability is not None
-                and kernel_min_capability > compute_capability
-            ):
-                failure_reasons.append(
-                    f"{kernel.__name__} requires capability "
-                    f"{kernel_min_capability}, current compute capability "
-                    f"is {compute_capability}"
-                )
-                continue
+        is_supported, reason = kernel.is_supported(compute_capability)
+        if not is_supported:
+            failure_reasons.append(f"{kernel.__name__}: {reason}")
+            continue
 
-        can_implement, failure_reason = kernel.can_implement(config)
-        if can_implement:
-            return kernel
-        else:
-            failure_reasons.append(
-                f" {kernel.__name__} cannot implement due to: {failure_reason}"
-            )
+        can_implement, reason = kernel.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel.__name__}: {reason}")
+            continue
+
+        return kernel
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
