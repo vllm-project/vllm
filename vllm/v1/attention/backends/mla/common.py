@@ -457,7 +457,7 @@ def use_cudnn_prefill() -> bool:
     return (
         flashinfer_available
         and vllm_config.attention_config.use_cudnn_prefill
-        and is_sm100f_supported()
+        and current_platform.is_device_capability(100)
         and has_nvidia_artifactory()
     )
 
