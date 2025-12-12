@@ -1201,6 +1201,7 @@ class Qwen3VLForConditionalGeneration(
             "gate_proj",
             "up_proj",
         ],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     supports_encoder_tp_data = True
