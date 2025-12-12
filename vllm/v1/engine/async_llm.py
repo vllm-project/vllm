@@ -527,6 +527,12 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | list[int] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
+        Generates the completions for the input prompts.
+
+        This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
+
         Main function called by the API server to kick off requests
             * 1) Making an AsyncStream corresponding to the Requests.
             * 2) Processing the Inputs.
@@ -538,6 +544,51 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        Args:
+            prompt: The prompts to the AsyncLLM. You may pass a sequence of
+                prompts or EngineCoreRequests for batch inference.
+                See [PromptType][vllm.inputs.PromptType]
+                for more details about the format of each prompt.
+            sampling_params: The sampling parameters for text generation. If
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            request_id: The request_ids for the prompts.
+                It must be a list of str matching the length of `prompts`,
+                and it is paired one by one with the prompt.
+            prompt_text: The prompt texts for the prompts.
+                If provided, must be a list of str matching the length
+                of `prompts`, where each prompt text value corresponds to the
+                prompt at the same index.
+            lora_request: LoRA request to use for generation, if any.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            tokenization_kwargs: The tokenization kwargs for the prompts.
+            trace_headers: The trace headers for the prompts.
+                When it is a single map, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+            priority: The priority of the requests, if any.
+                Only applicable when priority scheduling policy is enabled.
+                If provided, must be a list of integers matching the length
+                of `prompts`, where each priority value corresponds to the prompt
+                at the same index.
+            data_parallel_rank: The data parallel rank of the requests, if any.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
+                prompts and it is paired one by one with the prompt.
+
+        Returns:
+            An AsyncGenerator of `RequestOutput` objects containing the
+            generated completions for the input prompts.
+
+        Note:
+            Using `prompts` and `prompt_token_ids` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the `inputs` parameter.
         """
         is_batch = False
         if not isinstance(prompt, (str, dict)) and isinstance(prompt, Sequence):
