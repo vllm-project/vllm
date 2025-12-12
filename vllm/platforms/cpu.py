@@ -325,10 +325,16 @@ class CpuPlatform(Platform):
             # We need to find the location of PyTorch's libgomp
             torch_pkg = os.path.dirname(torch.__file__)
             site_root = os.path.dirname(torch_pkg)
-            torch_libs = os.path.join(site_root, "torch.libs")
-            pytorch_libgomp_so_candidates = glob.glob(
-                os.path.join(torch_libs, "libgomp-*.so*")
-            )
+            # Search both torch.libs and torch/lib - See: https://github.com/vllm-project/vllm/issues/30470
+            torch_libs_paths = [
+                os.path.join(site_root, "torch.libs"),
+                os.path.join(torch_pkg, "lib"),
+            ]
+            pytorch_libgomp_so_candidates = []
+            for torch_libs in torch_libs_paths:
+                pytorch_libgomp_so_candidates.extend(
+                    glob.glob(os.path.join(torch_libs, "libgomp*.so*"))
+                )
             if pytorch_libgomp_so_candidates:
                 pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
                 if ld_preload_str:
