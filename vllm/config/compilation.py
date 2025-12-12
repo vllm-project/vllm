@@ -792,6 +792,7 @@ class CompilationConfig:
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
         ):
+            # TODO disable for enc-dec
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True

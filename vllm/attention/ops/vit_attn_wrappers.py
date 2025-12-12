@@ -26,13 +26,14 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
+    softmax_scale: float,
     is_rocm_aiter: bool,
 ) -> torch.Tensor:
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-    q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    # q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
         k,
@@ -41,13 +42,14 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens_k=cu_seqlens,
         max_seqlen_q=max_seqlen.item(),
         max_seqlen_k=max_seqlen.item(),
+        softmax_scale=softmax_scale,
         dropout_p=0.0,
         causal=False,
     )
-    context_layer = einops.rearrange(
-        output, "(b s) h d -> s b (h d)", b=batch_size
-    ).contiguous()
-    return context_layer
+    # context_layer = einops.rearrange(
+    #     output, "(b s) h d -> s b (h d)", b=batch_size
+    # ).contiguous()
+    return output
 
 
 def flash_attn_maxseqlen_wrapper_fake(
@@ -57,10 +59,13 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
+    softmax_scale: float,
     is_rocm_aiter: bool,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    # b, s, h, d = q.shape
+    # return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    # TODO make a new custom op for this
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -77,10 +82,11 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
+    softmax_scale: float,
     is_rocm_aiter: bool,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter
+        q, k, v, cu_seqlens, max_seqlen, batch_size, softmax_scale, is_rocm_aiter
     )
 
 

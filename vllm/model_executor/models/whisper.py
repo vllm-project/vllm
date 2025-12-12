@@ -19,6 +19,7 @@ from transformers.models.whisper.modeling_whisper import sinusoids
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.attention.layers.cross_attention import CrossAttention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -160,8 +161,50 @@ class WhisperEncoderAttention(MultiHeadAttention):
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
 
+        # torch.Size([5, 1500, 1280])
+        # print("query", query.shape, "\n\n", flush=True)
+        # print("key", key.shape, "\n\n", flush=True)
+        # print("value", value.shape, "\n\n", flush=True)
+
         # Call the parent forward method
         out = super().forward(query, key, value)
+        # out torch.Size([7500, 20, 64])
+
+        # bsz, q_len = query.size()[:2]
+        # kv_len = key.size(1)
+
+        # query = query.view(bsz, q_len, self.num_heads, self.head_size)
+        # key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+        # value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+
+        # # if (num_repeat := self.num_queries_per_kv) > 1:
+        # #     # Handle MQA and GQA
+        # #     key = torch.repeat_interleave(key, num_repeat, dim=2)
+        # #     value = torch.repeat_interleave(value, num_repeat, dim=2)
+
+        # assert self._flash_attn_varlen_func is not None
+        # cu_seqlens_q = torch.arange(
+        #     0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device
+        # )
+        # cu_seqlens_k = torch.arange(
+        #     0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
+        # )
+        # assert len(cu_seqlens_q) == len(cu_seqlens_k)
+
+        # # TODO should be optional
+        # batch_size = 1
+        # from vllm.attention.ops.vit_attn_wrappers import vit_flash_attn_wrapper
+        # out = vit_flash_attn_wrapper(
+        #     query,
+        #     key,
+        #     value,
+        #     cu_seqlens_q,
+        #     torch.tensor(q_len),
+        #     batch_size,
+        #     self.scale,
+        #     # self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
+        #     False
+        # )
 
         if is_2d:
             out = out.squeeze(0)
@@ -421,7 +464,8 @@ class WhisperEncoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        hidden_states = cast_overflow_tensors(hidden_states)
+        # NOT compatible with torch.compile, enable optionally or fix
+        # hidden_states = cast_overflow_tensors(hidden_states)
 
         return hidden_states
 
@@ -485,6 +529,7 @@ class WhisperDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(dynamic_arg_dims={"input_features": 0})
 class WhisperEncoder(nn.Module):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
@@ -521,6 +566,8 @@ class WhisperEncoder(nn.Module):
             )
 
     def forward(self, input_features: torch.Tensor):
+        # print("input_features", input_features.shape, "\n\n", flush=True)
+        # TODO ok there's a conv here..
         embeds = nn.functional.gelu(self.conv1(input_features))
         embeds = nn.functional.gelu(self.conv2(embeds))
         embeds = embeds.transpose(-1, -2)

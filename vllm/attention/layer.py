@@ -558,17 +558,39 @@ class MultiHeadAttention(nn.Module):
             cu_seqlens_k = torch.arange(
                 0, (bsz + 1) * kv_len, step=kv_len, dtype=torch.int32, device=key.device
             )
+            assert len(cu_seqlens_q) == len(cu_seqlens_k)
 
-            out = self._flash_attn_varlen_func(
-                query.flatten(0, 1),
-                key.flatten(0, 1),
-                value.flatten(0, 1),
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=q_len,
-                max_seqlen_k=kv_len,
-                softmax_scale=self.scale,
+            # query torch.Size([7500, 20, 64])
+            # print("query", query.flatten(0,1).shape, "\n\n", flush=True)
+            # print("key", key.flatten(0,1).shape, "\n\n", flush=True)
+            # print("value", value.flatten(0,1).shape, "\n\n", flush=True)
+
+            # out = self._flash_attn_varlen_func(
+            #     query.flatten(0, 1),
+            #     key.flatten(0, 1),
+            #     value.flatten(0, 1),
+            #     cu_seqlens_q=cu_seqlens_q,
+            #     cu_seqlens_k=cu_seqlens_k,
+            #     max_seqlen_q=q_len,
+            #     max_seqlen_k=kv_len,
+            #     softmax_scale=self.scale,
+            # )
+            # print("out", out.shape, "\n\n", flush=True)
+
+            # TODO vit wrapper call should be optional
+            batch_size = 1
+            from vllm.attention.ops.vit_attn_wrappers import vit_flash_attn_wrapper
+            out = vit_flash_attn_wrapper(
+                query.flatten(0,1),
+                key.flatten(0,1),
+                value.flatten(0,1),
+                cu_seqlens_q,
+                torch.tensor(q_len),
+                batch_size,
+                self.scale,
+                self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA,
             )
+
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
