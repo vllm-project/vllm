@@ -182,8 +182,9 @@ class SchedulerOutput:
     # to process that the request's 0-th and 1-th images in the current step.
     scheduled_encoder_inputs: dict[str, list[int]]
     # req_id -> encoder input indices that are deduplicated (reuse cached output).
-    # These requests still need cross-attention KV cache allocated but skip
-    # encoder computation. They are also included in scheduled_encoder_inputs.
+    # For beam search optimization: when multiple requests share the same encoder
+    # input (e.g., all beams from same audio), deduplicated requests skip encoder
+    # computation but still need cross-attention KV cache allocated.
     deduplicated_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.

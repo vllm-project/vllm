@@ -2050,9 +2050,18 @@ class TranscriptionRequest(OpenAIBaseModel):
     use_beam_search: bool = False
     """Whether to use beam search for transcription generation."""
 
-    beam_width: int = Field(default=4, ge=1, le=8)
+    beam_width: int = Field(default=4, ge=1)
     """The number of beams to use in beam search. Higher values may improve
-    quality but increase computation time. Recommended: 2-4 for transcription."""
+    quality but increase computation time.
+    
+    Recommended values:
+    - 2-4: Good quality/speed balance for most use cases
+    - 4-8: Best performance sweet spot (encoder deduplication optimized)
+    - 8+: Diminishing returns, performance may degrade beyond beam_width=8
+    
+    Note: Performance is hardware-dependent. Larger machines may benefit from
+    higher beam widths. The implementation uses encoder deduplication to minimize
+    redundant computation."""
 
     length_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
     """Length penalty for beam search. Values > 1.0 favor longer sequences,
@@ -2123,26 +2132,18 @@ class TranscriptionRequest(OpenAIBaseModel):
         default_sampling_params: dict | None = None
     ) -> BeamSearchParams:
         """Convert transcription request to beam search parameters."""
-        # For transcription, use conservative max_tokens since outputs are typically short
-        max_tokens = min(default_max_tokens, 300)  # Conservative limit for audio transcription
+        # Use full default_max_tokens to support longer audio files
+        max_tokens = default_max_tokens
 
         if default_sampling_params is None:
             default_sampling_params = {}
 
-        # Use temperature for beam search - slightly lower than regular generation for stability
-        # Default temperature of 0.8 provides good balance between exploration and stability for transcription
-        # TODO: Consider making this model-aware (different defaults for different model types)
+        # Use temperature for beam search
         DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE = 0.8
         temperature = self.temperature if self.temperature is not None else DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE
 
-        # For encoder-decoder models like Whisper, limit beam width due to high encoder computation cost
-        # Based on performance testing: beam_width > 3 shows diminishing returns with exponential cost increase
-        # TODO: Make this configurable via environment variable or model config
-        MAX_BEAM_WIDTH_ENCODER_DECODER = 3
-        beam_width = min(self.beam_width, MAX_BEAM_WIDTH_ENCODER_DECODER)
-
         return BeamSearchParams(
-            beam_width=beam_width,
+            beam_width=self.beam_width,
             max_tokens=max_tokens,
             ignore_eos=False,
             temperature=temperature,

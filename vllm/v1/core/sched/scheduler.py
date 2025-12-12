@@ -240,9 +240,6 @@ class Scheduler(SchedulerInterface):
         # Track which multimodal hashes have been scheduled in this batch
         # to avoid recomputing encoders for concurrent requests with same input
         mm_hashes_scheduled_in_batch: set[str] = set()
-        # Map mm_hash -> request_id for tracking which request first allocated
-        # cross-attention blocks for a given encoder (for block sharing)
-        encoder_hash_to_first_request: dict[str, str] = {}
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -977,10 +974,6 @@ class Scheduler(SchedulerInterface):
             # For encoder-decoder beam search, deduplicated requests skip computation
             # but still need cross-attention KV cache allocated
             if request.mm_features[i].identifier in mm_hashes_scheduled_in_batch:
-                logger.info(
-                    f"[ENCODER DEDUP] Request {request.request_id} reusing encoder "
-                    f"mm_hash={request.mm_features[i].identifier[:16]}... (already scheduled in batch)"
-                )
                 # Track as deduplicated
                 deduplicated_inputs.append(i)
                 # Still add to encoder_inputs_to_schedule for cross-attention KV allocation

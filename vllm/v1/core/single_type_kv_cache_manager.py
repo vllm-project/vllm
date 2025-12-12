@@ -780,7 +780,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
             # Assign shared blocks to this request
             self.req_to_blocks[request_id] = shared_blocks.copy()
             self.req_to_encoder_hash[request_id] = encoder_hash
-            logger.info(f"[CROSS-ATTN SHARE] Request {request_id[:32]} sharing {len(shared_blocks)} cross-attention blocks for encoder {encoder_hash[:16]}")
             return []  # No NEW blocks allocated
         
         # Allocate new blocks normally
@@ -790,7 +789,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         if encoder_hash and new_blocks:
             self.encoder_hash_to_blocks[encoder_hash] = self.req_to_blocks[request_id]
             self.req_to_encoder_hash[request_id] = encoder_hash
-            logger.info(f"[CROSS-ATTN ALLOC] Request {request_id[:32]} allocated {len(new_blocks)} NEW cross-attention blocks for encoder {encoder_hash[:16]}")
         
         return new_blocks
 

@@ -325,11 +325,7 @@ class OpenAISpeechToText(OpenAIServing):
             list_result_generator = []
             for i, prompt in enumerate(prompts):
                 if use_beam_search and isinstance(sampling_params, BeamSearchParams):
-                    # Beam search: single prompt only for now
-                    if len(prompts) > 1:
-                        return self.create_error_response(
-                            "Beam search currently only supports single audio input."
-                        )
+                    # Beam search: Run on each chunk independently
                     try:
                         generator = self.beam_search(
                             prompt,
@@ -340,10 +336,11 @@ class OpenAISpeechToText(OpenAIServing):
                         list_result_generator.append(generator)
                     except Exception as e:
                         logger.exception(
-                            "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, error=%s",
+                            "Error in beam_search: request_id=%s, beam_width=%s, length_penalty=%s, chunk=%s, error=%s",
                             request_id,
                             sampling_params.beam_width,
                             sampling_params.length_penalty,
+                            i,
                             e,
                         )
                         raise

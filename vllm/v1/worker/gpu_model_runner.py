@@ -1293,10 +1293,6 @@ class GPUModelRunner(
         self.encoder_seq_lens.copy_to_gpu(num_reqs)
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
         encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
-        
-        # Debug: Log encoder sequence lengths for each request
-        if num_reqs > 1 and self.model_config.is_encoder_decoder:
-            logger.info(f"[ENCODER SEQ LENS] num_reqs={num_reqs}, encoder_seq_lens={encoder_seq_lens_cpu.tolist()}")
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
