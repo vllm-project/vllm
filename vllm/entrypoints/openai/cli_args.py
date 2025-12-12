@@ -194,6 +194,11 @@ class FrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint. 
     This is intended for use in a Disaggregated Everything setup.
     """
+    warmup_config: str | None = None
+    """Path to JSON file with warmup configuration. Warmup requests run before
+    the health endpoint reports ready, ensuring consistent performance from the
+    first production request. Format: {"concurrency": 1, "requests": [{"endpoint":
+    "/v1/chat/completions", "payload": {...}, "count": 1}, ...]}"""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
