@@ -68,18 +68,18 @@ class RequestOutputCollector:
         )
 
         if self.outputs is None:
-            self.outputs = {output.request_id: v}
+            self.outputs = {output.request_id: v}  # type: ignore[dict-item]
             self.ready.set()
             return
 
         prev = self.outputs.pop(output.request_id, None)  # type: ignore[union-attr]
         if prev is not None and isinstance(output, RequestOutput):
-            prev_output, aggregate = prev
+            prev_output, aggregate = prev  # type: ignore[misc]
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             prev_output.add(output, aggregate=aggregate)
             v = (prev_output, aggregate)
-        self.outputs[output.request_id] = v  # type: ignore[index]
+        self.outputs[output.request_id] = v  # type: ignore[index, assignment]
 
     async def get(self) -> list[RequestOutput | PoolingRequestOutput]:
         """Get operation blocks on put event."""
@@ -89,7 +89,7 @@ class RequestOutputCollector:
         self.ready.clear()
         if isinstance(outputs, Exception):
             raise outputs
-        return [output for output, _ in outputs.values()]
+        return [output for output, _ in outputs.values()]  # type: ignore[misc]
 
     def get_nowait(self) -> list[RequestOutput | PoolingRequestOutput] | None:
         """Non-blocking get operation."""
@@ -101,7 +101,7 @@ class RequestOutputCollector:
             self.ready.clear()
         if isinstance(outputs, Exception):
             raise outputs
-        return [output for output, _ in outputs.values()]
+        return [output for output, _ in outputs.values()]  # type: ignore[misc]
 
 
 @dataclass
