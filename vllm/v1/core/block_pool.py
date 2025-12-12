@@ -271,7 +271,7 @@ class BlockPool:
                 parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block_hash = maybe_convert_block_hash(
-                    request.block_hashes[num_cached_blocks - 1]
+                    block_hashes[num_cached_blocks - 1]
                 )
 
             self.kv_event_queue.append(
