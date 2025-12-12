@@ -32,7 +32,7 @@ def test_pp_cudagraph(
         str(PP_SIZE),
         "--distributed-executor-backend",
         "mp",
-        f"--attention-config.backend={ATTN_BACKEND}",
+        f"--attention-backend={ATTN_BACKEND}",
     ]
 
     eager_args = cudagraph_args + ["--enforce-eager"]

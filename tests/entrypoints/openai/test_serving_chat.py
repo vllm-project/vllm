@@ -77,7 +77,7 @@ def default_server_args(with_tool_parser: bool):
 
 @pytest.fixture(scope="module")
 def gptoss_server(default_server_args: list[str]):
-    server_args = default_server_args + ["--attention-config.backend=TRITON_ATTN"]
+    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
     with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
         yield remote_server
 

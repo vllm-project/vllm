@@ -220,7 +220,7 @@ def _test_cp_gsm8k(
     )
 
     if attn_backend:
-        server_args.append(f"--attention-config.backend={attn_backend}")
+        server_args.append(f"--attention-backend={attn_backend}")
 
     with RemoteOpenAIServer(
         model_id,

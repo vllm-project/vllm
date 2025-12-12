@@ -158,7 +158,7 @@ run_tests_for_model() {
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
-      BASE_CMD="${BASE_CMD} --attention-config.backend=$ATTENTION_BACKEND"
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
     if [ -n "$model_args" ]; then
@@ -204,7 +204,7 @@ run_tests_for_model() {
 
     # Add attention backend config if specified
     if [[ -n "$ATTENTION_BACKEND" ]]; then
-      BASE_CMD="${BASE_CMD} --attention-config.backend=$ATTENTION_BACKEND"
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
   # DP-EP attention mode

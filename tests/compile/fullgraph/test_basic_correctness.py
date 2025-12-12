@@ -113,7 +113,7 @@ def test_compile_correctness(
         "-tp",
         str(tp_size),
         "-cc.cudagraph_mode=none",
-        f"--attention-config.backend={attn_backend}",
+        f"--attention-backend={attn_backend}",
     ]
 
     all_args: list[list[str]] = []

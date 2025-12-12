@@ -154,7 +154,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     server_args: list[str] = [
         "--max-model-len=8192",
         "--max-num-seqs=32",
-        f"--attention-config.backend={backend}",
+        f"--attention-backend={backend}",
     ]
     if tp_size:
         server_args += ["-tp", tp_size]
