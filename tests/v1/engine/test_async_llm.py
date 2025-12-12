@@ -97,6 +97,54 @@ async def generate(
     return count, request_id
 
 
+async def multi_generate(
+    engine: AsyncLLM,
+    request_ids: list[str],
+    prompts: list[PromptType],
+    output_kind: RequestOutputKind,
+    max_tokens: int,
+    n: int = 1,
+    prompt_logprobs: int | None = None,
+    cancel_after: int | None = None,
+) -> dict[str, int]:
+    # Ensure generate doesn't complete too fast for cancellation test.
+    await asyncio.sleep(0.2)
+
+    counts: dict[str, int] = {}
+    canceled_ids = set()
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        output_kind=output_kind,
+        temperature=0.5,
+        seed=33,
+        n=n,
+        prompt_logprobs=prompt_logprobs,
+    )
+    async for out in engine.generate(
+        request_id=request_ids, prompt=prompts, sampling_params=sampling_params
+    ):
+        request_id = out.request_id
+        if request_id in canceled_ids:
+            continue
+
+        if counts.get(out.request_id) is None:
+            counts[request_id] = 0
+
+        num_tokens = sum(len(output.token_ids) for output in out.outputs)
+        if output_kind == RequestOutputKind.DELTA:
+            counts[request_id] += num_tokens
+        else:
+            counts[request_id] = num_tokens
+
+        if cancel_after is not None and counts[request_id] >= cancel_after:
+            canceled_ids.add(request_id)
+
+        await asyncio.sleep(0.0)
+
+    return counts
+
+
 @pytest.mark.parametrize(
     "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
@@ -141,6 +189,78 @@ async def test_load(
                 f"{request_id} generated {num_generated_tokens} but "
                 f"expected {NUM_EXPECTED_TOKENS}"
             )
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+@pytest.mark.parametrize(
+    "engine_args,prompt",
+    [(TEXT_ENGINE_ARGS, TEXT_PROMPT), (VISION_ENGINE_ARGS, VISION_PROMPT)],
+)
+@pytest.mark.asyncio
+async def test_multi_prompt_generate(
+    output_kind: RequestOutputKind,
+    engine_args: AsyncEngineArgs,
+    prompt: PromptType,
+):
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 20
+        NUM_EXPECTED_TOKENS = 10
+
+        prompts = [prompt] * NUM_REQUESTS
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+
+        counts = await multi_generate(
+            engine, request_ids, prompts, output_kind, NUM_EXPECTED_TOKENS
+        )
+
+        # Confirm that we got all the EXPECTED tokens from the requests.
+        for request_id, num_generated_tokens in counts.items():
+            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                f"{request_id} generated {num_generated_tokens} but "
+                f"expected {NUM_EXPECTED_TOKENS}"
+            )
+
+        assert not engine.output_processor.has_unfinished_requests()
+
+
+@pytest.mark.asyncio
+async def test_multi_prompt_generate_result():
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 3
+        NUM_TOKENS = 1
+
+        prompts = [f"0 + {i} = " for i in range(NUM_REQUESTS)]
+        request_ids = [f"{i}" for i in range(NUM_REQUESTS)]
+
+        sampling_params = SamplingParams(
+            max_tokens=NUM_TOKENS,
+            ignore_eos=True,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+            temperature=0.8,
+            seed=33,
+            n=1,
+        )
+        async for out in engine.generate(
+            request_id=request_ids, prompt=prompts, sampling_params=sampling_params
+        ):
+            assert len(out.outputs) == 1
+
+            request_id = out.request_id
+            output = out.outputs[0].text
+            print(f"✅[{request_id}]: {output}")
+            assert request_id in output
 
         assert not engine.output_processor.has_unfinished_requests()
 
