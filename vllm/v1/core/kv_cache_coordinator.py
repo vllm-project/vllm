@@ -61,8 +61,8 @@ class KVCacheCoordinator(ABC):
         self.use_eagle = use_eagle
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
-                cache_config=self.cache_config,
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
+                cache_config=self.cache_config,
                 block_pool=self.block_pool,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
