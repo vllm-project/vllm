@@ -249,8 +249,9 @@ def create_dummy_kv_cache(
 @dataclass
 class BackendConfig:
     name: str
-    env_vars: dict
+    attention_config: dict  # attention backend configuration
     comp_config: dict  # compilation config
+    env_vars: dict | None = None  # additional env vars (not attention backend)
     specific_gpu_arch: tuple | None = None
 
 
@@ -259,8 +260,8 @@ full_cg_backend_configs = {
     # FA3 on Hopper
     "FA3": BackendConfig(
         name="FA3",
+        attention_config={"backend": "FLASH_ATTN"},
         env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
             "VLLM_FLASH_ATTN_VERSION": "3",
             "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
         },
@@ -272,9 +273,7 @@ full_cg_backend_configs = {
     # FlashMLA on Hopper
     "FlashMLA": BackendConfig(
         name="FlashMLA",
-        env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASHMLA",
-        },
+        attention_config={"backend": "FLASHMLA"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
@@ -283,9 +282,7 @@ full_cg_backend_configs = {
     # Cutlass MLA on Blackwell
     "CutlassMLA": BackendConfig(
         name="CutlassMLA",
-        env_vars={
-            "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
-        },
+        attention_config={"backend": "CUTLASS_MLA"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
@@ -294,9 +291,7 @@ full_cg_backend_configs = {
     # FlashInfer MLA on Blackwell
     "FlashInferMLA": BackendConfig(
         name="FlashInferMLA",
-        env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASHINFER_MLA",
-        },
+        attention_config={"backend": "FLASHINFER_MLA"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
@@ -305,8 +300,8 @@ full_cg_backend_configs = {
     # FlashAttention MLA on Hopper
     "FlashAttentionMLA": BackendConfig(
         name="FlashAttentionMLA",
+        attention_config={"backend": "FLASH_ATTN_MLA"},
         env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASH_ATTN_MLA",
             "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
         },
         comp_config={
@@ -317,8 +312,8 @@ full_cg_backend_configs = {
     # FA2
     "FA2": BackendConfig(
         name="FA2",
+        attention_config={"backend": "FLASH_ATTN"},
         env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
             "VLLM_FLASH_ATTN_VERSION": "2",
             "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
         },
@@ -329,7 +324,7 @@ full_cg_backend_configs = {
     # Triton Attention
     "TritonAttn": BackendConfig(
         name="TritonAttn",
-        env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN"},
+        attention_config={"backend": "TRITON_ATTN"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
@@ -337,13 +332,14 @@ full_cg_backend_configs = {
     # FlashInfer
     "FlashInfer": BackendConfig(
         name="FlashInfer",
-        env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+        attention_config={"backend": "FLASHINFER"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
         },
     ),
     "RocmAttn": BackendConfig(
         name="RocmAttn",
+        attention_config={"backend": "ROCM_ATTN"},
         env_vars={"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
         comp_config={
             "cudagraph_mode": "FULL",

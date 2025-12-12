@@ -68,7 +68,8 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
     ):
         pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
 
-    env_vars = backend_configs[backend_name].env_vars
+    attention_config = backend_config.attention_config
+    env_vars = backend_config.env_vars or {}
 
     with temporary_environ(env_vars), ExitStack() as stack:
         if not supported:
@@ -80,6 +81,7 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
+            attention_config=attention_config,
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE, cudagraph_mode=cudagraph_mode
             ),
@@ -122,7 +124,9 @@ combo_cases_2 = [
 def test_cudagraph_compilation_combo(
     backend_name, cudagraph_mode, compilation_mode, supported
 ):
-    env_vars = backend_configs[backend_name].env_vars
+    backend_config = backend_configs[backend_name]
+    attention_config = backend_config.attention_config
+    env_vars = backend_config.env_vars or {}
 
     with temporary_environ(env_vars), ExitStack() as stack:
         if not supported:
@@ -134,6 +138,7 @@ def test_cudagraph_compilation_combo(
             trust_remote_code=True,
             gpu_memory_utilization=0.45,
             max_model_len=1024,
+            attention_config=attention_config,
             compilation_config=CompilationConfig(
                 mode=compilation_mode, cudagraph_mode=cudagraph_mode
             ),
