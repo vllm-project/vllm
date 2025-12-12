@@ -80,6 +80,8 @@ def test_compile_ranges(use_fresh_inductor_cache):
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -112,6 +114,8 @@ def test_compile_config_get_compile_ranges():
     VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
+            max_model_len=8192,
+            is_encoder_decoder=False,
         ),
         compilation_config=compilation_config,
     )
@@ -134,6 +138,8 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
     )
     scheduler_config = SchedulerConfig(
         max_num_batched_tokens=8192,
+        max_model_len=8192,
+        is_encoder_decoder=False,
     )
     torch.set_default_device("cuda")
 
