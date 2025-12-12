@@ -71,11 +71,6 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa:
     rocm_aiter_grouped_topk,
 )
 
-if current_platform.is_tpu():
-    from .moe_pallas import fused_moe as fused_moe_pallas
-else:
-    fused_moe_pallas = None  # type: ignore
-
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
