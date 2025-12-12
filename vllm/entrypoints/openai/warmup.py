@@ -23,6 +23,14 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+from vllm.entrypoints.pooling.classify.serving import ServingClassification
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -31,6 +39,14 @@ logger = init_logger(__name__)
 SUPPORTED_ENDPOINTS = {
     "/v1/chat/completions",
     "/v1/completions",
+    "/v1/embeddings",
+    "/pooling",
+    "/classify",
+    "/score",
+    "/v1/score",
+    "/rerank",
+    "/v1/rerank",
+    "/v2/rerank",
 }
 
 
@@ -87,11 +103,11 @@ async def _run_chat_completion_warmup(
     request_id: str,
 ) -> None:
     """Run a single chat completion warmup request."""
-    # Ensure model is set
-    if "model" not in payload:
-        payload = {**payload, "model": model}
+    # Copy payload and set defaults
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
 
-    request = ChatCompletionRequest(**payload)
+    request = ChatCompletionRequest(**request_payload)
 
     result = await handler.create_chat_completion(request, raw_request=None)
 
@@ -108,15 +124,106 @@ async def _run_completion_warmup(
     request_id: str,
 ) -> None:
     """Run a single completion warmup request."""
-    # Ensure model is set
-    if "model" not in payload:
-        payload = {**payload, "model": model}
+    # Copy payload and set defaults
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
 
-    request = CompletionRequest(**payload)
+    request = CompletionRequest(**request_payload)
 
     result = await handler.create_completion(request, raw_request=None)
 
     # Consume the generator if streaming
+    if hasattr(result, "__anext__"):
+        async for _ in result:
+            pass
+
+
+async def _run_embedding_warmup(
+    handler: OpenAIServingEmbedding,
+    payload: dict[str, Any],
+    model: str,
+    request_id: str,
+) -> None:
+    """Run a single embedding warmup request."""
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
+
+    request = EmbeddingRequest(**request_payload)
+    result = await handler.create_embedding(request, raw_request=None)
+
+    # Consume if generator
+    if hasattr(result, "__anext__"):
+        async for _ in result:
+            pass
+
+
+async def _run_pooling_warmup(
+    handler: OpenAIServingPooling,
+    payload: dict[str, Any],
+    model: str,
+    request_id: str,
+) -> None:
+    """Run a single pooling warmup request."""
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
+
+    request = PoolingRequest(**request_payload)
+    result = await handler.create_pooling(request, raw_request=None)
+
+    if hasattr(result, "__anext__"):
+        async for _ in result:
+            pass
+
+
+async def _run_classify_warmup(
+    handler: ServingClassification,
+    payload: dict[str, Any],
+    model: str,
+    request_id: str,
+) -> None:
+    """Run a single classification warmup request."""
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
+
+    request = ClassificationRequest(**request_payload)
+    result = await handler.create_classify(request, raw_request=None)
+
+    if hasattr(result, "__anext__"):
+        async for _ in result:
+            pass
+
+
+async def _run_score_warmup(
+    handler: ServingScores,
+    payload: dict[str, Any],
+    model: str,
+    request_id: str,
+) -> None:
+    """Run a single score warmup request."""
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
+
+    request = ScoreRequest(**request_payload)
+    result = await handler.create_score(request, raw_request=None)
+
+    if hasattr(result, "__anext__"):
+        async for _ in result:
+            pass
+
+
+async def _run_rerank_warmup(
+    handler: ServingScores,
+    payload: dict[str, Any],
+    model: str,
+    request_id: str,
+) -> None:
+    """Run a single rerank warmup request."""
+    request_payload = payload.copy()
+    request_payload.setdefault("model", model)
+
+    request = RerankRequest(**request_payload)
+    result = await handler.do_rerank(request, raw_request=None)
+
     if hasattr(result, "__anext__"):
         async for _ in result:
             pass
@@ -147,6 +254,51 @@ async def _run_single_warmup(
                 f"Cannot run warmup for {endpoint}"
             )
         await _run_completion_warmup(handler, payload, model, request_id)
+
+    elif endpoint == "/v1/embeddings":
+        handler = state.openai_serving_embedding
+        if handler is None:
+            raise NotImplementedError(
+                f"Embeddings endpoint not available for this model. "
+                f"Cannot run warmup for {endpoint}"
+            )
+        await _run_embedding_warmup(handler, payload, model, request_id)
+
+    elif endpoint == "/pooling":
+        handler = state.openai_serving_pooling
+        if handler is None:
+            raise NotImplementedError(
+                f"Pooling endpoint not available for this model. "
+                f"Cannot run warmup for {endpoint}"
+            )
+        await _run_pooling_warmup(handler, payload, model, request_id)
+
+    elif endpoint == "/classify":
+        handler = state.openai_serving_classification
+        if handler is None:
+            raise NotImplementedError(
+                f"Classification endpoint not available for this model. "
+                f"Cannot run warmup for {endpoint}"
+            )
+        await _run_classify_warmup(handler, payload, model, request_id)
+
+    elif endpoint in ("/score", "/v1/score"):
+        handler = state.openai_serving_scores
+        if handler is None:
+            raise NotImplementedError(
+                f"Score endpoint not available for this model. "
+                f"Cannot run warmup for {endpoint}"
+            )
+        await _run_score_warmup(handler, payload, model, request_id)
+
+    elif endpoint in ("/rerank", "/v1/rerank", "/v2/rerank"):
+        handler = state.openai_serving_scores
+        if handler is None:
+            raise NotImplementedError(
+                f"Rerank endpoint not available for this model. "
+                f"Cannot run warmup for {endpoint}"
+            )
+        await _run_rerank_warmup(handler, payload, model, request_id)
 
     else:
         raise NotImplementedError(
