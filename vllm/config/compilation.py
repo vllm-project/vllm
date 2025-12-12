@@ -17,7 +17,6 @@ from vllm.config.utils import (
     Range,
     config,
     get_hash_factors,
-    handle_deprecated,
     hash_factors,
 )
 from vllm.logger import init_logger
@@ -127,27 +126,6 @@ class PassConfig:
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
 
-    # Deprecated flags
-    enable_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_norm_quant and fuse_act_quant 
-    instead. Will be removed in v0.13.0 or v1.0.0, whichever is sooner.
-    """
-    enable_attn_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_attn_quant instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_noop: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use eliminate_noops instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_sequence_parallelism: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use enable_sp instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_async_tp: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_gemm_comms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_fi_allreduce_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_allreduce_rms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
@@ -206,15 +184,7 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
 
-        ignored_fields = [
-            "enable_fusion",
-            "enable_attn_fusion",
-            "enable_noop",
-            "enable_sequence_parallelism",
-            "enable_async_tp",
-            "enable_fi_allreduce_fusion",
-        ]
-        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
+        return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
         "fuse_norm_quant",
@@ -224,12 +194,6 @@ class PassConfig:
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
-        "enable_fusion",
-        "enable_attn_fusion",
-        "enable_noop",
-        "enable_sequence_parallelism",
-        "enable_async_tp",
-        "enable_fi_allreduce_fusion",
         mode="wrap",
     )
     @classmethod
@@ -241,49 +205,6 @@ class PassConfig:
 
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
-
-        # Map old flags to new flags and issue warnings
-        handle_deprecated(
-            self,
-            "enable_fusion",
-            ["fuse_norm_quant", "fuse_act_quant"],
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_attn_fusion",
-            "fuse_attn_quant",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_sequence_parallelism",
-            "enable_sp",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_async_tp",
-            "fuse_gemm_comms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_fi_allreduce_fusion",
-            "fuse_allreduce_rms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_noop",
-            "eliminate_noops",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
 
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:

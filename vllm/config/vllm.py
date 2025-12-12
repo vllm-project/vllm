@@ -750,27 +750,17 @@ class VllmConfig:
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
 
-        if self.model_config and self.model_config.is_encoder_decoder:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            self.scheduler_config.max_num_encoder_input_tokens = (
-                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+        if (
+            self.model_config
+            and self.model_config.architecture == "WhisperForConditionalGeneration"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            logger.warning(
+                "Whisper is known to have issues with "
+                "forked workers. If startup is hanging, "
+                "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                "to 'spawn'."
             )
-            logger.debug(
-                "Encoder-decoder model detected: setting "
-                "`max_num_encoder_input_tokens` to encoder length (%s)",
-                self.scheduler_config.max_num_encoder_input_tokens,
-            )
-            if (
-                self.model_config.architecture == "WhisperForConditionalGeneration"
-                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
-            ):
-                logger.warning(
-                    "Whisper is known to have issues with "
-                    "forked workers. If startup is hanging, "
-                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                    "to 'spawn'."
-                )
 
         if (
             self.kv_events_config is not None
@@ -819,11 +809,6 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
-
-        assert (
-            self.parallel_config.cp_kv_cache_interleave_size == 1
-            or self.speculative_config is None
-        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         self.compilation_config.set_splitting_ops_for_v1(
@@ -1014,7 +999,7 @@ class VllmConfig:
         max_graph_size = min(max_num_seqs * 2, 512)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
-        cuda_graph_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
+        cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
