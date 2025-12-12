@@ -17,7 +17,7 @@ from tests.compile.fusion_test_utils import (
     is_blackwell,
     run_model,
 )
-from tests.utils import flat_product
+from tests.utils import cuda_device_count_stateless, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
