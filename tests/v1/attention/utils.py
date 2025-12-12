@@ -249,9 +249,8 @@ def create_dummy_kv_cache(
 @dataclass
 class BackendConfig:
     name: str
-    attention_config: dict  # attention backend configuration
-    comp_config: dict  # compilation config
-    env_vars: dict | None = None  # additional env vars (not attention backend)
+    attention_config: dict
+    comp_config: dict
     specific_gpu_arch: tuple | None = None
 
 
@@ -300,9 +299,9 @@ full_cg_backend_configs = {
     # FlashAttention MLA on Hopper
     "FlashAttentionMLA": BackendConfig(
         name="FlashAttentionMLA",
-        attention_config={"backend": "FLASH_ATTN_MLA"},
-        env_vars={
-            "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+        attention_config={
+            "backend": "FLASH_ATTN_MLA",
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
         comp_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
@@ -339,8 +338,10 @@ full_cg_backend_configs = {
     ),
     "RocmAttn": BackendConfig(
         name="RocmAttn",
-        attention_config={"backend": "ROCM_ATTN"},
-        env_vars={"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
+        attention_config={
+            "backend": "ROCM_ATTN",
+            "use_prefill_decode_attention": True,
+        },
         comp_config={
             "cudagraph_mode": "FULL",
         },
