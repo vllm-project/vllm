@@ -38,7 +38,7 @@ models = [MODEL_NAME]
 @pytest.fixture(autouse=True)
 def set_attention_backend_for_rocm(monkeypatch):
     if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "ROCM_AITER_FA")
 
 
 def run_test(
