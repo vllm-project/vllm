@@ -95,6 +95,11 @@ class DefaultFusedMoERouter(FusedMoERouter):
     def routing_method_type(self) -> RoutingMethodType:
         return self._routing_method_type
 
+    # TODO: make each one of the routing types a separate class (including simulator)
+    # get rid of RoutingMethodType enum.
+    # Make a builder function.
+    # Update models/FusedMoE layer
+    # handle fused monolithic kernels w/nop router, e.g. flashinfer
     def select_experts(
         self,
         hidden_states: torch.Tensor,
