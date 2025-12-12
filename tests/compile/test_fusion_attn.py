@@ -333,6 +333,8 @@ def test_attention_quant_pattern(
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
+        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
