@@ -306,6 +306,9 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     " currently enabled. Its support is experimental. "
                     "Please report any issues you may observe."
                 )
+                assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                    "Chunked prefill is required for mamba cache mode 'align'."
+                )
             else:
                 raise ValueError(
                     "unknown mamba cache mode: %s", cache_config.mamba_cache_mode
