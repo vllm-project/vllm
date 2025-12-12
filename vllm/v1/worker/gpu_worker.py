@@ -334,14 +334,19 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            # Profile CUDA graph memory if FULL graphs will be captured
-            cudagraph_memory_estimate = 0
+            # Profile CUDA graph memory if graphs will be captured.
+            first_capture_memory = 0
+            graph_memory = 0
             if not self.model_config.enforce_eager:
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+                first_capture_memory, graph_memory = (
+                    self.model_runner.profile_cudagraph_memory()
+                )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
-        self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.peak_activation_memory = (
+            profile_result.torch_peak_increase + first_capture_memory
+        )
+        self.cudagraph_memory_estimate = graph_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -358,7 +363,8 @@ class Worker(WorkerBase):
         self.available_kv_cache_memory_bytes = (
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate
+            - first_capture_memory
+            - graph_memory
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory

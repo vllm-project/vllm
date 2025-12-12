@@ -3947,6 +3947,7 @@ class GPUModelRunner(
         remove_lora: bool = True,
         activate_lora: bool = False,
         is_graph_capturing: bool = False,
+        profile_seq_lens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -3970,6 +3971,9 @@ class GPUModelRunner(
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             activate_lora: If False, dummy_run is performed without LoRAs.
+            profile_seq_lens: If provided, use this value for seq_lens instead
+                of max_query_len. Used to profile attention workspace that
+                scales with context length.
         """
         assert (
             cudagraph_runtime_mode is None
@@ -4070,11 +4074,13 @@ class GPUModelRunner(
         # If force_attention is True, we always capture attention. Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            if create_mixed_batch:
+            if profile_seq_lens is not None:
+                seq_lens = profile_seq_lens  # type: ignore[assignment]
+            elif create_mixed_batch:
                 # In the mixed batch mode (used for FI warmup), we use
                 # shorter sequence lengths to run faster.
                 # TODO(luka) better system for describing dummy batches
-                seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
+                seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]  # type: ignore[assignment]
             else:
                 seq_lens = max_query_len  # type: ignore[assignment]
             self.seq_lens.np[:num_reqs] = seq_lens
@@ -4636,19 +4642,19 @@ class GPUModelRunner(
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
     @torch.inference_mode()
-    def profile_cudagraph_memory(self) -> int:
+    def profile_cudagraph_memory(self) -> tuple[int, int]:
         """Profile CUDA graph memory by capturing representative graphs.
 
-        This method estimates the total memory that will be consumed by CUDA
-        graphs (both FULL and PIECEWISE) when they are captured later. For each
-        graph type, it captures twice: first capture allocates the memory pool,
-        second is representative of typical graph size.
-
-        Warmup runs are done BEFORE measurement to match actual capture
-        conditions (where PyTorch's cache is already warm).
+        This method estimates the memory that will be consumed by CUDA graphs.
+        It returns two values:
+        1. First-capture memory: Includes workspace allocated only in CUDA graph mode
+           (e.g., FA3 split buffers). Must be reserved in main allocator
+           because FA3 may allocate from there if graph replay fails.
+        2. Graph memory: Overhead per captured graph × number of graphs.
+           This goes to the CUDA graph pool.
 
         Returns:
-            Estimated total CUDA graph memory in bytes.
+            Tuple of (first_capture_memory, graph_memory) in bytes.
         """
         (
             full_largest,
@@ -4659,7 +4665,7 @@ class GPUModelRunner(
 
         if full_count == 0 and piecewise_count == 0:
             logger.debug("No CUDA graphs will be captured, skipping profiling")
-            return 0
+            return 0, 0
 
         logger.info(
             "Profiling CUDA graph memory: FULL graphs=%d (largest=%s), "
@@ -4688,20 +4694,21 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             full_per_graph = 0
             piecewise_per_graph = 0
+            full_first_capture_memory = 0
 
             # Profile FULL graphs
             if full_largest is not None:
-                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
-                    self._dummy_run(
-                        full_largest,
-                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                        force_attention=True,
-                        uniform_decode=True,
-                        skip_eplb=True,
-                        remove_lora=False,
-                        activate_lora=False,
-                    )
-                # First capture sets up the memory pool (not measured)
+                max_seq_len_for_profile = min(
+                    self.max_model_len,
+                    self.max_num_tokens // full_largest,
+                )
+                # Measure first capture with no warmups. This is critical because:
+                # - Warmups run in eager mode (NONE) - no FA3 split buffer
+                # - First capture runs in graph mode (FULL) - allocates split buffer
+                # - If we measure after warmups, cache release masks the allocation
+                # By measuring before warmups, we capture the true first-capture cost.
+                torch.cuda.synchronize()
+                before_first_capture = torch.cuda.mem_get_info()[0]
                 self._dummy_run(
                     full_largest,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
@@ -4710,6 +4717,11 @@ class GPUModelRunner(
                     remove_lora=False,
                     activate_lora=False,
                     is_graph_capturing=True,
+                    profile_seq_lens=max_seq_len_for_profile,
+                )
+                torch.cuda.synchronize()
+                full_first_capture_memory = (
+                    before_first_capture - torch.cuda.mem_get_info()[0]
                 )
                 # Second capture measures per-graph overhead
                 if full_count > 1:
@@ -4788,24 +4800,24 @@ class GPUModelRunner(
                 self.model.cudagraph_wrapper.graph_pool = original_pool
         self._cleanup_profiling_kv_cache()
 
-        # Calculate estimates using per-graph size × count.
-        # The first capture includes workspace/activation memory that's already
-        # tracked by peak_activation_memory, so we ignore it.
-        full_estimate = full_per_graph * full_count
-        piecewise_estimate = piecewise_per_graph * piecewise_count
-        total_estimate = full_estimate + piecewise_estimate
+        graph_estimate = (
+            full_per_graph * (full_count - 1) + piecewise_per_graph * piecewise_count
+        )
+        total_estimate = full_first_capture_memory + graph_estimate
 
         logger.info(
-            "Estimated CUDA graph pool memory: %.2f GiB total "
-            "(FULL: %d × %.2f MiB, PIECEWISE: %d × %.2f MiB)",
+            "Estimated CUDA graph memory: %.2f GiB total "
+            "(FULL: %.2f MiB first-capture + (%d-1) × %.2f MiB, "
+            "PIECEWISE: %d × %.2f MiB)",
             total_estimate / (1 << 30),
+            full_first_capture_memory / (1 << 20),
             full_count,
             full_per_graph / (1 << 20),
             piecewise_count,
             piecewise_per_graph / (1 << 20),
         )
 
-        return int(total_estimate)
+        return int(full_first_capture_memory), int(graph_estimate)
 
     def capture_model(self) -> tuple[int, int]:
         """Capture CUDA graphs for the model.
@@ -4925,9 +4937,6 @@ class GPUModelRunner(
                 ),
             )
 
-        torch.cuda.synchronize()
-        capture_start_memory = torch.cuda.mem_get_info()[0]
-
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens, activate_lora in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
@@ -4973,13 +4982,6 @@ class GPUModelRunner(
                 is_graph_capturing=True,
             )
             torch.cuda.synchronize()
-            cumulative = capture_start_memory - torch.cuda.mem_get_info()[0]
-            logger.info(
-                "Captured %s graph: batch_size=%d, cumulative=%.2f MiB",
-                cudagraph_runtime_mode.name,
-                num_tokens,
-                cumulative / (1 << 20),
-            )
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
