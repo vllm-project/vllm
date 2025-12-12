@@ -102,7 +102,6 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
 
     test_sampling_params = [
         dict(),
-        dict(logprobs=2),
         dict(presence_penalty=-1.0),
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
