@@ -260,10 +260,10 @@ full_cg_backend_configs = {
     # FA3 on Hopper
     "FA3": BackendConfig(
         name="FA3",
-        attention_config={"backend": "FLASH_ATTN"},
-        env_vars={
-            "VLLM_FLASH_ATTN_VERSION": "3",
-            "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+        attention_config={
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": 3,
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
         comp_config={
             "cudagraph_mode": "FULL",
@@ -312,10 +312,10 @@ full_cg_backend_configs = {
     # FA2
     "FA2": BackendConfig(
         name="FA2",
-        attention_config={"backend": "FLASH_ATTN"},
-        env_vars={
-            "VLLM_FLASH_ATTN_VERSION": "2",
-            "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": "16",
+        attention_config={
+            "backend": "FLASH_ATTN",
+            "flash_attn_version": 2,
+            "flash_attn_max_num_splits_for_cuda_graph": 16,
         },
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
