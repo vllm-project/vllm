@@ -18,7 +18,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+IS_SUPPORTED_BY_GPU = (
+    current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
+)
 
 
 def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
