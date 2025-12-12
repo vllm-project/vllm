@@ -32,6 +32,7 @@ from transformers.models.qwen2_audio import Qwen2AudioEncoder
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -452,6 +453,16 @@ class AudioFlamingo3ForConditionalGeneration(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+            connector="multi_modal_projector.",
+            tower_model="audio_tower.",
+        )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
