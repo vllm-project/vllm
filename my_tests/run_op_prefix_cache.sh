@@ -20,7 +20,6 @@ fi
 env_vars=(
     # "CUDA_LAUNCH_BLOCKING=0"
     "CUDA_VISIBLE_DEVICES=0,1,2,3"
-    "VLLM_USE_LIGHTER_MAMBA_CACHE=1"
     # "CUDA_VISIBLE_DEVICES=6,7"
     # "VLLM_ATTENTION_BACKEND=FLASH_ATTN"
     # "VLLM_FLASH_ATTN_VERSION=3"
@@ -53,6 +52,7 @@ CMD+=(
     --enable-prefix-caching
     # --no-enable-chunked-prefill
     --enable-chunked-prefill
+    --mamba-cache-mode align
     --max-num-batched-tokens 8192
     --distributed-executor-backend mp
     --block-size 64

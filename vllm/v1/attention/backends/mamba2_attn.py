@@ -4,8 +4,6 @@ import itertools
 from dataclasses import dataclass
 
 import torch
-
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -174,9 +172,7 @@ class Mamba2AttentionMetadataBuilder(
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
 
-        if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-            and self.vllm_config.cache_config.enable_prefix_caching
-        ):
+        if self.vllm_config.cache_config.mamba_cache_mode == "all":
             # Return a tensor of shape (#requests, #max blocks)
             state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
@@ -227,9 +223,7 @@ class Mamba2AttentionMetadataBuilder(
                 - num_decode_tokens
             )
 
-            if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                and self.vllm_config.cache_config.enable_prefix_caching
-            ):
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert num_computed_tokens is not None
                 num_computed_tokens_p = num_computed_tokens[
                     num_reqs - num_prefills : num_reqs
@@ -318,9 +312,7 @@ class Mamba2AttentionMetadataBuilder(
             )
             state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
 
-            if (not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
-                and self.vllm_config.cache_config.enable_prefix_caching
-            ):
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
                     block_idx_last_scheduled_token, non_blocking=True
                 )

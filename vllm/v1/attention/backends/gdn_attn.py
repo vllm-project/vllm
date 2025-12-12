@@ -5,8 +5,6 @@
 from dataclasses import dataclass
 
 import torch
-
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
@@ -21,7 +19,9 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 from vllm.logger import init_logger
+
 logger = init_logger(__name__)
+
 
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
@@ -149,7 +149,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         context_lens = m.num_computed_tokens_cpu
         context_lens_tensor = context_lens.to(query_start_loc.device)
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
             block_table_tensor = mamba_gather_indices(
                 common_attn_metadata,
                 self.kv_cache_spec,
@@ -338,16 +338,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_num_query_tokens = non_spec_query_start_loc[-1]  # type: ignore[index]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
-
-        # if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
-        #     # NOTE: With Mamba prefix-caching support, a request can consist of
-        #     # multiple blocks. This makes the state_indices non-contiguous, so
-        #     # we must explicitly make them contiguous here.
-        #     if spec_state_indices_tensor is not None:
-        #         spec_state_indices_tensor = spec_state_indices_tensor.contiguous()
-        #     if non_spec_state_indices_tensor is not None:
-        #         non_spec_state_indices_tensor = \
-        #             non_spec_state_indices_tensor.contiguous()
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,

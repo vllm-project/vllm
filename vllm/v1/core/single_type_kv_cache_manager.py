@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
-from vllm import envs
+from vllm.config.cache import CacheConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -54,6 +54,7 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
+        cache_config: CacheConfig,
         block_pool: BlockPool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
@@ -66,6 +67,7 @@ class SingleTypeKVCacheManager(ABC):
             block_pool: The block pool.
             kv_cache_group_id: The id of the kv cache group of this manager.
         """
+        self.cache_config = cache_config
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
@@ -695,10 +697,13 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 
 class MambaManager(SingleTypeKVCacheManager):
-    def __init__(self, kv_cache_spec: MambaSpec, **kwargs) -> None:
-        super().__init__(kv_cache_spec, **kwargs)
+    def __init__(
+        self, kv_cache_spec: MambaSpec, cache_config: CacheConfig, **kwargs
+    ) -> None:
+        super().__init__(kv_cache_spec, cache_config, **kwargs)
+        self.mamba_cache_mode = cache_config.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.mamba_cache_mode == "align":
             self.last_state_block_idx: dict[str, int] = {}
             # the set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
@@ -762,7 +767,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         super().remove_skipped_blocks(request_id, num_computed_tokens)
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.mamba_cache_mode == "align":
             last_state_block_idx = self.last_state_block_idx.get(request_id)
             if (
                 last_state_block_idx is not None
@@ -790,7 +795,7 @@ class MambaManager(SingleTypeKVCacheManager):
         assert isinstance(self.kv_cache_spec, MambaSpec)
         # mamba layers only exist in target model.
         num_tokens = num_tokens_target_model
-        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.kv_cache_spec.num_speculative_blocks > 0:
@@ -853,7 +858,7 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
         num_tokens = num_tokens_target_model
-        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
             if self.num_speculative_blocks > 0:
@@ -926,7 +931,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 return req_blocks[prev_block_len:]
 
     def free(self, request_id: str) -> None:
-        if envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+        if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
         super().free(request_id)

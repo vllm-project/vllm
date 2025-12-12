@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
+from vllm.config.cache import CacheConfig
+from vllm.config.vllm import VllmConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -32,6 +34,7 @@ class KVCacheCoordinator(ABC):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -42,6 +45,7 @@ class KVCacheCoordinator(ABC):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
+        self.cache_config = cache_config
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
@@ -58,6 +62,7 @@ class KVCacheCoordinator(ABC):
         self.use_eagle = use_eagle
         self.single_type_managers = tuple(
             get_manager_for_kv_cache_spec(
+                cache_config=self.cache_config,
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
                 kv_cache_group_id=i,
@@ -235,6 +240,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -245,6 +251,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -280,6 +287,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -291,6 +299,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -348,6 +357,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
+        cache_config: CacheConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         use_eagle: bool,
@@ -359,6 +369,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -535,6 +546,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
 
 def get_kv_cache_coordinator(
+    cache_config: CacheConfig,
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     use_eagle: bool,
@@ -547,6 +559,7 @@ def get_kv_cache_coordinator(
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -558,6 +571,7 @@ def get_kv_cache_coordinator(
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(
+            cache_config,
             kv_cache_config,
             max_model_len,
             use_eagle,
@@ -569,6 +583,7 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
+        cache_config,
         kv_cache_config,
         max_model_len,
         use_eagle,
