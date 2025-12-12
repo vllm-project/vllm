@@ -1394,7 +1394,9 @@ class EngineArgs:
             )
 
         model_config = self.create_model_config()
-        self.model = model_config.model
+        # no need to overwrite model here for runai_streamer and cloud storage path.
+        if not (is_cloud_storage(self.model) and "runai_streamer" in self.load_format):
+            self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
         self._check_feature_supported(model_config)
