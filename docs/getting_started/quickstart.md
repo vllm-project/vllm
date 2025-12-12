@@ -298,10 +298,10 @@ Some of the available backend options include:
 
 For AMD ROCm, you can further control the specific Attention implementation using the following options:
 
-- Triton Unified Attention: `VLLM_ROCM_USE_AITER=0 VLLM_ROCM_USE_AITER_MHA=0` with `--attention-config.use_prefill_decode_attention=false`
-- AITER Unified Attention: `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_AITER_MHA=0` with `--attention-config.use_prefill_decode_attention=false`
-- Triton Prefill-Decode Attention: `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0` with `--attention-config.use_prefill_decode_attention=true`
-- AITER Multi-head Attention: `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1` with `--attention-config.use_prefill_decode_attention=false`
+- Triton Unified Attention: Set the environment variables `VLLM_ROCM_USE_AITER=0 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
+- AITER Unified Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
+- Triton Prefill-Decode Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=true` as a CLI argument.
+- AITER Multi-head Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
 
 !!! warning
     There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.
