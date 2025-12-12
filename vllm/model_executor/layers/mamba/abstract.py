@@ -4,6 +4,7 @@ from abc import abstractmethod
 from collections.abc import Iterable
 
 import torch
+
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
@@ -63,7 +64,6 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
-            enable_caching=vllm_config.cache_config.enable_prefix_caching,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

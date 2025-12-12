@@ -407,7 +407,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
             block_size=block_size,
-            enable_caching=cache_config.enable_prefix_caching,
         ).page_size_bytes
 
         # Model may be marked as is_hybrid

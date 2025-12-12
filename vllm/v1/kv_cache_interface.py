@@ -9,7 +9,6 @@ import torch
 from typing_extensions import Self
 
 from vllm.config import VllmConfig
-from vllm.config.cache import MambaCacheMode
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import get_dtype_size
@@ -248,7 +247,6 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: int | None = None
     mamba_type: str = "mamba2"
     num_speculative_blocks: int = 0
-    enable_caching: bool = False
 
     @property
     def page_size_bytes(self) -> int:
