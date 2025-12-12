@@ -358,8 +358,6 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
 )
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):

@@ -25,7 +25,6 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
-from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
@@ -305,8 +304,15 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    rope_theta_names = ("rope_theta", "rotary_emb_base")
-    rope_theta = getattr_iter(config, rope_theta_names, None)
+    from vllm.config.utils import getattr_iter
+
+    # Older custom models may use non-standard field names
+    # which need patching for both Transformers v4 and v5.
+    names = ["rope_theta", "rotary_emb_base"]
+    rope_theta = getattr_iter(config, names, None, warn=True)
+    names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
+    partial_rotary_factor = getattr_iter(config, names, None, warn=True)
+
     if Version(version("transformers")) < Version("5.0.0.dev0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
@@ -315,14 +321,18 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
-        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
-        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
         if partial_rotary_factor is not None:
             if not hasattr(config, "rope_parameters"):
                 config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
     elif rope_theta is not None or hasattr(config, "rope_parameters"):
         # Transformers v5 installed
+        # Patch these fields in case they used non-standard names
+        if rope_theta is not None:
+            config.rope_theta = rope_theta
+        if partial_rotary_factor is not None:
+            config.partial_rotary_factor = partial_rotary_factor
+        # Standardize and validate RoPE parameters
         config.standardize_rope_params()
         config.validate_rope()
 
@@ -953,6 +963,13 @@ def try_get_generation_config(
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
 ) -> GenerationConfig | None:
+    # GGUF files don't have generation_config.json - their config is embedded
+    # in the file header. Skip all filesystem lookups to avoid re-reading the
+    # memory-mapped file, which can hang in multi-process scenarios when the
+    # EngineCore process already has the file mapped.
+    if is_gguf(model):
+        return None
+
     try:
         return GenerationConfig.from_pretrained(
             model,

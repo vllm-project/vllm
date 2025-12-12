@@ -173,10 +173,7 @@ class _HfExamplesInfo:
 
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "AfmoeForCausalLM": _HfExamplesInfo(
-        "arcee-ai/Trinity-Nano",
-        is_available_online=False,
-    ),
+    "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
@@ -211,10 +208,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "CohereForCausalLM": _HfExamplesInfo(
-        "CohereForAI/c4ai-command-r-v01", trust_remote_code=True
+        "CohereLabs/c4ai-command-r-v01", trust_remote_code=True
     ),
     "Cohere2ForCausalLM": _HfExamplesInfo(
-        "CohereForAI/c4ai-command-r7b-12-2024",
+        "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
@@ -581,7 +578,7 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
-    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"),
+    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
