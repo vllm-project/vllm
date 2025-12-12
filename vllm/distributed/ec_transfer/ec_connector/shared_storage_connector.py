@@ -83,9 +83,13 @@ class ECSharedStorageConnector(ECConnectorBase):
             ))
             return
         # Load the EC for each mm data
+        mm_data_set = set()
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
+            if mm_data.mm_hash in mm_data_set:
+                continue
+            mm_data_set.add(mm_data.mm_hash)
             filename = self._generate_filename_debug(mm_data.mm_hash)
             ec_cache = safetensors.torch.load_file(filename)["ec_cache"].to(
                 self._vllm_config.device_config.device)
@@ -170,6 +174,41 @@ class ECSharedStorageConnector(ECConnectorBase):
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
         return meta
+
+    def update_mm_hash_key(self, request: "Request"):
+        """Update the mm_hash key with request id"""
+        if request.mm_features is None:
+            return
+        for feature in request.mm_features:
+            mm_hash = feature.identifier
+            new_mm_hash = f"{request.request_id}_{mm_hash}"
+            feature.identifier = new_mm_hash
+
+    def clean_caches(
+        self,
+        request: "Request",
+    ):
+        if self.is_producer:
+            return
+        mm_data_set = set()
+        for mm_feature in request.mm_features:
+            if mm_feature.identifier in mm_data_set:
+                continue
+            mm_data_set.add(mm_feature.identifier)
+            filename = self._generate_filename_debug(mm_feature.identifier)
+            flodername = self._generate_foldername_debug(
+                mm_feature.identifier, False)
+            try:
+                os.remove(filename)
+            except OSError as e:
+                logger.warning("Failed to remove cache file %s: %s", filename,
+                               e)
+
+            try:
+                os.rmdir(flodername)
+            except OSError as e:
+                logger.warning("Failed to remove cache directory %s: %s",
+                               flodername, e)
 
     # ==============================
     # Helper functions

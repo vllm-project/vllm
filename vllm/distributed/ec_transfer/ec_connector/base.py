@@ -76,6 +76,20 @@ class ECConnectorBase(ABC):
     def is_producer(self) -> bool:
         return self._is_producer
 
+    def update_mm_hash_key(self, request: "Request"):
+        """Update the mm_hash key with request id"""
+        return None
+
+    def clean_caches(self, request: "Request") -> None:
+        """
+        Optional hook. clean caches in ec_consumer side when request is finish.
+
+        Args:
+            request: Request
+
+        """
+        return None
+
     # ==============================
     # Worker-side methods
     # ==============================

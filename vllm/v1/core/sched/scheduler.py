@@ -1142,6 +1142,9 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        if self.ec_connector is not None:
+            self.ec_connector.update_mm_hash_key(request)
+
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:
@@ -1203,6 +1206,9 @@ class Scheduler(SchedulerInterface):
 
         if not delay_free_blocks:
             self._free_blocks(request)
+
+        if self.ec_connector is not None:
+            self.ec_connector.clean_caches(request)
 
         return kv_xfer_params
 
