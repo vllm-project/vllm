@@ -106,6 +106,7 @@ async def _run_chat_completion_warmup(
     # Copy payload and set defaults
     request_payload = payload.copy()
     request_payload.setdefault("model", model)
+    request_payload.setdefault("request_id", request_id)
 
     request = ChatCompletionRequest(**request_payload)
 
@@ -127,6 +128,7 @@ async def _run_completion_warmup(
     # Copy payload and set defaults
     request_payload = payload.copy()
     request_payload.setdefault("model", model)
+    request_payload.setdefault("request_id", request_id)
 
     request = CompletionRequest(**request_payload)
 
@@ -147,6 +149,7 @@ async def _run_embedding_warmup(
     """Run a single embedding warmup request."""
     request_payload = payload.copy()
     request_payload.setdefault("model", model)
+    request_payload.setdefault("request_id", request_id)
 
     request = EmbeddingRequest(**request_payload)
     result = await handler.create_embedding(request, raw_request=None)
@@ -166,6 +169,7 @@ async def _run_pooling_warmup(
     """Run a single pooling warmup request."""
     request_payload = payload.copy()
     request_payload.setdefault("model", model)
+    request_payload.setdefault("request_id", request_id)
 
     request = PoolingRequest(**request_payload)
     result = await handler.create_pooling(request, raw_request=None)
