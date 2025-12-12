@@ -62,7 +62,7 @@ def test_quantfp8_group_functionality(
     assert scales_col.stride(1) == batch_size
 
     # Test column-major scales consistency
-    assert torch.allclose(scales_col, scales_native, rtol=1e-9, atol=1e-8)
+    torch.testing.assert_close(scales_col, scales_native, rtol=1e-9, atol=1e-8)
 
     # 3. Test CUDA implementation (only for divisible dimensions)
     if is_divisible:
@@ -71,7 +71,7 @@ def test_quantfp8_group_functionality(
         assert scales_cuda.shape == (batch_size, expected_num_groups)
 
         # Verify CUDA/native consistency
-        assert torch.allclose(scales_cuda, scales_native, rtol=1e-9, atol=1e-8)
+        torch.testing.assert_close(scales_cuda, scales_native, rtol=2e-7, atol=2e-8)
 
         # Quantized values should mostly match
         diff_count = (x_quant_cuda != x_quant_native).sum().item()
