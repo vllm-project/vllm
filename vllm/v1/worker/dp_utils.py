@@ -56,7 +56,7 @@ def _run_ar(
     return tensor
 
 
-def _post_process_ubatch(tensor: torch.Tensor, num_microbatches: int) -> bool:
+def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]
 
@@ -68,9 +68,7 @@ def _post_process_ubatch(tensor: torch.Tensor, num_microbatches: int) -> bool:
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-    if is_last_ubatch_empty(
-        orig_min_num_tokens, padded_max_num_tokens, num_microbatches
-    ):
+    if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens, num_ubatches):
         logger.debug(
             "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
         )

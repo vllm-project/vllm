@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 
 _THREAD_ID_TO_CONTEXT: dict = {}
 # Here we hardcode the number of microbatches to 2 for default.
-_NUM_OF_MICRO_BATCHES: int = 2
+_NUM_UBATCHES: int = 2
 _CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = []
 
 
@@ -53,7 +53,7 @@ class UBatchContext:
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
         _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
         _CURRENT_CONTEXTS[self.id] = self
-        # _NUM_OF_MICRO_BATCHES is set in make_ubatch_contexts
+        # _NUM_UBATCHES is set in make_ubatch_contexts
         self.ready_barrier.wait()
 
         self.cpu_wait_event.wait()
@@ -187,7 +187,7 @@ dbo_switch_to_compute_sync = _register_ubatch_function(
 def dbo_register_recv_hook(recv_hook):
     if len(_THREAD_ID_TO_CONTEXT) > 0:
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
-        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_OF_MICRO_BATCHES]
+        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
         next_ctx.recv_hook = recv_hook
 
 
@@ -208,10 +208,10 @@ def make_ubatch_contexts(
     ready_barrier: threading.Barrier,
     schedule: str = "default",
 ) -> list[UBatchContext]:
-    global _NUM_OF_MICRO_BATCHES, _CURRENT_CONTEXTS
+    global _NUM_UBATCHES, _CURRENT_CONTEXTS
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
-    _NUM_OF_MICRO_BATCHES = num_micro_batches
+    _NUM_UBATCHES = num_micro_batches
     # Ensure the global context list is large enough
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))

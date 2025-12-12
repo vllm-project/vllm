@@ -771,18 +771,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
-<<<<<<< HEAD
-=======
-
-        # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
-        ubatch_idx = dbo_current_ubatch_id()
-
-        # Dynamically expand shared_buffers if needed
-        while len(self.shared_buffers) <= ubatch_idx:
-            self.shared_buffers.append(self.SharedBuffers())
-
-        buffers = self.shared_buffers[ubatch_idx]
->>>>>>> bc0c30372 (fix pre-commit)
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Force worst-case allocation in profiling run for

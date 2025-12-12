@@ -28,11 +28,9 @@ UBatchSlices: TypeAlias = list[UBatchSlice]
 
 
 def is_last_ubatch_empty(
-    orig_num_tokens: int, padded_num_tokens: int, num_microbatches: int
+    orig_num_tokens: int, padded_num_tokens: int, num_ubatches: int
 ) -> bool:
-    return (padded_num_tokens // num_microbatches) * (
-        num_microbatches - 1
-    ) >= orig_num_tokens
+    return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
 
 
 def check_ubatch_thresholds(
@@ -51,9 +49,6 @@ def check_ubatch_thresholds(
 def _pad_out_ubatch_slices(
     ubatch_slices: UBatchSlices, num_total_tokens: int, num_reqs_padded: int
 ) -> UBatchSlices:
-    if not ubatch_slices:
-        return ubatch_slices
-
     last_slice = ubatch_slices[-1]
     padded_last_request_slice = slice(last_slice.request_slice.start, num_reqs_padded)
     padded_last_token_slice = slice(last_slice.token_slice.start, num_total_tokens)
@@ -68,16 +63,16 @@ def maybe_create_ubatch_slices(
     num_scheduled_tokens: np.ndarray,
     num_tokens_padded: int,
     num_reqs_padded: int,
-    num_microbatches: int,
+    num_ubatches: int,
     split_point: list[int] | int | None = None,
 ) -> tuple[UBatchSlices | None, UBatchSlices | None]:
     if not should_ubatch:
         return None, None
 
     if split_point is None:
-        split_point = int(num_tokens_padded) // num_microbatches
+        split_point = int(num_tokens_padded) // num_ubatches
 
-    token_split_points = [split_point * i for i in range(1, num_microbatches)]
+    token_split_points = [split_point * i for i in range(1, num_ubatches)]
 
     # TODO(lucas): Refactor the gpu_model_runner.py so we can pass
     # in cu_num_tokens directly (i.e. query_start_loc)
