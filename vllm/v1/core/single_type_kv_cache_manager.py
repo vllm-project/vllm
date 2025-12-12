@@ -53,8 +53,8 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        cache_config: CacheConfig,
         block_pool: BlockPool,
+        cache_config: CacheConfig,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
