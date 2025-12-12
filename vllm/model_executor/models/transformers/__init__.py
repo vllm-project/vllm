@@ -16,7 +16,6 @@
 # limitations under the License.
 """Wrapper around `transformers` models"""
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.model_executor.models.transformers.base import Base
 from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
@@ -31,16 +30,13 @@ from vllm.model_executor.models.transformers.pooling import (
     EmbeddingMixin,
     SequenceClassificationMixin,
 )
-from vllm.model_executor.models.transformers.utils import can_enable_torch_compile
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
 # Text only models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(CausalMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
 
 
@@ -64,11 +60,9 @@ class TransformersMultiModalMoEForCausalLM(
 
 
 # Embedding models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersEmbeddingModel(EmbeddingMixin, LegacyMixin, Base): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
 
 
@@ -81,13 +75,11 @@ class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base
 
 
 # Sequence classification models
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForSequenceClassification(
     SequenceClassificationMixin, LegacyMixin, Base
 ): ...
 
 
-@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForSequenceClassification(
     SequenceClassificationMixin, MoEMixin, Base
 ): ...
