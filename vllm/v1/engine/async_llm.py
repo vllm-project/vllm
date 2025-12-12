@@ -502,11 +502,6 @@ class AsyncLLM(EngineClient):
                 "The lengths of prompts and data_parallel_rank must be the same."
             )
 
-    # TODO: we should support multiple prompts in one call, as you
-    # can do with LLM.generate. So that for multi-prompt completion
-    # requests we don't need to send multiple messages to core proc,
-    # and so we don't need multiple streams which then get
-    # re-multiplexed in the API server anyhow.
     async def generate(
         self,
         prompt: EngineCoreRequest
