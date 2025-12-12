@@ -53,8 +53,8 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        block_pool: BlockPool,
         cache_config: CacheConfig,
+        block_pool: BlockPool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -398,12 +398,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
-    def __init__(
-        self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool, **kwargs
-    ) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
+    def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -534,12 +531,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
-    def __init__(
-        self, kv_cache_spec: ChunkedLocalAttentionSpec, block_pool: BlockPool, **kwargs
-    ) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
+    def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
-        self._null_block = block_pool.null_block
 
     @classmethod
     def find_longest_cache_hit(
@@ -690,7 +684,7 @@ class MambaManager(SingleTypeKVCacheManager):
     def __init__(
         self, kv_cache_spec: MambaSpec, cache_config: CacheConfig, **kwargs
     ) -> None:
-        super().__init__(kv_cache_spec, cache_config, **kwargs)
+        super().__init__(kv_cache_spec, cache_config=cache_config, **kwargs)
         self.mamba_cache_mode = cache_config.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
