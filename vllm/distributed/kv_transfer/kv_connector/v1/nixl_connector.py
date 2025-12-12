@@ -489,6 +489,8 @@ class NixlConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+        # list of GPU block IDs per request
+        self._request_block_ids: dict[ReqId, list[int]] = {}
 
     def shutdown(self):
         self._stop_event.set()
@@ -689,13 +691,37 @@ class NixlConnectorScheduler:
                 kv_transfer_params=req.kv_transfer_params,
             )
 
-        for req_id, (req, block_ids) in self._reqs_need_save.items():
+        # NOTE: For prefill side, there might be chance that early added
+        # request is chunked prefill, so we need to check if new blocks are added
+        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+            if preempted:
+                self._request_block_ids[req_id] = []
+            if new_block_id_groups:
+                new_block_ids = (
+                    self._request_block_ids.get(req_id, []) + new_block_id_groups[0]
+                )
+                self._request_block_ids[req_id] = new_block_ids
+
+        added_reqs = []
+        for req_id, (req, _) in self._reqs_need_save.items():
             assert req.kv_transfer_params is not None
+            # don't use the block_ids from _reqs_need_save since it may be
+            # incomplete for partial prefill.
+            new_block_ids = self._request_block_ids.get(req_id, [])
+            is_partial = req.num_tokens > (len(new_block_ids) * self.block_size)
+            if is_partial:
+                continue
             meta.add_new_req_to_save(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=new_block_ids,
                 kv_transfer_params=req.kv_transfer_params,
             )
+            added_reqs.append(req_id)
+        # NOTE: for partial prefill, we will keep saving until the full
+        # prefill is done. Clear to avoid double saving.
+        for req_id in added_reqs:
+            self._reqs_need_save.pop(req_id, None)
+            self._request_block_ids.pop(req_id, None)
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
@@ -703,7 +729,6 @@ class NixlConnectorScheduler:
 
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
-        self._reqs_need_save.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
@@ -2307,6 +2332,26 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+def yield_req_data(
+    scheduler_output,
+) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
+    """
+    Yields:
+        (req_id, new_block_id_groups, preempted)
+    """
+    # new requests
+    for req_data in scheduler_output.scheduled_new_reqs:
+        yield req_data.req_id, req_data.block_ids, False
+
+    # cached requests
+    cached_reqs = scheduler_output.scheduled_cached_reqs
+    yield from zip(
+        cached_reqs.req_ids,
+        cached_reqs.new_block_ids,
+        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
+    )
 
 
 @dataclass
