@@ -1225,8 +1225,11 @@ class Scheduler(SchedulerInterface):
 
             if stopped:
                 if request.resumable:
-                    request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
-                    self.num_waiting_for_streaming += 1
+                    if request.streaming_queue:
+                        self._update_request_as_session(request)
+                    else:
+                        request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+                        self.num_waiting_for_streaming += 1
                     self.waiting.add_request(request)
                 else:
                     kv_transfer_params = self._free_request(request)
