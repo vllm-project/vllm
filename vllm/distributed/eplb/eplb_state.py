@@ -1155,6 +1155,13 @@ class EplbState:
         return self._allreduce_list(load_pass_list)
 
 
+@dataclass
+class EplbLayerState:
+    expert_load_view: torch.Tensor | None = None
+    logical_to_physical_map: torch.Tensor | None = None
+    logical_replica_count: torch.Tensor | None = None
+
+
 def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
     rank_mapping: dict[int, int],
