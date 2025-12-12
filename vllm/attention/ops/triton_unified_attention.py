@@ -273,18 +273,12 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        # Compute attention mask
+        # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
-        # Standard causal mask
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # For PrefixLM: prefix region uses bidirectional attention,
-        # suffix region uses causal attention
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
         if USE_MM_PREFIX:
-            # Standard causal mask
-            seq_mask = seq_offset[None, :] <= query_abs_pos
-
-            # Add full attention ranges
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
@@ -293,17 +287,13 @@ def kernel_unified_attention_2d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Check if query is in range
+                # Allow bidirectional attention within each range
                 q_in_range = (query_abs_pos >= range_start) & (
                     query_abs_pos < range_end
                 )
-
-                # Check if key is in range
                 k_in_range = (seq_offset[None, :] >= range_start) & (
                     seq_offset[None, :] < range_end
                 )
-
-                # If both in range, allow attention
                 seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -596,18 +586,12 @@ def kernel_unified_attention_3d(
         else:
             V = V_load
 
-        # Compute attention mask
+        # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
-        # Standard causal mask
-        seq_mask = seq_offset[None, :] < query_abs_pos + 1
+        seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # For PrefixLM: prefix region uses bidirectional attention,
-        # suffix region uses causal attention
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
         if USE_MM_PREFIX:
-            # Standard causal mask
-            seq_mask = seq_offset[None, :] <= query_abs_pos
-
-            # Add full attention ranges
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
@@ -616,17 +600,13 @@ def kernel_unified_attention_3d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Check if query is in range
+                # Allow bidirectional attention within each range
                 q_in_range = (query_abs_pos >= range_start) & (
                     query_abs_pos < range_end
                 )
-
-                # Check if key is in range
                 k_in_range = (seq_offset[None, :] >= range_start) & (
                     seq_offset[None, :] < range_end
                 )
-
-                # If both in range, allow attention
                 seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)

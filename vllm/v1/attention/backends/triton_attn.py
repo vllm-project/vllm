@@ -68,19 +68,24 @@ class TritonAttentionMetadata:
 
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+        """Convert mm_prefix_range dict to padded tensor for Triton kernel."""
         if self.mm_prefix_range is None:
             return None
-        mm_prefix_range_tensor = torch.nested.nested_tensor(
-            [
-                torch.tensor(
-                    self.mm_prefix_range[i],
-                    dtype=torch.int32,
-                    device=self.seq_lens.device,
-                )
-                for i in range(len(self.mm_prefix_range))
-            ]
-        ).to_padded_tensor(0)
-        return mm_prefix_range_tensor
+
+        # Use seq count from tensor, not dict length (keys may be non-contiguous)
+        num_seqs = self.seq_lens.shape[0]
+        device = self.seq_lens.device
+
+        range_tensors = [
+            torch.tensor(
+                self.mm_prefix_range.get(i, []),  # Safe access with empty fallback
+                dtype=torch.int32,
+                device=device,
+            )
+            for i in range(num_seqs)
+        ]
+
+        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
