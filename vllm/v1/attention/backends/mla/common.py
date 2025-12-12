@@ -1894,7 +1894,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+                    q,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    k_scale,
                 )
 
             # unpad if necessary
@@ -1927,9 +1930,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def forward(
         self,
         layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
+        query: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        key: torch.Tensor,
+        value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: torch.Tensor | None = None,
@@ -1953,8 +1956,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     self.num_heads,
                     self.qk_nope_head_dim + self.v_head_dim,
                 ),
-                device=k_c_normed.device,
-                dtype=k_c_normed.dtype,
+                device=key.device,
+                dtype=key.dtype,
             )
 
             # The zero fill is required when used with DP + EP
@@ -1972,9 +1975,16 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
-        q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
+        if isinstance(query, tuple):
+            q_nope, q_pe = query
+        else:
+            q_nope, q_pe = query.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+        q_nope = q_nope[:num_actual_toks, ...]
+        q_pe = q_pe[:num_actual_toks, ...]
+        kv_c_normed = key[:num_actual_toks, ...]
+        k_pe = value[:num_actual_toks, ...]
 
         assert (
             attn_metadata.num_decodes is not None
@@ -1986,16 +1996,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_q = q[:num_decode_tokens]
+        decode_q_nope = q_nope[:num_decode_tokens]
+        decode_q_pe = q_pe[:num_decode_tokens]
 
-        prefill_q = q[num_decode_tokens:]
+        prefill_q_nope = q_nope[num_decode_tokens:]
+        prefill_q_pe = q_pe[num_decode_tokens:]
+        prefill_q = torch.cat((prefill_q_nope, prefill_q_pe), dim=-1)
         prefill_k_pe = k_pe[num_decode_tokens:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
+        prefill_kv_c_normed = kv_c_normed[num_decode_tokens:]
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
-                k_c_normed,
+                kv_c_normed,
                 k_pe.squeeze(1),
                 kv_cache,
                 attn_metadata.slot_mapping.flatten(),
@@ -2009,7 +2022,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_prefill:
             self._forward_prefill(
                 prefill_q,
-                prefill_k_c_normed,
+                prefill_kv_c_normed,
                 prefill_k_pe,
                 kv_cache,
                 attn_metadata,
@@ -2019,10 +2032,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if has_decode:
             assert attn_metadata.decode is not None
-
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
 
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)

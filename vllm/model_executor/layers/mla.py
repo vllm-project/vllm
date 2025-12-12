@@ -149,11 +149,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
+        q_nope = q[..., : self.qk_nope_head_dim]
+        q_pe = q[..., self.qk_nope_head_dim :]
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -164,7 +164,8 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             q *= llama_4_scaling
 
         attn_out = self.mla_attn(
-            q,
+            q_nope,
+            q_pe,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
