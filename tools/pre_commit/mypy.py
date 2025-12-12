@@ -43,11 +43,11 @@ FILES = [
     "vllm/worker",
     "vllm/v1/core",
     "vllm/v1/engine",
+    "vllm/v1/executor",
     "vllm/v1/metrics",
     "vllm/v1/pool",
     "vllm/v1/sample",
     "vllm/v1/worker",
-    "vllm/v1/executor",
 ]
 
 # After fixing errors resulting from changing follow_imports
