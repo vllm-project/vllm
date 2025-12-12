@@ -617,7 +617,7 @@ class AsyncLLM(EngineClient):
                     data_parallel_rank=data_parallel_rank,
                 )
             else:
-                prompt = [prompt]  # type: ignore[list-item]
+                prompt = [prompt]  # type: ignore[list-item, assignment]
                 request_id = [request_id]  # type: ignore[list-item]
                 prompt_text = [prompt_text] if prompt_text is not None else None  # type: ignore[list-item]
                 trace_headers = [trace_headers] if trace_headers is not None else None  # type: ignore[list-item]
@@ -918,7 +918,7 @@ class AsyncLLM(EngineClient):
                     priority,
                 )
             else:
-                prompt = [prompt]
+                prompt = [prompt]  # type: ignore[list-item]
                 request_id = [request_id]  # type: ignore[list-item]
                 trace_headers = [trace_headers] if trace_headers is not None else None  # type: ignore[list-item]
                 priority = [priority]  # type: ignore[list-item]
