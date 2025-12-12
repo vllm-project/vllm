@@ -544,6 +544,11 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+
+        if self.is_encoder_decoder:
+            self.mm_processor_cache_gb = 0
+            logger.info("Encoder-decoder model detected, disabling mm processor cache.")
+
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
             if (
@@ -800,6 +805,13 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
+        if convert == "reward":
+            logger.warning(
+                "`--convert reward` is deprecated and will be removed in v0.15. "
+                "Please use `--convert embed` instead."
+            )
+            return "embed"
+
         if convert != "auto":
             return convert
 

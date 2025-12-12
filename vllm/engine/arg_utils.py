@@ -1649,7 +1649,13 @@ class EngineArgs:
                     "attention_backend and attention_config.backend "
                     "are mutually exclusive"
                 )
-            attention_config.backend = self.attention_backend
+            # Convert string to enum if needed (CLI parsing returns a string)
+            if isinstance(self.attention_backend, str):
+                attention_config.backend = AttentionBackendEnum[
+                    self.attention_backend.upper()
+                ]
+            else:
+                attention_config.backend = self.attention_backend
 
         load_config = self.create_load_config()
 
@@ -1783,6 +1789,7 @@ class EngineArgs:
         except Exception:
             # This is only used to set default_max_num_batched_tokens
             device_memory = 0
+            device_name = ""
 
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
@@ -1846,16 +1853,6 @@ class EngineArgs:
     ) -> None:
         default_chunked_prefill = model_config.is_chunked_prefill_supported
         default_prefix_caching = model_config.is_prefix_caching_supported
-
-        if self.prefill_context_parallel_size > 1:
-            default_chunked_prefill = False
-            default_prefix_caching = False
-            logger.warning_once(
-                "--prefill-context-parallel-size > 1 is not compatible with "
-                "chunked prefill and prefix caching now. Chunked prefill "
-                "and prefix caching have been disabled by default.",
-                scope="local",
-            )
 
         if self.enable_chunked_prefill is None:
             self.enable_chunked_prefill = default_chunked_prefill
@@ -2042,11 +2039,13 @@ def human_readable_int(value):
             "k": 10**3,
             "m": 10**6,
             "g": 10**9,
+            "t": 10**12,
         }
         binary_multiplier = {
             "K": 2**10,
             "M": 2**20,
             "G": 2**30,
+            "T": 2**40,
         }
 
         number, suffix = match.groups()
