@@ -27,7 +27,7 @@ import contextlib
 import gc
 import pickle
 import weakref
-from collections import namedtuple
+from collections import deque, namedtuple
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -40,7 +40,8 @@ import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
-from torch.distributed import Backend, ProcessGroup
+from torch import Tensor
+from torch.distributed import Backend, ProcessGroup, Work
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
@@ -386,6 +387,8 @@ class GroupCoordinator:
             torch.ops._C, "init_shm_manager"
         )
 
+        self._async_send_buff: deque[tuple[Work, Tensor]] = deque()
+
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True
     ):
@@ -637,7 +640,75 @@ class GroupCoordinator:
         )
         return obj_list
 
-    def send_object(self, obj: Any, dst: int) -> None:
+    def _release_completed_send_buff(self):
+        while self._async_send_buff and self._async_send_buff[0][0].is_completed():
+            self._async_send_buff.popleft()
+
+    def _wait_send_buff(self):
+        while self._async_send_buff:
+            self._async_send_buff[0][0].wait()
+            self._async_send_buff.popleft()
+
+    def _send(
+        self,
+        tensor: Tensor,
+        dst: int | None = None,
+        group: ProcessGroup | None = None,
+        tag: int = 0,
+        group_dst: int | None = None,
+        is_async: bool = False,
+        wait_buffer: bool = False,
+    ) -> Work | None:
+        if not is_async:
+            return torch.distributed.send(
+                tensor=tensor,
+                dst=dst,
+                group=group,
+                tag=tag,
+                group_dst=group_dst,
+            )
+        if wait_buffer:
+            self._wait_send_buff()
+        else:
+            self._release_completed_send_buff()
+        work = torch.distributed.isend(
+            tensor=tensor,
+            dst=dst,
+            group=group,
+            tag=tag,
+            group_dst=group_dst,
+        )
+        if work is not None:
+            self._async_send_buff.append((work, tensor))
+        return work
+
+    def _recv(
+        self,
+        tensor: Tensor,
+        src: int | None = None,
+        group: ProcessGroup | None = None,
+        tag: int = 0,
+        group_src: int | None = None,
+        is_async: bool = False,
+    ) -> int | Work | None:
+        if not is_async:
+            return torch.distributed.recv(
+                tensor=tensor,
+                src=src,
+                group=group,
+                tag=tag,
+                group_src=group_src,
+            )
+        work = torch.distributed.irecv(
+            tensor=tensor,
+            src=src,
+            group=group,
+            tag=tag,
+            group_src=group_src,
+        )
+        return work
+
+    def send_object(self, obj: Any, dst: int, is_async: bool = False) -> None:
         """Send the input object list to the destination rank."""
         """NOTE: `dst` is the local rank of the destination rank."""
 
@@ -656,11 +727,21 @@ class GroupCoordinator:
         )
 
         # Send object size
-
-        torch.distributed.send(size_tensor, dst=self.ranks[dst], group=self.cpu_group)
+        # Note(qcs): Since the size_tensor always has the same shape,
+        # we need to wait for all asynchronous sends in the previous buffer
+        # to complete to avoid incorrect pairing (due to unsupported tags)
+        self._send(
+            size_tensor,
+            dst=self.ranks[dst],
+            group=self.cpu_group,
+            is_async=is_async,
+            wait_buffer=True,
+        )
 
         # Send object
-        torch.distributed.send(object_tensor, dst=self.ranks[dst], group=self.cpu_group)
+        self._send(
+            object_tensor, dst=self.ranks[dst], group=self.cpu_group, is_async=is_async
+        )
 
         return None
 
@@ -677,9 +758,7 @@ class GroupCoordinator:
         size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
 
         # Receive object size
-        rank_size = torch.distributed.recv(
-            size_tensor, src=self.ranks[src], group=self.cpu_group
-        )
+        rank_size = self._recv(size_tensor, src=self.ranks[src], group=self.cpu_group)
 
         # Tensor to receive serialized objects into.
         object_tensor = torch.empty(  # type: ignore[call-overload]
@@ -688,7 +767,7 @@ class GroupCoordinator:
             device="cpu",
         )
 
-        rank_object = torch.distributed.recv(
+        rank_object = self._recv(
             object_tensor, src=self.ranks[src], group=self.cpu_group
         )
 
@@ -788,6 +867,7 @@ class GroupCoordinator:
         dst: int | None = None,
         all_gather_group: Optional["GroupCoordinator"] = None,
         all_gather_tensors: dict[str, bool] | None = None,
+        is_async: bool = False,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Send the input tensor dictionary.
         NOTE: `dst` is the local rank of the source rank.
@@ -838,7 +918,7 @@ class GroupCoordinator:
         # `metadata_list` lives in CPU memory.
         # `send_object_list` has serialization & deserialization,
         # all happening on CPU. Therefore, we can use the CPU group.
-        self.send_object(metadata_list, dst=dst)
+        self.send_object(metadata_list, dst=dst, is_async=is_async)
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
@@ -862,12 +942,12 @@ class GroupCoordinator:
 
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
-                torch.distributed.send(
-                    tensor, dst=self.ranks[dst], group=metadata_group
+                self._send(
+                    tensor, dst=self.ranks[dst], group=metadata_group, is_async=is_async
                 )
             else:
                 # use group for GPU tensors
-                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
+                self._send(tensor, dst=self.ranks[dst], group=group, is_async=is_async)
         return None
 
     def recv_tensor_dict(
@@ -943,12 +1023,10 @@ class GroupCoordinator:
 
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
-                    torch.distributed.recv(
-                        tensor, src=self.ranks[src], group=metadata_group
-                    )
+                    self._recv(tensor, src=self.ranks[src], group=metadata_group)
                 else:
                     # use group for GPU tensors
-                    torch.distributed.recv(tensor, src=self.ranks[src], group=group)
+                    self._recv(tensor, src=self.ranks[src], group=group)
                 if use_all_gather:
                     # do the allgather
                     tensor = all_gather_group.all_gather(  # type: ignore

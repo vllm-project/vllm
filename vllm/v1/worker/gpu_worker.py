@@ -638,6 +638,7 @@ class Worker(WorkerBase):
             output.tensors,
             all_gather_group=get_tp_group(),
             all_gather_tensors=all_gather_tensors,
+            is_async=True,
         )
 
         return None
