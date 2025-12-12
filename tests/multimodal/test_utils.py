@@ -428,6 +428,62 @@ def test_placeholder_range_get_num_embeds(is_embed, expected):
 
 
 @pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, None),
+        (
+            torch.tensor([False, True, False, True, True]),
+            torch.tensor([0, 1, 1, 2, 3]),
+        ),
+        (torch.tensor([True, True, True]), torch.tensor([1, 2, 3])),
+    ],
+)
+def test_placeholder_range_embeds_cumsum(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+
+    if expected is None:
+        assert pr.embeds_cumsum is None
+        return
+
+    assert torch.equal(pr.embeds_cumsum, expected)
+    # cached_property should return the same object on repeated access
+    assert pr.embeds_cumsum is pr.embeds_cumsum
+
+
+@pytest.mark.parametrize(
+    "is_embed,start_idx,end_idx,expected",
+    [
+        (None, 2, 4, (2, 4)),
+        (
+            torch.tensor([False, True, False, True, True]),
+            3,
+            5,
+            (1, 3),
+        ),
+        (
+            torch.tensor([False, True, False, True, True]),
+            0,
+            2,
+            (0, 1),
+        ),
+        (
+            torch.tensor([True, False, True, False]),
+            2,
+            2,
+            (1, 1),
+        ),
+    ],
+)
+def test_placeholder_range_get_embeds_indices_in_range(
+    is_embed, start_idx, end_idx, expected
+):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_embeds_indices_in_range(start_idx, end_idx) == expected
+
+
+@pytest.mark.parametrize(
     "offset,is_embed,expected",
     [
         (0, None, [(0, 4)]),
