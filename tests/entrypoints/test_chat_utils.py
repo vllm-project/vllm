@@ -796,9 +796,13 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
             "content": "<|image_1|>\nWhat's in this image?",
         }
     ]
+
     assert mm_data is not None
     assert "image" in mm_data
-    assert mm_data["image"] is None
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 1
+    assert mm_data["image"][0] is None
+
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[uuid])
 
 
@@ -825,10 +829,11 @@ def test_parse_chat_messages_empty_audio_embeds_with_uuid(
     # Should have audio in mm_data as None (UUID provided)
     assert mm_data is not None
     assert "audio" in mm_data
-    assert mm_data["audio"] is None
+    assert isinstance(mm_data["audio"], list)
+    assert len(mm_data["audio"]) == 1
+    assert mm_data["audio"][0] is None
+
     # UUID should be recorded
-    assert mm_uuids is not None
-    assert "audio" in mm_uuids
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[uuid])
 
 
