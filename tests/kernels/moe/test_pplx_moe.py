@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -181,6 +182,7 @@ def test_fused_moe_batched_experts(
     e: int,
     topk: int,
     dtype: torch.dtype,
+    workspace_init,
 ):
     current_platform.seed_everything(7)
 
@@ -863,6 +865,9 @@ def _pplx_test_loop(
     make_weights: bool,
     test_fn: Callable,
 ):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
     def format_result(msg, ex=None):
         if ex is not None:
             x = str(ex)

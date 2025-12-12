@@ -202,6 +202,27 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def workspace_init():
+    """Initialize the workspace manager for tests that need it.
+
+    This fixture initializes the workspace manager with a CUDA device
+    if available, and resets it after the test completes. Tests that
+    create a full vLLM engine should NOT use this fixture as the engine
+    will initialize the workspace manager itself.
+    """
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        init_workspace_manager(device)
+    yield
+    reset_workspace_manager()
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield

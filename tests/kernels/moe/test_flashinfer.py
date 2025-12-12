@@ -206,6 +206,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
     topk: int,
     activation: str,
     monkeypatch,
+    workspace_init,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")

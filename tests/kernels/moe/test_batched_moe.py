@@ -248,6 +248,7 @@ def test_fused_moe_batched_experts(
     per_act_token_quant: bool,
     block_shape: list[int] | None,
     input_scales: bool,
+    workspace_init,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""
