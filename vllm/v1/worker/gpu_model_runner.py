@@ -591,7 +591,6 @@ class GPUModelRunner(
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
-        self.valid_sampled_token_count_cpu: torch.Tensor | None = None
         # Pre-allocated tensor for copying draft token ids to CPU,
         # with dedicated stream for overlapping and event for coordination.
         self.draft_token_ids_copy_event: torch.Event | None = None
@@ -600,12 +599,6 @@ class GPUModelRunner(
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.Event()
             self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
-            self.valid_sampled_token_count_cpu = torch.empty(
-                self.max_num_reqs,
-                dtype=torch.int64,
-                device="cpu",
-                pin_memory=self.pin_memory,
-            )
             self.draft_token_ids_copy_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
@@ -615,6 +608,12 @@ class GPUModelRunner(
                 pin_memory=self.pin_memory,
             )
             self._prev_copy_draft_num_reqs: int = 0
+        self.valid_sampled_token_count_cpu = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int64,
+            device="cpu",
+            pin_memory=self.pin_memory,
+        )
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
