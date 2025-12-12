@@ -245,6 +245,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_USE_LIGHTER_MAMBA_CACHE: bool = False
 
+
 def get_default_cache_root():
     return os.getenv(
         "XDG_CACHE_HOME",

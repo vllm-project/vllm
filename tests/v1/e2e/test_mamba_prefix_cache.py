@@ -34,7 +34,7 @@ class StepAction:
 num_speculative_tokens = 3
 
 num_accepted_tokens = 1
-prompt_token_ids = []
+prompt_token_ids: list[int] = []
 MODEL = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 BLOCK_SIZE = 560
 NUM_HIDDEN_LAYERS = 8
@@ -49,8 +49,9 @@ def get_fake_sample_fn() -> SamplerOutput:
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> SamplerOutput:
+        assert logits is not None
         print(
-            f"[UNIT TEST] fake_sample_fn: {logits.shape=} {spec_decode_metadata=} {self.input_ids.cpu=}"
+            f"[UNIT TEST] fake_sample_fn: {logits.shape=} {spec_decode_metadata=} {self.input_ids.cpu=}"  # noqa: E501
         )
         num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
         num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
@@ -60,7 +61,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
             print(
-                f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {prompt_token_ids[first_token_id_index]=}"
+                f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {prompt_token_ids[first_token_id_index]=}"  # noqa: E501
             )
             return SamplerOutput(
                 sampled_token_ids=torch.tensor(
@@ -79,7 +80,7 @@ def get_fake_sample_fn() -> SamplerOutput:
             num_sampled_tokens - len(accpeted_tokens)
         )
         print(
-            f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {accpeted_tokens=} {sampled_token_ids=}"
+            f"[UNIT TEST] fake_sample_fn: {first_token_id_index=} {accpeted_tokens=} {sampled_token_ids=}"  # noqa: E501
         )
         # if (
         #     self.input_batch.num_computed_tokens_cpu_tensor[0].item()
@@ -123,7 +124,7 @@ def get_fake_propose_draft_token_ids_fn():
                 num_computed_tokens + 1
             )  # bonus token isn't considered as computed
         print(
-            f"fake_propose_draft_token_ids_fn: {self.input_batch.num_accepted_tokens_cpu=}"
+            f"fake_propose_draft_token_ids_fn: {self.input_batch.num_accepted_tokens_cpu=}"  # noqa: E501
         )
         first_token_id_index += self.input_batch.num_accepted_tokens_cpu[0].item()
         proposed_draft_token_ids = [
@@ -132,7 +133,7 @@ def get_fake_propose_draft_token_ids_fn():
             ]
         ]
         print(
-            f"[UNIT TEST] fake_propose_draft_token_ids_fn: {num_computed_tokens=} num_accepted_tokens={self.input_batch.num_accepted_tokens_cpu[0].item()} num_prompt_tokens={self.input_batch.num_prompt_tokens[0].item()} num_tokens_no_spec={self.input_batch.num_tokens_no_spec[0].item()} {first_token_id_index=} {proposed_draft_token_ids=}"
+            f"[UNIT TEST] fake_propose_draft_token_ids_fn: {num_computed_tokens=} num_accepted_tokens={self.input_batch.num_accepted_tokens_cpu[0].item()} num_prompt_tokens={self.input_batch.num_prompt_tokens[0].item()} num_tokens_no_spec={self.input_batch.num_tokens_no_spec[0].item()} {first_token_id_index=} {proposed_draft_token_ids=}"  # noqa: E501
         )
         return proposed_draft_token_ids
 
@@ -180,9 +181,9 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[
                 request.request_id
             ]
-            not_null_block = [not block.is_null for block in cur_block_ids]
-            not_null_block = [1 if block else 0 for block in not_null_block]
-            assert not_null_block == cur_step_action.kv_cache_block_ids
+            not_null_block_flags = [not block.is_null for block in cur_block_ids]
+            block_ids = [1 if block else 0 for block in not_null_block_flags]
+            assert block_ids == cur_step_action.kv_cache_block_ids
         return ret
 
     return fake_allocate_slots_fn
@@ -217,7 +218,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
             )
             print(
-                f"fake_execute_model_fn: {num_computed_tokens=} {last_num_computed_tokens=} {num_computed_tokens // BLOCK_SIZE > last_num_computed_tokens // BLOCK_SIZE=}"
+                f"fake_execute_model_fn: {num_computed_tokens=} {last_num_computed_tokens=} {num_computed_tokens // BLOCK_SIZE > last_num_computed_tokens // BLOCK_SIZE=}"  # noqa: E501
             )
             if (
                 num_computed_tokens // BLOCK_SIZE
@@ -226,7 +227,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
                 # generated a new aligned block in this step
                 block_idx = num_computed_tokens // mamba_spec.block_size - 1
                 print(
-                    f"[UNIT TEST] fake_execute_model_fn: block_idx= {block_idx} for num_computed_tokens={num_computed_tokens - num_computed_tokens % BLOCK_SIZE}"
+                    f"[UNIT TEST] fake_execute_model_fn: block_idx= {block_idx} for num_computed_tokens={num_computed_tokens - num_computed_tokens % BLOCK_SIZE}"  # noqa: E501
                 )
                 block_id = (
                     self.input_batch.block_table.block_tables[mamba_group_id]
@@ -247,7 +248,7 @@ def get_fake_execute_model_fn(original_execute_model_fn: Callable):
             last_num_computed_tokens = num_computed_tokens
         else:
             last_num_computed_tokens = 0
-            print(f"[UNIT TEST] fake_execute_model_fn: clear last_num_computed_tokens")
+            print("[UNIT TEST] fake_execute_model_fn: clear last_num_computed_tokens")
 
         ret = original_execute_model_fn(self, scheduler_output, intermediate_tensors)
 
@@ -320,7 +321,8 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     num_generated_tokens = 8000
     num_prompt_tokens = 500
     sampling_params = SamplingParams(temperature=0.0, max_tokens=num_generated_tokens)
-    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
+    with open(f"{os.path.dirname(__file__)}/input.txt") as file:
+        full_prompt = file.read()
     fake_execute_model_fn = get_fake_execute_model_fn(GPUModelRunner.execute_model)
     monkeypatch.setattr(GPUModelRunner, "execute_model", fake_execute_model_fn)
     fake_sample_fn = get_fake_sample_fn()
@@ -342,7 +344,7 @@ def test_run_ref_mamba_state(monkeypatch: pytest.MonkeyPatch):
     )
     print(f"Generated text: {outputs[0].outputs[0].token_ids}")
     print(
-        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
+        f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"  # noqa: E501
     )
     print(f"mamba_kv_cache_dict: {mamba_kv_cache_dict.keys()}")
     # ref_mamba_kv_cache_dict = torch.load("mamba_kv_cache_dict.pth")
@@ -368,7 +370,7 @@ def check_mamba_state_equal(
                 diff_idx = torch.nonzero(diff_mask)
                 if diff_idx.shape[0] * 100 < ref.numel():
                     print(
-                        f"[WARNING] found {diff_idx.shape[0] * 100 / ref.numel()}% of the elements are different"
+                        f"[WARNING] found {diff_idx.shape[0] * 100 / ref.numel()}% of the elements are different"  # noqa: E501
                     )
                     continue
                 print(
@@ -429,7 +431,8 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     apply_patch(monkeypatch)
-    full_prompt = open(f"{os.path.dirname(__file__)}/input.txt").read()
+    with open(f"{os.path.dirname(__file__)}/input.txt") as file:
+        full_prompt = file.read()
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -694,17 +697,17 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
                 step_action_next.kv_cache_block_ids is not None
                 and len(step_action_next.kv_cache_block_ids) == 0
             ):
-                step_action_next.kv_cache_block_ids = (
-                    step_action_prev.kv_cache_block_ids.copy()
-                )
+                prev_block_ids = step_action_prev.kv_cache_block_ids
+                if prev_block_ids is not None:
+                    step_action_next.kv_cache_block_ids = prev_block_ids.copy()
         global step_actions
         step_actions = test_config.step_actions
         print("step actions: ", step_actions)
         print(
-            f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"
+            f"expect token ids: {prompt_token_ids[num_prompt_tokens : num_prompt_tokens + num_generated_tokens]}"  # noqa: E501
         )
 
-        outputs = engine.generate(
+        _ = engine.generate(
             [TokensPrompt(prompt_token_ids=prompt_token_ids[:num_prompt_tokens])],
             sampling_params,
         )
@@ -713,7 +716,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         keys_to_check = [
             (action.postprocess_copy_idx[1] + 1) * BLOCK_SIZE
             for action in test_config.step_actions
-            if action.postprocess_copy_idx[0] != -1
+            if action.postprocess_copy_idx and action.postprocess_copy_idx[0] != -1
         ]
         check_mamba_state_equal(mamba_state_ref, mamba_kv_cache_dict, keys_to_check)
         mamba_kv_cache_dict.clear()
@@ -722,4 +725,8 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
 def test_check_mamba_state_equal():
     mamba_state_ref = torch.load("mamba_kv_cache_dict.pth")
     mamba_state_new = torch.load("mamba_kv_cache_dict_new.pth")
-    check_mamba_state_equal(mamba_state_ref, mamba_state_new)
+    check_mamba_state_equal(
+        mamba_state_ref,
+        mamba_state_new,
+        keys_to_check=list(mamba_state_ref.keys()),
+    )

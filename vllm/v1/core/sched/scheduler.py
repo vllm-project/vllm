@@ -213,9 +213,6 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-        print(
-            f">>> [DEBUG] Scheduler: init enable_prefix_caching={self.cache_config.enable_prefix_caching} block_size={self.block_size} kv_cache_config={self.kv_cache_config}"
-        )
 
         def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
             has_mamba: bool = any(
@@ -278,11 +275,6 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
-        print(f">>> [DEBUG] Scheduler: schidule new step")
-        for req in self.requests.values():
-            print(
-                f">>> [DEBUG] Scheduler: request {req.request_id} num_computed_tokens={req.num_computed_tokens} num_tokens={req.num_tokens} num_tokens_with_spec={req.num_tokens_with_spec}"
-            )
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -332,10 +324,6 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            logger.info(
-                f">>> [DEBUG] Scheduler: schedule RUNING: req_id={request.request_id}, "
-                f"num_prompt_tokens={request.num_prompt_tokens=}"
-            )
             # Ensure new tokens for a request in the prefill phase do not contain
             # sps tokens, especially in the last prefill chunk. For a hybrid-model,
             # extra sps tokens would corrupt the generated Mamba state.
@@ -452,9 +440,6 @@ class Scheduler(SchedulerInterface):
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
-                    print(
-                        f">>> [DEBUG] Scheduler: preempted request {preempted_req.request_id}"
-                    )
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
                     preempted_reqs.append(preempted_req)
@@ -527,10 +512,6 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting.peek_request()
-                logger.info(
-                    f">>> [DEBUG] Scheduler: schedule WAITING: req_id={request.request_id}, "
-                    f"num_prompt_tokens={request.num_prompt_tokens=}"
-                )
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -538,10 +519,6 @@ class Scheduler(SchedulerInterface):
                     if is_ready:
                         request.status = RequestStatus.WAITING
                     else:
-                        logger.debug(
-                            "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id,
-                        )
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
@@ -580,10 +557,6 @@ class Scheduler(SchedulerInterface):
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
-                    )
-                    logger.info(
-                        f">>> [DEBUG] Scheduler: get_computed_blk: req_id={request.request_id},"
-                        f"{num_new_local_computed_tokens=}"
                     )
 
                     # Get externally-cached tokens if using a KVConnector.
@@ -834,14 +807,6 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        logger.info(
-            ">>> [DEBUG] Scheduler: new_reqs:"
-            f"{[(reqdata.req_id, reqdata.block_ids) for reqdata in new_reqs_data]}"
-        )
-        logger.info(
-            ">>> [DEBUG] Scheduler: cached_reqs:"
-            f"{[(req_id, cached_reqs_data.new_block_ids[i]) for i, req_id in enumerate(cached_reqs_data.req_ids)]}"
-        )
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -858,7 +823,6 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
         )
-        # logger.info(f">>> [DEBUG] Scheduler: scheduler output: {scheduler_output}")
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -879,7 +843,6 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
-        logger.info(f">>> [DEBUG] Scheduler: scheduler_output: {scheduler_output}")
         return scheduler_output
 
     def _preempt_request(
@@ -1444,7 +1407,7 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
+                request.spec_token_ids = metadata.grammar.validate_tokens(
                     spec_token_ids
                 )
             else:
@@ -1916,7 +1879,7 @@ class Scheduler(SchedulerInterface):
             all_failed_req_ids = async_failed_req_ids | sync_failed_req_ids
             logger.error(
                 "Failing %d request(s) due to KV load failure "
-                "(failure_policy=fail, %d tokens affected). Request IDs: %s",
+                "(failure_policy=fail, %d tokens affected). Request IDs: 328",
                 total_failed_requests,
                 total_failed_tokens,
                 all_failed_req_ids,

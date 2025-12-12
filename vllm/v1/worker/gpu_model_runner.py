@@ -453,7 +453,9 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=(
+                self.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -517,7 +519,8 @@ class GPUModelRunner(
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
-            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # See detailed explanation in
+            # https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
             # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
             # the modality of inputs. For text-only inputs, each dimension has
@@ -607,7 +610,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
-        self.mamba_state_idx: dict[str, list[int]] = {}
+        self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
 
     def reset_mm_cache(self) -> None:
@@ -1056,10 +1059,13 @@ class GPUModelRunner(
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if is_global_first_rank():
-            logger.info(f">>> [DEBUG] Worker: _update_states: {output_token_ids=}")
             logger.info(
-                f">>> [DEBUG] Worker: _update_states: "
-                f"{self.input_batch.num_accepted_tokens_cpu[:len(num_accepted_tokens)]=}"
+                ">>> [DEBUG] Worker: _update_states: output_token_ids=%s",
+                output_token_ids,
+            )
+            logger.info(
+                ">>> [DEBUG] Worker: _update_states: num_accepted_tokens_cpu=%s",
+                self.input_batch.num_accepted_tokens_cpu[: len(num_accepted_tokens)],
             )
         if self.cache_config.mamba_cache_mode == "align":
             self._postprocess_mamba(scheduler_output)
@@ -1731,10 +1737,12 @@ class GPUModelRunner(
             if isinstance(attn_metadata, list):
                 for ub_metadata in attn_metadata:
                     for _metadata in ub_metadata.values():
-                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+                        # type: ignore[attr-defined]
+                        _metadata.mm_prefix_range = req_doc_ranges
             else:
                 for _metadata in attn_metadata.values():
-                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+                    # type: ignore[attr-defined]
+                    _metadata.mm_prefix_range = req_doc_ranges
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -2185,7 +2193,7 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)  # type: ignore[assignment]
+                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -2584,7 +2592,9 @@ class GPUModelRunner(
         )
         if is_global_first_rank():
             logger.info(
-                f">>> [DEBUG] Worker: sampler_output: {sampler_output.sampled_token_ids.shape} {sampler_output.sampled_token_ids}"
+                ">>> [DEBUG] Worker: sampler_output: shape=%s tokens=%s",
+                sampler_output.sampled_token_ids.shape,
+                sampler_output.sampled_token_ids,
             )
         return sampler_output
 
@@ -2935,20 +2945,23 @@ class GPUModelRunner(
 
     def _preprocess_mamba(self, scheduler_output: "SchedulerOutput"):
         """
-        Copies the mamba state of previous step to the last (1 + num_speculative_blocks) block
+        Copy the mamba state of previous step to the last
+        (1 + num_speculative_blocks) block.
         """
         mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
         num_speculative_blocks = mamba_spec.num_speculative_blocks
         # TODO(Chen): we need to optimize this function a lot
         assert self.cache_config.enable_prefix_caching
         block_size = mamba_spec.block_size
-        for req_id in itertools.chain(
-            scheduler_output.finished_req_ids, scheduler_output.preempted_req_ids
-        ):
+        finished_req_ids = scheduler_output.finished_req_ids
+        preempted_req_ids = scheduler_output.preempted_req_ids or []
+        for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
             self.mamba_state_idx.pop(req_id, None)
         for i, req_id in enumerate(self.input_batch.req_ids):
             if is_global_first_rank():
-                logger.info(f">>> [DEBUG] Worker: preprocess mamba for RUN: {req_id=}")
+                logger.info(
+                    ">>> [DEBUG] Worker: preprocess mamba for RUN: req_id=%s", req_id
+                )
             req_state = self.requests[req_id]
             prev_state_idx = self.mamba_state_idx.get(req_id)
             if prev_state_idx is None:
@@ -2957,11 +2970,15 @@ class GPUModelRunner(
                 prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
 
             num_blocks = len(req_state.block_ids[mamba_group_ids[0]])
-            # We always save the current running state at the last (1 + num_speculative_blocks) block
+            # We always save the current running state at the last
+            # (1 + num_speculative_blocks) block
             curr_state_idx = num_blocks - 1 - num_speculative_blocks
             if is_global_first_rank():
                 logger.info(
-                    f">>> [DEBUG] Worker: preprocess mamba: {req_id=}, idx {prev_state_idx=} -> {curr_state_idx=}"
+                    ">>> [DEBUG] Worker: preprocess mamba: req_id=%s, idx %s -> %s",
+                    req_id,
+                    prev_state_idx,
+                    curr_state_idx,
                 )
             self.mamba_state_idx[req_id] = curr_state_idx
             if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
@@ -3010,7 +3027,17 @@ class GPUModelRunner(
                 dest_gdn_state.copy_(src_gdn_state)
                 if is_global_first_rank() and layer_name == layer_names[0]:
                     logger.info(
-                        f">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: {layer_name=}, idx {src_block_idx=} -> {dest_block_idx=} conv {conv_state_block_id=} -> {dest_block_id=} with bias {accept_token_bias}, {gdn_state_block_id=} -> {dest_block_id=}"
+                        ">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: "
+                        "layer_name=%s, idx %s -> %s conv %s -> %s with bias %s, "
+                        "gdn %s -> %s",
+                        layer_name,
+                        src_block_idx,
+                        dest_block_idx,
+                        conv_state_block_id,
+                        dest_block_id,
+                        accept_token_bias,
+                        gdn_state_block_id,
+                        dest_block_id,
                     )
 
     def _postprocess_mamba(self, scheduler_output: "SchedulerOutput"):
@@ -3026,7 +3053,11 @@ class GPUModelRunner(
         num_accepted_tokens_cpu = self.input_batch.num_accepted_tokens_cpu
         if is_global_first_rank():
             logger.info(
-                f">>> [DEBUG] Worker: postprocess mamba {num_scheduled_tokens_dict=} {scheduled_spec_decode_tokens_dict=} {num_accepted_tokens_cpu=}"
+                ">>> [DEBUG] Worker: postprocess mamba num_scheduled_tokens=%s "
+                "scheduled_spec_decode_tokens=%s num_accepted_tokens_cpu=%s",
+                num_scheduled_tokens_dict,
+                scheduled_spec_decode_tokens_dict,
+                num_accepted_tokens_cpu,
             )
         # NOTE: can be optimized as this function always returns the same result
         mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
@@ -3046,7 +3077,16 @@ class GPUModelRunner(
             )
             if is_global_first_rank():
                 logger.info(
-                    f">>> [DEBUG] Worker: postprocess mamba: {req_id=}, {num_computed_tokens=}, {num_scheduled_tokens=} {num_draft_tokens=} {num_accepted_tokens=} {num_tokens_running_state=} {new_num_computed_tokens=} {aligned_new_computed_tokens=}"
+                    ">>> [DEBUG] Worker: postprocess mamba: req=%s comp=%s "
+                    "sched=%s draft=%s accepted=%s run_state=%s new=%s aligned=%s",
+                    req_id,
+                    num_computed_tokens,
+                    num_scheduled_tokens,
+                    num_draft_tokens,
+                    num_accepted_tokens,
+                    num_tokens_running_state,
+                    new_num_computed_tokens,
+                    aligned_new_computed_tokens,
                 )
             # TODO: how to ensure all blocks that cache_blocks called are cached here?
             if aligned_new_computed_tokens >= num_tokens_running_state:
@@ -3059,7 +3099,12 @@ class GPUModelRunner(
                 )
                 if is_global_first_rank():
                     logger.info(
-                        f">>> [DEBUG] Worker: postprocess mamba copy: {req_id=}, {src_block_idx=} -> {dest_block_idx=} with bias {accept_token_bias}"
+                        ">>> [DEBUG] Worker: postprocess mamba copy: req_id=%s, "
+                        "%s -> %s with bias %s",
+                        req_id,
+                        src_block_idx,
+                        dest_block_idx,
+                        accept_token_bias,
                     )
                 self._mamba_copy_block_for_qwen_next(
                     mamba_group_ids,
@@ -5088,8 +5133,10 @@ class GPUModelRunner(
 
         # if we have dedicated decode cudagraphs, and spec-decode is enabled,
         # we need to adjust the cudagraph sizes to be a multiple of the uniform
-        # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
-        # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # decode query length to avoid:
+        # https://github.com/vllm-project/vllm/issues/28207
+        # temp-fix:
+        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
         # Will be removed in the near future when we have separate cudagraph capture
         # sizes for decode and mixed prefill-decode.
         if (
@@ -5119,7 +5166,13 @@ class GPUModelRunner(
         just may have a performance penalty due to that backend treating decodes
         as prefills.
         """
-        min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
+
+        def min_none_high(a: int | None, b: int | None) -> int | None:
+            if b is None:
+                return a
+            if a is None:
+                return b
+            return min(a, b)
 
         reorder_batch_thresholds: list[int | None] = [
             group.get_metadata_builder().reorder_batch_threshold
@@ -5130,7 +5183,9 @@ class GPUModelRunner(
         if len(reorder_batch_thresholds) == 0:
             self.reorder_batch_threshold = None
             return
-        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
+        self.reorder_batch_threshold = reduce(  # type: ignore[assignment]
+            min_none_high, reorder_batch_thresholds
+        )
 
     @staticmethod
     def select_common_block_size(
@@ -5241,7 +5296,9 @@ class GPUModelRunner(
                 kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
+                logitsprocs_need_output_token_ids=(
+                    self.input_batch.logitsprocs_need_output_token_ids
+                ),
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=self.num_spec_tokens,
             )
