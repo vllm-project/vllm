@@ -935,7 +935,11 @@ def enable_batch_invariant_mode():
 
     # Batch invariant matmuls are no longer needed after cublas overrides
     if not is_torch_equal_or_newer("2.10.0.dev"):
-        if current_platform.is_device_capability(100):
+        if (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(80)
+            or current_platform.is_device_capability(89)
+        ):
             # For PyTorch 2.9, B200 uses GEMV for bs=1
             # Requires https://github.com/pytorch/pytorch/pull/166735
             _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
@@ -1006,11 +1010,11 @@ def override_envs_for_invariance():
         "FLASH_ATTN",  # best supported backend
         "FLASHINFER",
         "FLASH_ATTN_MLA",
+        "TRITON_MLA",
         # Not yet supported MLA backends
         # "FLASHMLA",
         # "FLEX_ATTENTION", # IMA issue even if we disable batch invariance
         # "FLASHINFER_MLA", https://github.com/vllm-project/vllm/pull/28967
-        # "TRITON_MLA",
     ]
     if curr_attn_backend not in supported_backends:
         error = (

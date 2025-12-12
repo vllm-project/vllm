@@ -157,7 +157,7 @@ class nccl_symm_mem_context:
         if self.disabled:
             return self
         assert self.pynccl_comm is not None, (
-            "Symmetric memory requires pynccl to be initalized"
+            "Symmetric memory requires pynccl to be initialized"
         )
         assert self.pynccl_comm.nccl_version >= 22703, (
             "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"

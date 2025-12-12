@@ -20,6 +20,14 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
+def zephyr_lora_files():
+    """Download zephyr LoRA files once per test session."""
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+
+
+@pytest.fixture(scope="module")
 def server(zephyr_lora_files):  # noqa: F811
     args = [
         # use half precision for speed and memory savings in CI environment

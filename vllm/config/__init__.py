@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.attention import AttentionConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
     CompilationConfig,
@@ -23,6 +24,7 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
+from vllm.config.profiler import ProfilerConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
@@ -46,6 +48,8 @@ from vllm.config.vllm import (
 # __all__ should only contain classes and functions.
 # Types and globals should be imported from their respective modules.
 __all__ = [
+    # From vllm.config.attention
+    "AttentionConfig",
     # From vllm.config.cache
     "CacheConfig",
     # From vllm.config.compilation
@@ -86,6 +90,8 @@ __all__ = [
     "SpeechToTextConfig",
     # From vllm.config.structured_outputs
     "StructuredOutputsConfig",
+    # From vllm.config.profiler
+    "ProfilerConfig",
     # From vllm.config.utils
     "ConfigType",
     "SupportsMetricsInfo",

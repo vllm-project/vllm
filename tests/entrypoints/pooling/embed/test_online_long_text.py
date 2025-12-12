@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import EmbeddingResponse
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():

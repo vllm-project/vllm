@@ -108,6 +108,65 @@ The number of this test is less stable compared to the delay and latency benchma
 
 WARNING: The benchmarking script will save json results by itself, so please do not configure `--save-results` or other results-saving-related parameters in `serving-tests.json`.
 
+#### Default Parameters Field
+
+We can specify default parameters in a JSON field with key `defaults`. Parameters defined in the field are applied globally to all serving tests, and can be overridden in test case fields. Here is an example:
+
+<details>
+<summary> An Example of default parameters field </summary>
+
+```json
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "server_environment_variables": {
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1
+    },
+    "server_parameters": {
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "block_size": 128,
+      "disable_log_stats": "",
+      "load_format": "dummy"
+    },
+    "client_parameters": {
+      "backend": "vllm",
+      "dataset_name": "random",
+      "random-input-len": 128,
+      "random-output-len": 128,
+      "num_prompts": 200,
+      "ignore-eos": ""
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_llama3B_tp2_random_128_128",
+      "server_parameters": {
+        "model": "meta-llama/Llama-3.2-3B-Instruct",
+        "tensor_parallel_size": 2,
+      },
+      "client_parameters": {
+        "model": "meta-llama/Llama-3.2-3B-Instruct",
+      }
+    },
+    {
+      "test_name": "serving_qwen3_tp4_random_128_128",
+      "server_parameters": {
+        "model": "Qwen/Qwen3-14B",
+        "tensor_parallel_size": 4,
+      },
+      "client_parameters": {
+        "model": "Qwen/Qwen3-14B",
+      }
+    },
+  ]
+}
+```
+
+</details>
+
 ### Visualizing the results
 
 The `convert-results-json-to-markdown.py` helps you put the benchmarking results inside a markdown table, by formatting [descriptions.md](performance-benchmarks-descriptions.md) with real benchmarking results.

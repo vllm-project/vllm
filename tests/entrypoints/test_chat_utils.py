@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 import pytest
+import torch
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.assets.audio import AudioAsset
@@ -28,8 +29,8 @@ from vllm.multimodal.utils import (
     encode_image_base64,
     encode_video_base64,
 )
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers import MistralTokenizer, get_tokenizer
+from vllm.utils.serial_utils import tensor2base64
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
@@ -86,11 +87,6 @@ def phi3v_model_config_image_embeds():
     )
 
 
-@pytest.fixture(scope="module")
-def phi3v_tokenizer():
-    return get_tokenizer(PHI3V_MODEL_ID)
-
-
 @pytest.fixture(scope="function")
 def qwen2_audio_model_config():
     return ModelConfig(
@@ -116,11 +112,6 @@ def audio_embeds_model_config():
     )
 
 
-@pytest.fixture(scope="module")
-def qwen2_audio_tokenizer():
-    return get_tokenizer(QWEN2AUDIO_MODEL_ID)
-
-
 @pytest.fixture(scope="function")
 def qwen25omni_model_config_mm_interleaved():
     return ModelConfig(
@@ -135,11 +126,6 @@ def qwen25omni_model_config_mm_interleaved():
     )
 
 
-@pytest.fixture(scope="module")
-def qwen25omni_tokenizer():
-    return get_tokenizer(QWEN25OMNI_MODEL_ID)
-
-
 @pytest.fixture(scope="function")
 def mistral_model_config():
     return ModelConfig(
@@ -149,11 +135,6 @@ def mistral_model_config():
             "image": 2,
         },
     )
-
-
-@pytest.fixture(scope="module")
-def mistral_tokenizer():
-    return get_tokenizer(MISTRAL_MODEL_ID)
 
 
 @pytest.fixture(scope="module")
@@ -240,7 +221,6 @@ def _assert_mm_data_inputs(
 
 def test_parse_chat_messages_single_image(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -254,7 +234,6 @@ def test_parse_chat_messages_single_image(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -267,7 +246,6 @@ def test_parse_chat_messages_single_image(
 
 def test_parse_chat_messages_single_image_with_uuid(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -288,7 +266,6 @@ def test_parse_chat_messages_single_image_with_uuid(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -301,7 +278,6 @@ def test_parse_chat_messages_single_image_with_uuid(
 
 def test_parse_chat_messages_single_empty_image_with_uuid(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -320,7 +296,6 @@ def test_parse_chat_messages_single_empty_image_with_uuid(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -333,7 +308,6 @@ def test_parse_chat_messages_single_empty_image_with_uuid(
 
 def test_parse_chat_messages_single_image_with_bad_uuid_format(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -355,7 +329,6 @@ def test_parse_chat_messages_single_image_with_bad_uuid_format(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -368,7 +341,6 @@ def test_parse_chat_messages_single_image_with_bad_uuid_format(
 
 def test_parse_chat_messages_multiple_images_with_uuids(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid1 = "my_uuid_1"
@@ -398,7 +370,6 @@ def test_parse_chat_messages_multiple_images_with_uuids(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -414,7 +385,6 @@ def test_parse_chat_messages_multiple_images_with_uuids(
 
 def test_parse_chat_messages_multiple_empty_images_with_uuids(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid1 = "my_uuid_1"
@@ -440,7 +410,6 @@ def test_parse_chat_messages_multiple_empty_images_with_uuids(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -456,7 +425,6 @@ def test_parse_chat_messages_multiple_empty_images_with_uuids(
 
 def test_parse_chat_messages_mixed_empty_images_with_uuids(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid1 = "my_uuid_1"
@@ -484,7 +452,6 @@ def test_parse_chat_messages_mixed_empty_images_with_uuids(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -501,7 +468,6 @@ def test_parse_chat_messages_mixed_empty_images_with_uuids(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_single_image_with_uuid_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -520,7 +486,6 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -534,7 +499,6 @@ async def test_parse_chat_messages_single_image_with_uuid_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_with_uuid_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -553,7 +517,6 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -567,7 +530,6 @@ async def test_parse_chat_messages_empty_image_with_uuid_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_with_uuids_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid1 = "my_uuid_1"
@@ -593,7 +555,6 @@ async def test_parse_chat_messages_multiple_images_with_uuids_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -610,7 +571,6 @@ async def test_parse_chat_messages_multiple_images_with_uuids_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid1 = "my_uuid_1"
@@ -636,7 +596,6 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -653,7 +612,6 @@ async def test_parse_chat_messages_multiple_empty_images_with_uuids_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid2 = "my_uuid_2"
@@ -677,7 +635,6 @@ async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -693,7 +650,6 @@ async def test_parse_chat_messages_multiple_images_with_partial_uuids_async(
 
 def test_parse_chat_messages_empty_system(
     mistral_model_config,
-    mistral_tokenizer,
 ):
     # Test string format
     conversation, _, _ = parse_chat_messages(
@@ -705,7 +661,6 @@ def test_parse_chat_messages_empty_system(
             },
         ],
         mistral_model_config,
-        mistral_tokenizer,
         content_format="string",
     )
     assert conversation == [
@@ -723,7 +678,6 @@ def test_parse_chat_messages_empty_system(
             },
         ],
         mistral_model_config,
-        mistral_tokenizer,
         content_format="openai",
     )
     assert conversation == [
@@ -735,7 +689,6 @@ def test_parse_chat_messages_empty_system(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_single_image_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
@@ -749,7 +702,6 @@ async def test_parse_chat_messages_single_image_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -762,7 +714,6 @@ async def test_parse_chat_messages_single_image_async(
 
 def test_parse_chat_messages_multiple_images(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -780,7 +731,6 @@ def test_parse_chat_messages_multiple_images(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -796,7 +746,6 @@ def test_parse_chat_messages_multiple_images(
 
 def test_parse_chat_messages_empty_pil_image_with_uuid(
     phi3v_model_config,
-    phi3v_tokenizer,
 ):
     uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -810,7 +759,6 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -826,7 +774,6 @@ def test_parse_chat_messages_empty_pil_image_with_uuid(
 
 def test_parse_chat_messages_empty_image_embeds_with_uuid(
     phi3v_model_config_image_embeds,
-    phi3v_tokenizer,
 ):
     uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -840,7 +787,6 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
             }
         ],
         phi3v_model_config_image_embeds,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -858,7 +804,6 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
 
 def test_parse_chat_messages_empty_audio_embeds_with_uuid(
     audio_embeds_model_config,
-    qwen2_audio_tokenizer,
 ):
     """Test audio_embeds with UUID (no actual embeds data)."""
     uuid = "test-audio-uuid-123"
@@ -874,7 +819,6 @@ def test_parse_chat_messages_empty_audio_embeds_with_uuid(
             }
         ],
         audio_embeds_model_config,
-        qwen2_audio_tokenizer,
         content_format="string",
     )
 
@@ -890,11 +834,8 @@ def test_parse_chat_messages_empty_audio_embeds_with_uuid(
 
 def test_parse_chat_messages_audio_embeds_with_string(
     audio_embeds_model_config,
-    qwen2_audio_tokenizer,
 ):
     """Test audio_embeds with base64 string embedding data."""
-    import base64
-    import io
 
     import torch
 
@@ -902,11 +843,7 @@ def test_parse_chat_messages_audio_embeds_with_string(
     audio_embedding = torch.randn(1, 128, 768)
 
     # Encode it as base64
-    buffer = io.BytesIO()
-    torch.save(audio_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_audio_embedding = base64.b64encode(binary_data).decode("utf-8")
+    base64_audio_embedding = tensor2base64(audio_embedding)
 
     conversation, mm_data, mm_uuids = parse_chat_messages(
         [
@@ -922,7 +859,6 @@ def test_parse_chat_messages_audio_embeds_with_string(
             }
         ],
         audio_embeds_model_config,
-        qwen2_audio_tokenizer,
         content_format="string",
     )
 
@@ -940,11 +876,8 @@ def test_parse_chat_messages_audio_embeds_with_string(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_audio_embeds_async(
     audio_embeds_model_config,
-    qwen2_audio_tokenizer,
 ):
     """Test audio_embeds with async futures."""
-    import base64
-    import io
 
     import torch
 
@@ -952,11 +885,7 @@ async def test_parse_chat_messages_audio_embeds_async(
     audio_embedding = torch.randn(1, 128, 768)
 
     # Encode it as base64
-    buffer = io.BytesIO()
-    torch.save(audio_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_audio_embedding = base64.b64encode(binary_data).decode("utf-8")
+    base64_audio_embedding = tensor2base64(audio_embedding)
 
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
         [
@@ -972,7 +901,6 @@ async def test_parse_chat_messages_audio_embeds_async(
             }
         ],
         audio_embeds_model_config,
-        qwen2_audio_tokenizer,
         content_format="string",
     )
 
@@ -988,10 +916,186 @@ async def test_parse_chat_messages_audio_embeds_async(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
+def test_parse_chat_messages_multiple_image_embeds(
+    phi3v_model_config_image_embeds,
+):
+    """Test that multiple image_embeds in a single message are now supported.
+
+    This test validates the fix for the limitation that previously only allowed
+    one message with {'type': 'image_embeds'}. Now multiple image embeddings
+    can be provided in a single request, similar to regular images.
+    """
+    # Create two sample image embedding tensors
+    image_embedding_1 = torch.randn(256, 1024)
+    image_embedding_2 = torch.randn(128, 1024)
+
+    # Encode them as base64 using the convenience function
+    base64_image_embedding_1 = tensor2base64(image_embedding_1)
+    base64_image_embedding_2 = tensor2base64(image_embedding_2)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_2,
+                    },
+                    {"type": "text", "text": "Describe these two images."},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nDescribe these two images.",
+        }
+    ]
+
+    # Verify mm_data contains a list of embeddings (not a single embedding)
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+
+    # Verify each embedding has the correct shape
+    assert isinstance(mm_data["image"][0], torch.Tensor)
+    assert mm_data["image"][0].shape == image_embedding_1.shape
+    assert isinstance(mm_data["image"][1], torch.Tensor)
+    assert mm_data["image"][1].shape == image_embedding_2.shape
+
+    # Verify UUIDs (None since we didn't provide any)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
+def test_parse_chat_messages_multiple_image_embeds_with_uuids(
+    phi3v_model_config_image_embeds,
+):
+    """Test multiple image_embeds with UUIDs.
+
+    This validates that UUIDs are properly tracked for multiple embeddings.
+    """
+    uuid1 = "image-uuid-1"
+    uuid2 = "image-uuid-2"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": None,
+                        "uuid": uuid1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": None,
+                        "uuid": uuid2,
+                    },
+                    {"type": "text", "text": "Compare these images."},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nCompare these images.",
+        }
+    ]
+
+    # Verify mm_data contains a list with None values (UUID references)
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+    assert mm_data["image"][0] is None
+    assert mm_data["image"][1] is None
+
+    # Verify UUIDs are correctly tracked
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[uuid1, uuid2])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_multiple_image_embeds_async(
+    phi3v_model_config_image_embeds,
+):
+    """Test multiple image_embeds with async parsing.
+
+    This validates the AsyncMultiModalItemTracker also supports multiple embeddings.
+    """
+    # Create two sample image embedding tensors
+    image_embedding_1 = torch.randn(200, 768)
+    image_embedding_2 = torch.randn(150, 768)
+
+    # Encode them as base64 using the convenience function
+    base64_image_embedding_1 = tensor2base64(image_embedding_1)
+    base64_image_embedding_2 = tensor2base64(image_embedding_2)
+
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_2,
+                    },
+                    {"type": "text", "text": "What do these images show?"},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nWhat do these images show?",
+        }
+    ]
+
+    # Await the future and verify mm_data
+    mm_data = await mm_future
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+
+    # Verify each embedding has the correct shape
+    assert isinstance(mm_data["image"][0], torch.Tensor)
+    assert mm_data["image"][0].shape == image_embedding_1.shape
+    assert isinstance(mm_data["image"][1], torch.Tensor)
+    assert mm_data["image"][1].shape == image_embedding_2.shape
+
+    # Verify UUIDs
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
     phi3v_model_config_image_embeds,
-    phi3v_tokenizer,
 ):
     uuid = "abcd"
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
@@ -1005,7 +1109,6 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
             }
         ],
         phi3v_model_config_image_embeds,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1025,7 +1128,6 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_async(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
@@ -1043,7 +1145,6 @@ async def test_parse_chat_messages_multiple_images_async(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1059,7 +1160,6 @@ async def test_parse_chat_messages_multiple_images_async(
 
 def test_parse_chat_messages_placeholder_already_in_prompt(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1077,7 +1177,6 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
     assert conversation == [
@@ -1092,7 +1191,6 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
 
 def test_parse_chat_messages_placeholder_one_already_in_prompt(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1111,7 +1209,6 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1128,7 +1225,6 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
 
 def test_parse_chat_messages_multiple_images_across_messages(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1150,7 +1246,6 @@ def test_parse_chat_messages_multiple_images_across_messages(
             },
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1165,7 +1260,6 @@ def test_parse_chat_messages_multiple_images_across_messages(
 
 def test_parse_chat_messages_multiple_images_with_uuids_across_messages(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -1196,7 +1290,6 @@ def test_parse_chat_messages_multiple_images_with_uuids_across_messages(
             },
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1211,7 +1304,6 @@ def test_parse_chat_messages_multiple_images_with_uuids_across_messages(
 
 def test_parse_chat_messages_context_text_format(
     phi3v_model_config,
-    phi3v_tokenizer,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
         [
@@ -1223,7 +1315,6 @@ def test_parse_chat_messages_context_text_format(
             {"role": "user", "content": "What about this one?"},
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="openai",
     )
 
@@ -1247,7 +1338,6 @@ def test_parse_chat_messages_context_text_format(
 
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     with warnings.catch_warnings():
@@ -1278,14 +1368,12 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
                     }
                 ],
                 phi3v_model_config,
-                phi3v_tokenizer,
                 content_format="string",
             )
 
 
 def test_parse_chat_messages_rejects_too_many_images_across_messages(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     with warnings.catch_warnings():
@@ -1323,14 +1411,12 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
                     },
                 ],
                 phi3v_model_config,
-                phi3v_tokenizer,
                 content_format="string",
             )
 
 
 def test_parse_chat_messages_multiple_images_uncommon_input(
     phi3v_model_config,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1345,7 +1431,6 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
             }
         ],
         phi3v_model_config,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1361,7 +1446,6 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
 
 def test_parse_chat_messages_multiple_images_interleave(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1381,7 +1465,6 @@ def test_parse_chat_messages_multiple_images_interleave(
             }
         ],
         phi3v_model_config_mm_interleaved,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1399,7 +1482,6 @@ def test_parse_chat_messages_multiple_images_interleave(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_interleave_async(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages_futures(
@@ -1419,7 +1501,6 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
             }
         ],
         phi3v_model_config_mm_interleaved,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1437,7 +1518,6 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -1466,7 +1546,6 @@ async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
             }
         ],
         phi3v_model_config_mm_interleaved,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1483,7 +1562,6 @@ async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
 
 def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -1506,7 +1584,6 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
             },
         ],
         phi3v_model_config_mm_interleaved,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1524,7 +1601,6 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
 
 def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interleave(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     image_uuid = str(hash(image_url))
@@ -1556,7 +1632,6 @@ def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interl
             },
         ],
         phi3v_model_config_mm_interleaved,
-        phi3v_tokenizer,
         content_format="string",
     )
 
@@ -1574,7 +1649,6 @@ def test_parse_chat_messages_multiple_images_with_uuids_multiple_messages_interl
 
 def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
     qwen25omni_model_config_mm_interleaved,
-    qwen25omni_tokenizer,
     image_url,
     video_url,
     audio_url,
@@ -1602,7 +1676,6 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
             },
         ],
         qwen25omni_model_config_mm_interleaved,
-        qwen25omni_tokenizer,
         content_format="string",
     )
 
@@ -1628,7 +1701,6 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
 
 def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interleave(
     qwen25omni_model_config_mm_interleaved,
-    qwen25omni_tokenizer,
     image_url,
     video_url,
     audio_url,
@@ -1672,7 +1744,6 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interl
             },
         ],
         qwen25omni_model_config_mm_interleaved,
-        qwen25omni_tokenizer,
         content_format="string",
     )
 
@@ -1700,7 +1771,6 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interl
 
 def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_messages_interleave(  # noqa: E501
     qwen25omni_model_config_mm_interleaved,
-    qwen25omni_tokenizer,
     image_url,
     video_url,
     audio_url,
@@ -1744,7 +1814,6 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
             },
         ],
         qwen25omni_model_config_mm_interleaved,
-        qwen25omni_tokenizer,
         content_format="string",
     )
 
@@ -1776,7 +1845,6 @@ def test_parse_chat_messages_multiple_modals_with_uuids_multiple_empty_media_mes
 
 def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_messages_interleave(  # noqa: E501
     qwen25omni_model_config_mm_interleaved,
-    qwen25omni_tokenizer,
     image_url,
     video_url,
     audio_url,
@@ -1812,7 +1880,6 @@ def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_message
             },
         ],
         qwen25omni_model_config_mm_interleaved,
-        qwen25omni_tokenizer,
         content_format="string",
     )
 
@@ -1838,7 +1905,6 @@ def test_parse_chat_messages_multiple_modals_with_partial_uuids_multiple_message
 
 def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     phi3v_model_config_mm_interleaved,
-    phi3v_tokenizer,
     image_url,
 ):
     with pytest.raises(
@@ -1862,7 +1928,6 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
                 }
             ],
             phi3v_model_config_mm_interleaved,
-            phi3v_tokenizer,
             content_format="string",
         )
 
@@ -2238,9 +2303,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
     assert resolved_format == expected_format
 
 
-def test_parse_chat_messages_include_thinking_chunk(
-    mistral_model_config, mistral_tokenizer
-):
+def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
     messages = [
         {
             "role": "system",
@@ -2270,7 +2333,6 @@ def test_parse_chat_messages_include_thinking_chunk(
     conversation_with_thinking, _, _ = parse_chat_messages(
         messages,
         mistral_model_config,
-        mistral_tokenizer,
         content_format="openai",
     )
 
@@ -2354,7 +2416,6 @@ def test_apply_mistral_chat_template_thinking_chunk():
 
 def test_parse_chat_messages_single_empty_audio_with_uuid(
     qwen2_audio_model_config,
-    qwen2_audio_tokenizer,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -2372,7 +2433,6 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
             }
         ],
         qwen2_audio_model_config,
-        qwen2_audio_tokenizer,
         content_format="string",
     )
 
@@ -2390,7 +2450,6 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
 @pytest.mark.asyncio
 async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,
-    qwen2_audio_tokenizer,
 ):
     audio_uuid = "abcd"
     conversation, mm_future, mm_uuids = parse_chat_messages_futures(
@@ -2408,7 +2467,6 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
             }
         ],
         qwen2_audio_model_config,
-        qwen2_audio_tokenizer,
         content_format="string",
     )
 

@@ -244,9 +244,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
+            elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
                 # also handle -O=<optimization_level> here
                 optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
                 processed_args += ["--optimization-level", optimization_level]

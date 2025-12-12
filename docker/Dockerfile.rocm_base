@@ -5,6 +5,8 @@ ARG PYTORCH_BRANCH="1c57644d"
 ARG PYTORCH_VISION_BRANCH="v0.23.0"
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
+ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="59bd8ff2"
@@ -23,6 +25,7 @@ ENV AITER_ROCM_ARCH=gfx942;gfx950
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
 ARG PYTHON_VERSION=3.12
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -45,6 +48,7 @@ RUN apt-get update -y \
     && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 FROM base AS build_triton
 ARG TRITON_BRANCH
@@ -66,11 +70,14 @@ RUN mkdir -p /app/install && cp /opt/rocm/share/amd_smi/dist/*.whl /app/install
 FROM base AS build_pytorch
 ARG PYTORCH_BRANCH
 ARG PYTORCH_VISION_BRANCH
+ARG PYTORCH_AUDIO_BRANCH
 ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
+ARG PYTORCH_AUDIO_REPO
+
 RUN git clone ${PYTORCH_REPO} pytorch
-RUN cd pytorch && git checkout ${PYTORCH_BRANCH} && \
-    pip install -r requirements.txt && git submodule update --init --recursive \
+RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
+    && pip install -r requirements.txt && git submodule update --init --recursive \
     && python3 tools/amd_build/build_amd.py \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
@@ -78,8 +85,15 @@ RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
+RUN git clone ${PYTORCH_AUDIO_REPO} audio
+RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt \
+    && python3 setup.py bdist_wheel --dist-dir=dist \
+    && pip install dist/*.whl
 RUN mkdir -p /app/install && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install
+    && cp /app/vision/dist/*.whl /app/install \
+    && cp /app/audio/dist/*.whl /app/install
 
 FROM base AS build_fa
 ARG FA_BRANCH
@@ -130,6 +144,8 @@ ARG PYTORCH_BRANCH
 ARG PYTORCH_VISION_BRANCH
 ARG PYTORCH_REPO
 ARG PYTORCH_VISION_REPO
+ARG PYTORCH_AUDIO_BRANCH
+ARG PYTORCH_AUDIO_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
@@ -141,6 +157,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
     && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_BRANCH: ${PYTORCH_AUDIO_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_REPO: ${PYTORCH_AUDIO_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \

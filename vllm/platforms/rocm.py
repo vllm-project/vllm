@@ -8,16 +8,14 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
-else:
-    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -196,7 +194,6 @@ class RocmPlatform(Platform):
         from importlib.util import find_spec
 
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if rocm_aiter_ops.is_mha_enabled():
             # Note: AITER FA is only supported for Qwen-VL models.
@@ -219,10 +216,10 @@ class RocmPlatform(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        use_mm_prefix,
         attn_type: str | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             if kv_cache_dtype.startswith("fp8"):
@@ -384,11 +381,43 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
-
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enaled()
+
+        if compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # decode context parallel does not support full cudagraphs
+            if parallel_config.decode_context_parallel_size > 1:
+                logger.warning_once(
+                    "Decode context parallel (DCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            # prefill context parallel do not support full cudagraphs
+            elif parallel_config.prefill_context_parallel_size > 1:
+                logger.warning_once(
+                    "Prefill context parallel (PCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            if (
+                envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
+                # NOTE: This block has been deprecated
+                # or get_env_variable_attn_backend()
+                # == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+                # TODO: monitor https://github.com/vllm-project/vllm/pull/30396
+                # to see how we can transition to the new way of selecting
+                # attention backends
+            ):
+                cache_config.block_size = 64
+                logger.warning(
+                    "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+                )
+            else:
+                cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -399,6 +428,9 @@ class RocmPlatform(Platform):
             and "-rms_norm" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+rms_norm")
+
+        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+quant_fp8")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

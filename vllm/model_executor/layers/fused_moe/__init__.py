@@ -4,7 +4,10 @@
 from contextlib import contextmanager
 from typing import Any
 
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -49,6 +52,7 @@ __all__ = [
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "RoutingMethodType",
     "SharedFusedMoE",
     "activation_without_mul",
     "override_config",
@@ -60,14 +64,13 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (  # noqa: E501
-        BatchedTritonOrDeepGemmExperts,
-    )
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
+        CutlassExpertsW4A8Fp8,
         cutlass_moe_fp4,
         cutlass_moe_fp8,
+        cutlass_moe_w4a8_fp8,
     )
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
@@ -91,14 +94,15 @@ if HAS_TRITON:
         "grouped_topk",
         "cutlass_moe_fp8",
         "cutlass_moe_fp4",
+        "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
+        "CutlassExpertsW4A8Fp8",
         "TritonExperts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
-        "BatchedTritonOrDeepGemmExperts",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

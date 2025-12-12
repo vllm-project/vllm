@@ -65,6 +65,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
 # Test vLLM image
@@ -88,9 +89,21 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 
 # install development dependencies (for testing)
 RUN cd /vllm-workspace \
-    && rm -rf vllm \
     && python3 -m pip install -e tests/vllm_test_utils \
     && python3 -m pip install pytest-shard
+
+# enable fast downloads from hf (for testing)
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# Copy in the v1 package (for python-only install test group)
+COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
+
+# Source code is used in the `python_only_compile.sh` test
+# We hide it inside `src/` so that this source code
+# will not be imported by other tests
+RUN mkdir src && mv vllm src/vllm
 
 # -----------------------
 # Final vLLM image

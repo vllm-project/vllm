@@ -139,14 +139,13 @@ def test_standard_attention_backend_selection(
     import importlib
 
     import vllm.envs as envs
-    from vllm.attention.backends.registry import _Backend
 
     importlib.reload(envs)
 
     # Convert string backend to enum if provided
     backend_enum = None
     if selected_backend:
-        backend_enum = getattr(_Backend, selected_backend)
+        backend_enum = getattr(AttentionBackendEnum, selected_backend)
 
     # Get the backend class path
     from vllm.platforms.rocm import RocmPlatform
@@ -253,7 +252,6 @@ def test_mla_backend_selection(
     import importlib
 
     import vllm.envs as envs
-    from vllm.attention.backends.registry import _Backend
 
     importlib.reload(envs)
 
@@ -269,7 +267,7 @@ def test_mla_backend_selection(
         # Convert string backend to enum if provided
         backend_enum = None
         if selected_backend:
-            backend_enum = getattr(_Backend, selected_backend)
+            backend_enum = getattr(AttentionBackendEnum, selected_backend)
 
         from vllm.platforms.rocm import RocmPlatform
 
@@ -301,7 +299,6 @@ def test_mla_backend_selection(
 
 def test_aiter_fa_requires_gfx9(mock_vllm_config):
     """Test that ROCM_AITER_FA requires gfx9 architecture."""
-    from vllm.attention.backends.registry import _Backend
     from vllm.platforms.rocm import RocmPlatform
 
     # Mock on_gfx9 to return False
@@ -313,7 +310,7 @@ def test_aiter_fa_requires_gfx9(mock_vllm_config):
         ),
     ):
         RocmPlatform.get_attn_backend_cls(
-            selected_backend=_Backend.ROCM_AITER_FA,
+            selected_backend=AttentionBackendEnum.ROCM_AITER_FA,
             head_size=128,
             dtype=torch.float16,
             kv_cache_dtype="auto",

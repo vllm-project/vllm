@@ -115,7 +115,7 @@ def test_compile_correctness(
             str(pp_size),
             "-tp",
             str(tp_size),
-            "-O.cudagraph_mode=none",
+            "-cc.cudagraph_mode=none",
         ]
 
         all_args: list[list[str]] = []
@@ -128,7 +128,7 @@ def test_compile_correctness(
         ]:
             for mode in [CompilationMode.NONE, comp_mode]:
                 all_args.append(
-                    final_args + [f"-O.mode={mode.name}", "-O.backend=inductor"]
+                    final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
                 )
 
             # inductor will change the output, so we only compare if the output
@@ -148,7 +148,7 @@ def test_compile_correctness(
             CompilationMode.DYNAMO_TRACE_ONCE,
             CompilationMode.VLLM_COMPILE,
         ]:
-            all_args.append(final_args + [f"-O.mode={mode.name}", "-O.backend=eager"])
+            all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
             all_envs.append({})
             all_envs.append({})
 

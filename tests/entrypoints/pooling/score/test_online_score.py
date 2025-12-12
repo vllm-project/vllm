@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import tensor
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import ScoreResponse
+from vllm.entrypoints.pooling.score.protocol import ScoreResponse
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():

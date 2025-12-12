@@ -18,18 +18,21 @@ from typing import (
 
 import numpy as np
 import torch
-from typing_extensions import runtime_checkable
+from typing_extensions import deprecated, runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionImpl
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
@@ -63,11 +66,6 @@ class CommonAttentionMetadata:
     """(batch_size + 1,), the start location of each request in query Tensor"""
 
     seq_lens: torch.Tensor
-    seq_lens_cpu: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
-
-    num_computed_tokens_cpu: torch.Tensor
     """(batch_size,), the number of computed tokens for each request"""
 
     num_reqs: int
@@ -78,7 +76,7 @@ class CommonAttentionMetadata:
     max_query_len: int
     """Longest query in batch"""
     max_seq_len: int
-    """Longest context length in batch"""
+    """Longest context length (may be an upper bound)"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -96,6 +94,70 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    # WARNING: Deprecated fields. Will be removed in a future release (v0.14.0)
+    _seq_lens_cpu: torch.Tensor | None = None
+    _num_computed_tokens_cpu: torch.Tensor | None = None
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync.
+    If a CPU copy is needed, use `seq_lens.cpu()` instead.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def seq_lens_cpu(self) -> torch.Tensor:
+        if self._seq_lens_cpu is None:
+            self._seq_lens_cpu = self.seq_lens.to("cpu")
+        return self._seq_lens_cpu
+
+    @property
+    @deprecated(
+        """
+    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
+    async scheduling. If a CPU copy is needed, it can be derived from 
+    query_start_loc_cpu and seq_lens.
+    Will be removed in a future release (v0.14.0)
+    """
+    )
+    def num_computed_tokens_cpu(self) -> torch.Tensor:
+        if self._num_computed_tokens_cpu is None:
+            query_seq_lens = (
+                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
+            )
+            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
+        return self._num_computed_tokens_cpu
+
+    # TODO(lucas): remove once we have FULL-CG spec-decode support
+    def unpadded(
+        self, num_actual_tokens: int, num_actual_reqs: int
+    ) -> "CommonAttentionMetadata":
+        maybe_slice_reqs = lambda x: x[:num_actual_reqs] if x is not None else None
+        return CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
+            seq_lens=self.seq_lens[:num_actual_reqs],
+            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
+            if self._seq_lens_cpu is not None
+            else None,
+            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
+            if self._num_computed_tokens_cpu is not None
+            else None,
+            num_reqs=num_actual_reqs,
+            num_actual_tokens=num_actual_tokens,
+            max_query_len=self.max_query_len,
+            max_seq_len=self.max_seq_len,
+            block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            slot_mapping=self.slot_mapping[:num_actual_tokens],
+            causal=self.causal,
+            logits_indices_padded=self.logits_indices_padded,
+            num_logits_indices=self.num_logits_indices,
+            encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
+            encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
+            dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
+            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+        )
 
 
 def slice_query_start_locs(
@@ -137,9 +199,7 @@ def _make_metadata_with_slice(
     assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
         "Token slice start outside of first request"
     )
-    assert start_locs[last_req] <= last_tok < start_locs[last_req + 1], (
-        "Token slice end outside of last request"
-    )
+    # NOTE: last token can be outside of the last request if we have CG padding.
 
     # If the "middle" request has tokens in both ubatches, we have to split it.
     # If ubatch_slice is the first ubatch then we will be splitting the last
@@ -197,14 +257,14 @@ def _make_metadata_with_slice(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )
 
 
@@ -662,9 +722,7 @@ def make_local_attention_virtual_batches(
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
-        seq_lens_cpu=seq_lens_cpu,
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
-        num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -672,6 +730,8 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
     )
 
 
@@ -692,7 +752,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     logits_indices = logits_indices_padded[:num_logits_indices]
     num_reqs = common_attn_metadata.num_reqs
     query_start_loc = common_attn_metadata.query_start_loc
-    seq_lens = common_attn_metadata.seq_lens
     # Example inputs
     # num_reqs: 3
     # generation_indices:  [14, 18, 19, 27]
@@ -721,9 +780,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
         query_start_loc_cpu=decode_query_start_loc.to("cpu", non_blocking=True),
-        seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens.to("cpu", non_blocking=True),
-        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        seq_lens=common_attn_metadata.seq_lens,
         num_reqs=num_reqs,
         num_actual_tokens=total_num_decode_tokens,
         max_query_len=decode_max_query_len,
@@ -731,6 +788,8 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         block_table_tensor=common_attn_metadata.block_table_tensor,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
+        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
+        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
@@ -856,11 +915,15 @@ def split_decodes_and_prefills(
         return 0, num_reqs, 0, num_tokens
 
     if require_uniform:
+        # check if we are in a padded uniform batch; this is used for full-CGs, some
+        # requests may have a query length of 0 but since they are padding its fine
+        # to treat them as decodes (ensures num_decodes matches the captured size)
+        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+            assert num_reqs * query_lens[0] == num_tokens, "tokens not padded correctly"
+            return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
-        # 0-query len indicates a padded request; leave this at the back
-        # of the batch with the prefills
-        is_prefill = (query_lens > decode_threshold) | (query_lens == 0)
+        is_prefill = query_lens > decode_threshold
 
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
