@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 
 import pytest
 
-from vllm.config import CompilationConfig, config
+from vllm.config import AttentionConfig, CompilationConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     contains_type,
@@ -296,6 +296,75 @@ def test_compilation_config():
         and args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
         and args.compilation_config.backend == "inductor"
     )
+
+
+def test_attention_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value
+    args = parser.parse_args([])
+    assert args.attention_config == AttentionConfig()
+
+    # set backend via dot notation
+    args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
+    assert args.attention_config.backend.name == "FLASH_ATTN"
+
+    # set all fields via dot notation
+    args = parser.parse_args(
+        [
+            "--attention-config.backend",
+            "FLASH_ATTN",
+            "--attention-config.flash_attn_version",
+            "3",
+            "--attention-config.use_prefill_decode_attention",
+            "true",
+            "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
+            "16",
+            "--attention-config.use_cudnn_prefill",
+            "true",
+            "--attention-config.use_trtllm_ragged_deepseek_prefill",
+            "true",
+            "--attention-config.use_trtllm_attention",
+            "true",
+            "--attention-config.disable_flashinfer_prefill",
+            "true",
+            "--attention-config.disable_flashinfer_q_quantization",
+            "true",
+        ]
+    )
+    assert args.attention_config.backend.name == "FLASH_ATTN"
+    assert args.attention_config.flash_attn_version == 3
+    assert args.attention_config.use_prefill_decode_attention is True
+    assert args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
+    assert args.attention_config.use_cudnn_prefill is True
+    assert args.attention_config.use_trtllm_ragged_deepseek_prefill is True
+    assert args.attention_config.use_trtllm_attention is True
+    assert args.attention_config.disable_flashinfer_prefill is True
+    assert args.attention_config.disable_flashinfer_q_quantization is True
+
+    # set to string form of a dict with all fields
+    args = parser.parse_args(
+        [
+            "--attention-config="
+            '{"backend": "FLASHINFER", "flash_attn_version": 2, '
+            '"use_prefill_decode_attention": false, '
+            '"flash_attn_max_num_splits_for_cuda_graph": 8, '
+            '"use_cudnn_prefill": false, '
+            '"use_trtllm_ragged_deepseek_prefill": false, '
+            '"use_trtllm_attention": false, '
+            '"disable_flashinfer_prefill": false, '
+            '"disable_flashinfer_q_quantization": false}',
+        ]
+    )
+    assert args.attention_config.backend.name == "FLASHINFER"
+    assert args.attention_config.flash_attn_version == 2
+    assert args.attention_config.use_prefill_decode_attention is False
+    assert args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
+    assert args.attention_config.use_cudnn_prefill is False
+    assert args.attention_config.use_trtllm_ragged_deepseek_prefill is False
+    assert args.attention_config.use_trtllm_attention is False
+    assert args.attention_config.disable_flashinfer_prefill is False
+    assert args.attention_config.disable_flashinfer_q_quantization is False
 
 
 def test_prefix_cache_default():
