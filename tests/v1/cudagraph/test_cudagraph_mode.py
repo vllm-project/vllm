@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
-import os
 import weakref
 from contextlib import ExitStack
 
@@ -12,26 +10,6 @@ from tests.v1.attention.utils import full_cg_backend_configs as backend_configs
 from vllm import LLM
 from vllm.config import CompilationConfig, CompilationMode
 from vllm.platforms import current_platform
-
-
-@contextlib.contextmanager
-def temporary_environ(env_vars):
-    """
-    Temporarily set environment variables and restore them afterward.
-    We have to do this vs monkeypatch because monkeypatch doesn't work
-    with "module" scoped fixtures.
-    """
-    original_env = {k: os.environ.get(k) for k in env_vars}
-    try:
-        os.environ.update(env_vars)
-        yield
-    finally:
-        for k, v in original_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
 
 # test attention backend and cudagraph_mode combo
 # (backend_name, cudagraph_mode, supported)
@@ -69,9 +47,8 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
         pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
 
     attention_config = backend_config.attention_config
-    env_vars = backend_config.env_vars or {}
 
-    with temporary_environ(env_vars), ExitStack() as stack:
+    with ExitStack() as stack:
         if not supported:
             stack.enter_context(pytest.raises(Exception))
 
@@ -126,9 +103,8 @@ def test_cudagraph_compilation_combo(
 ):
     backend_config = backend_configs[backend_name]
     attention_config = backend_config.attention_config
-    env_vars = backend_config.env_vars or {}
 
-    with temporary_environ(env_vars), ExitStack() as stack:
+    with ExitStack() as stack:
         if not supported:
             stack.enter_context(pytest.raises(Exception))
 
