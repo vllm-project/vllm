@@ -11,7 +11,8 @@ from torch import nn
 from transformers.activations import ACT2FN
 
 from vllm import envs
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -747,10 +748,8 @@ class Qwen3NextAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=config.partial_rotary_factor,
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 

@@ -8,6 +8,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     mamba_gather_indices,
@@ -36,6 +37,8 @@ class LinearAttentionMetadata:
 
 class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMetadata]):
     reorder_batch_threshold: int = 1
+
+    _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(
         self,

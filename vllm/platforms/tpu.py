@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 from tpu_info import device
 
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
@@ -15,7 +16,6 @@ from .interface import Platform, PlatformEnum
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
@@ -26,7 +26,6 @@ else:
     BlockSize = None
     VllmConfig = None
     PoolingParams = None
-    AttentionBackendEnum = None
     ParamsType = None
 
 logger = init_logger(__name__)
@@ -63,12 +62,11 @@ class TpuPlatform(Platform):
         kv_cache_dtype: str | None,
         block_size: int,
         use_mla: bool,
-        has_sink,
-        use_sparse,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
-        from vllm.attention.backends.registry import AttentionBackendEnum
-
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on TPU.")
         if selected_backend != AttentionBackendEnum.PALLAS:
@@ -267,7 +265,9 @@ class TpuPlatform(Platform):
 
 
 try:
-    from tpu_inference.platforms import TpuPlatform as TpuInferencePlatform
+    from tpu_inference.platforms import (
+        TpuPlatform as TpuInferencePlatform,
+    )
 
     TpuPlatform = TpuInferencePlatform  # type: ignore
     USE_TPU_INFERENCE = True
