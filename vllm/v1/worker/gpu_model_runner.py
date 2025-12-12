@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import math
 import time
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
