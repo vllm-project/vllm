@@ -600,7 +600,7 @@ nvidia-cusparse-cu12==12.5.10.65
     #   torch
 nvidia-cusparselt-cu12==0.7.1
     # via torch
-nvidia-nccl-cu12==2.28.9
+nvidia-nccl-cu12==2.27.5
     # via torch
 nvidia-nvjitlink-cu12==12.9.86
     # via
