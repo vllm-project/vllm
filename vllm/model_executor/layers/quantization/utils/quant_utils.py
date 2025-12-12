@@ -288,9 +288,7 @@ def get_and_maybe_dequant_weights(
         device=weight.device,
     )
     dequant_weights = layer.quant_method.apply(layer, eye, bias=None)
-    if layer.weight_block_size is not None:
-        dequant_weights = dequant_weights.T
-    return dequant_weights
+    return dequant_weights.T
 
 
 def pack_quantized_values_into_int32(
