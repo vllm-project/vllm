@@ -309,6 +309,10 @@ def test_attention_config():
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
     assert args.attention_config.backend.name == "FLASH_ATTN"
 
+    # set backend via --attention-backend shorthand
+    args = parser.parse_args(["--attention-backend", "FLASHINFER"])
+    assert args.attention_config.backend.name == "FLASHINFER"
+
     # set all fields via dot notation
     args = parser.parse_args(
         [
