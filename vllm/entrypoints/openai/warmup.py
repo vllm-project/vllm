@@ -11,6 +11,7 @@ request.
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -115,7 +116,7 @@ async def _run_chat_completion_warmup(
     result = await handler.create_chat_completion(request, raw_request=None)
 
     # Consume the generator if streaming
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -137,7 +138,7 @@ async def _run_completion_warmup(
     result = await handler.create_completion(request, raw_request=None)
 
     # Consume the generator if streaming
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -157,7 +158,7 @@ async def _run_embedding_warmup(
     result = await handler.create_embedding(request, raw_request=None)
 
     # Consume if generator
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -176,7 +177,7 @@ async def _run_pooling_warmup(
     request = PoolingCompletionRequest(**request_payload)
     result = await handler.create_pooling(request, raw_request=None)
 
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -194,7 +195,7 @@ async def _run_classify_warmup(
     request = ClassificationCompletionRequest(**request_payload)
     result = await handler.create_classify(request, raw_request=None)
 
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -212,7 +213,7 @@ async def _run_score_warmup(
     request = ScoreRequest(**request_payload)
     result = await handler.create_score(request, raw_request=None)
 
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
@@ -230,7 +231,7 @@ async def _run_rerank_warmup(
     request = RerankRequest(**request_payload)
     result = await handler.do_rerank(request, raw_request=None)
 
-    if hasattr(result, "__anext__"):
+    if isinstance(result, AsyncIterator):
         async for _ in result:
             pass
 
