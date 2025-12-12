@@ -16,7 +16,7 @@
 
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
 #include "../cuda_compat.h"
@@ -3287,7 +3287,7 @@ void paged_attention_custom_launcher(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const c10::DeviceGuard device_guard(query.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // mfma4 kernel is faster than mfma16 for gqa_ratio <= 4
@@ -3436,7 +3436,7 @@ void paged_attention_custom_launcher_navi(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const c10::DeviceGuard device_guard(query.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   switch (gqa_ratio) {

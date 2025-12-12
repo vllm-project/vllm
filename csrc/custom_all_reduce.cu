@@ -1,5 +1,5 @@
 #include <ATen/cuda/Exceptions.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <torch/all.h>
 
@@ -62,7 +62,7 @@ bool _is_weak_contiguous(torch::Tensor& t) {
 void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                 fptr_t _reg_buffer, int64_t reg_buffer_sz_bytes) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
+  const c10::DeviceGuard device_guard(inp.device());
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
 
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());

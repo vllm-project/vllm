@@ -1,6 +1,6 @@
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include "../../dispatch_utils.h"
 #include "layernorm_utils.cuh"
@@ -139,7 +139,7 @@ void rms_norm_dynamic_per_token_quant_dispatch(
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const c10::DeviceGuard device_guard(input.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {

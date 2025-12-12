@@ -4,7 +4,7 @@
 //
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <torch/all.h>
 #include "cutlass_extensions/torch_utils.hpp"
 #include "w4a8_utils.cuh"
@@ -179,7 +179,7 @@ struct W4A8GemmKernel {
     int const group_size_int = static_cast<int>(group_size);
 
     // Allocate output
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+    const c10::DeviceGuard device_guard(A.device());
     auto device = A.device();
     auto stream = at::cuda::getCurrentCUDAStream(device.index());
     torch::Tensor D =

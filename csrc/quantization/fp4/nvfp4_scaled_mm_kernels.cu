@@ -17,7 +17,7 @@
 #include <torch/all.h>
 
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include "cutlass_extensions/common.hpp"
 
@@ -301,7 +301,7 @@ void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
               B_sf.sizes()[1], ")");
 
   auto out_dtype = D.dtype();
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
+  const c10::DeviceGuard device_guard(A.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
 
   if (out_dtype == at::ScalarType::Half) {

@@ -62,7 +62,7 @@ torch::Tensor marlin_int4_fp8_preprocess(
   TORCH_CHECK(qweight.scalar_type() == at::ScalarType::Int,
               "qweight.dtype != torch.int32");
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(qweight));
+  const c10::DeviceGuard device_guard(qweight.device());
 
   torch::Tensor output = inplace ? qweight : torch::empty_like(qweight);
 
@@ -82,7 +82,7 @@ torch::Tensor marlin_int4_fp8_preprocess(
     TORCH_CHECK(qzeros.device().is_cuda(), "qzeros is not on GPU");
     TORCH_CHECK(qzeros.scalar_type() == at::ScalarType::Int,
                 "qweight.dtype != torch.int32");
-    TORCH_CHECK(device_of(qweight) == device_of(qzeros),
+    TORCH_CHECK(qweight.device() == qzeros.device(),
                 "qzeros is not on the same device with qweight");
 
     int32_t group_size = qweight.size(0) / qzeros.size(0);

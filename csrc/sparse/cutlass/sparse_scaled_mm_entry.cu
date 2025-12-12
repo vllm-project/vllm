@@ -1,6 +1,6 @@
 #include <cudaTypedefs.h>
 
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include <torch/all.h>
 
 #include "cutlass_extensions/common.hpp"
@@ -53,7 +53,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
                 bias->dim() == 1);
   }
 
-  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
+  c10::DeviceGuard const device_guard(a.device());
   int32_t version_num = get_sm_version_num();
 
   // Guard against compilation issues for sm90 kernels
@@ -79,7 +79,7 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
   TORCH_CHECK(a.stride(1) == 1);      // Row-major
   TORCH_CHECK(a.stride(0) % 8 == 0);  // 8 Byte Alignment for Compression
 
-  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
+  c10::DeviceGuard const device_guard(a.device());
   int32_t version_num = get_sm_version_num();
 
   // Guard against compilation issues for sm90 kernels

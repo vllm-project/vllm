@@ -1,6 +1,6 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
@@ -163,7 +163,7 @@ void rotary_embedding(
 
   dim3 grid(num_tokens);
   dim3 block(std::min<int64_t>(num_heads * rot_dim / 2, 512));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const c10::DeviceGuard device_guard(query.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "rotary_embedding", [&] {
     if (is_neox) {

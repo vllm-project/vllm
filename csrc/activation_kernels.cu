@@ -1,6 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 
 #include <cmath>
 
@@ -73,7 +73,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
   if (num_tokens == 0) {                                                 \
     return;                                                              \
   }                                                                      \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
+  const c10::DeviceGuard device_guard(input.device());      \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
   VLLM_DISPATCH_FLOATING_TYPES(                                          \
       input.scalar_type(), "act_and_mul_kernel", [&] {                   \
@@ -174,7 +174,7 @@ __global__ void swigluoai_and_mul_kernel(
   int64_t num_tokens = input.numel() / input.size(-1);                  \
   dim3 grid(num_tokens);                                                \
   dim3 block(std::min(d, 1024));                                        \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));     \
+  const c10::DeviceGuard device_guard(input.device());     \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();         \
   VLLM_DISPATCH_FLOATING_TYPES(                                         \
       input.scalar_type(), "act_and_mul_kernel_with_param", [&] {       \
@@ -189,7 +189,7 @@ __global__ void swigluoai_and_mul_kernel(
   int64_t num_tokens = input.numel() / input.size(-1);                         \
   dim3 grid(num_tokens);                                                       \
   dim3 block(std::min(d, 1024));                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const c10::DeviceGuard device_guard(input.device());            \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
   VLLM_DISPATCH_FLOATING_TYPES(                                                \
       input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
@@ -232,7 +232,7 @@ __global__ void activation_kernel(
   int64_t num_tokens = input.numel() / d;                                      \
   dim3 grid(num_tokens);                                                       \
   dim3 block(std::min(d, 1024));                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const c10::DeviceGuard device_guard(input.device());            \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
     vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                        \

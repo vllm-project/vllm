@@ -19,7 +19,7 @@
 #include <type_traits>
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <c10/core/DeviceGuard.h>
 #include "../cuda_compat.h"
 #include "../cub_helpers.h"
 
@@ -687,7 +687,7 @@ void topk_softmax(
     const bool needs_workspace = !is_pow_2 || num_experts > 256;
     const int64_t workspace_size = needs_workspace ? num_tokens * num_experts : 0;
 
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(gating_output));
+    const c10::DeviceGuard device_guard(gating_output.device());
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const auto workspace_options = gating_output.options().dtype(at::ScalarType::Float);
     torch::Tensor softmax_workspace = torch::empty({workspace_size}, workspace_options);
