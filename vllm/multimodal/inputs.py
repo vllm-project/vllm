@@ -188,8 +188,6 @@ class PlaceholderRange:
             Returns full placeholder range if `is_embed` is `None`.
         """
         if self.is_embed is None:
-            if self.length == 0:
-                return []
             return [(self.offset, self.offset + self.length - 1)]
 
         mask_i = self.is_embed.int()
