@@ -22,7 +22,6 @@ from vllm.model_executor.models.transformers.causal import CausalMixin
 from vllm.model_executor.models.transformers.legacy import LegacyMixin
 from vllm.model_executor.models.transformers.moe import MoEMixin
 from vllm.model_executor.models.transformers.multimodal import (
-    DYNAMIC_ARG_DIMS,
     MultiModalDummyInputsBuilder,
     MultiModalMixin,
     MultiModalProcessingInfo,
@@ -51,9 +50,6 @@ class TransformersMoEForCausalLM(MoEMixin, CausalMixin, Base): ...
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
 )
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
-)
 class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
 
 
@@ -61,9 +57,6 @@ class TransformersMultiModalForCausalLM(MultiModalMixin, CausalMixin, Base): ...
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
-)
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
 )
 class TransformersMultiModalMoEForCausalLM(
     MoEMixin, MultiModalMixin, CausalMixin, Base
@@ -83,9 +76,6 @@ class TransformersMoEEmbeddingModel(EmbeddingMixin, MoEMixin, Base): ...
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
-)
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
 )
 class TransformersMultiModalEmbeddingModel(EmbeddingMixin, MultiModalMixin, Base): ...
 
@@ -107,9 +97,6 @@ class TransformersMoEForSequenceClassification(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder,
-)
-@support_torch_compile(
-    dynamic_arg_dims=DYNAMIC_ARG_DIMS, enable_if=can_enable_torch_compile
 )
 class TransformersMultiModalForSequenceClassification(
     SequenceClassificationMixin, MultiModalMixin, Base
