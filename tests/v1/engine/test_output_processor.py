@@ -1268,5 +1268,36 @@ def test_abort_requests(runner: str, dummy_test_vectors):
         queue = RequestOutputCollector(output_kind=output_kind)
         output_processor.add_request(request, None, queue=queue)
 
-    for request in requests:
-        output_processor.abort_requests([request.request_id])
+    # Test aborting a single request
+    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
+        [requests[0].request_id]
+    )
+    assert isinstance(request_ids_to_abort, list)
+    assert isinstance(request_states_to_abort, list)
+    assert len(request_ids_to_abort) == 1
+    assert len(request_states_to_abort) == 1
+    assert request_ids_to_abort[0] == requests[0].request_id
+    assert request_states_to_abort[0].request_id == requests[0].request_id
+    from vllm.v1.engine.output_processor import RequestState
+
+    assert isinstance(request_states_to_abort[0], RequestState)
+
+    # Test aborting multiple requests
+    remaining_request_ids = [req.request_id for req in requests[1:3]]
+    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
+        remaining_request_ids
+    )
+    assert len(request_ids_to_abort) == 2
+    assert len(request_states_to_abort) == 2
+    assert set(request_ids_to_abort) == set(remaining_request_ids)
+    assert all(
+        req_state.request_id in remaining_request_ids
+        for req_state in request_states_to_abort
+    )
+
+    # Test aborting non-existent request (should return empty lists)
+    request_ids_to_abort, request_states_to_abort = output_processor.abort_requests(
+        ["non-existent-request"]
+    )
+    assert len(request_ids_to_abort) == 0
+    assert len(request_states_to_abort) == 0

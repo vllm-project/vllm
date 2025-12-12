@@ -30,10 +30,11 @@ from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.utils.math_utils import cdiv
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -554,8 +555,27 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids, request_states_to_abort = self.output_processor.abort_requests(
+            request_ids
+        )
         await self.engine_core.abort_requests_async(all_request_ids)
+
+        if self.logger_manager:
+            for req_state in request_states_to_abort:
+                # Create a new iteration stats object for each aborted request.
+                iteration_stats = IterationStats()
+                iteration_stats.update_from_finished_request(
+                    finish_reason=FinishReason.ABORT,
+                    num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
+                        req_state.prompt_token_ids, req_state.prompt_embeds
+                    ),
+                    max_tokens_param=req_state.max_tokens_param,
+                    req_stats=req_state.stats,
+                )
+                self.logger_manager.record(
+                    scheduler_stats=None,
+                    iteration_stats=iteration_stats,
+                )
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))

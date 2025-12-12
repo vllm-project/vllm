@@ -26,7 +26,8 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike, init_tokenizer_from_config
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -216,8 +217,27 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
-        self.engine_core.abort_requests(request_ids)
+        all_request_ids, request_states_to_abort = self.output_processor.abort_requests(
+            request_ids
+        )
+        self.engine_core.abort_requests(all_request_ids)
+
+        if self.logger_manager:
+            for req_state in request_states_to_abort:
+                # Create a new iteration stats object for each aborted request.
+                iteration_stats = IterationStats()
+                iteration_stats.update_from_finished_request(
+                    finish_reason=FinishReason.ABORT,
+                    num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
+                        req_state.prompt_token_ids, req_state.prompt_embeds
+                    ),
+                    max_tokens_param=req_state.max_tokens_param,
+                    req_stats=req_state.stats,
+                )
+                self.logger_manager.record(
+                    scheduler_stats=None,
+                    iteration_stats=iteration_stats,
+                )
 
     def add_request(
         self,
