@@ -596,7 +596,6 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
-        moe_parallel_config=moe_parallel_config,
     )
 
     return modular_kernel

@@ -10,7 +10,6 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
@@ -692,22 +691,15 @@ class FusedMoEModularKernel(torch.nn.Module):
         self.shared_experts = shared_experts
         self.shared_experts_stream = shared_experts_stream
 
-        # prefer an explicit FusedMoEParallelConfig when available
-        # (from FusedMoE layers / tests), otherwise derive one from the
-        # current vLLM config.
-        if moe_parallel_config is None:
-            vllm_config = get_current_vllm_config()
-            parallel_config = vllm_config.parallel_config
-            moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=parallel_config.tensor_parallel_size,
-                pcp_size_=parallel_config.pipeline_parallel_size,
-                dp_size_=parallel_config.data_parallel_size,
-                vllm_parallel_config=parallel_config,
-            )
-
-        self.moe_parallel_config: FusedMoEParallelConfig = moe_parallel_config
+        # prefer an explicit FusedMoEParallelConfig when available (from
+        # FusedMoE layers / tests).
+        # if not provided, assume this kernel is
+        # running in a non-DP+EP context
+        self.moe_parallel_config: FusedMoEParallelConfig | None = moe_parallel_config
         self.is_dp_ep = (
-            self.moe_parallel_config.dp_size > 1 and self.moe_parallel_config.use_ep
+            moe_parallel_config is not None
+            and moe_parallel_config.dp_size > 1
+            and moe_parallel_config.use_ep
         )
 
         self._post_init_setup()

@@ -21,7 +21,6 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
 )
@@ -1629,7 +1628,6 @@ def fused_experts(
     quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
     allow_cutlass_block_scaled_grouped_gemm: bool = False,
-    moe_parallel_config: FusedMoEParallelConfig | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -1663,7 +1661,6 @@ def fused_experts(
             a1_scale=quant_config.a1_scale,
             a2_scale=quant_config.a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            moe_parallel_config=moe_parallel_config,
         )
     elif (
         allow_cutlass_block_scaled_grouped_gemm

@@ -817,7 +817,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                moe_parallel_config=layer.moe_parallel_config,
             )
 
 
