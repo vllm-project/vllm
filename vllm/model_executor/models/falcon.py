@@ -167,7 +167,6 @@ class FalconAttention(nn.Module):
             max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
             self.rotary_emb = get_rope(
                 self.head_dim,
-                rotary_dim=self.head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
             )
