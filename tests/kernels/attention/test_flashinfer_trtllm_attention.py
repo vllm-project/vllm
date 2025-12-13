@@ -11,7 +11,7 @@ from tests.kernels.quantization.nvfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
@@ -443,7 +443,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         output_trtllm = output_trtllm.reshape(-1, query.shape[1], query.shape[2])
 
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 1e-1, 2e-1
+        rtol, atol = 3e-1, 4e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:

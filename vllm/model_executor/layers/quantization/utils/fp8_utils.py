@@ -247,7 +247,7 @@ class W8A8BlockFp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
-        self.is_blackwell = current_platform.is_device_capability(100)
+        self.is_blackwell = current_platform.is_device_capability_family(100)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
 
         # Get the correct blockscale mul and input quant operations.
