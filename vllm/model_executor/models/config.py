@@ -313,11 +313,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 raise ValueError(
                     "unknown mamba cache mode: %s", cache_config.mamba_cache_mode
                 )
-            # By default, mamba block size will be set to max_model_len (see
-            # below). When enabling prefix caching, we align mamba block size
-            # to the block size as the basic granularity for prefix caching.
-            if cache_config.mamba_block_size is None:
-                cache_config.mamba_block_size = cache_config.block_size
         elif cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
 
@@ -454,6 +449,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "to ensure that attention page size is >= mamba page size.",
                 attn_block_size,
             )
+
+        # By default, mamba block size will be set to max_model_len. 
+        # When enabling prefix caching and using align mamba cache 
+        # mode, we align mamba block size to the block size as the 
+        # basic granularity for prefix caching.
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = cache_config.block_size
 
         # compute new attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
