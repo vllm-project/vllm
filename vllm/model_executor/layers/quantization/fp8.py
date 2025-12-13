@@ -1329,6 +1329,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
              envs.VLLM_TEST_FORCE_FP8_MARLIN)
         )
 
+        # Currently, we always use triton or marlin for online fp8.
+        self.flashinfer_moe_backend = None
+
     def create_weights(
         self,
         layer: Module,
