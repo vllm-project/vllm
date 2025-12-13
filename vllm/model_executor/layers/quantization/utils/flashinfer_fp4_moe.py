@@ -50,7 +50,7 @@ def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
         and current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
     )
 
 

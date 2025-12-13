@@ -247,7 +247,7 @@ class W8A8BlockFp8LinearOp:
         self.act_quant_group_shape = act_quant_group_shape
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
-        self.is_blackwell = current_platform.is_device_capability(100)
+        self.is_blackwell = current_platform.is_device_capability_family(100)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
 
         # Get the correct blockscale mul and input quant operations.
@@ -762,9 +762,12 @@ def per_token_group_quant_fp8(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
+    # Using the default value (240.0) from pytorch will cause accuracy
+    # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm
+    # platforms that use the torch.float8_e4mefnuz dtype.
     finfo = torch.finfo(dtype)
-    fp8_min = finfo.min
-    fp8_max = finfo.max
+    fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
+    fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
 
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
