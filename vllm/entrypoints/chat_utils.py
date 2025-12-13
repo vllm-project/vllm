@@ -60,7 +60,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.entrypoints.chat_utils.resolve_hf_chat_template` has been moved to "
             "`vllm.renderers.hf.resolve_chat_template`. "
-            "The old name will be removed in v0.14.",
+            "The old name will be removed in v0.16.",
             DeprecationWarning,
             stacklevel=2,
         )
