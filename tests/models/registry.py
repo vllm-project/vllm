@@ -356,7 +356,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
-        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4", is_available_online=False
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -635,7 +635,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
-        is_available_online=False,
+        hf_overrides={"num_experts": 0},
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -674,8 +674,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/discussions/31",
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
-        "lightonai/LightOnOCR-1B",
-        is_available_online=False,
+        "lightonai/LightOnOCR-1B-1025"
     ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -779,8 +778,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "ministral-3": "mistralai/Ministral-3-3B-Instruct-2512",
         },
         tokenizer_mode="mistral",
-        # TODO: revert once Mistral-Large-3 and Ministral-3 are publicly available.
-        is_available_online=False,
     ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
@@ -886,6 +883,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
+        # TODO: revert once figuring out OOM in CI
         is_available_online=False,
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
