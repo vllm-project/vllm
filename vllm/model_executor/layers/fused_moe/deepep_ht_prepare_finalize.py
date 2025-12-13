@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from typing import Any
 
 import deep_ep
 import torch
@@ -64,7 +63,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # The dispatch function returns a handle that the combine function
         # requires. Under DBO microbatching we must track one handle per
         # micro-batch to avoid races between threads.
-        self.handles: list[Any | None] = []
+        self.handles = [None, None]
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
@@ -161,8 +160,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
-        while len(self.handles) <= a2a_idx:
-            self.handles.append(None)
         self.handles[a2a_idx] = handle
 
         dbo_switch_to_compute_sync()

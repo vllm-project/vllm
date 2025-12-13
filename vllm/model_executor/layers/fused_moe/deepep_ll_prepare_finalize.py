@@ -100,8 +100,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-
-        self.handles: list[tuple | None] = []
+        self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
 
         topk_indices_dtype = self.topk_indices_dtype()
@@ -251,8 +250,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         a2a_idx = dbo_current_ubatch_id()
-        while len(self.handles) <= a2a_idx:
-            self.handles.append(None)
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, (
