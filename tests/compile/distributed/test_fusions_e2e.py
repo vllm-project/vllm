@@ -138,6 +138,17 @@ elif current_platform.is_rocm():
 CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 
 
+def has_cuda_graph_wrapper_metadata() -> bool:
+    from importlib import import_module
+
+    try:
+        module = import_module("torch._inductor.utils")
+        module.CUDAGraphWrapperMetadata  # noqa B018
+    except AttributeError:
+        return False
+    return True
+
+
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
@@ -147,7 +158,17 @@ CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 )
 @pytest.mark.parametrize(
     "inductor_graph_partition",
-    [True, False] if not current_platform.is_rocm() else [False],
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_cuda_graph_wrapper_metadata(),
+                reason="This test requires"
+                "torch._inductor.utils.CUDAGraphWrapperMetadata to run",
+            ),
+        ),
+        False,
+    ],
 )
 def test_attn_quant(
     model_name: str,
