@@ -122,7 +122,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
-        # Store original shape for later reshaping
         original_shape = output.shape if output.ndim == 3 else None
 
         # In transformers backend, x and output have extra batch dimension like
@@ -138,7 +137,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if not current_platform.can_update_inplace():
             output = lora_output
 
-        # Restore original shape if it was flattened
+        # Reshape the flattened output back to its original shape,
+        # as some MM encoders cannot handle flattened inputs.
         if original_shape is not None:
             output = output.reshape(original_shape)
 

@@ -2157,8 +2157,13 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
+                # Prefer pos_info.is_embed to count actual MM embedding tokens.
+                # pos_info.length may overcount (e.g., special tokens in Qwen-VL).
+                # Fall back to length if is_embed is None.
                 num_tokens = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
                     pos_info.length
+                    if pos_info.is_embed is None
+                    else pos_info.is_embed.sum()
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
