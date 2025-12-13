@@ -1451,14 +1451,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 layer, False, input_dtype=self.marlin_input_dtype
             )
 
-    @property
-    def supports_eplb(self) -> bool:
-        return False
-
-    @property
-    def allow_inplace(self) -> bool:
-        return True
-
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """
