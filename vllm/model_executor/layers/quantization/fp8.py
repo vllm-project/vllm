@@ -849,12 +849,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
-            if not self.quant_config.is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "Found static activation scheme for checkpoint that "
-                    "was not serialized fp8."
-                )
-
             w13_input_scale = torch.nn.Parameter(
                 torch.ones(num_experts, dtype=torch.float32), requires_grad=False
             )
@@ -1353,37 +1347,36 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         # We are doing online quantization, patch the weight loaded
         # to call `process_weights_after_loading` in a streaming fashion
         # as soon as the last weight chunk is loaded.
-        if not self.quant_config.is_checkpoint_fp8_serialized:
-            weight_loader = extra_weight_attrs["weight_loader"]
-            # create a new holder to prevent modifying behavior of any other
-            # objects which might depend on the old one
-            new_extra_weight_attrs = extra_weight_attrs
+        weight_loader = extra_weight_attrs["weight_loader"]
+        # create a new holder to prevent modifying behavior of any other
+        # objects which might depend on the old one
+        new_extra_weight_attrs = extra_weight_attrs
 
-            def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-                # load the current weight chunk
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
+            # load the current weight chunk
+            res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
 
-                # add a counter to track how many elements we have updated
-                if not hasattr(layer, "_loaded_numel"):
-                    layer._loaded_numel = 0
-                layer._loaded_numel += loaded_weight.numel()
+            # add a counter to track how many elements we have updated
+            if not hasattr(layer, "_loaded_numel"):
+                layer._loaded_numel = 0
+            layer._loaded_numel += loaded_weight.numel()
 
-                # if we have loaded all of the elements, call
-                # process_weights_after_loading
-                target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-                if layer._loaded_numel == target_loaded_numel:
-                    self.process_weights_after_loading(layer)
+            # if we have loaded all of the elements, call
+            # process_weights_after_loading
+            target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
+            if layer._loaded_numel == target_loaded_numel:
+                self.process_weights_after_loading(layer)
 
-                    # Delete the bookkeeping
-                    del layer._loaded_numel
-                    # Prevent the usual `process_weights_after_loading` call
-                    # from doing anything
-                    layer._already_called_process_weights_after_loading = True
+                # Delete the bookkeeping
+                del layer._loaded_numel
+                # Prevent the usual `process_weights_after_loading` call
+                # from doing anything
+                layer._already_called_process_weights_after_loading = True
 
-                return res
+            return res
 
-            new_extra_weight_attrs["weight_loader"] = patched_weight_loader
-            extra_weight_attrs = new_extra_weight_attrs
+        new_extra_weight_attrs["weight_loader"] = patched_weight_loader
+        extra_weight_attrs = new_extra_weight_attrs
 
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
