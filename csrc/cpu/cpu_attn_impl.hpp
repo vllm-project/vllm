@@ -186,7 +186,7 @@ struct AttentionMetadata {
 //  - Intermediate outputs: q_tile_size * head_dim * output_buffer_elem_size + 2
 //  * q_tile_size * 4, partial output, max + sum (float)
 // Reduction scratchpad contains:
-//  - flags: bool array to indicate wether the split is finished
+//  - flags: bool array to indicate whether the split is finished
 //  - outputs: split_num * q_tile_size * head_dim * output_buffer_elem_size
 //  - max, sum: 2 * split_num * q_tile_size * 4
 class AttentionScratchPad {
@@ -1246,14 +1246,8 @@ class AttentionMainLoop {
         // rescale sum and partial outputs
         if (need_rescale) {
           // compute rescale factor
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           // rescale sum
           new_sum_val += rescale_factor * init_sum_val;
@@ -1889,15 +1883,8 @@ class AttentionMainLoop {
                                    : curr_output_buffer;
           float rescale_factor = final_max > curr_max ? curr_max - final_max
                                                       : final_max - curr_max;
-
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           local_sum[head_idx] = final_max > curr_max
                                     ? final_sum + rescale_factor * curr_sum
