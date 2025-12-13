@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import logging
 import signal
 import socket
 from http import HTTPStatus
@@ -22,6 +23,36 @@ from vllm.utils.network_utils import find_process_using_port
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger(__name__)
+
+
+class UvicornAccessLogFilter(logging.Filter):
+    """Filter to exclude specific paths from uvicorn access logs.
+
+    This is useful for filtering out noisy endpoints like /health and /metrics
+    that are frequently polled by monitoring systems.
+    """
+
+    def __init__(self, exclude_paths: list[str]) -> None:
+        super().__init__()
+        self.exclude_paths = set(exclude_paths)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn access log format: '%(client_addr)s - "%(request_line)s" %(status_code)s'  # noqa: E501
+        # The request line contains the method, path, and protocol.
+        # Example: '127.0.0.1:12345 - "GET /metrics HTTP/1.1" 200'
+        if hasattr(record, "scope"):
+            path = record.scope.get("path", "")  # type: ignore[union-attr]
+            if path in self.exclude_paths:
+                return False
+        # Fallback: check the message for the path
+        # The path appears after the HTTP method (GET, POST, etc.)
+        # Pattern: 'METHOD /path ' or 'METHOD /path"'
+        message = record.getMessage()
+        for path in self.exclude_paths:
+            # Match patterns like: "GET /metrics " or "POST /health HTTP"
+            if f" {path} " in message or f' {path}"' in message:
+                return False
+        return True
 
 
 async def serve_http(
@@ -51,11 +82,27 @@ async def serve_http(
     )
     h11_max_header_count = uvicorn_kwargs.pop("h11_max_header_count", None)
 
+    # Extract access log exclude paths if present
+    access_log_exclude_paths: list[str] = uvicorn_kwargs.pop(
+        "access_log_exclude_paths", []
+    )
+
     # Set safe defaults if not provided
     if h11_max_incomplete_event_size is None:
         h11_max_incomplete_event_size = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     if h11_max_header_count is None:
         h11_max_header_count = H11_MAX_HEADER_COUNT_DEFAULT
+
+    # Apply access log filter if paths are specified
+    if access_log_exclude_paths:
+        uvicorn_access_logger = logging.getLogger("uvicorn.access")
+        uvicorn_access_logger.addFilter(
+            UvicornAccessLogFilter(access_log_exclude_paths)
+        )
+        logger.info(
+            "Uvicorn access log will exclude paths: %s",
+            ", ".join(access_log_exclude_paths),
+        )
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
     # Set header limits
