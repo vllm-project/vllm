@@ -8,6 +8,7 @@ from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
+import torch
 import torch.nn as nn
 from PIL import Image
 
@@ -136,6 +137,7 @@ def create_batched_mm_kwargs(
     )
 
 
+# TODO(Isotr0py): Don't initalize model during test
 @contextmanager
 def initialize_dummy_model(
     model_cls: type[nn.Module],
@@ -150,10 +152,14 @@ def initialize_dummy_model(
         backend="nccl",
     )
     initialize_model_parallel(tensor_model_parallel_size=1)
+
+    current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
         with set_default_torch_dtype(model_config.dtype):
+            torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
+            torch.set_default_device(current_device)
         yield model
 
     del model
