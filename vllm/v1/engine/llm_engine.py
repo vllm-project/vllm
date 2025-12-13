@@ -226,6 +226,7 @@ class LLMEngine:
             for req_state in request_states_to_abort:
                 # Create a new iteration stats object for each aborted request.
                 iteration_stats = IterationStats()
+                assert req_state.stats is not None
                 iteration_stats.update_from_finished_request(
                     finish_reason=FinishReason.ABORT,
                     num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
