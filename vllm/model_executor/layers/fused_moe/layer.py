@@ -1200,10 +1200,14 @@ class FusedMoE(CustomOp):
         if full_load:
             shard_dim += 1
 
-        # Materialize GGUF UninitializedParameter
+        # Materialize GGUF UninitializedParameter accounting merged weights
         if is_gguf_weight and isinstance(param, UninitializedParameter):
+            # To materialize a tensor, we must have full shape including
+            # number of experts, making this portion to require `full_load`.
+            assert full_load
             final_shape = list(loaded_weight.shape)
-            if shard_id in ["w1", "w3"]:
+            # w1 and w3 are merged per expert.
+            if shard_id in {"w1", "w3"}:
                 final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
