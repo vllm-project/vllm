@@ -43,6 +43,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
+    is_sm100f_supported,
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
@@ -371,10 +372,7 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        from vllm.platforms import current_platform
-
-        capability = current_platform.get_device_capability()
-        if capability is not None and capability.major == 10:
+        if is_sm100f_supported():
             return "HND"
         return None
 
@@ -564,7 +562,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
 
-        if self.head_dim == 256 and current_platform.is_device_capability(100):
+        if self.head_dim == 256 and is_sm100f_supported():
             # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
             # head size 256 and block size 16 is not supported on blackwell.
             assert kv_cache_spec.block_size != 16, (
