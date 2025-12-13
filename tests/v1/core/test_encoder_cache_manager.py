@@ -24,7 +24,7 @@ class MockRequest:
             )
             self.mm_features.append(feature)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
+    def get_num_encoder_embeds(self, input_id: int) -> int:
         return self._token_counts[input_id]
 
 
@@ -163,8 +163,8 @@ def test_schedule_request_multi_images_respect_space_limit():
 
     num_tokens_to_schedule = 0
     assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
-    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
-    compute_budget -= req.get_num_encoder_tokens(0)
+    num_tokens_to_schedule += req.get_num_encoder_embeds(0)
+    compute_budget -= req.get_num_encoder_embeds(0)
 
     assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
 
@@ -175,15 +175,15 @@ def test_schedule_request_multi_images_respect_compute_limit():
     compute_budget = 10
     num_tokens_to_schedule = 0
     assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
-    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
-    compute_budget -= req.get_num_encoder_tokens(0)
+    num_tokens_to_schedule += req.get_num_encoder_embeds(0)
+    compute_budget -= req.get_num_encoder_embeds(0)
 
     assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
 
 
 def test_encoder_cache_with_is_embed_mask():
     class MockRequestWithMask(MockRequest):
-        def get_num_encoder_tokens(self, input_id: int) -> int:
+        def get_num_encoder_embeds(self, input_id: int) -> int:
             return self.mm_features[input_id].mm_position.get_num_embeds
 
     is_embed = torch.zeros(100, dtype=torch.bool)
@@ -212,7 +212,7 @@ def test_encoder_cache_with_is_embed_mask():
 
 def test_encoder_cache_mask_based_retrieval():
     class MockRequestWithMask(MockRequest):
-        def get_num_encoder_tokens(self, input_id: int) -> int:
+        def get_num_encoder_embeds(self, input_id: int) -> int:
             return self.mm_features[input_id].mm_position.get_num_embeds
 
     is_embed = torch.tensor(
