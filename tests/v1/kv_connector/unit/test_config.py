@@ -15,7 +15,7 @@ pytestmark = pytest.mark.cpu_test
     [
         ("native", 4.0, 1, 1, "OffloadingConnector", 4.0 * (1 << 30)),
         # bytes per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
-        ("native", 8.0, 2, 2, "OffloadingConnector", 8.0 * (1 << 30) / 4),
+        ("native", 8.0, 2, 2, "OffloadingConnector", 8.0 * (1 << 30)),
         ("lmcache", 4.0, 1, 1, "LMCacheConnectorV1", 4.0),
         # size per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
         ("lmcache", 8.0, 2, 2, "LMCacheConnectorV1", 2.0),
@@ -54,8 +54,7 @@ def test_kv_connector(
     assert kv_transfer_config.kv_role == "kv_both"
 
     if kv_offloading_backend == "native":
-        assert kv_connector_extra_config["kv_bytes_per_rank"] == expected_bytes
-        assert kv_connector_extra_config["num_cpu_blocks"] == 0
+        assert kv_connector_extra_config["cpu_bytes_to_use"] == expected_bytes
         # Existing config should be preserved
         assert kv_connector_extra_config["existing_key"] == "existing_value"
     elif kv_offloading_backend == "lmcache":

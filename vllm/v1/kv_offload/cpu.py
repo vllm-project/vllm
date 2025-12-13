@@ -21,12 +21,12 @@ class CPUOffloadingSpec(OffloadingSpec):
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
 
-        num_cpu_blocks = self.extra_config.get("num_cpu_blocks")
-        if not num_cpu_blocks:
+        cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
+        if not cpu_bytes_to_use:
             raise Exception(
-                "num_cpu_blocks must be specified in kv_connector_extra_config"
+                "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
-        self.num_cpu_blocks: int = num_cpu_blocks
+        self.cpu_bytes_to_use: int = int(cpu_bytes_to_use)
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -38,13 +38,18 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
+            kv_bytes_per_offloaded_block = (
+                self.vllm_config.cache_config.kv_bytes_per_block
+                * (self.offloaded_block_size // self.gpu_block_size)
+            )
+            num_blocks = self.cpu_bytes_to_use // kv_bytes_per_offloaded_block
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
             backend = CPUBackend(
-                block_size=self.offloaded_block_size, num_blocks=self.num_cpu_blocks
+                block_size=self.offloaded_block_size, num_blocks=num_blocks
             )
 
             if self.eviction_policy == "lru":
@@ -73,11 +78,17 @@ class CPUOffloadingSpec(OffloadingSpec):
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
+            kv_bytes_per_offloaded_block = (
+                self.vllm_config.cache_config.kv_bytes_per_block
+                * (self.offloaded_block_size // self.gpu_block_size)
+            )
+            num_blocks = self.cpu_bytes_to_use // kv_bytes_per_offloaded_block
+
             self._handler = CpuGpuOffloadingHandler(
                 attn_backends=attn_backends,
                 gpu_block_size=self.gpu_block_size,
                 cpu_block_size=self.offloaded_block_size,
-                num_cpu_blocks=self.num_cpu_blocks,
+                num_cpu_blocks=num_blocks,
                 gpu_caches=kv_caches,
             )
 
