@@ -53,7 +53,7 @@ class CompressedTensorsW4A8Int(CompressedTensorsScheme):
         self.quant_type = W4A8_SUPPORTED_TYPES_MAP[num_bits]
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         return 1
 
     def create_weights(

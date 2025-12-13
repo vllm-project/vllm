@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
+from compressed_tensors.quantization import ActivationOrdering, QuantizationArgs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -78,13 +79,16 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         )
 
     @classmethod
-    def get_min_capability(cls) -> int:
-        # For symmetric quantization,
-        # ExllamaLinearKernel (min_cc=60) is available.
-        if cls.symmetric:
-            return 60
-        # Asymmetric quantization requires Ampere or newer GPUs.
-        return 80
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
+        # ExllamaLinearKernel (min_cc=60) is available for symmetric
+        # quantization, but other kernels for asymmetric quantization
+        # require Ampere or newer GPUs.
+        min_cc = 60 if weight_quant.symmetric else 80
+        logger.info_once(
+            f"CompressedTensorsWNA16(symmetric={weight_quant.symmetric}) "
+            f"minimum compute capability: {min_cc}"
+        )
+        return min_cc
 
     def create_weights(
         self,

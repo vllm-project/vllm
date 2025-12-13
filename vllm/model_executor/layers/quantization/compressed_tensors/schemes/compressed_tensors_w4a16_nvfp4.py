@@ -27,7 +27,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         self.group_size = 16
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # don't restrict as emulations
         return 80
 

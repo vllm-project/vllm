@@ -33,7 +33,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         self.is_static_input_scheme = is_static_input_scheme
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # ampere and up
         return 80
 

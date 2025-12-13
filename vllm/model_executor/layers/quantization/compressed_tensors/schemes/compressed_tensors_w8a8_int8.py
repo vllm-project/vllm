@@ -35,7 +35,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         self.input_symmetric = input_symmetric
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # turing and up
         return 75
 
