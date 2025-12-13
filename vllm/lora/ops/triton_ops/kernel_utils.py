@@ -7,7 +7,6 @@ Utilities for Punica kernel construction.
 from vllm.triton_utils import tl, triton
 from vllm.model_executor.layers.fused_moe.utils import mm_k
 
-
 @triton.jit
 def do_expand_kernel(
     pid_n,
@@ -100,8 +99,7 @@ def do_expand_kernel(
         b_ptr,
         input_d2_stride,
         cur_lora_d2_stride,
-        None,
-        0,
+        tl.full((BLOCK_M,), 1, tl.int1),
         K,
         BLOCK_M,
         BLOCK_N,
@@ -111,16 +109,7 @@ def do_expand_kernel(
         CAST_TYPE,
         cur_lora_ptr.dtype.element_ty,
         USE_GDC,
-        a_scale_ptr= None,
-        b_scale_ptr= None,
-        stride_ask= None,
-        stride_bsk= None,
-        group_k = None,
-        group_n = None,
-        use_int8_w8a16= False,
-        use_fp8_w8a8=  False,
-        use_int8_w8a8= False,
-        compute_type= None, 
+        base_k=0,
     )
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
@@ -217,8 +206,7 @@ def do_shrink_kernel(
         b_ptr,
         input_d1_stride,
         lora_d2_stride,
-        None,
-        pid_sk * BLOCK_K,
+        tl.full((BLOCK_M,), 1, tl.int1),
         K,
         BLOCK_M,
         BLOCK_N,
@@ -228,16 +216,7 @@ def do_shrink_kernel(
         False,
         cur_lora_ptr.dtype.element_ty,
         False,  # USE_GDC is always False in shrink kernel
-        a_scale_ptr= None,
-        b_scale_ptr= None,
-        stride_ask= None,
-        stride_bsk= None,
-        group_k = None,
-        group_n = None,
-        use_int8_w8a16= False,
-        use_fp8_w8a8=  False,
-        use_int8_w8a8= False,
-        compute_type= None, 
+        base_k=pid_sk * BLOCK_K,
     )
     # GDC launch dependents hints the runtime system to launch dependent kernels.
     if USE_GDC:
