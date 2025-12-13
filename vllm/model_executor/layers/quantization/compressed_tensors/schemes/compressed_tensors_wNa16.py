@@ -79,8 +79,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # Turing and up
-        return 75
+        # For symmetric quantization,
+        # ExllamaLinearKernel (min_cc=60) is available.
+        if cls.symmetric:
+            return 60
+        # Asymmetric quantization requires Ampere or newer GPUs.
+        return 80
 
     def create_weights(
         self,
