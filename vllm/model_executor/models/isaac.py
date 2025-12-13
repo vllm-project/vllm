@@ -29,7 +29,6 @@ from vllm.config import VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -75,8 +74,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.hf import get_cached_tokenizer
-
-logger = init_logger(__name__)
 
 # ===== TensorStream Compatibility Layer for Isaac MRoPE =====
 # Minimal implementation of TensorStream classes needed for Isaac's 3D positional
@@ -1704,7 +1701,6 @@ class IsaacForConditionalGeneration(
         )
         config.image_token_id = self.vision_token_id
 
-        logger.info("vllm config: %s", repr(vllm_config))
         config.rope_scaling["mrope_section"] = calculated_mrope_section
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
