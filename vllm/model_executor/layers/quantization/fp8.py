@@ -1331,6 +1331,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         # Currently, we always use triton or marlin for online fp8.
         self.flashinfer_moe_backend = None
+        self.allow_deep_gemm = False
+        self.allow_cutlass_block_scaled_grouped_gemm = False
 
     def create_weights(
         self,
