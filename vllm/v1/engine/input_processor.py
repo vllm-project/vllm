@@ -188,29 +188,39 @@ class InputProcessor:
         def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
+
             mm_data = single_prompt.get("multi_modal_data")
             mm_uuids = single_prompt.get("multi_modal_uuids")
             if not mm_data or not mm_uuids:
                 return
 
+            import torch
+
+            def _get_len(items: object):
+                if isinstance(items, dict):  # Embedding inputs
+                    return _get_len(next(iter(items.values()))) if items else 1
+
+                if isinstance(items, list):
+                    return len(items)
+                if isinstance(items, torch.Tensor):
+                    # To keep backwards compatibility for single item embedding input
+                    return 1 if getattr(items, "_is_single_item", False) else len(items)
+
+                return 1
+
             for modality, items in mm_data.items():
                 if modality in mm_uuids:
-                    data_len = len(items) if isinstance(items, list) else 1
-                    uuid_len = (
-                        len(mm_uuids[modality])
-                        if isinstance(mm_uuids[modality], list)
-                        else 1
-                    )
+                    data_len = _get_len(items)
+                    uuid_len = _get_len(mm_uuids[modality])
                     if uuid_len != data_len:
                         raise ValueError(
-                            f"multi_modal_uuids for modality '{modality}' "
+                            f"multi_modal_uuids for modality {modality!r} "
                             "must have same length as data: got "
-                            f"{uuid_len} uuids vs "
-                            f"{data_len} items."
+                            f"{uuid_len} uuids vs {data_len} items."
                         )
                 else:
                     raise ValueError(
-                        f"multi_modal_uuids for modality '{modality}' must "
+                        f"multi_modal_uuids for modality {modality!r} must "
                         "be provided if multi_modal_data is provided."
                     )
 
