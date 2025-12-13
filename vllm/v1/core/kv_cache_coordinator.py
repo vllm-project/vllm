@@ -60,6 +60,7 @@ class KVCacheCoordinator(ABC):
             get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_group.kv_cache_spec,
                 block_pool=self.block_pool,
+                enable_caching=enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
@@ -124,7 +125,8 @@ class KVCacheCoordinator(ABC):
         self,
         request_id: str,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
-        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -133,18 +135,20 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
-            total_computed_tokens: The total number of computed tokens, including
-                both local and external tokens.
+            num_local_computed_tokens: The number of local computed tokens.
+            num_external_computed_tokens: The number of external computed tokens.
         """
         for i, manager in enumerate(self.single_type_managers):
             manager.save_new_computed_blocks(
-                request_id, new_computed_blocks[i], total_computed_tokens
+                request_id,
+                new_computed_blocks[i],
+                num_local_computed_tokens,
+                num_external_computed_tokens,
             )
 
     def allocate_new_blocks(
         self,
         request_id: str,
-        num_blocks_to_allocate_per_group: list[int],
         num_tokens: int,
         num_encoder_tokens: int = 0,
     ) -> tuple[list[KVCacheBlock], ...]:
@@ -169,12 +173,11 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
-                num_blocks_to_allocate_per_group[i],
                 num_encoder_tokens
                 if isinstance(manager, CrossAttentionManager)
                 else num_tokens,
             )
-            for i, manager in enumerate(self.single_type_managers)
+            for manager in self.single_type_managers
         )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:

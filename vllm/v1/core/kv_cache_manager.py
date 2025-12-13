@@ -237,33 +237,25 @@ class KVCacheManager:
 
         Blocks layout:
         ```
-        ---------------------------------------------------------------------
-        | < comp > | < new_comp > | < ext_comp >  | < new > | < lookahead > |
-        ---------------------------------------------------------------------
-                                                  |  < to be computed >     |
-        ---------------------------------------------------------------------
-                                  |           < to be allocated >           |
-        ---------------------------------------------------------------------
-                                  |     < to be cached >    |
-        ---------------------------------------------------------------------
-        | Prefix-cached tokens from both vLLM     |
-        | and connector. Can be safely removed if |
+        ----------------------------------------------------------------------
+        | < comp > | < new_comp > | < ext_comp >  | < new >  | < lookahead > |
+        ----------------------------------------------------------------------
+                                                  |   < to be computed >     |
+        ----------------------------------------------------------------------
+                                  |            < to be allocated >           |
+        ----------------------------------------------------------------------
+                                  | < to be cached (roughly, |
+                                  | details below)>          |
+        ----------------------------------------------------------------------
+        | Prefix-cached tokens from either vLLM   |
+        | or connector. Can be safely removed if  |
         | they are outside sliding window.        |
-        ---------------------------------------------------------------------
-                                  | not cached by |
+        ----------------------------------------------------------------------
+        |   < cached by vLLM >    | not cached by |
                                   | vLLM, but     |
-                                  | cached by     |
-                                  | connector     |
-        ---------------------------------------------------------------------
-        |   < cached by vLLM >    |
-        ---------------------------------------------------------------------
-        | ref_cnt  |
-        | increased|
-        ---------------------------------------------------------------------
-                   | ref_cnt not  |
-                   | increased yet|
-        ---------------------------------------------------------------------
-
+        | ref_cnt  | ref_cnt not  | cached by     |
+        | increased| increased yet| connector     |
+        ----------------------------------------------------------------------
         ```
 
         Abbrivations:
@@ -273,10 +265,13 @@ class KVCacheManager:
         new_comp  = num_new_computed_tokens
                   = len(new_computed_blocks) * block_size
         ext_comp  = num_external_computed_tokens, cached by the connector
-        new       = num_new_tokens
+        new       = num_new_tokens, including unverified draft tokens
         lookahead = num_lookahead_tokens
         ```
 
+        NOTE: for new tokens which include both verified and unverified draft
+        tokens, we only cache the verified tokens (by capping the number at
+        `request.num_tokens`).
 
         The allocation has three stages:
         - Free unnecessary blocks in `comp` and check
@@ -290,15 +285,8 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        if (
-            num_new_tokens == 0
-            and num_lookahead_tokens == 0
-            and num_external_computed_tokens == 0
-        ):
-            raise ValueError(
-                "At least one of num_new_tokens, num_lookahead_tokens, or "
-                "num_external_computed_tokens must be greater than 0"
-            )
+        if num_new_tokens == 0:
+            raise ValueError("num_new_tokens must be greater than 0")
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
@@ -347,27 +335,21 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_block_list)
-        else:
-            assert not any(new_computed_block_list), (
-                "Computed blocks should be empty when prefix caching is disabled"
-            )
-
-        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+        if (
+            new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+            or num_external_computed_tokens > 0
+        ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.save_new_computed_blocks(
                 request_id=request.request_id,
                 new_computed_blocks=new_computed_block_list,
-                total_computed_tokens=num_local_computed_tokens
-                + num_external_computed_tokens,
+                num_local_computed_tokens=num_local_computed_tokens,
+                num_external_computed_tokens=num_external_computed_tokens,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,
-            num_new_blocks_to_allocate,
             num_tokens_need_slot,
             num_encoder_tokens,
         )
