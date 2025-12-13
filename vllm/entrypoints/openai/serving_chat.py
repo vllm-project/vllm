@@ -311,11 +311,14 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
+                cache_hit_threshold = request.cache_hit_threshold
+
                 self._log_inputs(
                     sub_request_id,
                     request_prompts[i],
                     params=sampling_params,
                     lora_request=lora_request,
+                    cache_hit_threshold=cache_hit_threshold,
                 )
 
                 trace_headers = (
@@ -340,6 +343,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        cache_hit_threshold=request.cache_hit_threshold,
                     )
 
                     generator = self.engine_client.generate(
@@ -352,6 +356,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
+                        cache_hit_threshold=request.cache_hit_threshold,
                     )
 
                 generators.append(generator)
