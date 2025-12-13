@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
@@ -14,9 +15,6 @@ if TYPE_CHECKING:
     )
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
     from transformers import BatchEncoding
-
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-    from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
     try:
         # Transformers v5
@@ -201,7 +199,6 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-@TokenizerRegistry.register("mistral")
 class MistralTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(

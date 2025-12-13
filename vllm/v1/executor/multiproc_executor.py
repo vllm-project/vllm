@@ -292,8 +292,8 @@ class MultiprocExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-        kv_output_aggregator: KVOutputAggregator = None,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
@@ -474,6 +474,8 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    rpc_broadcast_mq: MessageQueue | None
+    worker_response_mq: MessageQueue | None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -485,7 +487,7 @@ class WorkerProc:
             )
 
             # Initializes a message queue for sending the model output
-            self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+            self.worker_response_mq = MessageQueue(1, 1)
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
@@ -718,6 +720,7 @@ class WorkerProc:
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
+            assert worker.worker_response_mq is not None
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -802,6 +805,7 @@ class WorkerProc:
 
     def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
+        assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True
