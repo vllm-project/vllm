@@ -1563,13 +1563,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           unsigned int kOff = k + (thrd * A_CHUNK);
           unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
           constexpr int unrl = N / sprdN;
-          bigType tmp[unrl];
-          for (unsigned int n = 0; n < unrl; n++) {
-            tmp[n].h8 = *(
-                (scalar8*)(&A[kOffcp +
-                              K * min__(actlN - 1,
-                                        n + (unrl * (threadIdx.y % sprdN)))]));
-          }
+          const unsigned int k_in = kOffcp + (unrl * (threadIdx.y % sprdN)) * K;
+          const unsigned int k_ot =
+              kOff + (unrl * (threadIdx.y % sprdN)) * kFitPdd;
+          for (unsigned int n = 0; n < unrl; n++)
+            __builtin_amdgcn_global_load_lds((int*)(&A[k_in + n * K]),
+                                             (int*)(&s[(k_ot + n * kFitPdd)]),
+                                             16, 0, 0);
 
           // Stage loaded B[] to LDS for MFMA swizzling...
           for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -1586,12 +1586,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       : bigB_[y][k2].h8;
             }
           }
-
-          const unsigned int k_ot =
-              kOff + (unrl * (threadIdx.y % sprdN)) * kFitPdd;
-          for (unsigned int n = 0; n < unrl; n++)
-            if ((unrl * (threadIdx.y % sprdN)) + n <= actlN)
-              *((scalar8*)(&s[k_ot + n * kFitPdd])) = tmp[n].h8;
         }
       }
     }
