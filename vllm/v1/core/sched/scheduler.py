@@ -272,6 +272,14 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
+            # >>> latency-aware scheduling BEGIN
+            # When there are waiting requests, cap prefill token admission for running
+            # requests to reduce tail latency caused by long prefill monopolization.
+            if self.waiting and request.num_computed_tokens < request.num_prompt_tokens:
+                latency_cap = max(1, token_budget // max(2, len(self.running)))
+                num_new_tokens = min(num_new_tokens, latency_cap)
+            # <<< latency-aware scheduling END
+
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             num_new_tokens = min(
