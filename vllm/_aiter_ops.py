@@ -54,28 +54,6 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
-def is_aiter_enabled() -> bool:
-    """Check if AITER is available and enabled.
-
-    Returns True if:
-    - aiter package is found
-    - Platform is ROCm on gfx9 architecture
-    - VLLM_ROCM_USE_AITER environment variable is enabled
-    """
-    if not IS_AITER_FOUND:
-        return False
-
-    if not current_platform.is_rocm():
-        return False
-
-    from vllm.platforms.rocm import on_gfx9
-
-    if not on_gfx9():
-        return False
-
-    return envs.VLLM_ROCM_USE_AITER
-
-
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

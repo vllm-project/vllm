@@ -194,9 +194,9 @@ class RocmPlatform(Platform):
     ) -> AttentionBackendEnum:
         from importlib.util import find_spec
 
-        from vllm._aiter_ops import is_aiter_enabled
+        from vllm._aiter_ops import rocm_aiter_ops
 
-        if is_aiter_enabled():
+        if rocm_aiter_ops.is_enabled():
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
