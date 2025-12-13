@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+EPLBPolicyOption = Literal["default"]
 
 
 @config
@@ -60,6 +61,13 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+    use_async: bool = False
+    """
+    Whether to use non-blocking EPLB.
+    """
+
+    policy: EPLBPolicyOption = "default"
+    """The policy type for expert parallel load balancing (EPLB)."""
 
 
 @config
@@ -137,22 +145,6 @@ class ParallelConfig:
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
-    num_redundant_experts: int | None = None
-    """`num_redundant_experts` is deprecated and has been replaced with
-    `eplb_config.num_redundant_experts`. This will be removed in v0.12.0.
-    Please use `eplb_config.num_redundant_experts` instead."""
-    eplb_window_size: int | None = None
-    """`eplb_window_size` is deprecated and has been replaced with
-    `eplb_config.window_size`. This will be removed in v0.12.0.
-    Please use `eplb_config.window_size` instead."""
-    eplb_step_interval: int | None = None
-    """`eplb_step_interval` is deprecated and has been replaced with
-    `eplb_config.step_interval`. This will be removed in v0.12.0.
-    Please use `eplb_config.step_interval` instead."""
-    eplb_log_balancedness: bool | None = None
-    """`eplb_log_balancedness` is deprecated and has been replaced with
-    `eplb_config.log_balancedness`. This will be removed in v0.12.0.
-    Please use `eplb_config.log_balancedness` instead."""
 
     max_parallel_loading_workers: int | None = None
     """Maximum number of parallel loading workers when loading model
@@ -192,13 +184,14 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model
-    workers, either "ray" or "mp" (multiprocessing). If the product
-    of pipeline_parallel_size and tensor_parallel_size is less than
-    or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, this will default
-    to "ray" if Ray is installed and fail otherwise. Note that tpu
-    only support Ray for distributed inference."""
+    """Backend to use for distributed model workers, either "ray" or "mp"
+    (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
+    is less than or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, an error will be raised. To use "mp"
+    you must also set nnodes, and to use "ray" you must manually set
+    distributed_executor_backend to "ray".
+
+    Note that tpu only support Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -250,9 +243,9 @@ class ParallelConfig:
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP or PCP.
     For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
-        and `total_cp_world_size = pcp_world_size * dcp_world_szie`.
+        and `total_cp_world_size = pcp_world_size * dcp_world_size`.
     store interleave_size tokens on total_cp_rank i,
-    then store next interleave_size tokens on taotal_cp_rank i+1.
+    then store next interleave_size tokens on total_cp_rank i+1.
     Interleave_size=1: token-level alignment, where token `i` is stored on
         total_cp_rank `i % total_cp_world_size`.
     Interleave_size=block_size: block-level alignment, where tokens are
@@ -324,11 +317,6 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        if self.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "Prefill context parallelism is not fully supported. "
-                "Please set prefill_context_parallel_size to 1."
-            )
         return self
 
     @property
@@ -512,40 +500,6 @@ class ParallelConfig:
                     "--all2all-backend command-line argument instead."
                 )
 
-        # Forward deprecated fields to their new location
-        if self.num_redundant_experts is not None:
-            self.eplb_config.num_redundant_experts = self.num_redundant_experts
-            logger.warning_once(
-                "num_redundant_experts is deprecated and has been replaced "
-                "with eplb_config.num_redundant_experts. This will be removed "
-                "in v0.12.0. Changing this field after initialization will "
-                "have no effect."
-            )
-        if self.eplb_window_size is not None:
-            self.eplb_config.window_size = self.eplb_window_size
-            logger.warning_once(
-                "eplb_window_size is deprecated and has been replaced "
-                "with eplb_config.window_size. This will be removed "
-                "in v0.12.0. Changing this field after initialization will "
-                "have no effect."
-            )
-        if self.eplb_step_interval is not None:
-            self.eplb_config.step_interval = self.eplb_step_interval
-            logger.warning_once(
-                "eplb_step_interval is deprecated and has been replaced "
-                "with eplb_config.step_interval. This will be removed "
-                "in v0.12.0. Changing this field after initialization will "
-                "have no effect."
-            )
-        if self.eplb_log_balancedness is not None:
-            self.eplb_config.log_balancedness = self.eplb_log_balancedness
-            logger.warning_once(
-                "eplb_log_balancedness is deprecated and has been replaced "
-                "with eplb_config.log_balancedness. This will be removed "
-                "in v0.12.0. Changing this field after initialization will "
-                "have no effect."
-            )
-
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size
@@ -608,8 +562,11 @@ class ParallelConfig:
             ):
                 gpu_count = cuda_device_count_stateless()
                 raise ValueError(
-                    f"Tensor parallel size ({self.world_size}) cannot be "
-                    f"larger than the number of available GPUs ({gpu_count})."
+                    f"World size ({self.world_size}) is larger than the number of "
+                    f"available GPUs ({gpu_count}) in this node. If this is "
+                    "intentional and you are using:\n"
+                    "- ray, set '--distributed-executor-backend ray'.\n"
+                    "- multiprocessing, set '--nnodes' appropriately."
                 )
             elif self.data_parallel_backend == "ray":
                 logger.info(
@@ -639,9 +596,14 @@ class ParallelConfig:
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
             )
-        if self.distributed_executor_backend != "mp" and self.nnodes > 1:
+        allowed_backends = ("mp", "uni", "external_launcher")
+        if (
+            self.distributed_executor_backend not in allowed_backends
+            and self.nnodes > 1
+        ):
             raise ValueError(
-                "nnodes > 1 can only be set when distributed exectuor backend is mp."
+                "nnodes > 1 can only be set when distributed executor "
+                "backend is mp, uni or external_launcher."
             )
 
     @property

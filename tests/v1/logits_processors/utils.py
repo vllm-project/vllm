@@ -27,7 +27,7 @@ DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_MODULE = "DummyModule"
+DUMMY_LOGITPROC_MODULE = "tests.v1.logits_processors.utils"
 DUMMY_LOGITPROC_FQCN = f"{DUMMY_LOGITPROC_MODULE}:DummyLogitsProcessor"
 
 
