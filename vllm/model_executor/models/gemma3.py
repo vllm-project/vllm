@@ -23,7 +23,8 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -175,7 +176,6 @@ class Gemma3Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=True,

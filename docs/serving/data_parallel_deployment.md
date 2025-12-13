@@ -24,7 +24,7 @@ There are two distinct modes supported for online deployments - self-contained w
 
 vLLM supports "self-contained" data parallel deployments that expose a single API endpoint.
 
-It can be configured by simply including e.g. `--data-parallel-size=4` in the vllm serve command line arguments. This will require 4 GPUs. It can be combined with tensor parallel, for example `--data-parallel-size=4 --tensor-parallel-size=2`, which would require 8 GPUs.
+It can be configured by simply including e.g. `--data-parallel-size=4` in the vllm serve command line arguments. This will require 4 GPUs. It can be combined with tensor parallel, for example `--data-parallel-size=4 --tensor-parallel-size=2`, which would require 8 GPUs. When sizing DP deployments, remember that `--max-num-seqs` applies per DP rank.
 
 Running a single data parallel deployment across multiple nodes requires a different `vllm serve` to be run on each node, specifying which DP ranks should run on that node. In this case, there will still be a single HTTP entrypoint - the API server(s) will run only on one node, but it doesn't necessarily need to be co-located with the DP ranks.
 
@@ -79,6 +79,18 @@ When deploying large DP sizes using this method, the API server process can beco
 <figure markdown="1">
 ![DP Internal LB Diagram](../assets/deployment/dp_internal_lb.png)
 </figure>
+
+## Hybrid Load Balancing
+
+Hybrid load balancing sits between the internal and external approaches. Each node runs its own API server(s) that only queue requests to the data-parallel engines colocated on that node. An upstream load balancer (for example, an ingress controller or traffic router) spreads user requests across those per-node endpoints.
+
+Enable this mode with `--data-parallel-hybrid-lb` while still launching every node with the global data-parallel size. The key differences from internal load balancing are:
+
+- You must provide `--data-parallel-size-local` and `--data-parallel-start-rank` so each node knows which ranks it owns.
+- Not compatible with `--headless` since every node exposes an API endpoint.
+- Scale `--api-server-count` per node based on the number of local ranks
+
+In this configuration, each node keeps scheduling decisions local, which reduces cross-node traffic and avoids single node bottlenecks at larger DP sizes.
 
 ## External Load Balancing
 

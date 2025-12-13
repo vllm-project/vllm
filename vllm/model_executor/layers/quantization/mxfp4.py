@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from enum import Enum
 from typing import Optional
 
@@ -8,6 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -36,6 +37,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
@@ -82,8 +86,21 @@ def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     if not current_platform.is_cuda():
         return Mxfp4Backend.NONE
 
-    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
-    return Mxfp4Backend.MARLIN
+    # If FlashInfer is not available, try either Marlin or Triton
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and is_torch_equal_or_newer("2.8.0")
+        # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+        # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+        # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+        and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+    )
+    if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+        return Mxfp4Backend.MARLIN
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+    return Mxfp4Backend.TRITON
 
 
 def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
@@ -184,8 +201,6 @@ class Mxfp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,
@@ -206,7 +221,9 @@ class Mxfp4Config(QuantizationConfig):
             if current_platform.is_xpu():
                 return IpexMxfp4MoEMethod(layer.moe_config)
             else:
-                return Mxfp4MoEMethod(layer.moe_config)
+                quant_method = Mxfp4MoEMethod(layer.moe_config)
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                return quant_method
         elif isinstance(layer, Attention):
             # TODO: Add support for MXFP4 Attention.
             logger.debug_once(
@@ -221,6 +238,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+
+        self.marlin_input_dtype = None
         self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
@@ -386,7 +405,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         elif (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -855,6 +874,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
                 return MarlinExperts(self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
+                if self.moe.is_lora_enabled:
+                    return UnfusedOAITritonExperts(self.moe_quant_config)
                 return OAITritonExperts(self.moe_quant_config)
             else:
                 raise NotImplementedError(
@@ -870,25 +891,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
+        if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
@@ -911,25 +915,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_scale1=None,
                 global_scale2=None,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                activation=activation,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                activation=layer.activation,
+                expert_map=layer.expert_map,
+                input_dtype=self.marlin_input_dtype,
             )
 
         assert _can_support_mxfp4(
-            use_grouped_topk,
-            topk_group,
-            num_expert_group,
-            expert_map,
-            custom_routing_function,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            scoring_func,
-            activation,
-            expert_load_view,
-            logical_to_physical_map,
-            logical_replica_count,
+            layer.use_grouped_topk,
+            layer.topk_group,
+            layer.num_expert_group,
+            layer.expert_map,
+            layer.custom_routing_function,
+            layer.e_score_correction_bias,
+            layer.apply_router_weight_on_input,
+            layer.scoring_func,
+            layer.activation,
+            layer.expert_load_view,
+            layer.logical_to_physical_map,
+            layer.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
@@ -965,8 +970,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,  # output1_scale_scalar
                 None,  # output1_scale_gate_scalar
                 None,  # output2_scale_scalar
-                global_num_experts,
-                top_k,
+                layer.global_num_experts,
+                layer.top_k,
                 None,  # n_group
                 None,  # topk_group
                 self.intermediate_size,  # padded to multiple of 256
@@ -974,7 +979,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.num_experts,  # local num experts
                 None,
                 None,
-                1 if renormalize else 0,  # routing_method_type, renormalize
+                1 if layer.renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]
@@ -1058,12 +1063,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
@@ -1115,37 +1120,20 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert activation == "swigluoai", (
+        assert layer.activation == "swigluoai", (
             "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
         )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
         hidden_states = layer.ipex_fusion(
             x_pad,
-            use_grouped_topk,
-            top_k,
+            layer.use_grouped_topk,
+            layer.top_k,
             router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
+            layer.renormalize,
+            layer.topk_group,
+            layer.num_expert_group,
             activation="swiglu_oai",
         )
         hidden_states = hidden_states[..., : self.original_hidden_size].contiguous()

@@ -131,7 +131,7 @@ class SymmMemCommunicator:
             return None
         if out is None:
             out = torch.empty_like(inp)
-        self.buffer[: inp.numel()].copy_(inp.reshape(-1))
+        self.buffer[: inp.numel()].copy_(inp.view(-1))
 
         # Determine which algorithm to use
         use_multimem = False

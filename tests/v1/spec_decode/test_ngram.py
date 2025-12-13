@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 
-from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
+from vllm.config import (
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.v1.spec_decode.ngram_proposer import (
     NgramProposer,
     _find_longest_matched_ngram_and_propose_tokens,
@@ -166,6 +170,34 @@ def test_ngram_proposer():
     assert len(result[0]) == 2
     assert np.array_equal(result[0], np.array([3, 1]))
     assert np.array_equal(result[1], np.array([]))
+
+    # Test non-contiguous indices: requests 0 and 2 need proposals,
+    # request 1 is in prefill
+    proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
+    max_model_len = 20
+    token_ids_cpu = np.zeros((3, max_model_len), dtype=np.int32)
+    token_ids_cpu[0, :5] = [1, 2, 3, 1, 2]
+    token_ids_cpu[1, :3] = [4, 5, 6]
+    token_ids_cpu[2, :5] = [7, 8, 9, 7, 8]
+    num_tokens_no_spec = np.array([5, 3, 5], dtype=np.int32)
+    sampled_token_ids = [[2], [], [8]]  # Empty list for request 1 simulates prefill
+    result = proposer.propose(
+        sampled_token_ids=sampled_token_ids,
+        req_ids=["0", "1", "2"],
+        num_tokens_no_spec=num_tokens_no_spec,
+        token_ids_cpu=token_ids_cpu,
+        spec_decode_unsupported_reqs=(),
+    )
+    assert len(result) == 3
+    assert np.array_equal(result[0], [3, 1])
+    assert len(result[1]) == 0
+    assert np.array_equal(result[2], [9, 7])
+    # Verify internal arrays written to correct indices
+    assert proposer.valid_ngram_num_drafts[0] == 2
+    assert proposer.valid_ngram_num_drafts[1] == 0
+    assert proposer.valid_ngram_num_drafts[2] == 2
+    assert np.array_equal(proposer.valid_ngram_draft[0, :2], [3, 1])
+    assert np.array_equal(proposer.valid_ngram_draft[2, :2], [9, 7])
 
     # test if 0 threads available: can happen if TP size > CPU count
     ngram_proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
