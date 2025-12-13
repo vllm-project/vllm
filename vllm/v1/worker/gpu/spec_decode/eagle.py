@@ -100,7 +100,7 @@ class EagleSpeculator:
     def set_attn(
         self,
         kv_cache_config: KVCacheConfig,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_metadata_builders: list[AttentionMetadataBuilder | None],
         block_tables: BlockTables,
     ) -> None:
         self.kv_cache_config = kv_cache_config
