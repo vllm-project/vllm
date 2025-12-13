@@ -149,6 +149,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
@@ -169,7 +170,6 @@ from .utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     gather_mm_placeholders,
-    get_mamba_groups,
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
@@ -1056,7 +1056,14 @@ class GPUModelRunner(
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         if self.cache_config.mamba_cache_mode == "align":
-            self._postprocess_mamba(scheduler_output)
+            mamba_utils.postprocess_mamba(
+                scheduler_output,
+                self.kv_cache_config,
+                self.input_batch,
+                self.requests,
+                self.mamba_state_idx,
+                self.compilation_config.static_forward_context,
+            )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -2923,176 +2930,6 @@ class GPUModelRunner(
                     for kv_cache_part in kv_cache:
                         kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
 
-    def _preprocess_mamba(self, scheduler_output: "SchedulerOutput"):
-        """
-        Copy the mamba state of previous step to the last
-        (1 + num_speculative_blocks) block.
-        """
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
-        num_speculative_blocks = mamba_spec.num_speculative_blocks
-        # TODO(Chen): we need to optimize this function a lot
-        assert self.cache_config.enable_prefix_caching
-        block_size = mamba_spec.block_size
-        finished_req_ids = scheduler_output.finished_req_ids
-        preempted_req_ids = scheduler_output.preempted_req_ids or set()
-        for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
-            self.mamba_state_idx.pop(req_id, None)
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            req_state = self.requests[req_id]
-            prev_state_idx = self.mamba_state_idx.get(req_id)
-            if prev_state_idx is None:
-                # new / resumed request, no previous state
-                # if num_computed_tokens is 0, prev_state_idx will be -1
-                prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
-
-            num_blocks = len(req_state.block_ids[mamba_group_ids[0]])
-
-            # We always save the current running state at the last
-            # (1 + num_speculative_blocks) block.
-            # A corner case worth mention here: assume we have block_size = 4 and
-            # num_speculative_tokens = 2. The request is [A, B, C] and contains 2 draft
-            # tokens [draft 1, draft 2]. Then we will have:
-            # Block 0: [A, B, C, draft 1]
-            # Block 1: [draft 2, TOFILL, TOFILL, TOFILL]
-            # Block 2: speculative block
-            # Block 3: speculative block
-            # And use block 1 to save the running state.
-            curr_state_idx = num_blocks - 1 - num_speculative_blocks
-            self.mamba_state_idx[req_id] = curr_state_idx
-            if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-                self._mamba_copy_block_for_qwen_next(
-                    mamba_group_ids,
-                    prev_state_idx,
-                    curr_state_idx,
-                    self.input_batch.num_accepted_tokens_cpu[i] - 1,
-                    req_state,
-                )
-                self.input_batch.num_accepted_tokens_cpu[i] = 1
-
-    def _mamba_copy_block_for_qwen_next(
-        self,
-        kv_cache_group_ids: list[int],
-        src_block_idx: int,
-        dest_block_idx: int,
-        accept_token_bias: int,
-        req_state: CachedRequestState,
-    ):
-        # TODO: general impl for all models
-        if src_block_idx == dest_block_idx and accept_token_bias == 0:
-            return
-        forward_context = self.compilation_config.static_forward_context
-        for kv_cache_group_id in kv_cache_group_ids:
-            block_ids = req_state.block_ids[kv_cache_group_id]
-            dest_block_id = block_ids[dest_block_idx]
-            layer_names = self.kv_cache_config.kv_cache_groups[
-                kv_cache_group_id
-            ].layer_names
-            for layer_name in layer_names:
-                kv_caches: list[list[torch.Tensor]] = forward_context[
-                    layer_name
-                ].kv_cache[0]
-                conv_state, gdn_state = kv_caches
-                # conv state
-                conv_state_block_id = block_ids[src_block_idx]
-                src_conv_state = conv_state[conv_state_block_id][accept_token_bias:]
-                dest_conv_state = conv_state[dest_block_id]
-                dest_conv_state[: len(src_conv_state)].copy_(src_conv_state.clone())
-                # gdn state
-                gdn_state_block_id = block_ids[src_block_idx + accept_token_bias]
-                src_gdn_state = gdn_state[gdn_state_block_id]
-                dest_gdn_state = gdn_state[dest_block_id]
-                dest_gdn_state.copy_(src_gdn_state)
-                if is_global_first_rank() and layer_name == layer_names[0]:
-                    logger.info(
-                        ">>> [DEBUG] Worker: mamba_copy_block_for_qwen_next: "
-                        "layer_name=%s, idx %s -> %s conv %s -> %s with bias %s, "
-                        "gdn %s -> %s",
-                        layer_name,
-                        src_block_idx,
-                        dest_block_idx,
-                        conv_state_block_id,
-                        dest_block_id,
-                        accept_token_bias,
-                        gdn_state_block_id,
-                        dest_block_id,
-                    )
-
-    def _postprocess_mamba(self, scheduler_output: "SchedulerOutput"):
-        """
-        1. If a blocks is converted from partial block to full block in this step, copy
-        2. Unify the state after token acceptance
-           the state from mamba_state_idx to that block
-        """
-        num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
-        scheduled_spec_decode_tokens_dict = (
-            scheduler_output.scheduled_spec_decode_tokens
-        )
-        num_accepted_tokens_cpu = self.input_batch.num_accepted_tokens_cpu
-        if is_global_first_rank():
-            logger.info(
-                ">>> [DEBUG] Worker: postprocess mamba num_scheduled_tokens=%s "
-                "scheduled_spec_decode_tokens=%s num_accepted_tokens_cpu=%s",
-                num_scheduled_tokens_dict,
-                scheduled_spec_decode_tokens_dict,
-                num_accepted_tokens_cpu,
-            )
-        # NOTE: can be optimized as this function always returns the same result
-        mamba_group_ids, mamba_spec = get_mamba_groups(self.kv_cache_config)
-        # TODO: vectorize this loop
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            req_state = self.requests[req_id]
-            num_computed_tokens = req_state.num_computed_tokens
-            num_draft_tokens = len(scheduled_spec_decode_tokens_dict.get(req_id, []))
-            num_scheduled_tokens = num_scheduled_tokens_dict[req_id]
-            num_accepted_tokens = num_accepted_tokens_cpu[i]
-            num_tokens_running_state = (
-                num_computed_tokens + num_scheduled_tokens - num_draft_tokens
-            )
-            new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens - 1
-            aligned_new_computed_tokens = (
-                new_num_computed_tokens // mamba_spec.block_size * mamba_spec.block_size
-            )
-            if is_global_first_rank():
-                logger.info(
-                    ">>> [DEBUG] Worker: postprocess mamba: req=%s comp=%s "
-                    "sched=%s draft=%s accepted=%s run_state=%s new=%s aligned=%s",
-                    req_id,
-                    num_computed_tokens,
-                    num_scheduled_tokens,
-                    num_draft_tokens,
-                    num_accepted_tokens,
-                    num_tokens_running_state,
-                    new_num_computed_tokens,
-                    aligned_new_computed_tokens,
-                )
-            # TODO: how to ensure all blocks that cache_blocks called are cached here?
-            if aligned_new_computed_tokens >= num_tokens_running_state:
-                accept_token_bias = (
-                    aligned_new_computed_tokens - num_tokens_running_state
-                )
-                src_block_idx = self.mamba_state_idx[req_id]
-                dest_block_idx = (
-                    aligned_new_computed_tokens // mamba_spec.block_size - 1
-                )
-                if is_global_first_rank():
-                    logger.info(
-                        ">>> [DEBUG] Worker: postprocess mamba copy: req_id=%s, "
-                        "%s -> %s with bias %s",
-                        req_id,
-                        src_block_idx,
-                        dest_block_idx,
-                        accept_token_bias,
-                    )
-                self._mamba_copy_block_for_qwen_next(
-                    mamba_group_ids,
-                    src_block_idx,
-                    dest_block_idx,
-                    accept_token_bias,
-                    req_state,
-                )
-                if src_block_idx == dest_block_idx:
-                    num_accepted_tokens_cpu[i] = 1
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3222,8 +3059,15 @@ class GPUModelRunner(
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                 if self.cache_config.mamba_cache_mode == "align":
-                    # TODO: add limition: preprocess only have new blocks
-                    self._preprocess_mamba(scheduler_output)
+                    mamba_utils.preprocess_mamba(
+                        scheduler_output,
+                        self.kv_cache_config,
+                        self.cache_config,
+                        self.mamba_state_idx,
+                        self.input_batch,
+                        self.requests,
+                        self.compilation_config.static_forward_context,
+                    )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices

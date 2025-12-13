@@ -3,23 +3,28 @@
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams, TokensPrompt
+from vllm.config import CacheConfig
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine.core_client import InprocClient
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.request import Request
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import get_mamba_groups
+from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
+from vllm.v1.worker.mamba_utils import get_mamba_groups
 
 
 @dataclass
@@ -272,45 +277,73 @@ def get_fake_process_mamba_fn(
     copy_info = (-1, -1)
 
     def fake_preprocess_mamba_fn(
-        self: GPUModelRunner, scheduler_output: SchedulerOutput
+        scheduler_output: SchedulerOutput,
+        kv_cache_config: KVCacheConfig,
+        cache_config: CacheConfig,
+        mamba_state_idx: dict[str, int],
+        input_batch: GPUInputBatch,
+        requests: dict[str, CachedRequestState],
+        forward_context: dict[str, Any],
     ):
         nonlocal copy_info
         copy_info = (-1, -1)
-        ret = original_preprocess_mamba_fn(self, scheduler_output)
+        ret = original_preprocess_mamba_fn(
+            scheduler_output,
+            kv_cache_config,
+            cache_config,
+            mamba_state_idx,
+            input_batch,
+            requests,
+            forward_context,
+        )
         if cur_step_action is not None:
             print("[UNIT TEST STEP] verifying preprocess_copy_idx")
             assert copy_info == cur_step_action.preprocess_copy_idx
         return ret
 
     def fake_post_process_mamba_fn(
-        self: GPUModelRunner, scheduler_output: SchedulerOutput
+        scheduler_output: SchedulerOutput,
+        kv_cache_config: KVCacheConfig,
+        input_batch: GPUInputBatch,
+        requests: dict[str, CachedRequestState],
+        mamba_state_idx: dict[str, int],
+        forward_context: dict[str, Any],
     ):
         nonlocal copy_info
         copy_info = (-1, -1)
-        ret = original_post_process_mamba_fn(self, scheduler_output)
+        ret = original_post_process_mamba_fn(
+            scheduler_output,
+            kv_cache_config,
+            input_batch,
+            requests,
+            mamba_state_idx,
+            forward_context,
+        )
         if cur_step_action is not None:
             print("[UNIT TEST STEP] verifying postprocess_copy_idx")
             assert copy_info == cur_step_action.postprocess_copy_idx
         return ret
 
     def fake_copy_fn(
-        self: GPUModelRunner,
-        kv_cache_group_ids: list[int],
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
         src_block_idx: int,
         dest_block_idx: int,
         accept_token_bias: int,
         req_state: CachedRequestState,
+        forward_context: dict[str, Any],
     ):
         nonlocal copy_info
         assert copy_info == (-1, -1)
         copy_info = (src_block_idx, dest_block_idx)
         return original_copy_fn(
-            self,
-            kv_cache_group_ids,
+            kv_cache_config,
+            mamba_group_ids,
             src_block_idx,
             dest_block_idx,
             accept_token_bias,
             req_state,
+            forward_context,
         )
 
     return fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn
@@ -417,16 +450,14 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
     fake_preprocess_mamba_fn, fake_post_process_mamba_fn, fake_copy_fn = (
         get_fake_process_mamba_fn(
-            GPUModelRunner._preprocess_mamba,
-            GPUModelRunner._postprocess_mamba,
-            GPUModelRunner._mamba_copy_block_for_qwen_next,
+            mamba_utils.preprocess_mamba,
+            mamba_utils.postprocess_mamba,
+            mamba_utils.mamba_copy_block_for_qwen_next,
         )
     )
-    monkeypatch.setattr(GPUModelRunner, "_preprocess_mamba", fake_preprocess_mamba_fn)
-    monkeypatch.setattr(
-        GPUModelRunner, "_postprocess_mamba", fake_post_process_mamba_fn
-    )
-    monkeypatch.setattr(GPUModelRunner, "_mamba_copy_block_for_qwen_next", fake_copy_fn)
+    monkeypatch.setattr(mamba_utils, "preprocess_mamba", fake_preprocess_mamba_fn)
+    monkeypatch.setattr(mamba_utils, "postprocess_mamba", fake_post_process_mamba_fn)
+    monkeypatch.setattr(mamba_utils, "mamba_copy_block_for_qwen_next", fake_copy_fn)
 
 
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
