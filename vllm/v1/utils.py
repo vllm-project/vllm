@@ -25,8 +25,11 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import kill_process_tree
+from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.stats import IterationStats
 
 if TYPE_CHECKING:
     import numpy as np
@@ -412,3 +415,24 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
         A memoryview of the tensor data as uint8.
     """
     return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+
+
+def record_aborted_requests(logger_manager, request_states_to_abort):
+    if not logger_manager:
+        return
+
+    for req_state in request_states_to_abort:
+        # Create a new iteration stats object for each aborted request.
+        iteration_stats = IterationStats()
+        iteration_stats.update_from_finished_request(
+            finish_reason=FinishReason.ABORT,
+            num_prompt_tokens=length_from_prompt_token_ids_or_embeds(
+                req_state.prompt_token_ids, req_state.prompt_embeds
+            ),
+            max_tokens_param=req_state.max_tokens_param,
+            req_stats=req_state.stats,
+        )
+        logger_manager.record(
+            scheduler_stats=None,
+            iteration_stats=iteration_stats,
+        )
