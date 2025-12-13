@@ -183,7 +183,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # Note: This will produce an incorrect answer if we don't make
         # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
-        input_tensor = input_.movedim(0, dim).contiguous()
+        input_tensor = input_.movedim(dim, 0).contiguous()
 
         assert input_tensor.shape[0] % world_size == 0
         chunk_size = input_tensor.shape[0] // world_size
@@ -210,7 +210,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         # Note: This will produce an incorrect answer if we don't make
         # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
-        input_tensor = input_.movedim(0, dim).contiguous()
+        input_tensor = input_.movedim(dim, 0).contiguous()
 
         if sizes is not None:
             assert len(sizes) == world_size
