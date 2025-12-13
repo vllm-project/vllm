@@ -1329,8 +1329,11 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
-        self.use_marlin = (current_platform.is_cuda and 
-                           current_platform.has_device_capability(89))
+        self.use_marlin = (
+            current_platform.is_cuda() and
+            (not current_platform.has_device_capability(89) or
+             envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        )
 
     def create_weights(
         self,
