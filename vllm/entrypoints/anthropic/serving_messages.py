@@ -9,18 +9,24 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Literal
 
+import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
+    AnthropicContextManagement,
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicDelta,
     AnthropicError,
+    AnthropicMessage,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicStreamEvent,
+    AnthropicToolChoice,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -83,8 +89,54 @@ class AnthropicServingMessages(OpenAIServingChat):
             "tool_calls": "tool_use",
         }
 
+    def _validate_anthropic_request(
+        self,
+        *,
+        messages: list[AnthropicMessage],
+        tool_choice: AnthropicToolChoice | None,
+    ) -> ErrorResponse | None:
+        if not messages:
+            return self.create_error_response("messages must contain at least one item")
+
+        if any(
+            isinstance(msg.content, list) and len(msg.content) == 0
+            for msg in messages  # type: ignore[arg-type]
+        ):
+            return self.create_error_response("message content must not be empty")
+
+        if (
+            tool_choice is not None
+            and tool_choice.type == "tool"
+            and not tool_choice.name
+        ):
+            return self.create_error_response(
+                "tool_choice.name is required when tool_choice.type is 'tool'"
+            )
+
+        return None
+
+    def _convert_tool_choice(
+        self, tool_choice: AnthropicToolChoice | None
+    ) -> ChatCompletionNamedToolChoiceParam | Literal["auto", "required"] | None:
+        if tool_choice is None:
+            return None
+        if tool_choice.type == "auto":
+            return "auto"
+        if tool_choice.type == "any":
+            return "required"
+        if tool_choice.type == "tool":
+            return ChatCompletionNamedToolChoiceParam.model_validate(
+                {
+                    "type": "function",
+                    "function": {"name": tool_choice.name},
+                }
+            )
+
+        return None
+
     def _convert_anthropic_to_openai_request(
-        self, anthropic_request: AnthropicMessagesRequest
+        self,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages = []
@@ -166,40 +218,29 @@ class AnthropicServingMessages(OpenAIServingChat):
                     else:
                         openai_msg["content"] = content_parts  # type: ignore
                 elif not tool_calls:
-                    continue
+                    openai_msg["content"] = ""
 
             openai_messages.append(openai_msg)
 
+        max_tokens = getattr(anthropic_request, "max_tokens", None)
         req = ChatCompletionRequest(
             model=anthropic_request.model,
             messages=openai_messages,
-            max_tokens=anthropic_request.max_tokens,
-            max_completion_tokens=anthropic_request.max_tokens,
+            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             stop=anthropic_request.stop_sequences,
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
         )
 
-        if anthropic_request.stream:
+        if getattr(anthropic_request, "stream", False):
             req.stream = anthropic_request.stream
             req.stream_options = StreamOptions.validate(
                 {"include_usage": True, "continuous_usage_stats": True}
             )
 
-        if anthropic_request.tool_choice is None:
-            req.tool_choice = None
-        elif anthropic_request.tool_choice.type == "auto":
-            req.tool_choice = "auto"
-        elif anthropic_request.tool_choice.type == "any":
-            req.tool_choice = "required"
-        elif anthropic_request.tool_choice.type == "tool":
-            req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate(
-                {
-                    "type": "function",
-                    "function": {"name": anthropic_request.tool_choice.name},
-                }
-            )
+        req.tool_choice = self._convert_tool_choice(anthropic_request.tool_choice)
 
         tools = []
         if anthropic_request.tools is None:
@@ -222,6 +263,78 @@ class AnthropicServingMessages(OpenAIServingChat):
         req.tools = tools
         return req
 
+    async def count_tokens(
+        self,
+        request: AnthropicCountTokensRequest,
+        raw_request: Request | None = None,
+    ) -> AnthropicCountTokensResponse | ErrorResponse:
+        """Implements Anthropic's messages.count_tokens endpoint."""
+
+        validation_error = self._validate_anthropic_request(
+            messages=request.messages,
+            tool_choice=request.tool_choice,
+        )
+        if validation_error is not None:
+            return validation_error
+
+        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req.stream = False
+        chat_req.stream_options = None
+        chat_req.max_tokens = None
+        chat_req.max_completion_tokens = None
+
+        error_check_ret = await self._check_model(chat_req)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            tokenizer = await self.engine_client.get_tokenizer()
+
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=chat_req.chat_template,
+                chat_template_kwargs=chat_req.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+
+            tool_dicts = (
+                None
+                if chat_req.tools is None
+                else [tool.model_dump() for tool in chat_req.tools]
+            )
+
+            _, _, engine_prompts = await self._preprocess_chat(
+                chat_req,
+                tokenizer,
+                chat_req.messages,
+                tool_dicts=tool_dicts,
+                chat_template=chat_req.chat_template or self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                add_generation_prompt=chat_req.add_generation_prompt,
+                continue_final_message=chat_req.continue_final_message,
+                chat_template_kwargs=chat_req.chat_template_kwargs,
+                add_special_tokens=chat_req.add_special_tokens,
+            )
+        except (ValueError, TypeError, jinja2.TemplateError) as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(f"{e} {e.__cause__}")
+
+        input_tokens = sum(
+            len(prompt["prompt_token_ids"])
+            for prompt in engine_prompts
+            if "prompt_token_ids" in prompt
+        )
+
+        response = AnthropicCountTokensResponse(
+            input_tokens=input_tokens,
+            context_management=AnthropicContextManagement(
+                original_input_tokens=input_tokens
+            ),
+        )
+
+        return response
+
     async def create_messages(
         self,
         request: AnthropicMessagesRequest,
@@ -235,6 +348,14 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
+
+        validation_error = self._validate_anthropic_request(
+            messages=request.messages,
+            tool_choice=request.tool_choice,
+        )
+        if validation_error is not None:
+            return validation_error
+
         chat_req = self._convert_anthropic_to_openai_request(request)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())

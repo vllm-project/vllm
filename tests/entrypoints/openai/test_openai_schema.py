@@ -89,8 +89,11 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                         content = message.get("content", [])
                         if (
                             isinstance(content, list)
-                            and len(content) > 0
-                            and any(item.get("type") == "file" for item in content)
+                            and content
+                            and any(
+                                isinstance(item, dict) and item.get("type") == "file"
+                                for item in content
+                            )
                         ):
                             return False
 
