@@ -146,7 +146,7 @@ class MistralToolParser(ToolParser):
             try:
                 if not self._is_pre_v11:
                     function_call_arr = []
-                    for single_tool_content in model_output.split(self.bot_token):
+                    for single_tool_content in model_output.split(self.bot_token)[1:]:
                         if "{" not in single_tool_content:
                             continue
 

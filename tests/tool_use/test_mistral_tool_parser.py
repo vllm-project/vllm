@@ -676,7 +676,7 @@ def test_extract_tool_calls_streaming(
         ),
         (
             # Complex
-            """[TOOL_CALLS]bash{"command": "print(\\"hello world!\\")\\nre.compile(r\'{}\')"}""",  # noqa: E501
+            """hi{hi[TOOL_CALLS]bash{"command": "print(\\"hello world!\\")\\nre.compile(r\'{}\')"}""",  # noqa: E501
             [
                 ToolCall(
                     function=FunctionCall(
@@ -687,7 +687,7 @@ def test_extract_tool_calls_streaming(
                     )
                 )
             ],
-            "",
+            "hi{hi",
         ),
     ],
 )
