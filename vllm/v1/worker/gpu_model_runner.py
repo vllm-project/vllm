@@ -2246,6 +2246,10 @@ class GPUModelRunner(
                     curr_embeds_start, curr_embeds_end = (
                         pos_info.get_embeds_indices_in_range(start_idx, end_idx)
                     )
+
+                    # If there are no embeddings in the current range, the request
+                    # should have never been scheduled.
+                    assert curr_embeds_start < curr_embeds_end
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]

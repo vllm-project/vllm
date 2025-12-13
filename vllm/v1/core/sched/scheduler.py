@@ -915,6 +915,7 @@ class Scheduler(SchedulerInterface):
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
+            num_encoder_embeds = mm_feature.mm_position.get_num_embeds
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -1003,20 +1004,19 @@ class Scheduler(SchedulerInterface):
                     end_idx_rel,
                 )
             )
-            curr_num_embeds = curr_embeds_end - curr_embeds_start
             # There's no embeddings in the current range of encoder placeholder tokens
             # so we can skip the encoder input.
-            if curr_num_embeds == 0:
+            if curr_embeds_end - curr_embeds_start == 0:
                 continue
 
             if self.ec_connector is not None and remote_cache_has_item[i]:
                 mm_hashes_to_schedule.add(request.mm_features[i].identifier)
                 external_load_encoder_input.append(i)
-                num_embeds_to_schedule += curr_num_embeds
+                num_embeds_to_schedule += num_encoder_embeds
                 continue
 
-            num_embeds_to_schedule += curr_num_embeds
-            encoder_compute_budget -= curr_num_embeds
+            num_embeds_to_schedule += num_encoder_embeds
+            encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule.add(request.mm_features[i].identifier)
             encoder_inputs_to_schedule.append(i)
 
