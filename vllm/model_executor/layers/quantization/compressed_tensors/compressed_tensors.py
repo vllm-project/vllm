@@ -757,7 +757,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
-        self._check_scheme_supported(scheme.get_min_capability())
+        self._check_scheme_supported(
+            scheme.get_min_capability(weight_quant=weight_quant)
+        )
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
         return scheme
 

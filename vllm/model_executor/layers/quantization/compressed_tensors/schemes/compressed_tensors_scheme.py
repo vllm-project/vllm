@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 
 __all__ = ["CompressedTensorsScheme"]
 

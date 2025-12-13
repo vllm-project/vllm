@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering, QuantizationArgs

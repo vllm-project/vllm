@@ -4,6 +4,7 @@
 from collections.abc import Callable
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 from torch.nn import Parameter
 
 from vllm import _custom_ops as ops

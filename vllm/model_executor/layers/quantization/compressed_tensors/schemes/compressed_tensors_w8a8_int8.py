@@ -4,7 +4,7 @@
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (

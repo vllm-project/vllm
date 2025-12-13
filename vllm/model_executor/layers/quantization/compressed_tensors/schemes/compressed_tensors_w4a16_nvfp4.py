@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
