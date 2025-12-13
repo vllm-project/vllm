@@ -316,10 +316,7 @@ class KVCacheManager:
             self.max_model_len,
         )
 
-        (
-            num_new_blocks_to_allocate,
-            num_evictable_blocks_to_allocate,
-        ) = self.coordinator.get_num_blocks_to_allocate(
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -327,11 +324,8 @@ class KVCacheManager:
             total_computed_tokens=num_local_computed_tokens
             + num_external_computed_tokens,
         )
-        tot_num_blocks_to_allocate = sum(num_new_blocks_to_allocate) + sum(
-            num_evictable_blocks_to_allocate
-        )
 
-        if tot_num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
             return None
 
