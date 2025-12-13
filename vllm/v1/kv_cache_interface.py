@@ -299,7 +299,7 @@ class CrossAttentionSpec(AttentionSpec):
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
 
 
-@dataclass(forzen=True)
+@dataclass(frozen=True)
 class SinkFullAttentionSpec(FullAttentionSpec):
     sink_len: int | None = None
 

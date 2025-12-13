@@ -787,7 +787,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 class SinkFullAttentionManager(FullAttentionManager):
     def __init__(
         self,
-        kv_cache_spec: KVCacheSpec,
+        kv_cache_spec: SinkFullAttentionSpec,
         block_pool: BlockPool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
