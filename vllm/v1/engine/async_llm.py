@@ -7,6 +7,8 @@ import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
+from asyncio import AbstractEventLoop
+import queue as q
 
 import numpy as np
 import torch
@@ -33,8 +35,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.utils.math_utils import cdiv
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine import EngineCoreRequest, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine.core_client import EngineCoreClient, MPClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
@@ -47,6 +49,8 @@ from vllm.v1.metrics.loggers import (
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.core.sched.policy.buffer_response_processor import (BufferResponseProcessor, GlobalSLORequirement,
+                                                                 BufferedResponse, bind_fixed_params)
 
 logger = init_logger(__name__)
 
@@ -152,6 +156,23 @@ class AsyncLLM(EngineClient):
                 aggregate_engine_logging=aggregate_engine_logging,
             )
             self.logger_manager.log_engine_initialized()
+
+        self.buffer_response = False
+        if vllm_config.additional_config:
+            logger.debug(f"Setting buffer_response and additional config is {vllm_config.additional_config}")
+            self.buffer_response = vllm_config.additional_config.get("buffer_response", False)
+            global_ttft_slo = vllm_config.additional_config.get("ttft_slo")
+            global_tpot_slo = vllm_config.additional_config.get("tpot_slo")
+            if self.buffer_response:
+                async_llm_engine_core = self.engine_core
+                decorated_vllm_process_callback = bind_fixed_params(loop=asyncio.get_event_loop(), engine_core=async_llm_engine_core)(
+                    vllm_process_callback)
+                global_slo = GlobalSLORequirement(ttft_slo=global_ttft_slo if global_ttft_slo else GlobalSLORequirement.ttft_slo,
+                                                  tpot_slo=global_tpot_slo if global_tpot_slo else GlobalSLORequirement.tpot_slo)
+                logger.info(f"using buffer_response: ttft_slo is {global_slo.ttft_slo} tpot_slo is {global_slo.tpot_slo}")
+                self.buffer_response_processor = BufferResponseProcessor(process_callback=decorated_vllm_process_callback,
+                                                                         global_slo_requirement=global_slo,
+                                                                         engine_num=vllm_config.parallel_config.data_parallel_size)
 
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
@@ -262,6 +283,9 @@ class AsyncLLM(EngineClient):
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
+        if buffer_response_processor := getattr(self, "buffer_response_processor", None):
+            buffer_response_processor.stop()
+
         handler = getattr(self, "output_handler", None)
         if handler is not None:
             cancel_task_threadsafe(handler)
@@ -345,6 +369,13 @@ class AsyncLLM(EngineClient):
     ):
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
+
+        # Add the request to BufferResponseProcessor
+        if self.buffer_response:
+            response = BufferedResponse(request_id = request.request_id,
+                                        output = q.Queue(),
+                                        last_processed_time = request.arrival_time)
+            self.buffer_response_processor.add_response(response)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -482,12 +513,33 @@ class AsyncLLM(EngineClient):
         log_stats = self.log_stats
         logger_manager = self.logger_manager
         input_processor = self.input_processor
+        buffer_response = self.buffer_response
+        buffer_response_processor = self.buffer_response_processor if buffer_response else None
 
         async def output_handler():
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+
+                    if buffer_response and not outputs.is_buffered_outputs:
+                        for output in outputs.outputs:
+                            response = BufferedResponse(
+                                request_id=output.request_id,
+                                output=output,
+                                engine_index=outputs.engine_index,
+                                is_ended=True if output.finish_reason is not None else False
+                            )
+                            buffer_response_processor.add_response(response)
+
+                        if logger_manager:
+                            logger_manager.record(
+                                engine_idx=outputs.engine_index,
+                                scheduler_stats=outputs.scheduler_stats,
+                                iteration_stats=None
+                            )
+                        continue
+
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = (
@@ -547,6 +599,10 @@ class AsyncLLM(EngineClient):
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
         all_request_ids = self.output_processor.abort_requests(request_ids)
+
+        if self.buffer_response:
+                            self.buffer_response_processor.abort_request(request_id)
+
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -864,3 +920,17 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
+
+
+def vllm_process_callback(loop: AbstractEventLoop, engine_core: MPClient, outputs: list[EngineCoreOutput], engine_index : int | None = 0) -> None:
+    """
+    VLLM callback function used in BufferResponseProcessor.
+
+    Args:
+        loop (AbstractEventLoop): The loop in async_llm to receive buffered responses from BufferResponseProcessor.
+        engine_core (MPClient): Engine core in async_llm.
+        outputs (list[EngineCoreOutput]): Buffered responses to release.
+        engine_index (Optional[int]): Use the index to release info to specific logger in async_llm. Defaults to 0.
+    """
+    engine_core_outputs = EngineCoreOutputs(outputs=outputs, engine_index = engine_index, is_buffered_outputs=True)
+    loop.call_soon_threadsafe(engine_core.outputs_queue.put_nowait, engine_core_outputs)
