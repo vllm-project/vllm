@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
+    EncoderDecoderCacheManager,
     compute_encoder_budget,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -181,7 +182,11 @@ class Scheduler(SchedulerInterface):
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
-        self.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+        self.encoder_cache_manager = (
+            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+            if self.is_encoder_decoder
+            else EncoderCacheManager(cache_size=encoder_cache_size)
+        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -1112,6 +1117,7 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
+            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
 
@@ -1120,12 +1126,10 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-
-            # Stop checking for pooler models.
-            pooler_output = None
-            if pooler_outputs:
-                pooler_output = pooler_outputs[req_index]
-                stopped = check_stop(request, self.max_model_len, pooler_output)
+            elif request.pooling_params and pooler_output is not None:
+                # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
 
             if stopped:
                 kv_transfer_params = self._free_request(request)
