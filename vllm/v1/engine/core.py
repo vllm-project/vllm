@@ -473,6 +473,14 @@ class EngineCore:
             self.model_executor.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
+        
+        # Clean up distributed environment (NCCL process groups)
+        try:
+            from vllm.distributed.parallel_state import destroy_distributed_environment
+            destroy_distributed_environment()
+        except Exception as e:
+            # Log but don't fail shutdown
+            logger.warning("Failed to destroy distributed environment during shutdown: %s", e)
 
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
@@ -1058,17 +1066,45 @@ class EngineCoreProc(EngineCore):
                     else:
                         request = generic_decoder.decode(data_frames)
                     
-                    # Special handling for FT_SCALE_DOWN: Set flag for proactive handling
-                    # The busy loop checks this flag and triggers reconfiguration immediately
-                    # This prevents NCCL std::terminate by reconfiguring before any collective
+                    # Special handling for FT_SCALE_DOWN: Abort immediately to release stuck collectives
+                    # This is CRITICAL for fast recovery - releases main thread from NCCL in milliseconds!
                     if request_type == EngineCoreRequestType.FT_SCALE_DOWN:
                         self.ft_scale_down_pending = request
+                        
                         logger.warning(
-                            "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread, "
-                            "flag set for proactive reconfiguration",
+                            "[FT] Rank %d: Received FT_SCALE_DOWN in IO thread. "
+                            "Aborting process groups NOW to release stuck collectives!",
                             self.engine_index
                         )
-                        # Don't queue - handled via flag check in busy loop
+                        
+                        # IMMEDIATELY abort process groups to release main thread
+                        # This allows main thread to exit from stuck NCCL collectives in milliseconds
+                        # instead of waiting 30 seconds for timeout!
+                        if hasattr(self, 'dp_group') and self.dp_group:
+                            try:
+                                if hasattr(self.dp_group, 'device_group'):
+                                    self.dp_group.device_group.abort()
+                                    logger.info(
+                                        "[FT] Rank %d: Aborted NCCL device group from IO thread "
+                                        "(releases main thread from stuck collective)",
+                                        self.engine_index
+                                    )
+                                
+                                if hasattr(self.dp_group, 'cpu_group'):
+                                    self.dp_group.cpu_group.abort()
+                                    logger.info(
+                                        "[FT] Rank %d: Aborted Gloo CPU group from IO thread",
+                                        self.engine_index
+                                    )
+                            except Exception as abort_err:
+                                logger.warning(
+                                    "[FT] Rank %d: Error aborting groups from IO thread: %s "
+                                    "(May not support abort or already aborted)",
+                                    self.engine_index, abort_err
+                                )
+                        
+                        # Don't queue - flag is enough, abort already done
+                        # Main thread will check flag and continue to full reconfiguration
                         continue
 
                     # Push to input queue for core busy loop.
@@ -1540,27 +1576,11 @@ class DPEngineCoreProc(EngineCoreProc):
         )
         
         try:
-            # ===== STEP 1: Abort Existing Process Groups =====
-            # This releases ranks stuck in NCCL collectives!
-            # Only works if NCCL was configured with blocking=0
-            logger.info("[FT] Rank %d: Aborting existing process groups", self.dp_rank)
+            # NOTE: Process groups already aborted in IO thread when FT_SCALE_DOWN arrived!
+            # This allowed main thread to exit from stuck collectives quickly.
+            # No need to abort again here.
             
-            if hasattr(self, 'dp_group') and self.dp_group:
-                try:
-                    if hasattr(self.dp_group, 'device_group'):
-                        logger.info("[FT] Rank %d: Aborting DP device group (NCCL)", self.dp_rank)
-                        self.dp_group.device_group.abort()
-                    
-                    if hasattr(self.dp_group, 'cpu_group'):
-                        logger.info("[FT] Rank %d: Aborting DP CPU group (Gloo)", self.dp_rank)
-                        self.dp_group.cpu_group.abort()
-                except Exception as abort_err:
-                    logger.warning(
-                        "[FT] Rank %d: Error aborting groups (may not support abort): %s",
-                        self.dp_rank, abort_err
-                    )
-            
-            # ===== STEP 2: Update EPLB State =====
+            # ===== STEP 1: Update EPLB State =====
             eplb_state = self._get_eplb_state()
             if eplb_state:
                 # Clear masked_ranks (failed rank is being removed)

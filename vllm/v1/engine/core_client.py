@@ -5,6 +5,7 @@ import contextlib
 import multiprocessing
 import queue
 import sys
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -441,6 +442,8 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
+        self.executor_class = executor_class
+        self.log_stats = log_stats
         
         # Debug: Log fault tolerance config at initialization
         logger.info(
