@@ -936,7 +936,7 @@ def enable_batch_invariant_mode():
     # Batch invariant matmuls are no longer needed after cublas overrides
     if not is_torch_equal_or_newer("2.10.0.dev"):
         if (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(80)
             or current_platform.is_device_capability(89)
         ):
