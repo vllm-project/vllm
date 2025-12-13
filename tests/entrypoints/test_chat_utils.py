@@ -29,7 +29,8 @@ from vllm.multimodal.utils import (
     encode_image_base64,
     encode_video_base64,
 )
-from vllm.tokenizers import MistralTokenizer, get_tokenizer
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.serial_utils import tensor2base64
 
 from ..models.registry import HF_EXAMPLE_MODELS
