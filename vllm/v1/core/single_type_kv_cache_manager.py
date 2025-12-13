@@ -74,7 +74,7 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-    ) -> tuple[int, int]:
+    ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
 
@@ -88,8 +88,7 @@ class SingleTypeKVCacheManager(ABC):
                 tokens.
 
         Returns:
-            The number of new blocks to allocate.
-            The number of evictable blocks (i.e., ref_cnt == 0) to allocate.
+            The number of blocks to allocate.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
@@ -105,7 +104,7 @@ class SingleTypeKVCacheManager(ABC):
             num_evictable_blocks = sum(
                 blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
             )
-            return num_new_blocks, num_evictable_blocks
+            return num_new_blocks + num_evictable_blocks
 
         # General case: some prefix tokens are skipped by the attention window.
         num_skipped_blocks = num_skipped_tokens // self.block_size
@@ -140,7 +139,7 @@ class SingleTypeKVCacheManager(ABC):
                 blk.ref_cnt == 0 and not blk.is_null
                 for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
             )
-        return num_new_blocks, num_evictable_blocks
+        return num_new_blocks + num_evictable_blocks
 
     def save_new_computed_blocks(
         self,
@@ -798,7 +797,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-    ) -> tuple[int, int]:
+    ) -> int:
         # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
         if total_computed_tokens > 0:
             logger.warning_once(
