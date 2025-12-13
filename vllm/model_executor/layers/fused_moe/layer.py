@@ -31,9 +31,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.default_fused_moe_router import (
-    DefaultFusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -42,6 +39,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
+)
+from vllm.model_executor.layers.fused_moe.router_factor import (
+    create_fused_moe_router,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -450,7 +450,7 @@ class FusedMoE(CustomOp):
                 "EPLB is only supported for FP8 quantization for now."
             )
 
-        self.router = DefaultFusedMoERouter(
+        self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
             eplb_state=self.eplb_state,
