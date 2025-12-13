@@ -85,6 +85,10 @@ class TritonAttentionMetadata:
             for i in range(num_seqs)
         ]
 
+        # Return None if all ranges are empty (avoids nested_tensor error)
+        if all(t.numel() == 0 for t in range_tensors):
+            return None
+
         return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
 
 

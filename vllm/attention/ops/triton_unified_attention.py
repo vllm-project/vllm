@@ -287,12 +287,12 @@ def kernel_unified_attention_2d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Allow bidirectional attention within each range
+                # Bidirectional: range_end inclusive (matches FlexAttention)
                 q_in_range = (query_abs_pos >= range_start) & (
-                    query_abs_pos < range_end
+                    query_abs_pos <= range_end
                 )
                 k_in_range = (seq_offset[None, :] >= range_start) & (
-                    seq_offset[None, :] < range_end
+                    seq_offset[None, :] <= range_end
                 )
                 seq_mask |= q_in_range & k_in_range
 
@@ -600,12 +600,12 @@ def kernel_unified_attention_3d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Allow bidirectional attention within each range
+                # Bidirectional: range_end inclusive (matches FlexAttention)
                 q_in_range = (query_abs_pos >= range_start) & (
-                    query_abs_pos < range_end
+                    query_abs_pos <= range_end
                 )
                 k_in_range = (seq_offset[None, :] >= range_start) & (
-                    seq_offset[None, :] < range_end
+                    seq_offset[None, :] <= range_end
                 )
                 seq_mask |= q_in_range & k_in_range
 
