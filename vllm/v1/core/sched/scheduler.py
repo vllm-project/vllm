@@ -267,12 +267,13 @@ class Scheduler(SchedulerInterface):
                 request.num_tokens_with_spec + request.num_output_placeholders
             )
             # Ensure new tokens for a request in the prefill phase do not contain
-            # speculative tokens, especially in the last prefill chunk. For a  hybrid 
+            # speculative tokens, especially in the last prefill chunk. For a hybrid
             # model, extra speculative tokens would corrupt the generated mamba state.
             # TODO: This logic does not yet handle resumed requests.
             if request.num_computed_tokens < request.num_prompt_tokens:
-                num_tokens_to_compute = min(num_tokens_to_compute,
-                                            request.num_prompt_tokens)
+                num_tokens_to_compute = min(
+                    num_tokens_to_compute, request.num_prompt_tokens
+                )
             num_new_tokens = num_tokens_to_compute - request.num_computed_tokens
 
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
