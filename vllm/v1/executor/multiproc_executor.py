@@ -706,7 +706,7 @@ class WorkerProc:
                     death_pipe.recv()
                 except EOFError:
                     # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
+                    logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
                 except Exception as e:

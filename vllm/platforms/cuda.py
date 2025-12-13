@@ -409,10 +409,11 @@ class CudaPlatformBase(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        logger.info(
+        logger.info_once(
             "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
-            [b[0].name for b in valid_backends_priorities],
+            tuple(b[0].name for b in valid_backends_priorities),
+            scope="local",
         )
 
         return selected_backend.get_path()
