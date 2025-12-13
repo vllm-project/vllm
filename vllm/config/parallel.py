@@ -715,7 +715,6 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size_across_dp > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
-
             from vllm.v1.executor import ray_utils
 
             backend: DistributedExecutorBackend = "mp"
