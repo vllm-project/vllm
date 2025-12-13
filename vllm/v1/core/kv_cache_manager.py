@@ -285,8 +285,13 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        if num_new_tokens == 0:
-            raise ValueError("num_new_tokens must be greater than 0")
+        # When loading KV data asynchronously, we may have zero new tokens to
+        # compute while still allocating slots for externally computed tokens.
+        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+            raise ValueError(
+                "num_new_tokens must be greater than 0 when there are no "
+                "external computed tokens"
+            )
 
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
