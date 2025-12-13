@@ -101,14 +101,27 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = self.apply_top_k_top_p(logits, k, p)
+        scatter_if_sorted = self.logprobs_mode in (
+            "processed_logits",
+            "processed_logprobs",
+        )
+        # Call apply_top_k_top_p and receive the returned sorted_indices
+        logits, sorted_indices = self.apply_top_k_top_p(
+            logits, k, p, scatter_if_sorted=scatter_if_sorted
+        )
+
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators), logits_to_return
+
+        # Sampling and processing mapping
+        sampled = random_sample(probs, generators)
+        if sorted_indices is not None:
+            sampled = sorted_indices.gather(1, sampled.unsqueeze(1)).squeeze(1)
+        return sampled, logits_to_return
 
     def forward_cuda(
         self,
@@ -149,7 +162,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = self.apply_top_k_top_p(logits, k, p)
+        logits, _ = self.apply_top_k_top_p(logits, k, p, scatter_if_sorted=True)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -240,7 +253,8 @@ def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-) -> torch.Tensor:
+    scatter_if_sorted: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Apply top-k and top-p masks to the logits.
 
     If a top-p is used, this function will sort the logits tensor,
@@ -250,10 +264,10 @@ def apply_top_k_top_p(
     """
     if p is None:
         if k is None:
-            return logits
+            return logits, None
 
         # Avoid sorting vocab for top-k only case.
-        return apply_top_k_only(logits, k)
+        return apply_top_k_only(logits, k), None
 
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
@@ -274,9 +288,12 @@ def apply_top_k_top_p(
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
+    if not scatter_if_sorted:
+        return logits_sort, logits_idx
+
     # Re-sort the probabilities.
     logits = logits_sort.scatter(dim=-1, index=logits_idx, src=logits_sort)
-    return logits
+    return logits, None
 
 
 def apply_top_k_only(
