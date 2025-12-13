@@ -73,10 +73,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import (
-    get_cached_tokenizer,
-    get_tokenizer,
-)
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.hf import get_cached_tokenizer
 
 logger = init_logger(__name__)
 
