@@ -335,8 +335,8 @@ class Fp8Config(QuantizationConfig):
             if self.is_checkpoint_fp8_serialized:
                 moe_quant_method = Fp8MoEMethod(self, layer)
             else:
-                moe_quant_method = OnlineFp8MoEMethod(self, layer)
-                moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                moe_quant_method = Fp8OnlineMoEMethod(self, layer)
+            moe_quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return moe_quant_method
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
