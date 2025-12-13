@@ -140,7 +140,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self._log_inputs(
             request_id,
-            TokensPrompt(prompt_token_ids=request.token_ids),
+            TokensPrompt(prompt_token_ids=request.tokens),
             params=None,
             lora_request=lora_request,
         )
