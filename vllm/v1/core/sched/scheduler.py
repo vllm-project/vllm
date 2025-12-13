@@ -263,11 +263,24 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_new_tokens = (
-                request.num_tokens_with_spec
-                + request.num_output_placeholders
-                - request.num_computed_tokens
-            )
+            # Ensure new tokens for a request in the prefill phase do not contain
+            # sps tokens, especially in the last prefill chunk. For a hybrid-model,
+            # extra sps tokens would corrupt the generated Mamba state.
+            # TODO: This logic does not yet handle resumed requests.
+            if request.num_computed_tokens < request.num_prompt_tokens:
+                num_new_tokens = (
+                    min(
+                        request.num_tokens_with_spec + request.num_output_placeholders,
+                        request.num_prompt_tokens,
+                    )
+                    - request.num_computed_tokens
+                )
+            else:
+                num_new_tokens = (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                )
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
