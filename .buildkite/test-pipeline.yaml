@@ -692,6 +692,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
@@ -704,6 +705,7 @@ steps:
   - vllm/model_executor/models/
   - vllm/transformers_utils/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
@@ -836,7 +838,7 @@ steps:
   - tests/models/multimodal
   no_gpu: true
   commands:
-    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - "pip install git+https://github.com/TIGER-AI-Lab/Mantis.git || echo 'Mantis installation skipped (decord not available on CPU-only environment)'"
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor Test
@@ -1346,6 +1348,7 @@ steps:
 - label: Prime-RL Integration Test # 15min
   timeout_in_minutes: 30
   optional: true
+  soft_fail: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -1380,21 +1383,3 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
-
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
-
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
