@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
+    flashinfer_trtllm_fp4_routed_moe,
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
     select_nvfp4_gemm_impl,
@@ -80,6 +81,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     has_flashinfer_moe,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -606,6 +608,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         Only supports pre-quantized checkpoints with FP8 weights and scales.
         """
 
+        if self.flashinfer_moe_backend is not None:
+            self._maybe_pad_intermediate_for_flashinfer(layer)
+
         layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
@@ -682,6 +687,50 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
         register_moe_scaling_factors(layer)
+
+    def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
+        """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
+
+        Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+        used for GEMM to be divisible by a small alignment value. When this is
+        not satisfied (e.g. with certain tensor-parallel sizes), we pad the
+        gate/up and down projection weights along the intermediate dim.
+        """
+        if not hasattr(layer, "w13_weight") or not hasattr(layer, "w2_weight"):
+            return
+
+        # Current local intermediate size (per partition) is the K dimension of
+        # the down projection.
+        num_experts, hidden_size, intermediate = layer.w2_weight.shape
+
+        min_alignment = 16
+        padded_intermediate = round_up(intermediate, min_alignment)
+
+        if padded_intermediate == intermediate:
+            return
+
+        logger.info(
+            "Padding intermediate size from %d to %d for up/down projection weights.",
+            intermediate,
+            padded_intermediate,
+        )
+
+        up_mult = 2 if self.moe.is_act_and_mul else 1
+        padded_gate_up_dim = up_mult * padded_intermediate
+
+        # Pad w13 and w12 along its intermediate dimension.
+        w13 = layer.w13_weight.data
+        padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
+        padded_w13[:, : w13.shape[1], :] = w13
+        layer.w13_weight.data = padded_w13
+
+        w2 = layer.w2_weight.data
+        padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
+        padded_w2[:, :, :intermediate] = w2
+        layer.w2_weight.data = padded_w2
+
+        if hasattr(layer, "intermediate_size_per_partition"):
+            layer.intermediate_size_per_partition = padded_intermediate
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1325,7 +1374,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "Accuracy may be affected."
             )
 
-        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+        w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2, requires_grad=False)
 
         # Common processing for input scales and alphas
@@ -1482,6 +1531,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_gscale=layer.w2_input_scale_quant,
         )
 
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
     def apply(
         self,
         layer: FusedMoE,
@@ -1500,11 +1553,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+            and not layer.enable_eplb
         ):
-            if layer.enable_eplb:
-                raise NotImplementedError(
-                    "EPLB not supported for `ModelOptNvFp4FusedMoE` yet."
-                )
             return flashinfer_trtllm_fp4_moe(
                 layer=layer,
                 x=x,
@@ -1521,6 +1571,20 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             hidden_states=x,
             router_logits=router_logits,
         )
+
+        # EPLB path
+        if (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+        ):
+            return flashinfer_trtllm_fp4_routed_moe(
+                layer=layer,
+                x=x,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
+                top_k=layer.top_k,
+                global_num_experts=layer.global_num_experts,
+            )
 
         if self.use_marlin:
             return fused_marlin_moe(

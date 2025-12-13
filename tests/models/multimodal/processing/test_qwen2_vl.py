@@ -53,3 +53,38 @@ def test_processor_override(
     assert img_tok_count == expected_toks_per_img * num_imgs
     assert pixel_shape[0] == expected_pixels_shape[0] * num_imgs
     assert pixel_shape[1] == expected_pixels_shape[1]
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
+@pytest.mark.parametrize("max_pixels", [1280 * 28 * 28, 1283 * 28 * 28])
+def test_get_image_size_with_most_features(
+    image_assets: ImageTestAssets,
+    model_id: str,
+    max_pixels: int,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs={"max_pixels": max_pixels},
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    hf_processor_mm_kwargs: dict[str, object] = {}
+    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    merge_size = processor.info.get_hf_config().vision_config.spatial_merge_size
+
+    max_image_size = processor.info.get_image_size_with_most_features()
+    max_tokens = processor.info.get_num_image_tokens(
+        image_width=max_image_size.width,
+        image_height=max_image_size.height,
+        image_processor=hf_processor.image_processor,
+    )
+
+    prompt = "<|vision_start|><|image_pad|><|vision_end|>"
+    for asset in image_assets:
+        mm_data = {"image": [asset.pil_image]}
+        processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        grid_thw = processed_inputs["mm_kwargs"].get_data()["image_grid_thw"].tolist()
+        t, h, w = grid_thw[0]
+        tokens = (t * h * w) // (merge_size**2)
+        assert tokens < max_tokens

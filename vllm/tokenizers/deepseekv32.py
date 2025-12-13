@@ -47,11 +47,13 @@ class DeepseekV32Tokenizer(HfTokenizer):
             thinking_mode = "chat"
         conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
-        drop_thinking = True
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
             messages[0]["tools"] = tools
-            drop_thinking = False
+
+        # Historical reasoning content is dropped when a new user message is introduced
+        drop_thinking = messages[-1]["role"] == "user"
+
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
         return prompt_str
