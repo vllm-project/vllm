@@ -897,8 +897,81 @@ class MPClient(EngineCoreClient):
             self.resources.coordinator.close()
             logger.info("[FT Full Restart] Closed coordinator")
         
-        # Step 4: Update config for new size
+        # Step 4: Update EPLB config to maintain expert-per-GPU ratio
+        # This mimics lightweight FT behavior by marking lost experts as redundant
+        original_dp_size = self.vllm_config.parallel_config.data_parallel_size
         new_size = len(surviving_gpus)
+        num_failed_ranks = original_dp_size - new_size
+        
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.enable_eplb:
+            eplb_config = parallel_config.eplb_config
+            model_config = self.vllm_config.model_config
+            
+            # Get logical number of experts from model config
+            # In EPLB: global_num_experts = logical_experts + redundant_experts
+            # After failure: we add lost experts to redundant_experts to maintain expert-per-GPU ratio
+            logical_experts = model_config.get_num_experts()
+            current_redundant = eplb_config.num_redundant_experts
+            total_physical_experts = logical_experts + current_redundant
+            
+            # Calculate experts per rank based on total physical experts
+            # (must be evenly divisible for consistent distribution)
+            if total_physical_experts % original_dp_size != 0:
+                error_msg = (
+                    f"[FT Full Restart] Cannot maintain expert distribution: "
+                    f"{total_physical_experts} physical experts (logical={logical_experts} + "
+                    f"redundant={current_redundant}) not evenly divisible by {original_dp_size} ranks. "
+                    f"Full restart requires even expert distribution."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            experts_per_rank = total_physical_experts // original_dp_size
+            lost_experts = num_failed_ranks * experts_per_rank
+            
+            new_redundant_experts = current_redundant - lost_experts
+            # Calculate remaining physical experts after loss
+            remaining_physical = total_physical_experts - lost_experts
+            
+            # Validate: new_redundant_experts must be non-negative
+            # If negative, it means we have fewer physical experts than logical experts,
+            # which violates the requirement that every logical expert needs a physical implementation
+            if new_redundant_experts < 0:
+                error_msg = (
+                    f"[FT Full Restart] Configuration invalid after failure: "
+                    f"Insufficient physical experts remaining. "
+                    f"logical_experts={logical_experts}, remaining_physical={remaining_physical}, "
+                    f"new_redundant={new_redundant_experts}. "
+                    f"Lost too many experts ({lost_experts}) - cannot maintain minimal coverage."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            
+            
+            # Validate: remaining physical experts must be evenly divisible by new DP size
+            if remaining_physical % new_size != 0:
+                error_msg = (
+                    f"[FT Full Restart] Configuration invalid after failure: "
+                    f"{remaining_physical} remaining physical experts not evenly divisible by "
+                    f"{new_size} surviving ranks. Cannot maintain consistent expert-per-GPU ratio."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            logger.info(
+                "[FT Full Restart] Maintaining expert-per-GPU ratio: "
+                "logical_experts=%d, physical_before=%d, experts_per_rank=%d, "
+                "lost_experts=%d, physical_after=%d, redundant: %d→%d",
+                logical_experts, total_physical_experts, experts_per_rank,
+                lost_experts, remaining_physical, current_redundant, new_redundant_experts
+            )
+            
+            # Update EPLB configuration
+            eplb_config.num_redundant_experts = new_redundant_experts
+        
+        # Step 5: Update config for new size
         self.vllm_config.parallel_config.data_parallel_size = new_size
         self.vllm_config.parallel_config.data_parallel_size_local = new_size
         

@@ -3968,6 +3968,33 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def clear_cuda_graphs(self) -> None:
+        """Clear all captured CUDA graphs to force recapture.
+        
+        This is necessary during elastic scaling when process groups change,
+        as old graphs contain references to destroyed NCCL communicators.
+        Clearing the dictionaries removes all references to the CUDAGraph
+        objects, allowing them to be garbage collected and their GPU memory
+        returned to the pool.
+        """
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+        from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+        
+        if isinstance(self.model, CUDAGraphWrapper):
+            # Clear regular CUDA graph entries
+            self.model.concrete_cudagraph_entries.clear()
+            logger.info("Cleared CUDA graphs from CUDAGraphWrapper")
+        elif isinstance(self.model, UBatchWrapper):
+            # Clear ubatched CUDA graphs
+            self.model.cudagraphs.clear()
+            # Also clear the nested cudagraph wrapper if it exists
+            if self.model.cudagraph_wrapper is not None:
+                self.model.cudagraph_wrapper.concrete_cudagraph_entries.clear()
+            logger.info("Cleared CUDA graphs from UBatchWrapper")
+        else:
+            # Model is not wrapped, no CUDA graphs to clear
+            logger.debug("No CUDA graph wrappers found, nothing to clear")
+
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
