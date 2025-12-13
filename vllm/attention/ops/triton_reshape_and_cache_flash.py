@@ -186,17 +186,20 @@ def triton_reshape_and_cache_flash(
 
 @triton.jit
 def reshape_and_cache_kernel_flash_diffkv(
-    kv_ptr,  # [num_tokens, num_heads, head_size + head_size_v]
+    key_ptr,  # [num_tokens, num_heads, head_size]
+    value_ptr,  # [num_tokens, num_heads, head_size_v]
     kv_cache_ptr,  # [num_blocks, block_size, num_heads, head_size + head_size_v]
     slot_mapping_ptr,  # [num_tokens]
     k_scale,  # float32
     v_scale,  # float32
     # strides
-    kv_stride: tl.int64,
+    key_stride: tl.int64,
+    value_stride: tl.int64,
     block_stride: tl.int64,
     page_stride: tl.int64,
     num_heads: tl.constexpr,
-    head_size_kv: tl.constexpr,
+    head_size_k: tl.constexpr,
+    head_size_v: tl.constexpr,
     block_size: tl.constexpr,
     # FP8 flags
     FP8_KV_CACHE: tl.constexpr,
@@ -211,24 +214,51 @@ def reshape_and_cache_kernel_flash_diffkv(
 
     tile_i = tl.program_id(axis=1)
     tile_offs = tl.arange(0, TILE_SIZE)
-    tile_pos = tile_i * TILE_SIZE + tile_offs
 
     block_idx = slot_idx // block_size
     block_offset = slot_idx % block_size
 
-    src_kv_idx = token_idx * kv_stride
+    src_key_idx = token_idx * key_stride + tile_i * head_size_k
+    src_value_idx = token_idx * value_stride + tile_i * head_size_v
 
-    tgt_idx = block_idx * block_stride + block_offset * page_stride
-
-    # [TILE_SIZE]
-    kv_tile = tl.load(
-        kv_ptr + src_kv_idx + tile_pos, mask=tile_pos < (num_heads * head_size_kv)
+    tgt_idx = (
+        block_idx * block_stride
+        + block_offset * page_stride
+        + tile_i * (head_size_k + head_size_v)
     )
 
+    # [TILE_SIZE]
+    key_load = tl.load(key_ptr + src_key_idx + tile_offs, mask=tile_offs < head_size_k)
+    if FP8_KV_CACHE:
+        # tl.store will do the correct implicit cast to fp8,
+        # based on the key_cache_ptr.dtype.element_ty
+        key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
+    else:
+        key_tile = key_load
+
+    # [TILE_SIZE]
+    value_load = tl.load(
+        value_ptr + src_value_idx + tile_offs, mask=tile_offs * head_size_v
+    )
+    if FP8_KV_CACHE:
+        if value_load.dtype.is_fp8():
+            value_tile = value_load
+        else:
+            # tl.store will do the correct implicit cast to fp8,
+            #  based on the value_cache_ptr.dtype.element_ty
+            value_tile = value_load / tl.load(v_scale)
+    else:
+        value_tile = value_load
+
     tl.store(
-        kv_cache_ptr + tgt_idx + tile_pos,
-        kv_tile,
-        mask=tile_pos < (num_heads * head_size_kv),
+        kv_cache_ptr + tgt_idx + tile_offs,
+        key_tile,
+        mask=tile_offs < head_size_k,
+    )
+    tl.store(
+        kv_cache_ptr + tgt_idx + head_size_k + tile_offs,
+        value_tile,
+        mask=tile_offs < head_size_v,
     )
     return
 
@@ -243,13 +273,13 @@ def triton_reshape_and_cache_flash_diffkv(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
-    kv = torch.cat([key, value], dim=-1).contiguous()
-    num_heads = kv.shape[1]
-    head_size_kv = kv.shape[2]
+    num_heads = key.shape[1]
+    head_size_k = key.shape[2]
+    head_size_v = value.shape[2]
     block_size = kv_cache.shape[1]
-    n = num_heads * head_size_kv
 
-    kv_stride = kv.stride()[0]
+    k_stride = key.stride()[0]
+    v_stride = value.stride()[0]
     block_stride = kv_cache.stride()[0]
     page_stride = kv_cache.stride()[1]
 
@@ -272,13 +302,20 @@ def triton_reshape_and_cache_flash_diffkv(
     )
 
     FP8_KV_CACHE = kv_cache_dtype.startswith("fp8")
-    assert not FP8_KV_CACHE, (
+    assert (not FP8_KV_CACHE) or kv_cache_torch_dtype in [
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.uint8,
+        torch.float8_e4m3fnuz,
+    ], (
         "unsupported dtype of KV cache tensor, got "
-        "{kv_cache_torch_dtype}. Supported kv cache dtypes: bfloat16, float16, float32."
+        "{kv_cache_torch_dtype}. Supported kv cache dtypes: fp8e4m3fn, "
+        "fp8e5m2, uint8, bfloat16, float16, float32, fp8e4m3fnuz."
     )
 
     # heuristics instead of autotuning
-    TILE_SIZE = min(2048, triton.next_power_of_2(n))
+    TILE_SIZE = max(head_size_k, head_size_v)
+    TILE_SIZE = triton.next_power_of_2(TILE_SIZE)
     if current_platform.is_rocm() or current_platform.is_xpu():
         num_stages = 4
         num_warps = 8
@@ -292,21 +329,24 @@ def triton_reshape_and_cache_flash_diffkv(
     #   using cudagraphs
     grid = lambda meta: (
         slot_mapping.shape[0],
-        triton.cdiv(n, meta["TILE_SIZE"]),
+        num_heads,
     )
 
     reshape_and_cache_kernel_flash_diffkv[grid](
-        kv_ptr=kv,
+        key_ptr=key,
+        value_ptr=value,
         kv_cache_ptr=kv_cache,
         slot_mapping_ptr=slot_mapping,
         k_scale=k_scale,
         v_scale=v_scale,
         # strides
-        kv_stride=kv_stride,
+        key_stride=k_stride,
+        value_stride=v_stride,
         block_stride=block_stride,
         page_stride=page_stride,
         num_heads=num_heads,
-        head_size_kv=head_size_kv,
+        head_size_k=head_size_k,
+        head_size_v=head_size_v,
         block_size=block_size,
         # FP8 flags
         FP8_KV_CACHE=FP8_KV_CACHE,

@@ -29,8 +29,8 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, AttentionType
+from vllm.attention.layers.static_sink_attention import StaticSinkAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -41,7 +41,6 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -82,144 +81,13 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
-from vllm.v1.attention.backends.flash_diffkv_attn import FlashDiffkvAttentionBackend
-from vllm.v1.kv_cache_interface import (
-    FullDiffkvAttentionSpec,
-    KVCacheSpec,
-)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 
 def check_ffn_act_fn(act_fn: str):
     if act_fn != "silu":
         raise ValueError(
             f"Unsupported activation: {act_fn}. Only silu is supported for now."
-        )
-
-
-class DiffkvAttention(Attention):
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        head_size_v: int,
-        scale: float,
-        num_kv_heads: int | None = None,
-        alibi_slopes: list[float] | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        logits_soft_cap: float | None = None,
-        per_layer_sliding_window: int | None = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: str | None = None,
-        attn_backend: type[AttentionBackend] | None = None,
-        **extra_impl_args,
-    ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            cache_config,
-            quant_config,
-            logits_soft_cap,
-            per_layer_sliding_window,
-            prefix,
-            attn_type,
-            kv_sharing_target_layer_name,
-            attn_backend,
-            **extra_impl_args,
-        )
-        self.head_size_v = head_size_v
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        output_shape: torch.Size | None = None,
-    ) -> torch.Tensor:
-        """
-        The KV cache is stored inside this class and is accessed via
-        `self.kv_cache`.
-
-        Attention metadata (`attn_metadata`) is set using a context manager in
-        the model runner's `execute_model` method. It is accessed via forward
-        context using
-        `vllm.forward_context.get_forward_context().attn_metadata`.
-        """
-        if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(query, key, value, self.layer_name)
-        output_dtype = query.dtype
-        if self.query_quant is not None:
-            # quantizing with a simple torch operation enables
-            # torch.compile to fuse this into previous ops
-            # which reduces overheads during decoding.
-            # Otherwise queries are quantized using custom ops
-            # which causes decoding overheads
-            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
-
-            # check if query quantization is supported
-            if self.impl.supports_quant_query_input():
-                query, _ = self.query_quant(query, self._q_scale)
-
-        if self.use_output:
-            output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
-            hidden_size = output_shape[-1]
-            # Reshape the query, key, and value tensors.
-            # NOTE(woosuk): We do this outside the custom op to minimize the
-            # CPU overheads from the non-CUDA-graph regions.
-            query = query.view(-1, self.num_heads, self.head_size)
-            output = output.view(-1, self.num_heads, self.head_size_v)
-            if key is not None:
-                key = key.view(-1, self.num_kv_heads, self.head_size)
-            if value is not None:
-                value = value.view(-1, self.num_kv_heads, self.head_size_v)
-            if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(
-                    self,
-                    query,
-                    key,
-                    value,
-                    self_kv_cache,
-                    attn_metadata,
-                    output=output,
-                )
-            else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query,
-                    key,
-                    value,
-                    output,
-                    self.layer_name,
-                )
-            return output.view(-1, hidden_size)
-        else:
-            raise ValueError(
-                "Unsupport Error, currently only flash_diffkv_attn "
-                "backend with output buffer is supported"
-            )
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Block size may get updated after model loading, refresh it
-        block_size = vllm_config.cache_config.block_size
-        # Should not be called for enc-dec or encoder-only attention.
-        assert self.attn_type == AttentionType.DECODER
-        # Only support for full attention now.
-        assert self.sliding_window is None
-        return FullDiffkvAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=self.head_size,
-            head_size_v=self.head_size_v,
-            dtype=self.kv_cache_torch_dtype,
         )
 
 
@@ -673,7 +541,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
         )
 
 
-class OpenPanguDiffkvAttention(nn.Module):
+class OpenPanguSinkAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -777,19 +645,19 @@ class OpenPanguDiffkvAttention(nn.Module):
         else:
             sliding_window = None
 
-        FlashDiffkvAttentionBackend.set_head_size_v(self.v_channels)
-        self.attn = DiffkvAttention(
+        self.attn = StaticSinkAttention(
             self.num_heads,
             self.head_dim,
-            self.v_channels,
             self.scaling,
+            sink_len=self.param_sink_number,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
-            attn_backend=FlashDiffkvAttentionBackend,
+            attn_backend=FlashAttentionBackend,
+            head_size_v=self.v_channels,
         )
 
         if self.param_sink_number > 0:
@@ -919,19 +787,13 @@ class OpenPanguDiffkvAttention(nn.Module):
             is_neox_style=is_neox_style,
         )
 
-    def get_sink_kv(self) -> dict[str, torch.Tensor]:
-        if self.param_sink_number == 0:
-            raise ValueError("No sink_key and sink_value when param_sink_number == 0")
-
+    def post_weight_load(self) -> None:
         if hasattr(self, "k_layernorm") and self.k_layernorm is not None:
             param_sink_key = self.k_layernorm(self.param_sink_key)
         else:
             param_sink_key = self.param_sink_key
 
-        return {
-            "sink_key": param_sink_key,
-            "sink_value": self.param_sink_value,
-        }
+        self.attn.update_sink_kv(param_sink_key, self.param_sink_value)
 
 
 class OpenPanguDecoderLayer(nn.Module):
@@ -1001,7 +863,7 @@ class OpenPanguDecoderLayer(nn.Module):
                     "rope_type": "default",
                     "rope_theta": config.rope_theta,
                 }
-            self.self_attn = OpenPanguDiffkvAttention(
+            self.self_attn = OpenPanguSinkAttention(
                 config=config,
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -1359,7 +1221,16 @@ class OpenPanguModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+
+        self.post_weight_load()
         return loaded_params
+
+    def post_weight_load(self) -> None:
+        for name, module in self.named_modules():
+            if module is self:
+                continue
+            if hasattr(module, "post_weight_load"):
+                module.post_weight_load()
 
 
 class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):

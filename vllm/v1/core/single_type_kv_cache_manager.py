@@ -12,10 +12,10 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
-    FullDiffkvAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -317,8 +317,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         pcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec,
-            FullAttentionSpec | ChunkedLocalAttentionSpec | FullDiffkvAttentionSpec,
+            kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
@@ -785,14 +784,35 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         raise NotImplementedError("CrossAttentionManager does not support caching")
 
 
+class SinkFullAttentionManager(FullAttentionManager):
+    def __init__(
+        self,
+        kv_cache_spec: KVCacheSpec,
+        block_pool: BlockPool,
+        kv_cache_group_id: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ):
+        super().__init__(
+            kv_cache_spec, block_pool, kv_cache_group_id, dcp_world_size, pcp_world_size
+        )
+        sink_len = kv_cache_spec.sink_len
+        if sink_len > 0:
+            assert sink_len % self.block_size == 0
+            num_sink_block = sink_len // self.block_size
+            self.sink_blocks = self.block_pool.free_block_queue.popleft_n(
+                num_sink_block
+            )
+
+
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
-    FullDiffkvAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
+    SinkFullAttentionSpec: SinkFullAttentionManager,
 }
 
 

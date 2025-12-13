@@ -263,6 +263,7 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
+        sink_len: int = 0,
     ) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -292,7 +293,7 @@ class MultiGroupBlockTable:
                 block_size,
                 max_num_reqs,
                 max(
-                    cdiv(max_model_len, block_size * total_cp_world_size),
+                    cdiv(max_model_len + sink_len, block_size * total_cp_world_size),
                     1 + num_speculative_tokens,
                 ),
                 max_num_batched_tokens,

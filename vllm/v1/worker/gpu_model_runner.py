@@ -27,9 +27,6 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
 )
 from vllm.attention.layer import Attention, MLAAttention
-from vllm.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
-)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -5209,16 +5206,25 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
+                    if hasattr(kv_cache_spec, "head_size_v"):
+                        kwargs = {"head_size_v": kv_cache_spec.head_size_v}
+                        stride_kwargs = {"diff_kv": True}
+                    else:
+                        kwargs = {}
+                        stride_kwargs = {}
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         kernel_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
+                        **kwargs,
                     )
                     dtype = kv_cache_spec.dtype
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                            **stride_kwargs
+                        )
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
@@ -5410,7 +5416,6 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
-        self.prepare_sink_kv_cache(kv_caches)
 
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
@@ -5501,36 +5506,3 @@ class GPUModelRunner(
         self.transfer_event.record()
         self.transfer_event.synchronize()
         return pinned.tolist()
-
-    def prepare_sink_kv_cache(self, kv_caches) -> None:
-        if self.sink_len == 0:
-            return
-
-        def find_module_by_name(model, target_name: str):
-            for name, module in model.named_modules():
-                if name == target_name:
-                    return module
-            raise KeyError(f"Module '{target_name}' not found")
-
-        for layer_name, kv_cache in kv_caches.items():
-            layer_prefix = layer_name.rsplit(".", 1)[0]
-            self_attn_module = find_module_by_name(self.model, layer_prefix)
-            if not hasattr(self_attn_module, "get_sink_kv"):
-                continue
-            else:
-                sink_kv = self_attn_module.get_sink_kv()
-                sink_kv_slot_mapping = torch.arange(
-                    self.vllm_config.cache_config.block_size,
-                    self.sink_len + self.vllm_config.cache_config.block_size,
-                    device=torch.cuda.current_device(),
-                    dtype=torch.long,
-                )
-                triton_reshape_and_cache_flash_diffkv(
-                    sink_kv["sink_key"],
-                    sink_kv["sink_value"],
-                    kv_cache,
-                    sink_kv_slot_mapping,
-                    self_attn_module.attn.kv_cache_dtype,
-                    self_attn_module.attn._k_scale,
-                    self_attn_module.attn._v_scale,
-                )
