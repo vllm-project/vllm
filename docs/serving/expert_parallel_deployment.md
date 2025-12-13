@@ -44,7 +44,27 @@ Where:
 - `DP_SIZE`: Data parallel size
 - `EP_SIZE`: Expert parallel size (computed automatically)
 
-When EP is enabled, MoE layers use expert parallelism instead of tensor parallelism, while attention layers continue to use tensor parallelism if `TP_SIZE > 1`.
+### Layer Behavior with EP Enabled
+
+When EP is enabled, different layers in MoE models behave differently:
+
+| Layer Type | Behavior | Parallelism Used |
+|------------|----------|------------------|
+| **Expert (MoE) Layers** | Sharded across all EP ranks | Expert Parallel (EP) of size `TP × DP` |
+| **Attention Layers** | Behavior depends on TP size | See below |
+
+**Attention layer parallelism:**
+
+- **When `TP = 1`**: Attention weights are **replicated** across all DP ranks (data parallelism)
+- **When `TP > 1`**: Attention weights are **sharded** using tensor parallelism across TP ranks within each DP group
+
+For example, with `TP=2, DP=4` (8 GPUs total):
+
+- Expert layers form an EP group of size 8, with experts distributed across all GPUs
+- Attention layers use TP=2 within each of the 4 DP groups
+
+!!! note "Key Difference from Data Parallel Deployment"
+    Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
 
 ### Example Command
 
