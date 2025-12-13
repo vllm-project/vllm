@@ -1451,20 +1451,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
                 layer, False, input_dtype=self.marlin_input_dtype
             )
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
-        if self.use_marlin:
-            return None
-
-        return fp8_w8a8_moe_quant_config(
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
-            a1_scale=None,
-            a2_scale=None,
-            block_shape=None,
-        )
-
     @property
     def supports_eplb(self) -> bool:
         return False
