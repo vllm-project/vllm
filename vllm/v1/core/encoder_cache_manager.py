@@ -39,9 +39,11 @@ class EncoderCacheManager:
     space for new embeddings.
     Oldest cached embeddings with no request referenced will be first evicted.
 
-    NOTE: The EncoderCacheManager operates on the level of multimodal embeddings instead
-    of all tokens that represent the multimodal data in the input sequence. This
-    means all padding tokens in-between multimodal embeddings are not considered.
+    NOTE: The EncoderCacheManager operates on the level of multimodal embeddings
+    instead of encoder tokens (i.e. all tokens that represent the multimodal data
+    in the input sequence). This means all break/text tokens in-between multimodal
+    embeddings are not considered with respect to the cache size and the number
+    of free slots.
 
     Args:
         cache_size: Limit the size of the cache, measured by the number of
@@ -125,7 +127,7 @@ class EncoderCacheManager:
         Args:
             request: The request containing the multimodal input.
             input_id: Index of the multimodal input within the request.
-            encoder_compute_budget: Number of encoder tokens allowed to be
+            encoder_compute_budget: Number of encoder embeddings allowed to be
                 computed when this method is invoked.
             num_embeds_to_schedule: Number of encoder embeddings already scheduled to be
                 allocated with cache space when this method is invoked.
@@ -210,7 +212,7 @@ class EncoderCacheManager:
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is
-        increased by the number of encoder tokens for that input.
+        increased by the number of encoder embeddings for that input.
 
         The entry is NOT physically freed until capacity is needed (e.g., by
         `can_allocate`).
