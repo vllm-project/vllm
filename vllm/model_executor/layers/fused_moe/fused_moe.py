@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     activation_without_mul,
     disable_inplace,
     moe_kernel_quantize_input,
+    mm_k,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
@@ -79,100 +80,6 @@ def write_zeros_to_output(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
-
-@triton.jit
-def mm_k(
-    a_ptrs,
-    b_ptrs,
-    a_scale_ptrs,
-    b_scale_ptrs,
-    stride_ak,
-    stride_bk,
-    stride_ask,
-    stride_bsk,
-    token_mask,
-    base_k,
-    K: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    SPLIT_K: tl.constexpr,
-    CAST_TYPE: tl.constexpr,
-    b_dtype: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
-    use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    group_k: tl.constexpr,
-    group_n: tl.constexpr,
-    compute_type: tl.constexpr,
-):
-
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    STEP_K = BLOCK_K * SPLIT_K
-    num_iters = tl.cdiv(K, STEP_K)
-    for k in range(num_iters):
-        block_start_k = k * STEP_K + base_k
-        block_end_k = block_start_k + BLOCK_K
-
-        if EVEN_K:
-            # K is divisible by BLOCK_K, no masking ever needed
-            # pre-fetch lora weight
-            tiled_b = tl.load(b_ptrs)
-            if USE_GDC:
-                tl.extra.cuda.gdc_wait()
-            tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
-            if CAST_TYPE:
-                tiled_a = tiled_a.to(b_dtype)
-        else:
-            # Check if we need element-wise masking
-            if block_start_k >= K:
-                # Entire block out of range, skip
-                pass
-            elif block_end_k <= K:
-                # Entire block in range, no masking needed (fast path)
-                tiled_b = tl.load(b_ptrs)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                tiled_a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
-                if CAST_TYPE:
-                    tiled_a = tiled_a.to(b_dtype)
-            else:
-                # Partial block, need masking (only last iteration)
-                k_offsets = tl.arange(0, BLOCK_K)
-                mask = block_start_k + k_offsets < K
-                tiled_b = tl.load(b_ptrs, mask=mask[:, None], other=0.0)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                tiled_a = tl.load(a_ptrs, mask=token_mask[:, None] & mask[None, :], other=0.0)
-                if CAST_TYPE:
-                    tiled_a = tiled_a.to(b_dtype)
-
-        if use_int8_w8a16:
-            accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
-        elif use_fp8_w8a8 or use_int8_w8a8:
-            if group_k > 0 and group_n > 0:
-                offs_ks = block_start_k // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                )
-                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                accumulator += tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
-            else:
-                if use_fp8_w8a8:
-                    # acc used to enable fp8_fast_accum
-                    accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                else:
-                    accumulator += tl.dot(tiled_a, tiled_b)
-        else:
-            accumulator += tl.dot(tiled_a, tiled_b)
-        # Advance the ptrs to the next K block.
-        a_ptrs += STEP_K * stride_ak
-        b_ptrs += STEP_K * stride_bk
-
-    return accumulator
 
 
 @triton.jit
@@ -586,12 +493,8 @@ def fused_moe_kernel(
     accumulator = mm_k(
         a_ptrs,
         b_ptrs,
-        a_scale_ptrs if a_scale_ptr else None,
-        b_scale_ptrs if b_scale_ptr else None,
         stride_ak,
         stride_bk,
-        stride_ask,
-        stride_bsk,
         token_mask,
         base_k,
         K,
@@ -603,11 +506,15 @@ def fused_moe_kernel(
         False,
         None,
         USE_GDC,
+        a_scale_ptrs if a_scale_ptr else None,
+        b_scale_ptrs if b_scale_ptr else None,
+        stride_ask,
+        stride_bsk,
+        group_k,
+        group_n,
         use_int8_w8a16,
         use_fp8_w8a8,
         use_int8_w8a8,
-        group_k,
-        group_n,
         compute_type,
     )
 
