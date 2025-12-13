@@ -351,10 +351,7 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
     --max-lora-rank 64
 ```
 
-
-
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
-
 
 ## Using Tips
 
