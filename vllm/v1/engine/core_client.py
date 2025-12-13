@@ -608,7 +608,7 @@ class MPClient(EngineCoreClient):
         # Track GPU assignments for fault tolerance
         # Maps dp_rank → local_dp_rank (physical GPU assignment)
         self.gpu_mapping: dict[int, int] = {}
-        self._initialize_gpu_mapping()
+        self._initialize_gpu_mapping(explicit_local_dp_ranks)
 
         self.core_engines: list[EngineIdentity] = [
             i.to_bytes(2, "little") for i in self.engine_ranks_managed
@@ -783,10 +783,15 @@ class MPClient(EngineCoreClient):
             return int(match.group(1))
         raise ValueError(f"Cannot parse rank from process name: {proc.name}")
     
-    def _initialize_gpu_mapping(self):
+    def _initialize_gpu_mapping(self, explicit_local_dp_ranks: list[int] | None = None):
         """
         Initialize GPU mapping from process configuration.
         Maps dp_rank → local_dp_rank (physical GPU assignment).
+        
+        Args:
+            explicit_local_dp_ranks: Optional explicit GPU assignments (for full restart).
+                If provided, uses these instead of sequential assignment.
+                Example: [0, 1, 3] creates mapping {0: 0, 1: 1, 2: 3} (skips GPU 2)
         """
         parallel_config = self.vllm_config.parallel_config
         
@@ -797,7 +802,14 @@ class MPClient(EngineCoreClient):
         
         for i in range(local_engine_count):
             dp_rank = start_index + i
-            local_dp_rank = local_start_index + i
+            
+            # Use explicit GPU assignment if provided (for FT full restart)
+            # Otherwise use sequential assignment (normal case)
+            if explicit_local_dp_ranks is not None:
+                local_dp_rank = explicit_local_dp_ranks[i]
+            else:
+                local_dp_rank = local_start_index + i
+                
             self.gpu_mapping[dp_rank] = local_dp_rank
         
         logger.info("[FT] Initial GPU mapping: %s", self.gpu_mapping)
