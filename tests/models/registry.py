@@ -774,7 +774,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",
         extras={
-            "mistral-large-3-nvfp4": "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",  # noqa: E501
+            "mistral-large-3": "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
             "ministral-3": "mistralai/Ministral-3-3B-Instruct-2512",
         },
         tokenizer_mode="mistral",
