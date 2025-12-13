@@ -1270,6 +1270,43 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
             )
 
 
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
+@pytest.mark.parametrize("enable_sleep_mode", [True, False])
+def test_e2e_register_kv_caches(
+    dist_init, distributed_executor_backend, enable_sleep_mode, monkeypatch
+):
+    model_name = "Qwen/Qwen3-0.6B"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+    llm_kwargs = {
+        "model": model_name,
+        "enforce_eager": True,
+        "enable_sleep_mode": enable_sleep_mode,
+        "gpu_memory_utilization": 0.5,
+        "kv_transfer_config": kv_transfer_config,
+        "distributed_executor_backend": distributed_executor_backend,
+    }
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def run_test_and_cleanup():
+        # NOTE: Register kv caches in `initialize_from_config` during LLM initialization
+        llm = LLM(**llm_kwargs)
+        llm.llm_engine.engine_core.shutdown()
+
+    # Build runtime_env only if we're using Ray
+    if distributed_executor_backend == "ray":
+        ray.init()
+        try:
+            run_test_and_cleanup()
+        finally:
+            ray.shutdown()
+    else:
+        run_test_and_cleanup()
+
+
 class FakePlatform(Platform):
     device_type: str = "oot"
 
