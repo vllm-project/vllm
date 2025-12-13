@@ -40,7 +40,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
-from vllm.model_executor.layers.fused_moe.router_factor import (
+from vllm.model_executor.layers.fused_moe.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
