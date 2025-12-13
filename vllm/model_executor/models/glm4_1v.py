@@ -678,9 +678,9 @@ class Glm4vVisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
         self.blocks = nn.ModuleList(
             [
@@ -1257,6 +1257,7 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
                     )
                 height = min(height, overrides.height)
 
+        num_frames = max(num_frames, 2)  # GLM 4.6V requires 2 frames
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
