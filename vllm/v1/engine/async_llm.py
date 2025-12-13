@@ -44,10 +44,10 @@ from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
     load_stat_logger_plugin_factories,
+    record_aborted_requests,
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
-from vllm.v1.utils import record_aborted_requests
 
 logger = init_logger(__name__)
 

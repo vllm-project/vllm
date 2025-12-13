@@ -32,13 +32,14 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
+from vllm.v1.metrics.loggers import (
+    StatLoggerFactory,
+    StatLoggerManager,
+    record_aborted_requests,
+)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
-from vllm.v1.utils import (
-    record_aborted_requests,
-    record_function_or_nullcontext,
-)
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
