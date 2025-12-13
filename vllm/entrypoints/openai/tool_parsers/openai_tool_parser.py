@@ -83,7 +83,9 @@ class OpenAIToolParser(ToolParser):
         if parser.current_content:
             if parser.current_channel == "final":
                 final_content = parser.current_content
-            elif parser.current_channel == "commentary":
+            elif (
+                parser.current_channel == "commentary" and not parser.current_recipient
+            ):
                 commentary_content = parser.current_content
 
         return ExtractedToolCallInformation(
