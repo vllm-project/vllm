@@ -177,7 +177,9 @@ VLM_TEST_SETTINGS = {
             "attention_config": {
                 "backend": "ROCM_AITER_FA",
             },
-        },
+        }
+        if current_platform.is_rocm()
+        else None,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
