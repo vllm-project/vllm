@@ -1306,6 +1306,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         else:
             return result
 
+
 class Fp8OnlineMoEMethod(Fp8MoEMethod):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
@@ -1471,6 +1472,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
     @property
     def allow_inplace(self) -> bool:
         return True
+
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
     """
