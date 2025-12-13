@@ -9,7 +9,7 @@ from mistral_common.audio import Audio
 from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....conftest import AudioTestAssets
 from ....utils import RemoteOpenAIServer

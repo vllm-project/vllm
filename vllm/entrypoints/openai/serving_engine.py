@@ -117,7 +117,9 @@ from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.tokenizers import DeepseekV32Tokenizer, MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.deepseekv32 import DeepseekV32Tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,

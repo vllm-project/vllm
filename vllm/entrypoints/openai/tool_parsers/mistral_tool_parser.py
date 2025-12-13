@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from enum import Enum, auto
 from random import choices
 from string import ascii_letters, digits
+from typing import Any
 
 import ijson
 import regex as re
@@ -24,7 +25,8 @@ from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.logger import init_logger
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -84,6 +86,7 @@ class MistralToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
+        self.prev_tool_call_arr: list[dict[str, Any]] = []
         self.current_tool_id: int = -1
         self.streaming_state: StreamingState = StreamingState.WAITING_FOR_TOOL_START
 
