@@ -86,6 +86,7 @@ class MistralToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
+        self.prev_tool_call_arr: list[dict[str, Any]] = []
         self.current_tool_id: int = -1
         self.streaming_state: StreamingState = StreamingState.WAITING_FOR_TOOL_START
 
@@ -108,8 +109,6 @@ class MistralToolParser(ToolParser):
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!"
             )
-
-        self.prev_tool_call_arr: list[dict[str, Any]]
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         request = super().adjust_request(request)
