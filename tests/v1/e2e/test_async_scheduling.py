@@ -4,6 +4,7 @@ from itertools import repeat
 from typing import Any
 
 import pytest
+import torch
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
@@ -158,6 +159,7 @@ def run_tests(
             m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
         # lock matmul precision to full FP32 (IEEE)
         m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "ieee")
+        torch.backends.cuda.matmul.allow_tf32 = False
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
