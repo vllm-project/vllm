@@ -1117,6 +1117,7 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
+            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
 
@@ -1125,12 +1126,10 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-
-            # Stop checking for pooler models.
-            pooler_output = None
-            if pooler_outputs:
-                pooler_output = pooler_outputs[req_index]
-                stopped = check_stop(request, self.max_model_len, pooler_output)
+            elif request.pooling_params and pooler_output is not None:
+                # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
 
             if stopped:
                 kv_transfer_params = self._free_request(request)
