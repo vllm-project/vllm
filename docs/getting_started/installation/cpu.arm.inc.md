@@ -37,7 +37,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 
 To install from nightly index, run:
 ```bash
-uv pip install -U vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu
 ```
 
 !!! warning "`pip` caveat"
