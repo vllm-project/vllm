@@ -17,6 +17,7 @@ import msgspec
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.config.parallel import FaultToleranceMode
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -1228,10 +1229,25 @@ class DPEngineCoreProc(EngineCoreProc):
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         dp_size = vllm_config.parallel_config.data_parallel_size
         local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        fault_tolerance_mode = vllm_config.parallel_config.fault_tolerance_mode
 
         assert dp_size > 1
         assert local_dp_rank is not None
-        assert 0 <= local_dp_rank <= dp_rank < dp_size
+        
+        # In fault tolerance mode, local_dp_rank can be > dp_rank when skipping
+        # failed GPUs (e.g., logical ranks [0,1,2] mapped to physical GPUs [0,1,3])
+        if fault_tolerance_mode == FaultToleranceMode.FULL_RESTART or fault_tolerance_mode == "full_restart":
+            # Relaxed check: only validate ranges, allow non-sequential GPU assignments
+            assert 0 <= local_dp_rank and 0 <= dp_rank < dp_size, (
+                f"Invalid rank configuration: local_dp_rank={local_dp_rank}, "
+                f"dp_rank={dp_rank}, dp_size={dp_size}"
+            )
+        else:
+            # Normal mode: enforce sequential GPU assignment
+            assert 0 <= local_dp_rank <= dp_rank < dp_size, (
+                f"Invalid rank configuration: local_dp_rank={local_dp_rank} must be "
+                f"<= dp_rank={dp_rank} < dp_size={dp_size}"
+            )
 
         if vllm_config.kv_transfer_config is not None:
             # modify the engine_id and append the local_dp_rank to it to ensure

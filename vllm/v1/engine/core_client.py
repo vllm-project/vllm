@@ -900,6 +900,7 @@ class MPClient(EngineCoreClient):
         # Step 4: Update config for new size
         new_size = len(surviving_gpus)
         self.vllm_config.parallel_config.data_parallel_size = new_size
+        self.vllm_config.parallel_config.data_parallel_size_local = new_size
         
         logger.info(
             "[FT Full Restart] Recreating %d engines on GPUs %s...",
