@@ -42,7 +42,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
     SchedulerStats,
@@ -201,6 +201,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            cache_config=self.cache_config,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
@@ -212,6 +213,76 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+
+        def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
+            has_mamba: bool = any(
+                isinstance(group_spec.kv_cache_spec, MambaSpec)
+                for group_spec in kv_cache_config.kv_cache_groups
+            )
+            if vllm_config.model_config.is_hybrid:
+                assert has_mamba, "Hybrid models must have mamba layers"
+            return has_mamba
+
+        self.need_mamba_block_aligned_split = (
+            has_mamba_layers(self.kv_cache_config)
+            and self.cache_config.mamba_cache_mode == "align"
+        )
+
+    def _mamba_block_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        assert num_external_computed_tokens == 0, (
+            "External KV connector is not verified yet"
+        )
+        if request.num_output_tokens == 0:  # prefill
+            # Ensure new tokens for a request in the prefill phase do not contain
+            # draft tokens, especially in the last prefill chunk. For a hybrid-model,
+            # extra draft tokens would corrupt the generated Mamba state.
+            # TODO: This logic does not yet handle resumed requests.
+            if request.num_computed_tokens < request.num_prompt_tokens:
+                num_new_tokens = min(
+                    request.num_prompt_tokens - request.num_computed_tokens,
+                    num_new_tokens,
+                )
+
+            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+            # must be a multiple of `block_size`.
+            # As an exception, if `num_new_tokens` is less than `block_size`, the
+            # state is simply not cached, requiring no special handling.
+            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
+            # matching block. To prevent this from causing a Mamba cache miss, the
+            # last chunk must be larger than `block_size`.
+            block_size = self.cache_config.block_size
+            last_cache_position = (
+                request.num_prompt_tokens - request.num_prompt_tokens % block_size
+            )
+            # eagle prune
+            if self.use_eagle:
+                last_cache_position = max(last_cache_position - block_size, 0)
+            num_computed_tokens = (
+                request.num_computed_tokens
+                + num_new_local_computed_tokens
+                + num_external_computed_tokens
+            )
+            num_computed_tokens_after_prefill = num_computed_tokens + num_new_tokens
+            if num_computed_tokens_after_prefill < last_cache_position:
+                # align to block_size
+                num_new_tokens = num_new_tokens // block_size * block_size
+            elif (
+                num_computed_tokens
+                < last_cache_position
+                < num_computed_tokens_after_prefill
+            ):
+                # force to cache the last chunk
+                num_new_tokens = last_cache_position - num_computed_tokens
+            else:
+                # prefill the last few tokens
+                pass
+        return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -296,6 +367,11 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(
+                    request, num_new_tokens
+                )
+
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -306,6 +382,8 @@ class Scheduler(SchedulerInterface):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
+                # 4. Insufficient budget for a block-aligned chunk in hybrid
+                #    models with mamba cache mode \"align\".
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -558,6 +636,16 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+
+                if self.need_mamba_block_aligned_split:
+                    num_new_tokens = self._mamba_block_aligned_split(
+                        request,
+                        num_new_tokens,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
+                    if num_new_tokens == 0:
+                        break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an

@@ -30,6 +30,7 @@ CacheDType = Literal[
     "fp8_ds_mla",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
+MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -122,6 +123,14 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    mamba_cache_mode: MambaCacheMode = "none"
+    """The cache strategy for Mamba layers.
+    - "none": set when prefix caching is disabled.
+    - "all": cache the mamba state of all tokens at position i * block_size. This is 
+           the default behavior when prefix caching is enabled.
+    - "align": only cache the mamba state of the last token of each scheduler step and
+           when the token is at position i * block_size.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -230,3 +239,12 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
+
+    def __post_init__(self) -> None:
+        if self.enable_prefix_caching:
+            if self.mamba_cache_mode == "none":
+                self.mamba_cache_mode = "last"
+        else:
+            assert self.mamba_cache_mode == "none", (
+                "mamba_cache_mode must be 'none' when prefix caching is disabled"
+            )

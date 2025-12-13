@@ -10,6 +10,7 @@ from vllm.v1.attention.backends.utils import (
     PAD_SLOT_ID,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
+    mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 
@@ -48,7 +49,11 @@ class ShortConvAttentionMetadataBuilder(
     ) -> ShortConvAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc
-        state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        state_indices_tensor = mamba_get_block_table_tensor(
+            common_attn_metadata,
+            self.kv_cache_spec,
+            self.vllm_config.cache_config.mamba_cache_mode,
+        )[:, 0]
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None

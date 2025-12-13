@@ -149,6 +149,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
@@ -608,6 +609,7 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
 
     def reset_mm_cache(self) -> None:
@@ -1019,7 +1021,7 @@ class GPUModelRunner(
         self.input_batch.refresh_metadata()
 
     def _update_states_after_model_execute(
-        self, output_token_ids: torch.Tensor
+        self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
         """Update the cached states after model execution.
 
@@ -1055,6 +1057,15 @@ class GPUModelRunner(
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+        if self.cache_config.mamba_cache_mode == "align":
+            mamba_utils.postprocess_mamba(
+                scheduler_output,
+                self.kv_cache_config,
+                self.input_batch,
+                self.requests,
+                self.mamba_state_idx,
+                self.compilation_config.static_forward_context,
+            )
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
         model = self.get_model()
@@ -2574,7 +2585,6 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
-        self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -2904,6 +2914,24 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
+    def _mamba_copy_block(
+        self,
+        kv_cache_group_spec: KVCacheGroupSpec,
+        src_block_id: int,
+        dest_block_id: int,
+    ):
+        if src_block_id == dest_block_id:
+            return
+        forward_context = self.compilation_config.static_forward_context
+        for layer_name in kv_cache_group_spec.layer_names:
+            kv_caches: list[list[torch.Tensor]] = forward_context[layer_name].kv_cache
+            for kv_cache in kv_caches:
+                if isinstance(kv_cache, torch.Tensor):
+                    kv_cache[dest_block_id].copy_(kv_cache[src_block_id])
+                elif isinstance(kv_cache, list):
+                    for kv_cache_part in kv_cache:
+                        kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3031,6 +3059,17 @@ class GPUModelRunner(
                 )
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                if self.cache_config.mamba_cache_mode == "align":
+                    mamba_utils.preprocess_mamba(
+                        scheduler_output,
+                        self.kv_cache_config,
+                        self.cache_config,
+                        self.mamba_state_idx,
+                        self.input_batch,
+                        self.requests,
+                        self.compilation_config.static_forward_context,
+                    )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
@@ -3209,6 +3248,9 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        self._update_states_after_model_execute(
+            sampler_output.sampled_token_ids, scheduler_output
+        )
         self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
@@ -4949,6 +4991,7 @@ class GPUModelRunner(
         just may have a performance penalty due to that backend treating decodes
         as prefills.
         """
+
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
         reorder_batch_thresholds: list[int | None] = [

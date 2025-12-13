@@ -260,8 +260,16 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        max_model_len = vllm_config.model_config.max_model_len
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        # We allocate 1 block for each request now, so max_memory_usage_bytes is
+        # the same as page_size_bytes.
+        # Need to update this when supporting prefix caching.
+        if vllm_config.cache_config.mamba_cache_mode == "all":
+            max_model_len = vllm_config.model_config.max_model_len
+            return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        elif vllm_config.cache_config.mamba_cache_mode == "align":
+            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+        else:
+            return self.page_size_bytes * (1 + self.num_speculative_blocks)
 
 
 @dataclass(frozen=True)
