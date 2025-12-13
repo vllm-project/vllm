@@ -2,24 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
+from typing import Any
 
 from transformers import BatchEncoding
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
 from .deepseek_v32_encoding import encode_messages
-from .hf import HfTokenizer, TokenizerLike
-from .registry import TokenizerRegistry
+from .hf import CachedHfTokenizer
+from .protocol import TokenizerLike
 
 
-@TokenizerRegistry.register("deepseek_v32")
-class DeepseekV32Tokenizer(HfTokenizer):
-    def __init__(self, tokenizer: TokenizerLike):
-        self.tokenizer = tokenizer
-        self.name_or_path = (
-            tokenizer.name_or_path if hasattr(tokenizer, "name_or_path") else ""
-        )
-        self._added_vocab = self.tokenizer.get_added_vocab()
-        self._added_vocab_size = len(self._added_vocab)
-
+class DeepseekV32Tokenizer(CachedHfTokenizer):
     @classmethod
     def from_pretrained(
         cls,
@@ -40,7 +34,21 @@ class DeepseekV32Tokenizer(HfTokenizer):
         )
         return DeepseekV32Tokenizer(tokenizer)
 
-    def apply_chat_template(self, messages, tools=None, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike) -> None:
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.name_or_path = getattr(tokenizer, "name_or_path", "")
+
+        self._added_vocab = self.tokenizer.get_added_vocab()
+        self._added_vocab_size = len(self._added_vocab)
+
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str | list[int]:
         thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
@@ -49,13 +57,24 @@ class DeepseekV32Tokenizer(HfTokenizer):
         messages = conversation.copy()
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
-            messages[0]["tools"] = tools
+            messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
         # Historical reasoning content is dropped when a new user message is introduced
         drop_thinking = messages[-1]["role"] == "user"
 
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+
+        if kwargs.get("tokenize", True):
+            tokenizer_kwargs = {
+                k: kwargs[k] for k in ("truncation", "max_length") if k in kwargs
+            }
+            return self.encode(
+                prompt_str,
+                add_special_tokens=False,
+                **tokenizer_kwargs,
+            )
+
         return prompt_str
 
     def num_special_tokens_to_add(self) -> int:
