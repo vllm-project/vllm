@@ -780,6 +780,38 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
+def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
+    """Detect Gemma3 models via unique (head_size, sliding_window) signature.
+
+    Gemma3 models are the only ones using sliding_window=1024 with
+    head_size 128 (27B) or 256 (1B, 4B, 12B). Other SWA models use
+    different window sizes (Mistral=4096, Phi-3=2047).
+    """
+    return sliding_window == 1024 and head_size in (128, 256)
+
+
+def _get_tile_size(
+    head_size: int,
+    sliding_window: int,
+    element_size: int,
+    is_prefill: bool,
+) -> int:
+    """Select tile size with Gemma3-specific optimization.
+
+    For Gemma3, use 32 for both prefill and decode to better utilize
+    the larger head dimension (128/256). For other models, use
+    the default vLLM behavior.
+    """
+    if _is_gemma3_attention(head_size, sliding_window):
+        # Gemma3: use 32 for decode (default is 16)
+        return 32
+
+    # Default behavior
+    if is_prefill:
+        return 32
+    return 16 if element_size >= 2 else 32
+
+
 def unified_attention(
     q,
     k,
@@ -848,11 +880,15 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    # Assigning default tile sizes for prefill and decode.
-    # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
-    # and at least 16 for all other data types.
-    TILE_SIZE_PREFILL = 32
-    TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
+    # Tile sizes for prefill and decode. Gemma3 models use optimized values.
+    # Note: tile size must be at least 32 for fp8 (element_size == 1).
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    TILE_SIZE_PREFILL = _get_tile_size(
+        head_size, sliding_window_val, q.element_size(), is_prefill=True
+    )
+    TILE_SIZE_DECODE = _get_tile_size(
+        head_size, sliding_window_val, q.element_size(), is_prefill=False
+    )
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
