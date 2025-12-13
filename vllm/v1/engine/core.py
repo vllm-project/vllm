@@ -103,6 +103,11 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
+        self.afd_config = vllm_config.afd_config
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            logger.info("jcz EngineCore ffn role")
+            return
+
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
@@ -601,6 +606,7 @@ class EngineCoreProc(EngineCore):
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
+        self.afd_config = vllm_config.afd_config
 
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
@@ -855,7 +861,6 @@ class EngineCoreProc(EngineCore):
                 set_process_title("EngineCore")
                 decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
-
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -877,6 +882,23 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
+
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            logger.info("AFD FFN Server started, workers running...")
+            try:
+                # Tell workers to start FFN server loops (one-time call)
+                self.model_executor.collective_rpc("start_ffn_server_loop")
+
+                # Main thread waits without busy polling
+                shutdown_event = threading.Event()
+                shutdown_event.wait()  # Block until interrupted
+
+            except KeyboardInterrupt:
+                logger.info("Server shutting down...")
+                self.model_executor.collective_rpc("stop_ffn_server_loop")
+            except Exception as e:
+                logger.error("Server error: %s", e)
+                raise
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
@@ -1156,6 +1178,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.afd_config = vllm_config.afd_config
         super().__init__(
             vllm_config,
             local_client,
@@ -1238,6 +1261,22 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
+        if self.afd_config and self.afd_config.afd_role == "ffn":
+            logger.info("AFD FFN Server started, workers running...")
+            try:
+                # Tell workers to start FFN server loops (one-time call)
+                self.model_executor.collective_rpc("start_ffn_server_loop")
+
+                # Main thread waits without busy polling
+                shutdown_event = threading.Event()
+                shutdown_event.wait()  # Block until interrupted
+
+            except KeyboardInterrupt:
+                logger.info("Server shutting down...")
+                self.model_executor.collective_rpc("stop_ffn_server_loop")
+            except Exception as e:
+                logger.error("Server error: %s", e)
+                raise
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
