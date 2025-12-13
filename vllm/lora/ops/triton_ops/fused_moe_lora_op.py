@@ -92,7 +92,6 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
-    EVEN_K: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
@@ -167,13 +166,13 @@ def _fused_moe_lora_kernel(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
-        EVEN_K,
+        EVEN_K = False,
         SPLIT_K=SPLIT_K,
         CAST_TYPE=None,
         b_dtype=b_ptr.dtype.element_ty,
         USE_GDC=USE_GDC,
         IS_PRIMARY=IS_PRIMARY,
-        base_k=0,
+        base_k=pid_sk * BLOCK_SIZE_K,
     )
 
     if MUL_ROUTED_WEIGHT:
@@ -242,7 +241,6 @@ def _fused_moe_lora_shrink(
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
-    EVEN_K = K % (block_size_m * split_k) == 0
     grid = lambda META: (
         split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
@@ -282,7 +280,6 @@ def _fused_moe_lora_shrink(
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
         IS_PRIMARY=True,
-        EVEN_K=EVEN_K,
         **shrink_config,
     )
 
@@ -349,7 +346,6 @@ def _fused_moe_lora_expand(
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
-    EVEN_K = K % (block_size_m * split_k) == 0
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
@@ -387,7 +383,6 @@ def _fused_moe_lora_expand(
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         IS_PRIMARY=False,
-        EVEN_K=EVEN_K,
         **expand_config,
     )
     for i in range(num_slices):
