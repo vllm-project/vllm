@@ -1317,22 +1317,11 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
     """
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
-        self.layer = layer
-        self.quant_config = quant_config
+        super().__init__(quant_config, layer)
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
-        self.use_marlin = (
-            current_platform.is_cuda() and
-            (not current_platform.has_device_capability(89) or
-             envs.VLLM_TEST_FORCE_FP8_MARLIN)
-        )
-
-        # Currently, we always use triton or marlin for online fp8.
-        self.flashinfer_moe_backend = None
-        self.allow_deep_gemm = False
-        self.allow_cutlass_block_scaled_grouped_gemm = False
+        assert self.flashinfer_moe_backend is None
 
     def create_weights(
         self,
