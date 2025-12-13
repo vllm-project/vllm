@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolParser,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ...utils import check_logprobs_close
 
