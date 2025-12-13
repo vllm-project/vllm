@@ -990,11 +990,15 @@ class MPClient(EngineCoreClient):
             explicit_local_dp_ranks=surviving_gpus,  # [0, 1, 3] - Skip GPU 2!
         )
         
-        # Step 6: Start new monitor thread for new processes
+        # Step 6: Reset engine_dead flag since new engines are healthy
+        self.resources.engine_dead = False
+        logger.info("[FT Full Restart] Reset engine_dead flag - new engines are operational")
+        
+        # Step 7: Start new monitor thread for new processes
         self.start_engine_core_monitor()
         
         logger.info(
-            "[FT Full Restart] Complete! Restarted %d processes on GPUs %s",
+            "[FT Full Restart] Complete! Successfully restarted %d processes on GPUs %s",
             new_size, surviving_gpus
         )
     
