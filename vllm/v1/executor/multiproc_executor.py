@@ -124,9 +124,7 @@ class MultiprocExecutor(Executor):
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # get_loopback_ip() for communication.
+        # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
