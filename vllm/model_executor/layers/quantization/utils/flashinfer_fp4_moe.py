@@ -280,7 +280,12 @@ def flashinfer_trtllm_fp4_moe(
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
     routing_method_type = layer.routing_method_type
     if use_llama4_routing:
-        routing_method_type = flashinfer.RoutingMethodType.Llama4
+        routing_method_type = RoutingMethodType.Llama4
+        router_logits = (
+            router_logits.to(torch.float32)
+            if routing_method_type == RoutingMethodType.DeepSeekV3
+            else router_logits
+        )
 
     # Prepare routing bias
     routing_bias = e_score_correction_bias
