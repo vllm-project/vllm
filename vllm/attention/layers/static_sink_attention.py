@@ -66,9 +66,6 @@ def create_static_sink_attention_backend(
             common_attn_metadata.seq_lens[:] = (
                 common_attn_metadata.seq_lens + self.sink_len
             )
-            common_attn_metadata.seq_lens_cpu = (
-                common_attn_metadata.seq_lens_cpu + self.sink_len
-            )
             common_attn_metadata.max_seq_len = (
                 common_attn_metadata.max_seq_len + self.sink_len
             )
@@ -152,7 +149,7 @@ class StaticSinkAttention(Attention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        output_shape: torch.size | None = None,
+        output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         assert self.sink_key is not None and self.sink_value is not None, (
             "sink_key and sink_value have not been prepared"

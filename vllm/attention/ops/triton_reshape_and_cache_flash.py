@@ -238,7 +238,7 @@ def reshape_and_cache_kernel_flash_diffkv(
 
     # [TILE_SIZE]
     value_load = tl.load(
-        value_ptr + src_value_idx + tile_offs, mask=tile_offs * head_size_v
+        value_ptr + src_value_idx + tile_offs, mask=tile_offs < head_size_v
     )
     if FP8_KV_CACHE:
         if value_load.dtype.is_fp8():
@@ -322,8 +322,6 @@ def triton_reshape_and_cache_flash_diffkv(
     else:  # cuda
         num_stages = 10
         num_warps = 16
-        if torch.cuda.get_device_capability(key.device)[0] < 9:
-            TILE_SIZE = min(512, TILE_SIZE)
 
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs

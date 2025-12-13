@@ -778,10 +778,10 @@ class OpenPanguSinkAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = False
+        rope_parameters = {"partial_rotary_factor": self.qk_rope_dim / self.head_dim}
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.qk_rope_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
