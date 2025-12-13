@@ -66,7 +66,7 @@ def can_initialize(
 
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip", check_max_version=False)
 
     hf_overrides_fn = partial(
         dummy_hf_overrides,
