@@ -247,7 +247,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expert_tokens_meta=expert_tokens_meta,
             aq_out=a1q_perm,
         )
-        assert a1q.size(0) == M_sum
 
         mm1_out = _resize_cache(workspace2, (M_sum, N))
         m_grouped_fp8_gemm_nt_contiguous(

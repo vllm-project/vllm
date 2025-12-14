@@ -83,6 +83,10 @@ def count_expert_num_tokens(
         (num_local_experts), device=topk_ids.device, dtype=torch.int32
     )
 
+    if topk_ids.numel() == 0:
+        expert_num_tokens.fill_(0)
+        return expert_num_tokens
+
     grid = num_local_experts
     BLOCK_SIZE = min(topk_ids.numel(), 1024)
     BLOCK_SIZE = triton.next_power_of_2(BLOCK_SIZE)
