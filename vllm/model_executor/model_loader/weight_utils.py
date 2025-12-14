@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -448,17 +449,29 @@ def download_weights_from_hf(
             fs = HfFileSystem()
             file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-            # Use the first pattern found in the HF repo's files.
-            for pattern in allow_patterns:
-                matching = fnmatch.filter(file_list, pattern)
-                if len(matching) > 0:
-                    allow_patterns = [pattern]
-                break
+            # If downloading safetensors and an index file exists, use the
+            # specific file names from the index to avoid downloading
+            # unnecessary files (e.g., from subdirectories like "original/").
+            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
+            if "*.safetensors" in allow_patterns and index_file in file_list:
+                index_path = hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename=SAFE_WEIGHTS_INDEX_NAME,
+                    cache_dir=cache_dir,
+                    revision=revision,
+                )
+                with open(index_path) as f:
+                    weight_map = json.load(f)["weight_map"]
+                allow_patterns = list(set(weight_map.values()))
+            else:
+                # Use the first pattern found in the HF repo's files.
+                for pattern in allow_patterns:
+                    if fnmatch.filter(file_list, pattern):
+                        allow_patterns = [pattern]
+                        break
         except Exception as e:
             logger.warning(
-                "Failed to get file list for '%s'. Trying each pattern in "
-                "allow_patterns individually until weights have been "
-                "downloaded. Error: %s",
+                "Failed to get file list for '%s': %s",
                 model_name_or_path,
                 e,
             )
@@ -468,20 +481,15 @@ def download_weights_from_hf(
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        for allow_pattern in allow_patterns:
-            hf_folder = snapshot_download(
-                model_name_or_path,
-                allow_patterns=allow_pattern,
-                ignore_patterns=ignore_patterns,
-                cache_dir=cache_dir,
-                tqdm_class=DisabledTqdm,
-                revision=revision,
-                local_files_only=local_only,
-            )
-            # If we have downloaded weights for this allow_pattern,
-            # we don't need to check the rest.
-            if any(Path(hf_folder).glob(allow_pattern)):
-                break
+        hf_folder = snapshot_download(
+            model_name_or_path,
+            allow_patterns=allow_patterns,
+            ignore_patterns=ignore_patterns,
+            cache_dir=cache_dir,
+            tqdm_class=DisabledTqdm,
+            revision=revision,
+            local_files_only=local_only,
+        )
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info(
