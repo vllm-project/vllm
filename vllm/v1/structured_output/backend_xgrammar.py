@@ -268,13 +268,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 
