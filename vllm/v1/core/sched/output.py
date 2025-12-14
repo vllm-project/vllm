@@ -228,3 +228,5 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
+    # Number of invalid tokens per structured output request.
+    num_invalid_tokens_per_req: list[int] | None = None
