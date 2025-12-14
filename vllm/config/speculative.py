@@ -167,6 +167,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
+        initial_architecture = hf_config.architectures[0]
         if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
@@ -225,6 +226,9 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
+
+        if initial_architecture == "MistralLarge3ForCausalLM":
+            hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
         return hf_config
 
@@ -333,6 +337,7 @@ class SpeculativeConfig:
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
                     hf_overrides=SpeculativeConfig.hf_config_override,
+                    config_format=self.target_model_config.config_format,
                 )
 
                 # Automatically detect the method

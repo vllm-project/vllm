@@ -376,6 +376,19 @@ Supported models:
 
 Flags: `--tool-call-parser olmo3`
 
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.

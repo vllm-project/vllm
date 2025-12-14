@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import psutil
 import regex as re
 import torch
 
@@ -132,6 +133,7 @@ class CpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
@@ -147,11 +149,21 @@ class CpuPlatform(Platform):
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
+        node_dir = "/sys/devices/system/node"
         if kv_cache_space is None:
-            kv_cache_space = 4 * GiB_bytes  # type: ignore
+            nodes = (
+                [d for d in os.listdir(node_dir) if d.startswith("node")]
+                if os.path.exists(node_dir)
+                else []
+            )
+            num_numa_nodes = len(nodes) or 1
+            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
+            DEFAULT_CPU_MEM_UTILIZATION = 0.5
+            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
+            kv_cache_space_gib = kv_cache_space / GiB_bytes
             logger.warning_once(
-                "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                "for CPU backend is not set, using 4 by default."
+                "VLLM_CPU_KVCACHE_SPACE not set. Using "
+                f"{kv_cache_space_gib:.2f} GiB for KV cache."
             )
         else:
             kv_cache_space *= GiB_bytes
@@ -313,10 +325,16 @@ class CpuPlatform(Platform):
             # We need to find the location of PyTorch's libgomp
             torch_pkg = os.path.dirname(torch.__file__)
             site_root = os.path.dirname(torch_pkg)
-            torch_libs = os.path.join(site_root, "torch.libs")
-            pytorch_libgomp_so_candidates = glob.glob(
-                os.path.join(torch_libs, "libgomp-*.so*")
-            )
+            # Search both torch.libs and torch/lib - See: https://github.com/vllm-project/vllm/issues/30470
+            torch_libs_paths = [
+                os.path.join(site_root, "torch.libs"),
+                os.path.join(torch_pkg, "lib"),
+            ]
+            pytorch_libgomp_so_candidates = []
+            for torch_libs in torch_libs_paths:
+                pytorch_libgomp_so_candidates.extend(
+                    glob.glob(os.path.join(torch_libs, "libgomp*.so*"))
+                )
             if pytorch_libgomp_so_candidates:
                 pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
                 if ld_preload_str:

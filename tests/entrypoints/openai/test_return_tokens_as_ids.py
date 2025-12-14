@@ -7,7 +7,7 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 

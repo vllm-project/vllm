@@ -15,7 +15,7 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import (
     BatchUpdateBuilder,
     LogitsProcessors,
@@ -33,7 +33,6 @@ class CachedRequestState:
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
-    pooling_params: PoolingParams | None
     generator: torch.Generator | None
 
     block_ids: tuple[list[int], ...]
@@ -51,10 +50,17 @@ class CachedRequestState:
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
+    # for pooling models
+    pooling_params: PoolingParams | None = None
+    pooling_states: PoolingStates | None = None
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
         )
+
+        if self.pooling_params is not None:
+            self.pooling_states = PoolingStates()
 
     @property
     def num_tokens(self) -> int:
@@ -255,7 +261,9 @@ class InputBatch:
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
+        # for pooling models
         self.pooling_params: dict[str, PoolingParams] = {}
+        self.pooling_states: dict[str, PoolingStates] = {}
 
         # Cached reference to the GPU tensor of previously sampled tokens
         self.prev_sampled_token_ids: torch.Tensor | None = None
@@ -413,7 +421,11 @@ class InputBatch:
                     sampling_params.bad_words_token_ids
                 )
         elif pooling_params := request.pooling_params:
+            pooling_states = request.pooling_states
+            assert pooling_states is not None
+
             self.pooling_params[req_id] = pooling_params
+            self.pooling_states[req_id] = pooling_states
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids
             )
@@ -469,6 +481,7 @@ class InputBatch:
 
         if self.is_pooling_model:
             self.pooling_params.pop(req_id, None)
+            self.pooling_states.pop(req_id, None)
             return req_index
 
         self.greedy_reqs.discard(req_id)
@@ -482,6 +495,8 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+        if self.prev_req_id_to_index is not None:
+            self.prev_req_id_to_index.pop(req_id, None)
 
         self.has_allowed_token_ids.discard(req_id)
         if self.allowed_token_ids_mask_cpu_tensor is not None:
@@ -835,13 +850,19 @@ class InputBatch:
         assert len(self.req_ids) == len(self.pooling_params)
         return [self.pooling_params[req_id] for req_id in self.req_ids]
 
+    def get_pooling_states(self) -> list[PoolingStates]:
+        assert len(self.req_ids) == len(self.pooling_states)
+        return [self.pooling_states[req_id] for req_id in self.req_ids]
+
     def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
+        pooling_states = self.get_pooling_states()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(self.num_prompt_tokens[: self.num_reqs]),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
+            pooling_states=pooling_states,
         )
 
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:

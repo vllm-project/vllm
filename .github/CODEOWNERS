@@ -146,9 +146,10 @@ mkdocs.yaml @hmellor
 /requirements/kv_connectors.txt @NickLucche
 
 # Pooling models
-/examples/*/pooling/ @noooop
+/examples/pooling @noooop
 /tests/models/*/pooling* @noooop
 /tests/entrypoints/pooling @noooop
+/vllm/entrypoints/pooling @noooop
 /vllm/config/pooler.py @noooop
 /vllm/pooling_params.py @noooop
 /vllm/model_executor/layers/pooler.py @noooop
