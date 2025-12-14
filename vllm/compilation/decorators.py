@@ -390,14 +390,6 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            # Validate that AOT compile is not used with unbacked dynamic
-            # shapes. aot_compile re-allocates backed symbols post dynamo!
-            if ds_type == DynamicShapesType.UNBACKED:
-                raise ValueError(
-                    "AOT compilation is not compatible with UNBACKED dynamic shapes. "
-                    "Please use BACKED or BACKED_SIZE_OBLIVIOUS dynamic shapes type "
-                    "when VLLM_USE_AOT_COMPILE is enabled."
-                )
             from .caching import compilation_config_hash_factors
 
             factors: list[str] = compilation_config_hash_factors(self.vllm_config)
