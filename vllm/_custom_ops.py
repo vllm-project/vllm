@@ -498,15 +498,15 @@ def awq_dequantize(
 def awq_gemm(
     input: torch.Tensor,
     qweight: torch.Tensor,
-    qzeros: torch.Tensor,
     scales: torch.Tensor,
+    qzeros: torch.Tensor,
     split_k_iters: int,
 ) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import awq_gemm_triton
 
-        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
-    return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+        return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
+    return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters)
 
 
 # gptq
@@ -632,8 +632,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def _awq_gemm_fake(
         input: torch.Tensor,
         qweight: torch.Tensor,
-        qzeros: torch.Tensor,
         scales: torch.Tensor,
+        qzeros: torch.Tensor,
         split_k_iters: torch.SymInt,
     ) -> torch.Tensor:
         num_in_feats = input.size(0)
