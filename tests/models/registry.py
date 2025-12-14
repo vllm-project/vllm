@@ -578,6 +578,9 @@ _AUTOMATIC_CONVERTED_MODELS = {
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
+    "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0.dev"
+    ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
