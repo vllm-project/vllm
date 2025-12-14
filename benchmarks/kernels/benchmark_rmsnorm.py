@@ -4,7 +4,12 @@
 import itertools
 
 import torch
-from flashinfer.norm import fused_add_rmsnorm, rmsnorm
+from flashinfer.norm import (
+    fused_add_rmsnorm,
+    gemma_fused_add_rmsnorm,
+    gemma_rmsnorm,
+    rmsnorm,
+)
 from torch import nn
 
 from vllm import _custom_ops as vllm_ops
@@ -12,10 +17,16 @@ from vllm.triton_utils import triton
 
 
 class HuggingFaceRMSNorm(nn.Module):
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        is_gemma: bool = False,
+    ) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        self.is_gemma = is_gemma
 
     def forward(
         self,
@@ -30,7 +41,10 @@ class HuggingFaceRMSNorm(nn.Module):
 
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype) * self.weight
+        if self.is_gemma:
+            x = (x * (1.0 + self.weight.float())).to(orig_dtype)
+        else:
+            x = x.to(orig_dtype) * self.weight
         if residual is None:
             return x
         else:
@@ -42,8 +56,9 @@ def rmsnorm_naive(
     weight: torch.Tensor,
     residual: torch.Tensor | None = None,
     eps: float = 1e-6,
+    is_gemma: bool = False,
 ):
-    naive_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps)
+    naive_norm = HuggingFaceRMSNorm(x.shape[-1], eps=eps, is_gemma=is_gemma)
     naive_norm.weight = nn.Parameter(weight)
     naive_norm = naive_norm.to(x.device)
 
@@ -85,7 +100,7 @@ def rmsnorm_flashinfer(
     return output
 
 
-def rmsnorm_vllm(
+def gemma_rmsnorm_flashinfer(
     x: torch.Tensor,
     weight: torch.Tensor,
     residual: torch.Tensor | None = None,
@@ -97,11 +112,36 @@ def rmsnorm_vllm(
         residual = residual.view(-1, residual.shape[-1])
 
     if residual is not None:
-        vllm_ops.fused_add_rms_norm(x, residual, weight, eps)
+        gemma_fused_add_rmsnorm(x, residual, weight, eps)
+        output = (x, residual)
+    else:
+        output = gemma_rmsnorm(x, weight, eps)
+
+    if isinstance(output, tuple):
+        output = (output[0].view(orig_shape), output[1].view(orig_shape))
+    else:
+        output = output.view(orig_shape)
+    return output
+
+
+def rmsnorm_vllm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    residual: torch.Tensor | None = None,
+    eps: float = 1e-6,
+    is_gemma: bool = False,
+):
+    orig_shape = x.shape
+    x = x.view(-1, x.shape[-1])
+    if residual is not None:
+        residual = residual.view(-1, residual.shape[-1])
+
+    if residual is not None:
+        vllm_ops.fused_add_rms_norm(x, residual, weight, eps, is_gemma)
         output = (x, residual)
     else:
         out = torch.empty_like(x)
-        vllm_ops.rms_norm(out, x, weight, eps)
+        vllm_ops.rms_norm(out, x, weight, eps, is_gemma)
         output = out
 
     if isinstance(output, tuple):
@@ -111,20 +151,31 @@ def rmsnorm_vllm(
     return output
 
 
-def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True):
+def calculate_diff(batch_size, seq_len, hidden_size, use_residual=True, is_gemma=False):
     dtype = torch.bfloat16
     x = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device="cuda")
     weight = torch.ones(hidden_size, dtype=dtype, device="cuda")
     residual = torch.randn_like(x) if use_residual else None
 
     output_naive = rmsnorm_naive(
-        x.clone(), weight, residual.clone() if residual is not None else None
+        x.clone(),
+        weight,
+        residual.clone() if residual is not None else None,
+        is_gemma=is_gemma,
     )
-    output_flashinfer = rmsnorm_flashinfer(
-        x.clone(), weight, residual.clone() if residual is not None else None
-    )
+    if is_gemma:
+        output_flashinfer = gemma_rmsnorm_flashinfer(
+            x.clone(), weight, residual.clone() if residual is not None else None
+        )
+    else:
+        output_flashinfer = rmsnorm_flashinfer(
+            x.clone(), weight, residual.clone() if residual is not None else None
+        )
     output_vllm = rmsnorm_vllm(
-        x.clone(), weight, residual.clone() if residual is not None else None
+        x.clone(),
+        weight,
+        residual.clone() if residual is not None else None,
+        is_gemma=is_gemma,
     )
 
     if use_residual:
@@ -150,7 +201,7 @@ head_num_range = [32, 48]
 configs = list(itertools.product(head_num_range, batch_size_range, seq_length_range))
 
 
-def get_benchmark(use_residual):
+def get_benchmark(use_residual, is_gemma):
     @triton.testing.perf_report(
         triton.testing.Benchmark(
             x_names=["head_num", "batch_size", "seq_len"],
@@ -180,12 +231,16 @@ def get_benchmark(use_residual):
                     x.clone(),
                     weight,
                     residual.clone() if residual is not None else None,
+                    is_gemma=is_gemma,
                 ),
                 quantiles=quantiles,
             )
         elif provider == "flashinfer":
+            rmsnorm_flashinfer_func = (
+                gemma_rmsnorm_flashinfer if is_gemma else rmsnorm_flashinfer
+            )
             ms, min_ms, max_ms = triton.testing.do_bench(
-                lambda: rmsnorm_flashinfer(
+                lambda: rmsnorm_flashinfer_func(
                     x.clone(),
                     weight,
                     residual.clone() if residual is not None else None,
@@ -198,6 +253,7 @@ def get_benchmark(use_residual):
                     x.clone(),
                     weight,
                     residual.clone() if residual is not None else None,
+                    is_gemma=is_gemma,
                 ),
                 quantiles=quantiles,
             )
@@ -233,6 +289,9 @@ if __name__ == "__main__":
         "--use-residual", action="store_true", help="Whether to use residual connection"
     )
     parser.add_argument(
+        "--is-gemma", action="store_true", help="Whether it is Gemma style rms norm"
+    )
+    parser.add_argument(
         "--save-path",
         type=str,
         default="./configs/rmsnorm/",
@@ -247,9 +306,10 @@ if __name__ == "__main__":
         seq_len=args.seq_len,
         hidden_size=args.hidden_size,
         use_residual=args.use_residual,
+        is_gemma=args.is_gemma,
     )
 
     # Get the benchmark function with proper use_residual setting
-    benchmark = get_benchmark(args.use_residual)
+    benchmark = get_benchmark(args.use_residual, args.is_gemma)
     # Run performance benchmark
     benchmark.run(print_data=True, save_path=args.save_path)

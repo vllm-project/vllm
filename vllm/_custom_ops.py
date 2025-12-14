@@ -326,15 +326,23 @@ def rotary_embedding(
 
 # layer norm ops
 def rms_norm(
-    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    is_gemma: bool = False,
 ) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    torch.ops._C.rms_norm(out, input, weight, epsilon, is_gemma)
 
 
 def fused_add_rms_norm(
-    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    is_gemma: bool = False,
 ) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon, is_gemma)
 
 
 def fused_qk_norm_rope(

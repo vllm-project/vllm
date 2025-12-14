@@ -10,7 +10,7 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
+template <typename scalar_t, int VEC_SIZE, int NUM_DIMS, bool IS_GEMMA>
 __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,           // [..., hidden_size]
     const scalar_t* __restrict__ input,   // [..., hidden_size]
@@ -77,7 +77,12 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      if (IS_GEMMA) {
+        dst.val[j] = (scalar_t)((x * s_variance) *
+                                (1.0 + static_cast<float>(src2.val[j])));
+      } else {
+        dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      }
     }
     v_out[i] = dst;
   }
@@ -87,7 +92,7 @@ __global__ void rms_norm_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
-template <typename scalar_t, int width>
+template <typename scalar_t, int width, bool IS_GEMMA>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -98,6 +103,8 @@ fused_add_rms_norm_kernel(
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
+  using Converter = vllm::_typeConvert<scalar_t>;
+  using T2 = typename Converter::packed_hip_type;
 
   const int vec_hidden_size = hidden_size / width;
   const int64_t vec_input_stride = input_stride / width;
@@ -134,17 +141,47 @@ fused_add_rms_norm_kernel(
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
-    _f16Vec<scalar_t, width> temp = residual_v[id];
-    temp *= s_variance;
-    temp *= weight_v[idx];
-    input_v[strided_id] = temp;
+    _f16Vec<scalar_t, width> r_v = residual_v[id];
+    _f16Vec<scalar_t, width> w_v = weight_v[idx];
+    if constexpr (width % 2 == 0) {
+#pragma unroll
+      for (int j = 0; j < width; j += 2) {
+        if (IS_GEMMA) {
+          float2 temp_f = Converter::convert(T2{r_v.data[j], r_v.data[j + 1]});
+          temp_f.x = (temp_f.x * s_variance) * (1.0 + (float)(w_v.data[j]));
+          temp_f.y = (temp_f.y * s_variance) * (1.0 + (float)(w_v.data[j + 1]));
+          T2 temp = Converter::convert(temp_f);
+          r_v.data[j] = temp.x;
+          r_v.data[j + 1] = temp.y;
+        } else {
+          float2 temp_f = Converter::convert(T2{r_v.data[j], r_v.data[j + 1]});
+          temp_f.x = (temp_f.x * s_variance);
+          temp_f.y = (temp_f.y * s_variance);
+          T2 temp = Converter::convert(temp_f);
+          r_v.data[j] = temp.x * w_v.data[j];
+          r_v.data[j + 1] = temp.y * w_v.data[j + 1];
+        }
+      }
+    } else {
+#pragma unroll
+      for (int j = 0; j < width; ++j) {
+        float x = static_cast<float>(r_v.data[j]);
+        if (IS_GEMMA) {
+          r_v.data[j] =
+              Converter::convert(x * s_variance * (1.0 + (float)(w_v.data[j])));
+        } else {
+          r_v.data[j] = Converter::convert(x * s_variance) * w_v.data[j];
+        }
+      }
+    }
+    input_v[strided_id] = r_v;
   }
 }
 
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
-template <typename scalar_t, int width>
+template <typename scalar_t, int width, bool IS_GEMMA>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -174,8 +211,13 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * input_stride + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+    if (IS_GEMMA) {
+      input[blockIdx.x * input_stride + idx] =
+          (scalar_t)(x * s_variance * (1.0 + (float)(weight[idx])));
+    } else {
+      input[blockIdx.x * input_stride + idx] =
+          ((scalar_t)(x * s_variance)) * weight[idx];
+    }
   }
 }
 
@@ -184,7 +226,7 @@ fused_add_rms_norm_kernel(
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
-              double epsilon) {
+              double epsilon, bool is_gemma) {
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -215,31 +257,35 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
           std::min(hidden_size / calculated_vec_size, max_block_size);
       dim3 block(block_size);
       VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
-        vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank>
-            <<<grid, block, 0, stream>>>(
-                out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                input_stride_d2, input_stride_d3, input_stride_d4,
-                input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
-                epsilon, num_tokens, hidden_size);
+        VLLM_DISPATCH_BOOL(is_gemma, IS_GEMMA, [&] {
+          vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank, IS_GEMMA>
+              <<<grid, block, 0, stream>>>(
+                  out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+                  input_stride_d2, input_stride_d3, input_stride_d4,
+                  input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
+                  epsilon, num_tokens, hidden_size);
+        });
       });
     });
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
-  VLLM_DISPATCH_FLOATING_TYPES(                                             \
-      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {               \
-        vllm::fused_add_rms_norm_kernel<scalar_t, width>                    \
-            <<<grid, block, 0, stream>>>(                                   \
-                input.data_ptr<scalar_t>(), input_stride,                   \
-                residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-                epsilon, num_tokens, hidden_size);                          \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                      \
+  VLLM_DISPATCH_FLOATING_TYPES(                                               \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                 \
+        VLLM_DISPATCH_BOOL(is_gemma, IS_GEMMA, [&] {                          \
+          vllm::fused_add_rms_norm_kernel<scalar_t, width, IS_GEMMA>          \
+              <<<grid, block, 0, stream>>>(                                   \
+                  input.data_ptr<scalar_t>(), input_stride,                   \
+                  residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
+                  epsilon, num_tokens, hidden_size);                          \
+        });                                                                   \
       });
 
 void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
-                        double epsilon) {
+                        double epsilon, bool is_gemma) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
