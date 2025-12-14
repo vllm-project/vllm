@@ -274,6 +274,9 @@ class AsyncLLM(EngineClient):
 
         if self.errored:
             raise EngineDeadError()
+        
+        # Ensure output handler is running (restart if needed after full restart)
+        self._ensure_output_handler()
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -348,6 +351,27 @@ class AsyncLLM(EngineClient):
     # requests we don't need to send multiple messages to core proc,
     # and so we don't need multiple streams which then get
     # re-multiplexed in the API server anyhow.
+    def _ensure_output_handler(self):
+        """Ensure output handler is running. Restart if needed (e.g., after full restart)."""
+        if self.output_handler is None or self.output_handler.done():
+            if self.output_handler is not None:
+                # Handler died, check if it was cancelled or errored
+                try:
+                    exc = self.output_handler.exception()
+                    if exc:
+                        logger.warning(
+                            "[AsyncLLM] Previous output_handler died with exception: %s. "
+                            "Restarting handler...", exc
+                        )
+                except asyncio.CancelledError:
+                    logger.info("[AsyncLLM] Previous output_handler was cancelled. Restarting...")
+                except Exception:
+                    pass  # Invalid state, just restart
+            
+            logger.info("[AsyncLLM] Restarting output_handler")
+            self.output_handler = None  # Reset to allow _run_output_handler to proceed
+            self._run_output_handler()
+    
     async def generate(
         self,
         prompt: EngineCoreRequest | PromptType,
@@ -461,6 +485,8 @@ class AsyncLLM(EngineClient):
 
         if self.output_handler is not None:
             return
+        
+        logger.info("[AsyncLLM] Starting output_handler task")
 
         # Ensure that the task doesn't have a circular ref back to the AsyncLLM
         # object, or else it won't be garbage collected and cleaned up properly.
@@ -524,6 +550,12 @@ class AsyncLLM(EngineClient):
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
+            except asyncio.CancelledError:
+                logger.info(
+                    "[AsyncLLM] output_handler cancelled (likely due to full restart). "
+                    "Task will be recreated on next operation."
+                )
+                raise
 
         self.output_handler = asyncio.create_task(output_handler())
 

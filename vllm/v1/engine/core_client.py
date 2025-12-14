@@ -417,6 +417,10 @@ class BackgroundResources:
     def validate_alive(self, frames: Sequence[zmq.Frame]):
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
+            logger.error(
+                "[EngineDeadError] Detected ENGINE_CORE_DEAD message from engine. "
+                "One or more engine core processes have crashed."
+            )
             raise EngineDeadError()
 
 
@@ -489,12 +493,20 @@ class MPClient(EngineCoreClient):
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
-        return (
-            EngineDeadError(suppress_context=True) if self.resources.engine_dead else e
-        )
+        if self.resources.engine_dead:
+            logger.error(
+                "[EngineDeadError] Formatting exception as EngineDeadError. "
+                "Original exception type: %s, message: %s",
+                type(e).__name__, str(e)
+            )
+            return EngineDeadError(suppress_context=True)
+        return e
 
     def ensure_alive(self):
         if self.resources.engine_dead:
+            logger.error(
+                "[EngineDeadError] Engine is dead, cannot proceed with operation"
+            )
             raise EngineDeadError()
 
     def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
@@ -694,8 +706,10 @@ class MPClient(EngineCoreClient):
                 failed_rank = _self._get_rank_from_process(failed_proc)
                 
                 logger.error(
-                    "[FT] Engine core proc %s (rank %d) died unexpectedly",
-                    failed_proc.name, failed_rank
+                    "[FT] Engine core proc %s (rank %d, PID %d) died unexpectedly. "
+                    "Exit code: %s",
+                    failed_proc.name, failed_rank, failed_proc.pid,
+                    failed_proc.exitcode
                 )
                 
                 if fault_tolerance_enabled:
@@ -906,8 +920,21 @@ class MPClient(EngineCoreClient):
             logger.info("[FT Full Restart] Closed old engine manager")
         
         if self.resources.coordinator:
+            coordinator_pid = self.resources.coordinator.proc.pid if hasattr(self.resources.coordinator, 'proc') else None
             self.resources.coordinator.close()
-            logger.info("[FT Full Restart] Closed coordinator")
+            logger.info("[FT Full Restart] Closed coordinator (PID: %s)", coordinator_pid)
+            
+            # Wait for coordinator process to actually terminate to avoid port conflicts
+            if coordinator_pid:
+                timeout = 5
+                start = time.time()
+                while self.resources.coordinator.proc.is_alive():
+                    if time.time() - start > timeout:
+                        logger.warning("[FT Full Restart] Coordinator didn't exit cleanly, force killing")
+                        self.resources.coordinator.proc.kill()
+                        break
+                    time.sleep(0.1)
+                logger.info("[FT Full Restart] Coordinator process fully terminated")
         
         # Step 4: Update EPLB config to maintain expert-per-GPU ratio
         # This mimics lightweight FT behavior by marking lost experts as redundant
@@ -987,9 +1014,15 @@ class MPClient(EngineCoreClient):
         self.vllm_config.parallel_config.data_parallel_size = new_size
         self.vllm_config.parallel_config.data_parallel_size_local = new_size
         
+        # CRITICAL: Get new master port for process group initialization
+        # Without this, new engines will try to use old port which may have stale NCCL state
+        from vllm.utils.network_utils import get_open_port
+        self.vllm_config.parallel_config.data_parallel_master_port = get_open_port()
+        
         logger.info(
-            "[FT Full Restart] Recreating %d engines on GPUs %s...",
-            new_size, surviving_gpus
+            "[FT Full Restart] Recreating %d engines on GPUs %s (new master port: %d)...",
+            new_size, surviving_gpus, 
+            self.vllm_config.parallel_config.data_parallel_master_port
         )
         
         # Step 5: Reinitialize engines using refactored method
@@ -1006,7 +1039,24 @@ class MPClient(EngineCoreClient):
         self.resources.engine_dead = False
         logger.info("[FT Full Restart] Reset engine_dead flag - new engines are operational")
         
-        # Step 7: Start new monitor thread for new processes
+        # Step 7: Restart output_queue_task with new ZMQ sockets
+        # CRITICAL: The old output_queue_task captured OLD socket references in its closure (line 1354)
+        # Even though we created NEW sockets, the old task still reads from the OLD socket reference!
+        # We MUST cancel it so _ensure_output_queue_task() creates a NEW task that captures NEW sockets
+        # 
+        # Note: We're called from sync monitor thread, so we can't create async tasks here.
+        # Instead, set to None and the task will be recreated lazily on next get_output_async() call.
+        # AsyncLLM.output_handler doesn't need restarting - it will automatically use the new task.
+        if self.resources.output_queue_task is not None:
+            logger.info("[FT Full Restart] Cancelling stale output_queue_task (has old socket refs)")
+            self.resources.output_queue_task.cancel()
+            self.resources.output_queue_task = None
+            logger.info(
+                "[FT Full Restart] output_queue_task cancelled. "
+                "Will be recreated with new sockets on next get_output_async() call"
+            )
+        
+        # Step 8: Start new monitor thread for new processes
         self.start_engine_core_monitor()
         
         logger.info(
@@ -1158,6 +1208,11 @@ class SyncMPClient(MPClient):
         # from this (run_output_handler) task to shut down the server.
         outputs = self.outputs_queue.get()
         if isinstance(outputs, Exception):
+            logger.error(
+                "[EngineDeadError] Exception received from output queue (sync). "
+                "Exception type: %s, message: %s",
+                type(outputs).__name__, str(outputs)
+            )
             raise self._format_exception(outputs) from None
         if outputs.wave_complete is not None:
             self.engines_running = False
@@ -1332,6 +1387,11 @@ class AsyncMPClient(MPClient):
         assert self.outputs_queue is not None
         outputs = await self.outputs_queue.get()
         if isinstance(outputs, Exception):
+            logger.error(
+                "[EngineDeadError] Exception received from output queue (async). "
+                "Exception type: %s, message: %s",
+                type(outputs).__name__, str(outputs)
+            )
             raise self._format_exception(outputs) from None
         return outputs
 

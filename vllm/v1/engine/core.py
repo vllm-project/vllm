@@ -867,11 +867,38 @@ class EngineCoreProc(EngineCore):
             logger.debug("EngineCore exiting.")
             raise
         except Exception as e:
+            import sys
+            import traceback
+            error_details = f"Rank {dp_rank} (local {local_dp_rank}): {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+            
+            # CRITICAL: Force flush to ensure error is visible even if process dies
+            error_msg = (
+                f"\n{'='*80}\n"
+                f"[EngineCore FATAL] DP Rank {dp_rank} (local GPU {local_dp_rank}) CRASHED\n"
+                f"Exception Type: {type(e).__name__}\n"
+                f"Exception Message: {str(e)}\n"
+                f"Full Traceback:\n{traceback.format_exc()}"
+                f"{'='*80}\n"
+            )
+            
+            # Print to both stderr and logger to maximize visibility
+            print(error_msg, file=sys.stderr, flush=True)
+            
             if engine_core is None:
-                logger.exception("EngineCore failed to start.")
+                logger.exception(
+                    "[EngineCore FATAL] DP Rank %d (local %d) failed to start. "
+                    "Exception type: %s, message: %s",
+                    dp_rank, local_dp_rank, type(e).__name__, str(e)
+                )
             else:
-                logger.exception("EngineCore encountered a fatal error.")
-                engine_core._send_engine_dead()
+                logger.exception(
+                    "[EngineCore FATAL] DP Rank %d (local %d) encountered fatal error. "
+                    "Exception type: %s, message: %s. "
+                    "Sending ENGINE_CORE_DEAD signal to client.",
+                    dp_rank, local_dp_rank, type(e).__name__, str(e)
+                )
+                # Pass error details so client can log them
+                engine_core._send_engine_dead(error_info=error_details)
             raise e
         finally:
             if engine_core is not None:
@@ -975,8 +1002,17 @@ class EngineCoreProc(EngineCore):
             for v, p in zip(args, arg_types)
         )
 
-    def _send_engine_dead(self):
-        """Send EngineDead status to the EngineCoreClient."""
+    def _send_engine_dead(self, error_info: str | None = None):
+        """Send EngineDead status to the EngineCoreClient.
+        
+        Args:
+            error_info: Optional error details to help debug the root cause
+        """
+        if error_info:
+            logger.error(
+                "[ENGINE_DEAD] Sending death signal with error: %s", 
+                error_info
+            )
 
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
