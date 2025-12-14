@@ -19,6 +19,8 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
+from vllm.tokenizers import TokenizerLike
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
@@ -73,6 +75,8 @@ class OpenAIServingModels:
         self.io_processor = self.engine_client.io_processor
         self.model_config = self.engine_client.model_config
         self.max_model_len = self.model_config.max_model_len
+
+        self.async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.
