@@ -235,7 +235,9 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput], dur_s: float, selected_percentiles: list[float]
+    outputs: list[RequestFuncOutput],
+    dur_s: float,
+    selected_percentiles: list[float],
 ) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
