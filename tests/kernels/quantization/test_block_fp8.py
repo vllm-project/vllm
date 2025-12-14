@@ -24,6 +24,7 @@ from vllm.utils.deep_gemm import (
     per_block_cast_to_fp8,
     should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.flashinfer import has_flashinfer_fp8_blockscale_gemm
 from vllm.utils.import_utils import has_deep_gemm
 
 if current_platform.get_device_capability() < (9, 0):
@@ -205,3 +206,57 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
+    if not has_flashinfer_fp8_blockscale_gemm():
+        pytest.skip(
+            "FlashInfer block GEMM not available (requires SM90+ and FlashInfer)"
+        )
+    # only aligned sizes
+    if K % 128 != 0 or N % 64 != 0:
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
+
+    torch.manual_seed(seed)
+    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_max = fp8_info.max
+
+    A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+    B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+
+    A_fp8, As_fp8 = per_token_group_quant_fp8(A_fp32, block_size[1])
+    B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)
+
+    As = As_fp8.to(torch.float32)
+    Bs = Bs_fp8.to(torch.float32)
+
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
+
+    # Transpose earlier so that the testing will not trigger transposing kernels
+    # As_fp8 = get_col_major_tma_aligned_tensor(As_fp8)
+
+    out = torch.zeros((M, N), device="cuda", dtype=out_dtype)
+
+    assert As_fp8.shape == (M, (K + 127) // 128), (
+        f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
+    )
+
+    A_bf16 = A_fp32.to(torch.bfloat16)
+
+    out = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
+        input=A_bf16,
+        weight=B_fp8,
+        input_scale=None,
+        weight_scale=Bs,
+        out_dtype=out_dtype,
+    )
+
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
+    assert rel_diff < 0.028
