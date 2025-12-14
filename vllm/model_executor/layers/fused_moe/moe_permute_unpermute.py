@@ -177,7 +177,7 @@ def moe_permute(
         m_indices,
     )
 
-    if a1q_scale is not None and a1q_scale.dim() > 1:
+    if a1q_scale is not None and a1q_scale.numel() > 1:
         a1q_scale = a1q_scale[permuted_idx.clamp(max=n_token * topk - 1) // topk]
     return (
         permuted_hidden_states,
