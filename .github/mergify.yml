@@ -1,4 +1,11 @@
 pull_request_rules:
+- name: rebase-pr-older-than-40-commits
+  conditions:
+      - base = main
+      - "#commits-behind >= 40"
+  actions:
+    rebase:
+
 - name: label-documentation
   description: Automatically apply documentation label
   conditions:
