@@ -2747,6 +2747,13 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
+        # This check is needed because in some environments
+        # (e.g. Docker with specific models),
+        # inputs_embeds validation might fail
+        # if dtypes don't strictly match.
+        if inputs_embeds is not None and inputs_embeds.dtype != self.dtype:
+            inputs_embeds = inputs_embeds.to(self.dtype)
+
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -4195,7 +4202,7 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                 ),
             ):
-                outputs = self.model(
+                outputs = self._model_forward(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
