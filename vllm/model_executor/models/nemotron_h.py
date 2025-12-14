@@ -32,6 +32,8 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
+
+# Import LoRA classes for custom 3-slice MergedColumnParallelLinear support
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
@@ -747,6 +749,9 @@ class NemotronHForCausalLM(
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
 ):
+    # Relevant only if self.has_moe is True
+    is_non_gated_moe: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
@@ -758,6 +763,10 @@ class NemotronHForCausalLM(
             "k_proj",
             "v_proj",
         ],
+        # Note: conv1d and in_proj (MambaMixer2) are NOT in packed_modules_mapping
+        # because the checkpoint may have a single weight for the whole module.
+        # The custom MergedColumnParallelLinearVariableSliceWithLoRA class
+        # handles these by checking output_sizes when packed_modules_list is empty.
     }
 
     # LoRA specific attributes
@@ -818,6 +827,7 @@ class NemotronHForCausalLM(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
+
         self.model = NemotronHModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
