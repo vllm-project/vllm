@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import concurrent
 import json
+import os
 import sys
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 import numpy as np
 import torch
@@ -125,6 +127,7 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
@@ -269,6 +272,15 @@ class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
     chat_template_content_format: ChatTemplateContentFormatOption
 
 
+_process_tokenizer_name: str | None = None
+_process_tokenizer_mode: str | None = None
+_process_trust_remote_code: bool | None = None
+_process_tokenizer_revision: str | None = None
+_process_max_model_len: int | None = None
+_process_do_lower_case: bool | None = None
+_process_tokenizer: Any | None = None
+
+
 class OpenAIServing:
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID (e.g. "embd", "classify")
@@ -304,6 +316,43 @@ class OpenAIServing:
         self.io_processor = self.models.io_processor
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
+
+        self.enable_tokenizer_proc_pool = os.getenv("TOKENIZER_PROC_POOL", "0") == "1"
+        self.tokenizer_worker_num = max(
+            1, int(os.getenv("TOKENIZER_WORKER_NUM", default=5))
+        )
+        self.process_pool_threshold = max(
+            1, int(os.getenv("TOKENIZER_PROC_POOL_THRES", 512))
+        )
+        self.do_lower_case = False
+        if self.model_config and self.model_config.encoder_config:
+            self.do_lower_case = self.model_config.encoder_config.get(
+                "do_lower_case", False
+            )
+
+        if self.enable_tokenizer_proc_pool:
+            logger.info("Tokenizer process pool is enabled.")
+            logger.info("Tokenizer worker num is %s.", self.tokenizer_worker_num)
+            logger.info("Process pool threshold is %s.", self.process_pool_threshold)
+
+            self._tokenizer_proc_pool_executor = ProcessPoolExecutor(
+                max_workers=self.tokenizer_worker_num,
+                initializer=self._init_proc_tokenizer,
+                initargs=(  # type: ignore[arg-type]
+                    self.model_config.tokenizer,
+                    self.model_config.tokenizer_mode,
+                    self.model_config.trust_remote_code,
+                    self.model_config.tokenizer_revision,
+                    self.model_config.max_model_len,
+                    self.do_lower_case,
+                ),
+            )
+
+            self._tokenize_prompt_input_or_inputs_async_proc_pool = make_async(
+                self._tokenize_prompt_input_or_inputs_proc_pool,
+                executor=self._tokenizer_proc_pool_executor,
+            )
+            self._initialize_process_pool()
 
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
@@ -620,6 +669,141 @@ class OpenAIServing:
             async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
             self._async_tokenizer_pool[tokenizer] = async_tokenizer
         return async_tokenizer
+
+    def _initialize_process_pool(self):
+        """
+        Initializes the process pool executor by submitting and waiting for dummy tasks.
+        Ensures the process pool is properly set up before use.
+        """
+        executor: ProcessPoolExecutor | None = getattr(
+            self, "_tokenizer_proc_pool_executor", None
+        )
+
+        if executor is None:
+            logger.error("Process pool executor not found")
+            raise ValueError("Process pool executor not initialized")
+
+        # Use stored max_workers instead of private _max_workers
+        max_workers: int = getattr(self, "tokenizer_worker_num", 1)
+
+        futures = []
+        try:
+            # Submit dummy tasks to all workers
+            for _ in range(max_workers):
+                future = executor.submit(
+                    OpenAIServing._proc_pool_dummy_task,
+                )
+                futures.append(future)
+
+            # Wait for all dummy tasks to complete
+            for future in futures:
+                future.result()
+            logger.info("Process pool initialized successfully")
+
+        except concurrent.futures.process.BrokenProcessPool as e:
+            raise RuntimeError(f"Process pool initialization failed: {e}") from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Unexpected error during process pool initialization: {e}"
+            ) from e
+
+    @staticmethod
+    def _proc_pool_dummy_task():
+        """A no-op task used to verify process pool initialization."""
+        return
+
+    @staticmethod
+    def _init_proc_tokenizer(*args: object) -> None:
+        if len(args) != 6:
+            raise TypeError("expected 6 init args")
+        (
+            tokenizer,
+            tokenizer_mode,
+            trust_remote_code,
+            tokenizer_revision,
+            max_model_len,
+            do_lower_case,
+        ) = cast(tuple[str, str, bool, str, int, bool], args)
+
+        global _process_tokenizer, _process_tokenizer_name, _process_tokenizer_mode
+        global _process_trust_remote_code, _process_tokenizer_revision
+        global _process_max_model_len, _process_do_lower_case
+
+        # Validate inputs
+        if not tokenizer:
+            raise ValueError("Tokenizer name or path cannot be empty")
+        if max_model_len <= 0:
+            raise ValueError(f"max_model_len must be positive, got {max_model_len}")
+
+        # Store configuration in global variables
+        _process_tokenizer_name = tokenizer
+        _process_tokenizer_mode = tokenizer_mode
+        _process_trust_remote_code = trust_remote_code
+        _process_tokenizer_revision = tokenizer_revision
+        _process_max_model_len = max_model_len
+        _process_do_lower_case = do_lower_case
+
+        # Initialize tokenizer
+        try:
+            _process_tokenizer = get_tokenizer(
+                tokenizer_name=tokenizer,
+                tokenizer_mode=tokenizer_mode,
+                trust_remote_code=trust_remote_code,
+                revision=tokenizer_revision,
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to initialize tokenizer: {e}") from e
+
+    @staticmethod
+    def _normalize_prompt_text_to_input_static(
+        request: AnyRequest,
+        tokenizer: AnyTokenizer,
+        prompt: str,
+        add_special_tokens: bool,
+        max_model_len: int,
+        do_lower_case: bool,
+    ) -> TextTokensPrompt:
+        if do_lower_case:
+            prompt = prompt.lower()
+
+        encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
+        input_ids = encoded.input_ids
+
+        input_text = prompt
+        return OpenAIServing._validate_input_static(
+            request, input_ids, input_text, max_model_len
+        )
+
+    @staticmethod
+    def _tokenize_prompt_input_or_inputs_proc_pool(
+        request: AnyRequest,
+        request_prompt: str,
+        add_special_tokens: bool = True,
+    ) -> list[TextTokensPrompt]:
+        global _process_tokenizer
+        global _process_max_model_len, _process_do_lower_case
+
+        # Validate global tokenizer state
+        if _process_tokenizer is None:
+            raise ValueError(
+                "Tokenizer not initialized. Call _init_proc_tokenizer first."
+            )
+        if _process_max_model_len is None or _process_do_lower_case is None:
+            raise ValueError(
+                "Tokenizer configuration "
+                "(max_model_len or do_lower_case) not initialized."
+            )
+
+        result = OpenAIServing._normalize_prompt_text_to_input_static(
+            request=request,
+            tokenizer=_process_tokenizer,
+            prompt=request_prompt,
+            add_special_tokens=add_special_tokens,
+            max_model_len=_process_max_model_len,
+            do_lower_case=_process_do_lower_case,
+        )
+
+        return [result]
 
     async def _preprocess(
         self,
@@ -1080,6 +1264,77 @@ class OpenAIServing:
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
+    @staticmethod
+    def _validate_input_static(
+        request: AnyRequest, input_ids: list[int], input_text: str, max_model_len: int
+    ) -> TextTokensPrompt:
+        token_num = len(input_ids)
+
+        # Note: EmbeddingRequest, ClassificationRequest,
+        # and ScoreRequest doesn't have max_tokens
+        if isinstance(
+            request,
+            (
+                EmbeddingChatRequest,
+                EmbeddingCompletionRequest,
+                ScoreRequest,
+                RerankRequest,
+                ClassificationRequest,
+            ),
+        ):
+            # Note: input length can be up to the entire model context length
+            # since these requests don't generate tokens.
+            if token_num > max_model_len:
+                operations: dict[type[AnyRequest], str] = {
+                    ScoreRequest: "score",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
+                }
+                operation = operations.get(type(request), "embedding generation")
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for {operation}. "
+                    f"Please reduce the length of the input."
+                )
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+
+        # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
+        # and does not require model context length validation
+        if isinstance(
+            request,
+            (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
+        ):
+            return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+
+        # chat completion endpoint supports max_completion_tokens
+        if isinstance(request, ChatCompletionRequest):
+            # TODO(#9845): remove max_tokens when field dropped from OpenAI API
+            max_tokens = request.max_completion_tokens or request.max_tokens
+        else:
+            max_tokens = getattr(request, "max_tokens", None)
+
+        # Note: input length can be up to model context length - 1 for
+        # completion-like requests.
+        if token_num >= max_model_len:
+            raise ValueError(
+                f"This model's maximum context length is "
+                f"{max_model_len} tokens. However, your request has "
+                f"{token_num} input tokens. Please reduce the length of "
+                "the input messages."
+            )
+
+        if max_tokens is not None and token_num + max_tokens > max_model_len:
+            raise ValueError(
+                "'max_tokens' or 'max_completion_tokens' is too large: "
+                f"{max_tokens}. This model's maximum context length is "
+                f"{max_model_len} tokens and your request has "
+                f"{token_num} input tokens ({max_tokens} > {max_model_len}"
+                f" - {token_num})."
+            )
+
+        return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
+
     async def _tokenize_prompt_input_async(
         self,
         request: AnyRequest,
@@ -1239,12 +1494,23 @@ class OpenAIServing:
                 prompt=request_prompt, prompt_token_ids=[1]
             )
         elif isinstance(request_prompt, str):
-            prompt_inputs = await self._tokenize_prompt_input_async(
-                request,
-                tokenizer,
-                request_prompt,
-                add_special_tokens=add_special_tokens,
-            )
+            if (
+                self.enable_tokenizer_proc_pool
+                and len(request_prompt) >= self.process_pool_threshold
+            ):
+                result = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
+                    request,
+                    request_prompt,
+                    add_special_tokens=add_special_tokens,
+                )
+                prompt_inputs = result[0]
+            else:
+                prompt_inputs = await self._tokenize_prompt_input_async(
+                    request,
+                    tokenizer,
+                    request_prompt,
+                    add_special_tokens=add_special_tokens,
+                )
         else:
             # For MistralTokenizer
             assert is_list_of(request_prompt, int), (
