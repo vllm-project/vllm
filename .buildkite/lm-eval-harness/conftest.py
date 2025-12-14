@@ -17,6 +17,18 @@ def pytest_addoption(parser):
         default="1",
         help="Tensor parallel size to use for evaluation",
     )
+    parser.addoption(
+        "--dp-size",
+        action="store",
+        default="1",
+        help="Data parallel size to use for evaluation",
+    )
+    parser.addoption(
+        "--ep",
+        action="store_true",
+        default=False,
+        help="Enable expert parallelism for evaluation",
+    )
 
 
 @pytest.fixture(scope="session")
@@ -28,6 +40,16 @@ def config_list_file(pytestconfig, config_dir):
 @pytest.fixture(scope="session")
 def tp_size(pytestconfig):
     return pytestconfig.getoption("--tp-size")
+
+
+@pytest.fixture(scope="session")
+def dp_size(pytestconfig):
+    return pytestconfig.getoption("--dp-size")
+
+
+@pytest.fixture(scope="session")
+def ep_enable(pytestconfig):
+    return pytestconfig.getoption("--ep")
 
 
 def pytest_generate_tests(metafunc):
