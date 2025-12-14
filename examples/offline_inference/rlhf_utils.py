@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+from ast import Dict, Tuple
 from collections.abc import Callable
+from enum import Enum
 from typing import TypedDict
 
 import torch
@@ -92,6 +94,15 @@ class FlattenedTensorMetadata(TypedDict):
     offset: int
 
 
+class PayloadType(Enum):
+    """Enumerates possible payload types in IPC protocol."""
+
+    HANDLES = "handles"
+    BUFFER_UPDATE = "buffer_update"
+    DONE = "done"
+    UNKNOWN = "unknown"
+
+
 class ColocateWorkerExtension:
     """
     The class for vLLM's worker to inherit from, in the colocate setting.
@@ -152,11 +163,86 @@ class ColocateWorkerExtension:
         gc.collect()
         torch.cuda.empty_cache()
 
+    def update_weights_from_ipc_async(self, zmq_handles: dict[str, str]):
+        assert self.device is not None
+        if not hasattr(self, "_zmq_ctx") or self._zmq_ctx is None:
+            self._zmq_ctx = zmq.Context()
+        socket = self._zmq_ctx.socket(zmq.ROUTER)
+        socket.bind(zmq_handles[self.report_device_id()])
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+
+        buffers: Dict[int, torch.Tensor] = {}
+        while True:
+            events = dict(poller.poll(timeout=100))
+            if socket in events and (events[socket] & zmq.POLLIN):
+                # Router identity
+                identity = socket.recv()
+
+                payload: (
+                    list[tuple[Callable, tuple]]
+                    | tuple[int, list[FlattenedTensorMetadata]]
+                    | None
+                ) = socket.recv_pyobj()
+
+                payload_type = self._identify_payload_type(payload)
+
+                # === HANDLE LIST OF SHARED MEMORY HANDLES ===
+                if payload_type == PayloadType.HANDLES:
+                    handles: list[tuple[Callable, tuple]] = payload
+                    for i, h in enumerate(handles):
+                        buffers[i] = rebuild_ipc(h, self.device.index)
+                    socket.send_multipart([identity, b"ACK_HANDLES"])
+                    continue
+
+                # === HANDLE BUFFERED MODEL UPDATES ===
+                if payload_type == PayloadType.BUFFER_UPDATE:
+                    buf_id, items = payload
+                    buffer = buffers.get(buf_id)
+                    if buffer is None:
+                        continue
+
+                    weights: list[Tuple[str, torch.Tensor]] = []
+                    for item in items:
+                        assert isinstance(item, dict)
+                        shape = torch.Size(item["shape"])
+                        dtype, offset = item["dtype"], item["offset"]
+                        size = dtype.itemsize * shape.numel()
+                        tensor = (
+                            buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                        )
+                        weights.append((item["name"], tensor))
+
+                    self.model_runner.model.load_weights(weights=weights)
+                    torch.cuda.synchronize()
+                    socket.send_multipart([identity, str(buf_id).encode()])
+
+                # === DONE SIGNAL ===
+                elif payload_type == PayloadType.DONE:
+                    socket.send_multipart([identity, b"DONE"])
+                    break
+                else:
+                    continue
+
+        socket.close()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def report_device_id(self) -> str:
         from vllm.platforms import current_platform
 
         self.device_uuid = current_platform.get_device_uuid(self.device.index)
         return self.device_uuid
+
+    def _identify_payload_type(self, payload) -> PayloadType:
+        if isinstance(payload, list):
+            return PayloadType.HANDLES
+        elif isinstance(payload, tuple):
+            buf_id, _ = payload
+            if buf_id is None:
+                return PayloadType.DONE
+            return PayloadType.BUFFER_UPDATE
+        return PayloadType.UNKNOWN
 
     def check_weights_changed(self):
         """
