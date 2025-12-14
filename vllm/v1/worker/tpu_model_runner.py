@@ -31,7 +31,8 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.layers import BaseLayerWithLoRA, LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
@@ -1468,11 +1469,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._hidden_states_dtype = out.dtype
 
     def _set_active_loras(
-        self, prompt_lora_mapping, token_lora_mapping, lora_requests
+        self,
+        prompt_lora_mapping: tuple[int, ...],
+        token_lora_mapping: tuple[int, ...],
+        lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         torch_xla.sync(wait=False)  # Captures input updates
         super()._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests
+            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
         torch_xla.sync(wait=False)  # Captures metadata updates
 

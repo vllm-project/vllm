@@ -1201,6 +1201,7 @@ class Qwen3VLForConditionalGeneration(
             "gate_proj",
             "up_proj",
         ],
+        "qkv": ["qkv"],  # For vision tower's already-packed QKV
     }
 
     supports_encoder_tp_data = True
@@ -1677,6 +1678,6 @@ class Qwen3VLForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.merger",
+            connector=["visual.merger", "visual.deepstack_merger_list"],
             tower_model="visual.",
         )
