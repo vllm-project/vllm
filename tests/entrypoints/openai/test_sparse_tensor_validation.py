@@ -13,7 +13,7 @@ import io
 import pytest
 import torch
 
-from vllm.entrypoints.renderer import BaseRenderer
+from vllm.entrypoints.renderer import CompletionRenderer
 from vllm.multimodal.audio import AudioEmbeddingMediaIO
 from vllm.multimodal.image import ImageEmbeddingMediaIO
 
@@ -64,7 +64,7 @@ class TestPromptEmbedsValidation:
 
     def test_valid_dense_tensor_accepted(self, model_config):
         """Baseline: Valid dense tensors should work normally."""
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         valid_tensor = _create_valid_dense_tensor()
         encoded = _encode_tensor(valid_tensor)
@@ -87,7 +87,7 @@ class TestPromptEmbedsValidation:
 
     def test_malicious_sparse_tensor_rejected(self, model_config):
         """Security: Malicious sparse tensors should be rejected."""
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
@@ -102,7 +102,7 @@ class TestPromptEmbedsValidation:
 
     def test_extremely_large_indices_rejected(self, model_config):
         """Security: Sparse tensors with extremely large indices should be rejected."""
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         # Create tensor with indices far beyond reasonable bounds
         indices = torch.tensor([[999999], [999999]])
@@ -119,7 +119,7 @@ class TestPromptEmbedsValidation:
 
     def test_negative_indices_rejected(self, model_config):
         """Security: Sparse tensors with negative indices should be rejected."""
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         # Create tensor with negative indices
         indices = torch.tensor([[-1], [-1]])
@@ -254,7 +254,7 @@ class TestSparseTensorValidationIntegration:
         3. Sends to /v1/completions with prompt_embeds parameter
         4. Server should reject before memory corruption occurs
         """
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         # Step 1-2: Attacker creates malicious payload
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
@@ -293,7 +293,7 @@ class TestSparseTensorValidationIntegration:
 
         Ensures the fix doesn't break legitimate batch processing.
         """
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         valid_tensors = [
             _encode_tensor(_create_valid_dense_tensor()),
@@ -312,7 +312,7 @@ class TestSparseTensorValidationIntegration:
         Even if most tensors are valid, a single malicious one should
         cause rejection of the entire batch.
         """
-        renderer = BaseRenderer(model_config)
+        renderer = CompletionRenderer(model_config)
 
         mixed_batch = [
             _encode_tensor(_create_valid_dense_tensor()),
