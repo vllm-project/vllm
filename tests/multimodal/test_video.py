@@ -147,7 +147,7 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
     """
     Regression test for handling videos with broken frames.
     This test uses a pre-corrupted video file (assets/corrupted.mp4) that
-    contains broken/unreadable frames to verify the video loader handles
+    contains broken frames to verify the video loader handles
     them gracefully without crashing and returns accurate metadata.
     """
     with monkeypatch.context() as m:
@@ -177,3 +177,125 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             f"Expected fewer than {metadata['total_num_frames']} frames, "
             f"but loaded {frames.shape[0]} frames"
         )
+
+
+@VIDEO_LOADER_REGISTRY.register("test_video_backend_override_1")
+class TestVideoBackendOverride1(VideoLoader):
+    """Test loader that returns FAKE_OUTPUT_1 to verify backend selection."""
+
+    @classmethod
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict]:
+        return FAKE_OUTPUT_1, {"video_backend": "test_video_backend_override_1"}
+
+
+@VIDEO_LOADER_REGISTRY.register("test_video_backend_override_2")
+class TestVideoBackendOverride2(VideoLoader):
+    """Test loader that returns FAKE_OUTPUT_2 to verify backend selection."""
+
+    @classmethod
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, **kwargs
+    ) -> tuple[npt.NDArray, dict]:
+        return FAKE_OUTPUT_2, {"video_backend": "test_video_backend_override_2"}
+
+
+def test_video_media_io_backend_kwarg_override(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that video_backend kwarg can override the VLLM_VIDEO_LOADER_BACKEND
+    environment variable.
+
+    This allows users to dynamically select a different video backend
+    via --media-io-kwargs without changing the global env var, which is
+    useful when plugins set a default backend but a specific request
+    needs a different one.
+    """
+    with monkeypatch.context() as m:
+        # Set the env var to one backend
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_video_backend_override_1")
+
+        imageio = ImageMediaIO()
+
+        # Without video_backend kwarg, should use env var backend
+        videoio_default = VideoMediaIO(imageio, num_frames=10)
+        frames_default, metadata_default = videoio_default.load_bytes(b"test")
+        np.testing.assert_array_equal(frames_default, FAKE_OUTPUT_1)
+        assert metadata_default["video_backend"] == "test_video_backend_override_1"
+
+        # With video_backend kwarg, should override env var
+        videoio_override = VideoMediaIO(
+            imageio, num_frames=10, video_backend="test_video_backend_override_2"
+        )
+        frames_override, metadata_override = videoio_override.load_bytes(b"test")
+        np.testing.assert_array_equal(frames_override, FAKE_OUTPUT_2)
+        assert metadata_override["video_backend"] == "test_video_backend_override_2"
+
+
+def test_video_media_io_backend_kwarg_not_passed_to_loader(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Test that video_backend kwarg is consumed by VideoMediaIO and NOT passed
+    through to the underlying video loader's load_bytes method.
+
+    This ensures the kwarg is properly popped from kwargs before forwarding.
+    """
+
+    @VIDEO_LOADER_REGISTRY.register("test_reject_video_backend_kwarg")
+    class RejectVideoBackendKwargLoader(VideoLoader):
+        """Test loader that fails if video_backend is passed through."""
+
+        @classmethod
+        def load_bytes(
+            cls, data: bytes, num_frames: int = -1, **kwargs
+        ) -> tuple[npt.NDArray, dict]:
+            # This should never receive video_backend in kwargs
+            if "video_backend" in kwargs:
+                raise AssertionError(
+                    "video_backend should be consumed by VideoMediaIO, "
+                    "not passed to loader"
+                )
+            return FAKE_OUTPUT_1, {"received_kwargs": list(kwargs.keys())}
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_reject_video_backend_kwarg")
+
+        imageio = ImageMediaIO()
+
+        # Even when video_backend is provided, it should NOT be passed to loader
+        videoio = VideoMediaIO(
+            imageio,
+            num_frames=10,
+            video_backend="test_reject_video_backend_kwarg",
+            other_kwarg="should_pass_through",
+        )
+
+        # This should NOT raise AssertionError
+        frames, metadata = videoio.load_bytes(b"test")
+        np.testing.assert_array_equal(frames, FAKE_OUTPUT_1)
+        # Verify other kwargs are still passed through
+        assert "other_kwarg" in metadata["received_kwargs"]
+
+
+def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that when video_backend kwarg is None or not provided,
+    VideoMediaIO falls back to VLLM_VIDEO_LOADER_BACKEND env var.
+    """
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_video_backend_override_2")
+
+        imageio = ImageMediaIO()
+
+        # Explicit None should fall back to env var
+        videoio_none = VideoMediaIO(imageio, num_frames=10, video_backend=None)
+        frames_none, metadata_none = videoio_none.load_bytes(b"test")
+        np.testing.assert_array_equal(frames_none, FAKE_OUTPUT_2)
+        assert metadata_none["video_backend"] == "test_video_backend_override_2"
+
+        # Not providing video_backend should also fall back to env var
+        videoio_missing = VideoMediaIO(imageio, num_frames=10)
+        frames_missing, metadata_missing = videoio_missing.load_bytes(b"test")
+        np.testing.assert_array_equal(frames_missing, FAKE_OUTPUT_2)
+        assert metadata_missing["video_backend"] == "test_video_backend_override_2"

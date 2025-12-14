@@ -14,9 +14,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
 from vllm.transformers_utils.config import (
-    get_hf_file_bytes,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
@@ -175,9 +175,14 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             self.vllm_config = vllm_config
 
             # These are not used in pooling models
-            for attr in ("lm_head", "logits_processor"):
-                if hasattr(self, attr):
-                    delattr(self, attr)
+            objects_to_clean = [self]
+            if language_model := getattr(self, "language_model", None):
+                objects_to_clean.append(language_model)
+
+            for obj in objects_to_clean:
+                for attr in ("lm_head", "logits_processor"):
+                    if hasattr(obj, attr):
+                        delattr(obj, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
@@ -301,7 +306,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             quant_config = vllm_config.quant_config
 
             self.score = ReplicatedLinear(
-                model_config.hidden_size,
+                model_config.get_hidden_size(),
                 text_config.num_labels,
                 bias=False,
                 params_dtype=vllm_config.model_config.head_dtype,
@@ -344,44 +349,6 @@ def as_seq_cls_model(cls: _T) -> _T:
     )
 
     return ModelForSequenceClassification  # type: ignore
-
-
-def as_reward_model(cls: _T) -> _T:
-    """
-    Subclass an existing vLLM model to support reward modeling.
-
-    By default, we return the hidden states of each token directly.
-
-    Note:
-        We assume that no extra layers are added to the original model;
-        please implement your own model if this is not the case.
-    """
-    # Avoid modifying existing reward models
-    if is_pooling_model(cls):
-        return cls
-
-    # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
-
-    from .interfaces_base import default_pooling_type
-
-    @default_pooling_type("ALL")
-    class ModelForReward(_create_pooling_model_cls(cls)):
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self.pooler = DispatchPooler(
-                {
-                    "token_classify": Pooler.for_token_classify(
-                        pooler_config=pooler_config
-                    )
-                }
-            )
-
-    ModelForReward.__name__ = _get_pooling_model_name(cls.__name__, "ForReward")
-
-    return ModelForReward  # type: ignore
 
 
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -428,7 +395,7 @@ def load_weights_using_from_2_way_softmax(
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
-        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens
@@ -444,7 +411,7 @@ def load_weights_using_from_2_way_softmax(
     )
     loaded_weights = pooling_model_cls.load_weights(model, weights, load_lm_head=True)
 
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,
@@ -486,7 +453,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     )
     if text_config.tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
-        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
         embed_tokens = (
             model.model.embed_tokens
@@ -498,7 +465,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
     loaded_weights = type(model).__mro__[1].load_weights(model, weights)
 
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     tokenizer = get_tokenizer(
         model_config.tokenizer,

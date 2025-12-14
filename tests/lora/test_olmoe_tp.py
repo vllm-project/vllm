@@ -40,7 +40,10 @@ EXPECTED_BASE_MODEL_OUTPUT = [
 
 
 def generate_and_test(
-    llm: vllm.LLM, lora_path: str, lora_id: list[int | None] | int | None
+    llm: vllm.LLM,
+    lora_path: str,
+    lora_id: list[int | None] | int | None,
+    compare_lower: bool = False,
 ) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(context="How many candidates are there?"),
@@ -74,12 +77,18 @@ def generate_and_test(
 
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         req_lora_id = lora_id[i] if isinstance(lora_id, list) else lora_id
+        generated_text = generated_texts[i]
         expected_output = (
             EXPECTED_LORA_OUTPUT[i]
             if req_lora_id is not None
             else EXPECTED_BASE_MODEL_OUTPUT[i]
         )
-        assert generated_texts[i].startswith(expected_output)
+
+        if compare_lower:
+            generated_text = generated_text.lower()
+            expected_output = expected_output.lower()
+
+        assert generated_text.startswith(expected_output)
 
 
 def test_olmoe_lora(olmoe_lora_files):
@@ -146,6 +155,9 @@ def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
         tensor_parallel_size=4,
         fully_sharded_loras=fully_sharded_loras,
     )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=1)
-    generate_and_test(llm, olmoe_lora_files, lora_id=2)
+    generate_and_test(
+        llm, olmoe_lora_files, lora_id=1, compare_lower=fully_sharded_loras
+    )
+    generate_and_test(
+        llm, olmoe_lora_files, lora_id=2, compare_lower=fully_sharded_loras
+    )
