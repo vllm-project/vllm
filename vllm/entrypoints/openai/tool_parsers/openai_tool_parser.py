@@ -79,6 +79,16 @@ class OpenAIToolParser(ToolParser):
                 elif msg.channel == "commentary" and not msg.recipient:
                     commentary_content = msg_text
 
+            # Check for partial responses:
+            # current content in final channel without recipient and final content.
+            if (
+                parser.current_content
+                and final_content is None
+                and parser.current_recipient is None
+                and parser.current_channel in [None, "final"]
+            ):
+                final_content = parser.current_content
+
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
