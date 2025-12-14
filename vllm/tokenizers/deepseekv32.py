@@ -53,6 +53,10 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
+        reasoning = kwargs.get("reasoning")
+        if reasoning is not None:
+            thinking_mode = "thinking"
+
         conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
         if tools is not None and len(tools) > 0:
