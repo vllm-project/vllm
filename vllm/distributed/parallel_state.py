@@ -1188,17 +1188,17 @@ def init_distributed_environment(
         if parallel_config.nnodes > 1:
             ip = parallel_config.master_addr
             port = parallel_config.master_port
-            distributed_init_method = get_distributed_init_method(ip, port)
         else:
             ip = parallel_config.data_parallel_master_ip
             port = parallel_config.get_next_dp_init_port()
-            distributed_init_method = get_distributed_init_method(ip, port)
-            logger.debug(
-                "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
-                world_size,
-                rank,
-                distributed_init_method,
-            )
+        distributed_init_method = get_distributed_init_method(ip, port)
+        logger.debug(
+            "Adjusting world_size=%d rank=%d distributed_init_method=%s for"
+            " multi-node and/or DP",
+            world_size,
+            rank,
+            distributed_init_method,
+        )
     if not torch.distributed.is_initialized():
         logger.info(
             "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",

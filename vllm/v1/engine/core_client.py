@@ -12,6 +12,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
@@ -490,13 +491,25 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            # Create input and output sockets.
-            self.input_socket = self.resources.input_socket = make_zmq_socket(
-                self.ctx, input_address, zmq.ROUTER, bind=True
+            # Create input and output sockets with late binding support.
+            # make_zmq_socket() auto-discovers actual ports for wildcard addresses.
+            self.input_socket, actual_input_address = make_zmq_socket(
+                self.ctx, input_address, zmq.ROUTER, bind=True, return_address=True
             )
-            self.resources.output_socket = make_zmq_socket(
-                self.ctx, output_address, zmq.PULL
+            self.resources.input_socket = self.input_socket
+
+            self.resources.output_socket, actual_output_address = make_zmq_socket(
+                self.ctx, output_address, zmq.PULL, bind=True, return_address=True
             )
+
+            # Report actual addresses back to parent if a reporting pipe was provided
+            if client_addresses and isinstance(
+                report_pipe := client_addresses.get("address_report_pipe"), Connection
+            ):
+                report_pipe.send(
+                    {"input": actual_input_address, "output": actual_output_address}
+                )
+                report_pipe.close()
 
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
