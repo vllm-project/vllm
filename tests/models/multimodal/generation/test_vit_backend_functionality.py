@@ -19,7 +19,8 @@ from vllm.multimodal.utils import encode_image_base64
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
-from ....utils import large_gpu_mark
+from ....utils import create_new_process_for_each_test
+from ...utils import dummy_hf_overrides
 
 # Dots.OCR prompt from official repository
 # https://github.com/rednote-hilab/dots.ocr/blob/d72d1d8c5bdd0362eb264f714cdbd1e5daa7cdff/dots_ocr/utils/prompts.py#L3
@@ -74,7 +75,6 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             "max_tokens": 256,
             "stop_token_ids": None,
         },
-        "gpu_marks": [large_gpu_mark(80)],
         "use_processor": True,
         "question": "What is the content of each image?",
     },
@@ -167,7 +167,6 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             "top_k": 20,
             "max_tokens": 16384,
         },
-        "gpu_marks": [large_gpu_mark(80)],
         "use_processor": True,
         "question": "What is the content of each image?",
     },
@@ -274,6 +273,8 @@ def run_llm_generate_test(config, mm_encoder_attn_backend, image_assets):
         max_num_seqs=config["max_num_seqs"],
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_encoder_attn_backend=mm_encoder_attn_backend,
+        hf_overrides=dummy_hf_overrides,
+        load_format="dummy",
     )
 
     engine_dict = asdict(engine_args) | {"seed": 42}
@@ -290,15 +291,12 @@ def run_llm_generate_test(config, mm_encoder_attn_backend, image_assets):
     )
 
     # Validate
-    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
-        print(generated_text)
         validator = config.get("output_validator", lambda x: len(x) > 10)
         assert validator(generated_text), (
             f"Validation failed for {config['model_name']}: {generated_text}"
         )
-    print("-" * 50)
 
 
 def run_llm_chat_test(config, mm_encoder_attn_backend, image_assets):
@@ -319,6 +317,8 @@ def run_llm_chat_test(config, mm_encoder_attn_backend, image_assets):
         max_num_seqs=config["max_num_seqs"],
         limit_mm_per_prompt=config["limit_mm_per_prompt"],
         mm_encoder_attn_backend=mm_encoder_attn_backend,
+        hf_overrides=dummy_hf_overrides,
+        load_format="dummy",
     )
 
     engine_dict = asdict(engine_args) | {"seed": 42}
@@ -329,15 +329,12 @@ def run_llm_chat_test(config, mm_encoder_attn_backend, image_assets):
     outputs = llm.chat(messages=messages, sampling_params=sampling_params)
 
     # Validate
-    print("-" * 50)
     for o in outputs:
         generated_text = o.outputs[0].text
-        print(generated_text)
         validator = config.get("output_validator", lambda x: len(x) > 10)
         assert validator(generated_text), (
             f"Validation failed for {config['model_name']}: {generated_text}"
         )
-    print("-" * 50)
 
 
 def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
@@ -365,6 +362,8 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
             tensor_parallel_size=1,
             video_pruning_rate=pruning_rate,
             mm_encoder_attn_backend=mm_encoder_attn_backend,
+            hf_overrides=dummy_hf_overrides,
+            load_format="dummy",
             **config["runner_kwargs"],
         ) as vllm_model:
             outputs = vllm_model.generate_greedy(
@@ -389,6 +388,7 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
+@create_new_process_for_each_test()
 def test_vit_backend_functionality(
     model_key: str,
     mm_encoder_attn_backend: AttentionBackendEnum | None,
