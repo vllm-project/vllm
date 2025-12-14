@@ -77,6 +77,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_remaining_state,
     parse_response_input,
     render_for_completion,
+    requires_tools,
 )
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
@@ -985,6 +986,8 @@ class OpenAIServingResponses(OpenAIServing):
             else None
         )
 
+        tool_choice_required = requires_tools(request.tool_choice)
+
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
             browser_description=browser_description,
@@ -992,6 +995,7 @@ class OpenAIServingResponses(OpenAIServing):
             container_description=container_description,
             instructions=request.instructions,
             with_custom_tools=with_custom_tools,
+            tool_choice_required=tool_choice_required,
         )
         return sys_msg
 

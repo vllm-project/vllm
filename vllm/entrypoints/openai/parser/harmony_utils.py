@@ -77,6 +77,10 @@ def has_custom_tools(tool_types: set[str]) -> bool:
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
 
+def requires_tools(tool_choice: str) -> bool:
+    return tool_choice == "required"
+
+
 def get_encoding():
     global _harmony_encoding
     if _harmony_encoding is None:
@@ -93,6 +97,7 @@ def get_system_message(
     container_description: str | None = None,
     instructions: str | None = None,
     with_custom_tools: bool = False,
+    tool_choice_required: bool = False,
 ) -> Message:
     sys_msg_content = SystemContent.new()
     if model_identity is not None:
@@ -117,7 +122,14 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_tools(python_description)
     if container_description is not None:
         sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
+    if tool_choice_required:
+        channel_config = sys_msg_content.channel_config
+        invalid_channel = "final"
+        new_config = ChannelConfig.require_channels(
+            [c for c in channel_config.valid_channels if c != invalid_channel]
+        )
+        sys_msg_content = sys_msg_content.with_channel_config(new_config)
+    elif not with_custom_tools:
         channel_config = sys_msg_content.channel_config
         invalid_channel = "commentary"
         new_config = ChannelConfig.require_channels(

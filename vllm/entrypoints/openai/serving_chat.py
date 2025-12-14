@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
     render_for_completion,
+    requires_tools,
 )
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
@@ -254,6 +255,12 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 # For GPT-OSS.
+                request = await self._adjust_request_for_tool_call(
+                    request,
+                    tokenizer=tokenizer,
+                    tool_parser=tool_parser,
+                )
+
                 (
                     conversation,
                     request_prompts,
@@ -1788,6 +1795,7 @@ class OpenAIServingChat(OpenAIServing):
             browser_description=None,
             python_description=None,
             with_custom_tools=request.tools is not None,
+            tool_choice_required=requires_tools(request.tool_choice),
         )
         messages.append(sys_msg)
 

@@ -1144,6 +1144,29 @@ class OpenAIServing:
             )
         return None
 
+    async def _adjust_request_for_tool_call(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        tokenizer: TokenizerLike | None,
+        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
+    ):
+        # tool parsing is done only if a tool_parser has been set and if
+        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
+        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        should_parse_tools = tool_parser is not None and (
+            hasattr(request, "tool_choice") and request.tool_choice != "none"
+        )
+
+        if should_parse_tools:
+            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                msg = (
+                    "Tool usage is only supported for Chat Completions API "
+                    "or Responses API requests."
+                )
+                raise NotImplementedError(msg)
+            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
+        return request
+
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
@@ -1214,21 +1237,11 @@ class OpenAIServing:
 
         mm_data = await mm_data_future
 
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        should_parse_tools = tool_parser is not None and (
-            hasattr(request, "tool_choice") and request.tool_choice != "none"
+        request = await self._adjust_request_for_tool_call(
+            request,
+            tokenizer=tokenizer,
+            tool_parser=tool_parser,
         )
-
-        if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
-                msg = (
-                    "Tool usage is only supported for Chat Completions API "
-                    "or Responses API requests."
-                )
-                raise NotImplementedError(msg)
-            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (
