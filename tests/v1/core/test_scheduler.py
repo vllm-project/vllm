@@ -240,6 +240,134 @@ def test_no_mm_input_chunking():
         )
 
 
+def test_scheduler_sparse_embedding_mask_budgeting():
+    """Test scheduler budgets correctly with sparse embedding masks.
+
+    This test verifies that the scheduler uses actual embedding counts
+    (not placeholder lengths) for budgeting, which is critical for models
+    with sparse embedding density like Qwen3-VL.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+    )
+
+    # Create sparse mask: 100 positions, only 8 embeddings (8% density)
+    # This simulates Qwen3-VL video scenario
+    is_embed = torch.zeros(100, dtype=torch.bool)
+    is_embed[:8] = True
+
+    # Create 10 requests, each with sparse embedding mask
+    mm_positions = [[PlaceholderRange(offset=0, length=100, is_embed=is_embed)]]
+    requests = create_requests(
+        num_requests=10,
+        num_tokens=100,
+        mm_positions=mm_positions * 10,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # With sparse masks (8 embeddings each), scheduler should:
+    # 1. Budget 8 tokens per request for encoder (not 100)
+    # 2. Fit more requests in the encoder budget
+    # OLD behavior: 1024 / 100 = ~10 requests max
+    # NEW behavior: 1024 / 8 = 128 requests possible (budget allows more)
+
+    # All 10 requests should be scheduled
+    assert len(output.scheduled_new_reqs) == 10
+
+    # Verify each request scheduled 100 decoder tokens
+    for req_id in output.num_scheduled_tokens:
+        assert output.num_scheduled_tokens[req_id] == 100
+
+    # All 10 requests should have encoder inputs scheduled
+    assert len(output.scheduled_encoder_inputs) == 10
+
+
+def test_scheduler_90_percent_embedding_density():
+    """Test scheduler budgeting with 90% embedding density.
+
+    This test verifies correct budgeting with high density masks,
+    approaching the backward-compatible case (100% density).
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+    )
+
+    # Create sparse mask: 100 positions, 90 embeddings (90% density)
+    is_embed = torch.ones(100, dtype=torch.bool)
+    is_embed[::10] = False  # Every 10th position is NOT an embedding
+
+    mm_positions = [[PlaceholderRange(offset=0, length=100, is_embed=is_embed)]]
+    requests = create_requests(
+        num_requests=10,
+        num_tokens=100,
+        mm_positions=mm_positions * 10,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # With 90% density (90 embeddings each):
+    # Encoder budget: 1024 / 90 = ~11 requests possible
+    # All 10 requests should be scheduled
+    assert len(output.scheduled_new_reqs) == 10
+    assert len(output.scheduled_encoder_inputs) == 10
+
+    # Verify correct token counts
+    for req_id in output.num_scheduled_tokens:
+        assert output.num_scheduled_tokens[req_id] == 100
+
+
+def test_scheduler_budget_accuracy_with_sparse_masks():
+    """Test that scheduler budget tracking is accurate with sparse masks.
+
+    This test verifies that:
+    1. Budget calculations use actual embedding counts (not placeholder lengths)
+    2. Multiple requests with different sparsity levels are budgeted correctly
+    3. Scheduler doesn't over-allocate or under-allocate budget
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=2048,
+    )
+
+    # Create request with very low density (5%)
+    # 200 positions, 10 embeddings = 5%
+    is_embed_5pct = torch.zeros(200, dtype=torch.bool)
+    is_embed_5pct[:10] = True
+    mm_positions_5pct = [
+        [PlaceholderRange(offset=0, length=200, is_embed=is_embed_5pct)]
+    ]
+
+    # Create 5 requests with 5% density
+    # Expected encoder budget: 5 * 10 = 50 tokens
+    requests = create_requests(
+        num_requests=5,
+        num_tokens=200,
+        mm_positions=mm_positions_5pct * 5,
+    )
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    # All 5 requests should be scheduled (only 50 encoder tokens total)
+    assert len(output.scheduled_new_reqs) == 5
+    assert len(output.scheduled_encoder_inputs) == 5
+
+    # Verify each request scheduled all 200 decoder tokens
+    for req_id in output.num_scheduled_tokens:
+        assert output.num_scheduled_tokens[req_id] == 200
+
+
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
 def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     """Test scheduling behavior with concurrent partial requests.

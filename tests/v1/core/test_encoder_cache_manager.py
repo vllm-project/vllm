@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -178,3 +179,121 @@ def test_schedule_request_multi_images_respect_compute_limit():
     compute_budget -= req.get_num_encoder_tokens(0)
 
     assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
+
+
+def test_encoder_cache_with_is_embed_mask():
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_tokens(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    is_embed = torch.zeros(100, dtype=torch.bool)
+    is_embed[torch.tensor([5, 15, 25, 35, 45, 55, 65, 75])] = True
+
+    request = MockRequestWithMask("r1", ["img1"], [100])
+    request.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=100, is_embed=is_embed),
+    )
+
+    manager = EncoderCacheManager(cache_size=100)
+    manager.allocate(request, 0)
+
+    assert manager.num_free_slots == 92
+    assert "img1" in manager.cached
+
+    old_size = 100
+    new_size = request.mm_features[0].mm_position.get_num_embeds()
+    assert new_size == 8
+    savings_ratio = old_size / new_size
+    assert savings_ratio == 12.5
+
+
+def test_encoder_cache_mask_based_retrieval():
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_tokens(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    is_embed = torch.tensor(
+        [False, False, True, True, False, True, True, True, False, False]
+    )
+
+    request = MockRequestWithMask("r1", ["img1"], [10])
+    request.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=10, is_embed=is_embed),
+    )
+
+    manager = EncoderCacheManager(cache_size=50)
+    manager.allocate(request, 0)
+
+    assert request.mm_features[0].mm_position.get_num_embeds() == 5
+
+    start_idx = 2
+    end_idx = 8
+    num_embeds_before = is_embed[:start_idx].sum().item()
+    num_embeds_in_range = is_embed[start_idx:end_idx].sum().item()
+
+    assert num_embeds_before == 0
+    assert num_embeds_in_range == 5
+
+    start_idx = 0
+    end_idx = 5
+    num_embeds_before = is_embed[:start_idx].sum().item() if start_idx > 0 else 0
+    num_embeds_in_range = is_embed[start_idx:end_idx].sum().item()
+
+    assert num_embeds_before == 0
+    assert num_embeds_in_range == 2
+
+
+def test_eviction_uses_embedding_counts_not_placeholder_lengths():
+    """Test that eviction uses actual embedding counts, not placeholder lengths.
+
+    Critical for sparse embeddings (e.g., Qwen3-VL where 100 positions = 8 embeddings).
+    Eviction should free 8 slots (embedding count), not 100 (placeholder length).
+    """
+
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_tokens(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    manager = EncoderCacheManager(cache_size=50)
+
+    # Request 1: 8% density (8 embeddings in 100 positions)
+    is_embed_sparse = torch.zeros(100, dtype=torch.bool)
+    is_embed_sparse[:8] = True
+
+    req1 = MockRequestWithMask("req1", ["img1"], [100])
+    req1.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=100, is_embed=is_embed_sparse),
+    )
+
+    # Allocate req1 (uses 8 embedding slots, not 100)
+    assert manager.can_allocate(req1, 0, int(1e9), 0)
+    manager.allocate(req1, 0)
+    assert manager.num_free_slots == 42  # 50 - 8 = 42
+    manager.free_encoder_input(req1, 0)
+
+    # Request 2: Needs 50 slots, will evict req1
+    req2 = MockRequestWithMask("req2", ["img2"], [50])
+    req2.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img2",
+        mm_position=PlaceholderRange(offset=0, length=50, is_embed=None),
+    )
+
+    # Eviction should free 8 slots (embedding count), allowing req2 to fit
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    # Verification: 42 free + 8 evicted - 50 allocated = 0 free
+    assert manager.num_free_slots == 0
+    assert "img1" not in manager.cached
+    assert "img2" in manager.cached
