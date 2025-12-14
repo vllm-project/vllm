@@ -41,14 +41,14 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs, FinishReason
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, AbortRequest
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -229,6 +229,8 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        # List of all abort request (cause by any errors of the backend)
+        aborted_requests: list[AbortRequest] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -448,7 +450,32 @@ class Scheduler(SchedulerInterface):
                 # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    try:
+                        grammar_ready = structured_output_req and structured_output_req.grammar
+                    except Exception as e:
+                        error_msg = f"Structured output grammar compilation failed: {e}"
+                        logger.warning(f"{error_msg} for request {request.request_id}")
+
+                        # 2. Add to local list
+                        aborted_requests.append(
+                            AbortRequest(
+                                client_index=request.client_index,
+                                request_id=request.request_id,
+                                error_message=error_msg,
+                                events=request.take_events(),
+                                trace_headers=request.trace_headers,
+                                num_cached_tokens=request.num_cached_tokens,
+                                num_nans_in_logits=request.num_nans_in_logits
+                                )
+                            )
+
+                        # 3. Finish the request (clean up resources)
+                        if self.finished_req_ids_dict is None:
+                            self.finished_req_ids_dict = defaultdict(set)
+                        self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+                        continue
+
+                    if grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
@@ -733,6 +760,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            aborted_reqs=aborted_requests,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1154,6 +1182,26 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+
+            # 1. Process Aborted Requests
+            for aborted_req in scheduler_output.aborted_reqs:
+                # Construct the error output
+                outputs[aborted_req.client_index].append(
+                        EngineCoreOutput(
+                                request_id=aborted_req.request_id,
+                                new_token_ids=[],
+                                finish_reason=FinishReason.STOP,
+                                new_logprobs=None,
+                                new_prompt_logprobs_tensors=None,
+                                pooling_output=None,
+                                stop_reason=aborted_req.error_message,
+                                events=aborted_req.events,
+                                kv_transfer_params=None,
+                                trace_headers=aborted_req.trace_headers,
+                                num_cached_tokens=aborted_req.num_cached_tokens,
+                                num_nans_in_logits=aborted_req.num_nans_in_logits,
+                                )
+                        )
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
