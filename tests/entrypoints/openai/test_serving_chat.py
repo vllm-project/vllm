@@ -1426,7 +1426,7 @@ async def test_tool_choice_validation_without_parser():
     assert hasattr(response_required, "body")
     error_body = response_required.body.decode()
     assert "tool_choice" in error_body
-    assert "--enable-auto-tool-choice" in error_body
+    assert "--tool-call-parser" in error_body
 
     # Test named tool_choice without tool_parser
     req_named = ChatCompletionRequest(
@@ -1439,4 +1439,4 @@ async def test_tool_choice_validation_without_parser():
     assert hasattr(response_named, "body")
     error_body = response_named.body.decode()
     assert "tool_choice" in error_body
-    assert "--enable-auto-tool-choice" in error_body
+    assert "--tool-call-parser" in error_body

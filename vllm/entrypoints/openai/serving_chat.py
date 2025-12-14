@@ -227,7 +227,7 @@ class OpenAIServingChat(OpenAIServing):
                     # "required" or named tool requires tool parser
                     return self.create_error_response(
                         f'tool_choice="{request.tool_choice}" requires '
-                        "--enable-auto-tool-choice and --tool-call-parser to be set"
+                        "--tool-call-parser to be set"
                     )
 
             if request.tools is None or (
