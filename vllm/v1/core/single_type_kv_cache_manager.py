@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -19,6 +20,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
+logger = init_logger(__name__)
+
 
 class SingleTypeKVCacheManager(ABC):
     """
@@ -30,6 +33,7 @@ class SingleTypeKVCacheManager(ABC):
         self,
         kv_cache_spec: KVCacheSpec,
         block_pool: BlockPool,
+        enable_caching: bool,
         kv_cache_group_id: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -48,6 +52,7 @@ class SingleTypeKVCacheManager(ABC):
             self.block_size *= dcp_world_size * pcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
+        self.enable_caching = enable_caching
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
@@ -68,6 +73,7 @@ class SingleTypeKVCacheManager(ABC):
         request_id: str,
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -78,28 +84,69 @@ class SingleTypeKVCacheManager(ABC):
                 tokens that are already allocated).
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
+            total_computed_tokens: Include both local and external computed
+                tokens.
 
         Returns:
-            The number of blocks.
+            The number of blocks to allocate.
         """
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
-        num_new_blocks = (
-            num_required_blocks
-            - len(new_computed_blocks)
-            - len(self.req_to_blocks[request_id])
+        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+
+        # Fast-path: nothing is skipped.
+        if num_skipped_tokens <= 0:
+            num_new_blocks = (
+                num_required_blocks
+                - len(new_computed_blocks)
+                - len(self.req_to_blocks[request_id])
+            )
+            num_evictable_blocks = sum(
+                blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
+            )
+            return num_new_blocks + num_evictable_blocks
+
+        # General case: some prefix tokens are skipped by the attention window.
+        num_skipped_blocks = num_skipped_tokens // self.block_size
+        num_local_computed_blocks = len(new_computed_blocks) + len(
+            self.req_to_blocks[request_id]
         )
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it will be changed from a free block
-        # to a computed block when the request is allocated, so we also count
-        # it as needed to be allocated.
-        num_evictable_computed_blocks = sum(
-            blk.ref_cnt == 0 and not blk.is_null for blk in new_computed_blocks
-        )
-        return num_new_blocks + num_evictable_computed_blocks
+
+        if num_skipped_blocks >= num_local_computed_blocks:
+            # All local-computed blocks (both existing and newly computed) are
+            # outside the current window. In this case we only need blocks for
+            # the non-skipped suffix.
+            num_new_blocks = max(num_required_blocks - num_skipped_blocks, 0)
+            # All new computed blocks are skipped. This happens when the entire
+            # sliding window hits external KV cache via a KV connector.
+            num_evictable_blocks = 0
+        else:
+            # Some local-computed blocks remain inside the window.
+            num_new_blocks = max(num_required_blocks - num_local_computed_blocks, 0)
+
+            # Among the new_computed_blocks, the first
+            # `num_skipped_new_computed_blocks` correspond to skipped tokens and
+            # therefore do not need to be "touched" / re-allocated.
+            num_skipped_new_computed_blocks = max(
+                0, num_skipped_blocks - len(self.req_to_blocks[request_id])
+            )
+
+            # If a computed block of a request is an eviction candidate (in the
+            # free queue and ref_cnt == 0), it will be changed from a free block
+            # to a computed block when the request is allocated, so we also count
+            # it in the free-capacity check.
+            num_evictable_blocks = sum(
+                blk.ref_cnt == 0 and not blk.is_null
+                for blk in new_computed_blocks[num_skipped_new_computed_blocks:]
+            )
+        return num_new_blocks + num_evictable_blocks
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -109,15 +156,53 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
         """
-        if request_id not in self.num_cached_block:
-            # A new request.
-            req_blocks = self.req_to_blocks[request_id]
-            assert len(req_blocks) == 0
-            req_blocks.extend(new_computed_blocks)
-            self.num_cached_block[request_id] = len(new_computed_blocks)
-        else:
-            # A running request. Should not have new computed blocks.
+
+        if request_id in self.num_cached_block:
+            # Fast-path: a running request. Should not have any new computed blocks.
             assert len(new_computed_blocks) == 0
+            return
+
+        # A new request.
+        req_blocks = self.req_to_blocks[request_id]
+        assert len(req_blocks) == 0
+        num_total_computed_tokens = (
+            num_local_computed_tokens + num_external_computed_tokens
+        )
+        num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
+        num_skipped_blocks = num_skipped_tokens // self.block_size
+        if num_skipped_blocks > 0:
+            # It is possible that all new computed blocks are skipped when
+            # num_skipped_blocks > len(new_computed_blocks).
+            new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
+            # Some external computed tokens may be skipped too.
+            num_external_computed_tokens = min(
+                num_total_computed_tokens - num_skipped_tokens,
+                num_external_computed_tokens,
+            )
+
+        # Touch the computed blocks to make sure they won't be evicted.
+        if self.enable_caching:
+            self.block_pool.touch(new_computed_blocks)
+        else:
+            assert not any(new_computed_blocks), (
+                "Computed blocks should be empty when prefix caching is disabled"
+            )
+
+        # Skip blocks are padded with null blocks.
+        req_blocks.extend([self._null_block] * num_skipped_blocks)
+        # Add the remaining computed blocks.
+        req_blocks.extend(new_computed_blocks)
+        # All cached hits (including skipped nulls) are already cached; mark
+        # them so cache_blocks() will not try to re-cache blocks that already
+        # have a block_hash set.
+        self.num_cached_block[request_id] = len(req_blocks)
+
+        if num_external_computed_tokens > 0:
+            # Allocate new blocks for external computed tokens.
+            allocated_blocks = self.block_pool.get_new_blocks(
+                cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
+            )
+            req_blocks.extend(allocated_blocks)
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int
@@ -711,9 +796,16 @@ class MambaManager(SingleTypeKVCacheManager):
         request_id: str,
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
     ) -> int:
-        # Allocate extra `num_speculative_blocks` blocks for
-        # speculative decoding (MTP/EAGLE) with linear attention.
+        # TODO(Kuntai): handle the case where `total_computed_tokens > 0`
+        if total_computed_tokens > 0:
+            logger.warning_once(
+                "Currently Mamba GPU memory allocator may cause"
+                " memory waste when total_computed_tokens"
+                " is greater than 0."
+            )
+
         assert isinstance(self.kv_cache_spec, MambaSpec)
         if self.kv_cache_spec.num_speculative_blocks > 0:
             num_tokens += (
@@ -721,7 +813,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 * self.kv_cache_spec.num_speculative_blocks
             )
         return super().get_num_blocks_to_allocate(
-            request_id, num_tokens, new_computed_blocks
+            request_id, num_tokens, new_computed_blocks, total_computed_tokens
         )
 
     def allocate_new_blocks(
@@ -742,7 +834,11 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
