@@ -247,3 +247,53 @@ def test_encoder_cache_mask_based_retrieval():
 
     assert num_embeds_before == 0
     assert num_embeds_in_range == 2
+
+
+def test_eviction_uses_embedding_counts_not_placeholder_lengths():
+    """Test that eviction uses actual embedding counts, not placeholder lengths.
+
+    Critical for sparse embeddings (e.g., Qwen3-VL where 100 positions = 8 embeddings).
+    Eviction should free 8 slots (embedding count), not 100 (placeholder length).
+    """
+
+    class MockRequestWithMask(MockRequest):
+        def get_num_encoder_tokens(self, input_id: int) -> int:
+            return self.mm_features[input_id].mm_position.get_num_embeds()
+
+    manager = EncoderCacheManager(cache_size=50)
+
+    # Request 1: 8% density (8 embeddings in 100 positions)
+    is_embed_sparse = torch.zeros(100, dtype=torch.bool)
+    is_embed_sparse[:8] = True
+
+    req1 = MockRequestWithMask("req1", ["img1"], [100])
+    req1.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img1",
+        mm_position=PlaceholderRange(offset=0, length=100, is_embed=is_embed_sparse),
+    )
+
+    # Allocate req1 (uses 8 embedding slots, not 100)
+    assert manager.can_allocate(req1, 0, int(1e9), 0)
+    manager.allocate(req1, 0)
+    assert manager.num_free_slots == 42  # 50 - 8 = 42
+    manager.free_encoder_input(req1, 0)
+
+    # Request 2: Needs 50 slots, will evict req1
+    req2 = MockRequestWithMask("req2", ["img2"], [50])
+    req2.mm_features[0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img2",
+        mm_position=PlaceholderRange(offset=0, length=50, is_embed=None),
+    )
+
+    # Eviction should free 8 slots (embedding count), allowing req2 to fit
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    # Verification: 42 free + 8 evicted - 50 allocated = 0 free
+    assert manager.num_free_slots == 0
+    assert "img1" not in manager.cached
+    assert "img2" in manager.cached
