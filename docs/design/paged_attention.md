@@ -36,7 +36,7 @@ the input pointers `q`, `k_cache`, and `v_cache`, which point
 to query, key, and value data on global memory that need to be read
 and processed. The output pointer `out` points to global memory
 where the result should be written. These four pointers actually
-refer to multi-dimensional arrays, but each thread only accesses the
+refer to multidimensional arrays, but each thread only accesses the
 portion of data assigned to it. I have omitted all other runtime
 parameters here for simplicity.
 
@@ -229,7 +229,7 @@ manner.
 
 ## QK
 
-As shown the pseudo code below, before the entire for loop block, we
+As shown the pseudocode below, before the entire for loop block, we
 fetch the query data for one token and store it in `q_vecs`. Then,
 in the outer for loop, we iterate through different `k_ptrs` that
 point to different tokens and prepare the `k_vecs` in the inner for
@@ -403,7 +403,7 @@ for ... { // Iteration over different blocks.
 }
 ```
 
-As shown in the above pseudo code, in the outer loop, similar to
+As shown in the above pseudocode, in the outer loop, similar to
 `k_ptr`, `logits_vec` iterates over different blocks and reads
 `V_VEC_SIZE` elements from `logits`. In the inner loop, each
 thread reads `V_VEC_SIZE` elements from the same tokens as a

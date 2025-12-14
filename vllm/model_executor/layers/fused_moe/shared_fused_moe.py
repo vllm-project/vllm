@@ -30,8 +30,8 @@ class SharedFusedMoE(FusedMoE):
 
         # Disable shared expert overlap if:
         #   - we are using eplb, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothint to gain
-        #   - we are using marlin kjernels
+        #   - we are using flashinfer with DP, since there nothing to gain
+        #   - we are using marlin kernels
         self.use_overlapped = (
             use_overlapped
             and not (
