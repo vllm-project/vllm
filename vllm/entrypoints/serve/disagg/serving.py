@@ -27,7 +27,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
     GenerateResponseChoice,
 )
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -99,7 +99,7 @@ class ServingTokens(OpenAIServing):
 
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=request.token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
         if request.features is not None:
             engine_prompt["multi_modal_data"] = None
 
@@ -115,7 +115,7 @@ class ServingTokens(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                request.token_ids,
+                TokensPrompt(prompt_token_ids=request.token_ids),
                 params=sampling_params,
                 lora_request=lora_request,
             )
