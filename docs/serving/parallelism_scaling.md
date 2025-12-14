@@ -154,7 +154,7 @@ vllm serve /path/to/the/model/in/the/container \
 
 ## Optimizing network communication for tensor parallelism
 
-Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand.
+Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.
 To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
 [examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) helper script.
 Contact your system administrator for more information about the required flags.
