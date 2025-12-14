@@ -3,7 +3,7 @@
 
 import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
@@ -49,6 +49,7 @@ try:
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
+            self._execute_model_outputs = deque[AsyncModelRunnerOutput]()
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -117,6 +118,21 @@ try:
                 # pickled.
                 if isinstance(output, AsyncModelRunnerOutput):
                     output = output.get_output()
+
+            if self.vllm_config.scheduler_config.async_scheduling:
+                self._execute_model_outputs.append(output)
+                return None
+
+            return output
+
+        def get_execute_model_output(self) -> "ModelRunnerOutput":
+            assert self.vllm_config.scheduler_config.async_scheduling
+            assert self._execute_model_outputs, "No execute_model output available"
+            output = self._execute_model_outputs.popleft()
+
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.get_output()
+
             return output
 
         def override_env_vars(self, vars: dict[str, str]):

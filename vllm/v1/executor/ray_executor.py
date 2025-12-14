@@ -446,11 +446,20 @@ class RayDistributedExecutor(Executor):
 
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
+        if self.scheduler_config.async_scheduling:
+            assert non_block
+            ray.get(refs)
+
+            refs = [
+                worker.execute_method.remote("get_execute_model_output")
+                for worker in self.workers
+            ]
+
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                return ray.get(refs[0])
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
