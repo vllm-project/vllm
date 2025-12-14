@@ -5,7 +5,6 @@ import threading
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.loggers import AggregatedLoggingStatLogger
 
@@ -66,18 +65,20 @@ async def main():
         max_tokens=100,
     )
     num_prompts = 10
-    for i in range(num_prompts):
-        prompt = "Who won the 2004 World Series?"
-        final_output: RequestOutput | None = None
-        async for output in engine_client.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=f"abcdef-{i}",
-            data_parallel_rank=1,
-        ):
-            final_output = output
-        if final_output:
-            print(final_output.outputs[0].text)
+    prompt = "Who won the 2004 World Series?"
+    prompts = [prompt] * num_prompts
+    request_ids = [f"abcdef-{i}" for i in range(num_prompts)]
+    # split requests to two ranks
+    data_parallel_ranks = [0, 1] * (num_prompts // 2)
+
+    async for output in engine_client.generate(
+        prompt=prompts,
+        sampling_params=sampling_params,
+        request_id=request_ids,
+        data_parallel_rank=data_parallel_ranks,
+    ):
+        if output.finished:
+            print(f"\n✅[{output.request_id}]: {output.outputs[0].text}\n")
 
     stop_logging_event.set()
     logging_thread.join()
