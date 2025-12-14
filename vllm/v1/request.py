@@ -211,7 +211,12 @@ class Request:
 
     def get_num_encoder_tokens(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        num_tokens = self.mm_features[input_id].mm_position.length
+        mm_position = self.mm_features[input_id].mm_position
+        # Use actual embedding count when mask exists, otherwise use length
+        if mm_position.is_embed is not None:
+            num_tokens = mm_position.get_num_embeds()
+        else:
+            num_tokens = mm_position.length
         return num_tokens
 
     def record_event(
