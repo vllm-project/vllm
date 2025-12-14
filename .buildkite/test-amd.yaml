@@ -967,7 +967,7 @@ steps:
     - pytest -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Standard) # 60min
-  timeout_in_minutes: 80
+  timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -1007,7 +1007,8 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
-- label: Multi-Modal Models Test (Extended) 2
+- label: Multi-Modal Models Test (Extended) 2 #60min
+  timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
@@ -1525,6 +1526,29 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+
+- label: Blackwell LM Eval Small Models
+  timeout_in_minutes: 120
+  gpu: b200
+  optional: true # run on nightlies
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
+
+- label: Multi-Modal Accuracy Eval (Small Models) # 160min
+  timeout_in_minutes: 240
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  # grade: Blocking
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: LM Eval Large Models (4 Card)
   mirror_hardwares: [amdexperimental, amdproduction]
