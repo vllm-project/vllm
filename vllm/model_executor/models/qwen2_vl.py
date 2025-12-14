@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -49,7 +50,7 @@ from vllm.attention.layer import (
 )
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.distributed import parallel_state
+from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
@@ -359,9 +360,20 @@ class Qwen2VisionAttention(nn.Module):
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
+        if self.tp_size > 1:
+            qkv = tensor_model_parallel_all_gather(qkv)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
         q, k, v = qkv.chunk(3, dim=2)
+
+        # 3 * [s, b, head * head_dim]
+        if self.tp_size > 1:
+            splitter = partial(
+                dist_utils.split_tensor_along_last_dim, num_partitions=self.tp_size
+            )
+            q = splitter(q)[self.tp_rank]
+            k = splitter(k)[self.tp_rank]
+            v = splitter(v)[self.tp_rank]
 
         # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
         new_shape = (
@@ -621,9 +633,9 @@ class Qwen2VisionTransformer(nn.Module):
         head_dim = embed_dim // num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.blocks = nn.ModuleList(
@@ -959,13 +971,42 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return num_video_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-            num_frames=1,
-            image_processor=None,
-        )
-        return max_image_size
+        # NOTE: Simply processing a huge size with _get_vision_info might not give a
+        # size that maximizes the number of featrues, i.e., the number of (merged)
+        # patches. This is because the number of patches limits the allowed aspect
+        # ratios. For example, suppose the maximum number of patches is 1280. A square
+        # image cannot be broken down into 1280 patches, so feeding a giant square image
+        # into _get_vision_info will not yield a size that maximizes the number of
+        # patches. Therefore, we directly factorize the maximum number of patches into
+        # height and width. The tricky part is to avoid extreme aspect ratios (>200 for
+        # qwen2-vl). If we can't find a suitable aspect ratio, we decrease the number of
+        # patches and retry. This is safe because the processor does not accept extreme
+        # aspect ratios, so there is no valid post-resize image with the number of
+        # patches that yields extreme aspect ratios.
+
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+        image_processor = self.get_image_processor()
+        max_pixels = image_processor.max_pixels or image_processor.size["longest_edge"]
+        unit = patch_size * merge_size
+        max_seq_len = max_pixels // (unit * unit)
+
+        def closest_factor_pair(n: int) -> tuple[int, int]:
+            # left <= right
+            for d in range(math.isqrt(n), 0, -1):
+                if n % d == 0:
+                    return d, n // d
+            return 1, n
+
+        height_factor, width_factor = 1, max_seq_len
+        for seq_len in range(max_seq_len, 0, -1):
+            height_factor, width_factor = closest_factor_pair(seq_len)
+            if width_factor / height_factor <= 200:
+                break
+
+        return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()

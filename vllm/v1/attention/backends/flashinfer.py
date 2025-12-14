@@ -429,6 +429,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
+        self.attention_config = vllm_config.attention_config
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -563,7 +564,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
 
-        if self.head_dim == 256 and current_platform.is_device_capability(100):
+        if self.head_dim == 256 and current_platform.is_device_capability_family(100):
             # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
             # head size 256 and block size 16 is not supported on blackwell.
             assert kv_cache_spec.block_size != 16, (
@@ -779,6 +780,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
+            force_use_trtllm=self.attention_config.use_trtllm_attention,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
