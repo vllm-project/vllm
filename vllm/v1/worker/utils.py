@@ -198,6 +198,61 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
+def scatter_mm_placeholders(
+    embeds: torch.Tensor,
+    is_embed: torch.Tensor | None,
+) -> torch.Tensor:
+    """
+    Scatter the multimodal embeddings into a contiguous tensor that represents
+    the placeholder tokens.
+
+    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
+
+    Args:
+        embeds: The multimodal embeddings.
+            Shape: `(num_embeds, embed_dim)`
+        is_embed: A boolean mask indicating which positions in the placeholder
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
+    Note:
+        This function is maintained for backward compatibility with external
+        hardware backends (HPU via vllm_gaudi, etc.). The core GPU backend
+        no longer uses this approach as of the encoder cache optimization
+        (see GPUModelRunner for the new compact cache implementation).
+    """
+    if is_embed is None:
+        return embeds
+
+    placeholders = embeds.new_full(
+        (is_embed.shape[0], embeds.shape[-1]),
+        fill_value=torch.nan,
+    )
+    placeholders[is_embed] = embeds
+    return placeholders
+
+
+def gather_mm_placeholders(
+    placeholders: torch.Tensor,
+    is_embed: torch.Tensor | None,
+) -> torch.Tensor:
+    """
+    Reconstructs the embeddings from the placeholder tokens.
+
+    This is the operation of [`scatter_mm_placeholders`]
+    [vllm.v1.worker.utils.scatter_mm_placeholders].
+
+    Note:
+        This function is maintained for backward compatibility with external
+        hardware backends (HPU via vllm_gaudi, etc.). The core GPU backend
+        no longer uses this approach as of the encoder cache optimization
+        (see GPUModelRunner for the new compact cache implementation).
+    """
+    if is_embed is None:
+        return placeholders
+
+    return placeholders[is_embed]
+
+
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
