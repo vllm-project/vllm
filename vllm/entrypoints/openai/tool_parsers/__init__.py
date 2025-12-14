@@ -138,6 +138,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",
     ),
+    "step_deepresearch": (
+        "step_deepresearch_tool_parser",
+        "StepDeepResearchToolParser",
+    ),
 }
 
 
