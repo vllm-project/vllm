@@ -8,6 +8,7 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -16,6 +17,8 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+
+logger = init_logger(__name__)
 
 
 class MultiModalBudget:
@@ -215,6 +218,9 @@ def scatter_mm_placeholders(
             tokens need to be filled with multimodal embeddings.
             Shape: `(num_placeholders, num_embeds)`
     """
+    logger.warning_once(
+        "`scatter_mm_placeholders` is deprecated and will be removed in v0.14.0."
+    )
     if is_embed is None:
         return embeds
 
@@ -236,6 +242,9 @@ def gather_mm_placeholders(
     This is the operation of [`scatter_mm_placeholders`]
     [vllm.v1.worker.utils.scatter_mm_placeholders].
     """
+    logger.warning_once(
+        "`gather_mm_placeholders` is deprecated and will be removed in v0.14.0."
+    )
     if is_embed is None:
         return placeholders
 
