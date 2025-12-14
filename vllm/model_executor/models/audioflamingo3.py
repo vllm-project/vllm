@@ -136,25 +136,14 @@ class AudioFlamingo3Encoder(Qwen2AudioEncoder):
     ):
         # input_features: (batch, num_mel_bins, seq_len)
         if isinstance(input_features, list):
-            hidden_states = []
-            for features in input_features:
-                # features: (num_mel_bins, seq_len)
-                features = features.unsqueeze(0)
-                embeds = nn.functional.gelu(self.conv1(features))
-                embeds = nn.functional.gelu(self.conv2(embeds))
-                embeds = embeds.transpose(-1, -2)
-                embeds = (
-                    embeds + self.embed_positions.weight[: embeds.size(-2), :]
-                ).to(embeds.dtype)
-                hidden_states.append(embeds.squeeze(0))
-            hidden_states = torch.stack(hidden_states)
-        else:
-            hidden_states = nn.functional.gelu(self.conv1(input_features))
-            hidden_states = nn.functional.gelu(self.conv2(hidden_states))
-            hidden_states = hidden_states.transpose(-1, -2)
-            hidden_states = (
-                hidden_states + self.embed_positions.weight[: hidden_states.size(-2), :]
-            ).to(hidden_states.dtype)
+            input_features = torch.stack(input_features)
+
+        hidden_states = nn.functional.gelu(self.conv1(input_features))
+        hidden_states = nn.functional.gelu(self.conv2(hidden_states))
+        hidden_states = hidden_states.transpose(-1, -2)
+        hidden_states = (
+            hidden_states + self.embed_positions.weight[: hidden_states.size(-2), :]
+        ).to(hidden_states.dtype)
 
         for layer in self.layers:
             layer_outputs = layer(hidden_states, attention_mask)
@@ -297,7 +286,7 @@ class AudioFlamingo3MultiModalProcessor(
     def _call_hf_processor(
         self,
         prompt: str,
-        mm_data: Mapping[str, object],
+        mm_data: dict[str, object],
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
@@ -535,8 +524,10 @@ class AudioFlamingo3ForConditionalGeneration(
             chunk_counts = [1] * input_features.shape[0]
         elif isinstance(chunk_counts, torch.Tensor):
             chunk_counts = chunk_counts.tolist()
-        elif isinstance(chunk_counts, list) and isinstance(
-            chunk_counts[0], torch.Tensor
+        elif (
+            isinstance(chunk_counts, list)
+            and chunk_counts
+            and isinstance(chunk_counts[0], torch.Tensor)
         ):
             chunk_counts = [c.item() for c in chunk_counts]
 
