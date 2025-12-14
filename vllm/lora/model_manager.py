@@ -106,7 +106,9 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
-        self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
+        is_moe = is_moe_model(self.model)
+        self._is_3d_moe_model = is_moe and self.model.is_3d_moe_weight
+        self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._create_lora_modules()
 
         self.model.lora_manager = self
@@ -274,6 +276,18 @@ class LoRAModelManager:
                     module_name,
                 )
                 continue
+
+            # TODO: Remove this restriction
+            # peft error when generating LoRA adapter with "gate" module:
+            # "Target module NemotronHTopkRouter() is not supported."
+            if self._is_non_gated_moe and module_name.endswith("mixer.gate"):
+                logger.debug(
+                    "LoRA is not supported for non-gated MoE gate module."
+                    " %s will be ignored.",
+                    module_name,
+                )
+                continue
+
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if isinstance(module, FusedMoE):
@@ -426,7 +440,9 @@ class LoRAModelManager:
                     )
                     subloras.append(lora)
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
-                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
+                    lora = PackedLoRALayerWeights.pack_moe(
+                        subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
+                    )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
@@ -490,7 +506,9 @@ class LoRAModelManager:
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
+                    replacement_loras,
+                    module_name,
+                    is_non_gated_moe=self._is_non_gated_moe,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(

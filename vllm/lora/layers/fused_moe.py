@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -138,7 +141,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
         else:
             assert isinstance(
-                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
+                m_fused_moe_fn.fused_experts,
+                (MarlinExperts, TritonExperts, FlashInferExperts),
+            ), (
+                f"Unsupported expert type: {type(m_fused_moe_fn.fused_experts)}. "
+                f"Expected one of: MarlinExperts, TritonExperts, FlashInferExperts"
             )
 
         def fwd_decorator(layer, func):
@@ -304,6 +311,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         fused_experts.activation = act_decorator(
             self.base_layer, fused_experts.activation
         )
+        # moe_sum is required for LoRA support
+        if not hasattr(fused_experts, "moe_sum"):
+            raise AttributeError(
+                f"Expert type {type(fused_experts).__name__} does not have "
+                f"'moe_sum' method required for LoRA support. "
+                f"Please ensure the expert implementation includes 'moe_sum'."
+            )
         fused_experts.moe_sum = moe_sum_decorator(
             self.base_layer, fused_experts.moe_sum
         )
