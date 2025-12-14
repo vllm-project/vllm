@@ -22,6 +22,7 @@ import os
 
 import pytest
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm import LLM, SamplingParams
 
 MODEL_NAME = "nvidia/audio-flamingo-3-hf"
@@ -35,6 +36,10 @@ def get_fixture_path(filename):
 
 @pytest.fixture(scope="module")
 def llm():
+    # Check if the model is supported by the current transformers version
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
+
     try:
         llm = LLM(
             model=MODEL_NAME,

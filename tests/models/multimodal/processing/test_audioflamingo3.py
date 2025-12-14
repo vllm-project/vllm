@@ -24,11 +24,7 @@ import pytest
 import torch
 from transformers import PretrainedConfig
 
-from vllm.model_executor.models.audioflamingo3 import (
-    AudioFlamingo3DummyInputsBuilder,
-    AudioFlamingo3MultiModalProcessor,
-    AudioFlamingo3ProcessingInfo,
-)
+from tests.models.registry import HF_EXAMPLE_MODELS
 
 
 class MockAudioFlamingo3Config(PretrainedConfig):
@@ -67,7 +63,20 @@ def mock_ctx():
     return ctx
 
 
+@pytest.fixture(autouse=True)
+def check_transformers_version():
+    # Check if the model is supported by the current transformers version
+    model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
+    model_info.check_transformers_version(on_fail="skip")
+
+
 def test_audio_chunk_counting(mock_ctx):
+    from vllm.model_executor.models.audioflamingo3 import (
+        AudioFlamingo3DummyInputsBuilder,
+        AudioFlamingo3MultiModalProcessor,
+        AudioFlamingo3ProcessingInfo,
+    )
+
     info = AudioFlamingo3ProcessingInfo(mock_ctx)
     processor = AudioFlamingo3MultiModalProcessor(
         info, AudioFlamingo3DummyInputsBuilder(info)
@@ -98,6 +107,11 @@ def test_audio_chunk_counting(mock_ctx):
 
 
 def test_dummy_data_generation(mock_ctx):
+    from vllm.model_executor.models.audioflamingo3 import (
+        AudioFlamingo3DummyInputsBuilder,
+        AudioFlamingo3ProcessingInfo,
+    )
+
     info = AudioFlamingo3ProcessingInfo(mock_ctx)
     builder = AudioFlamingo3DummyInputsBuilder(info)
 
