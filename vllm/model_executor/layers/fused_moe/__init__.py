@@ -6,10 +6,17 @@ from typing import Any
 
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_params import (
+    FusedMoEParams,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_router import (
+    FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
@@ -45,7 +52,10 @@ def get_config() -> dict[str, Any] | None:
 
 __all__ = [
     "FusedMoE",
+    "FusedMoEParams",
+    "FusedMoERouter",
     "FusedMoEConfig",
+    "FusedMoEQuantConfig",
     "FusedMoEMethodBase",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
