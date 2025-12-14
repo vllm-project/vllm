@@ -124,12 +124,29 @@ class RMSNormQuantPattern:
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
 
-        # groupwise FP8 linear uses col major scales if deepgemm and cutlass
-        using_deepgemm = should_use_deepgemm_for_fp8_linear_for_nk(
-            self.model_dtype,
-            config.model_config.hf_config.intermediate_size,
-            config.model_config.hf_config.hidden_size,
-        )
+        hf_config = config.model_config.hf_config
+        hidden_size = getattr(hf_config, "hidden_size", None)
+        intermediate_size = getattr(hf_config, "intermediate_size", None)
+
+        # try `text_config` if present, models like Qwen3VL/Qwen3VLMoe have it here
+        text_config = getattr(hf_config, "text_config", None)
+        if text_config is not None:
+            hidden_size = getattr(text_config, "hidden_size", hidden_size)
+            intermediate_size = getattr(
+                text_config, "intermediate_size", intermediate_size
+            )
+
+        using_deepgemm = False
+        if (
+            self.model_dtype is not None
+            and isinstance(hidden_size, int)
+            and isinstance(intermediate_size, int)
+        ):
+            using_deepgemm = should_use_deepgemm_for_fp8_linear_for_nk(
+                self.model_dtype,
+                intermediate_size,
+                hidden_size,
+            )
         use_col_major_scales = using_deepgemm or cutlass_block_fp8_supported()
         use_e8m0 = is_deep_gemm_e8m0_used() if using_deepgemm else False
 
