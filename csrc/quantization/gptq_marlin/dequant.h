@@ -67,7 +67,7 @@ where `scale_factor * multiplier` can be computed at weight loading.
 
 namespace MARLIN_NAMESPACE_NAME {
 
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 750
 // Lookup-table based 3-input logical operation; explicitly used for
 // dequantization as the compiler does not seem to automatically recognize it in
 // all cases.
@@ -546,6 +546,19 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
   frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
 }
+
+template <>
+__device__ inline void dequant_fp8_scales<half2, vllm::kFE8M0fnu.id()>(
+    int q, half2* frag_b) {
+  // The scales is actual UE5M0 now
+  int Out1 = (q & 0x1F001F00) << 2;
+  q <<= 10;
+  int Out2 = q & 0x7C007C00;
+
+  // Note: reverse indexing is intentional because weights are permuted
+  frag_b[1] = *reinterpret_cast<const half2*>(&Out1);
+  frag_b[0] = *reinterpret_cast<const half2*>(&Out2);
+};
 
 template <>
 __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(

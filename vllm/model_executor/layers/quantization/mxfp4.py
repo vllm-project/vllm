@@ -184,7 +184,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -192,7 +192,11 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
+        # NOTE:
+        # 1. For MXFP4 x FP16, the value of the UE8M0 scale is required to be
+        #    between 2 ** -15 and 2 ** 16.
+        # 2. MXFP4 x FP16 only support Marlin Kernel.
+        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -238,6 +242,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+        if moe.in_dtype == torch.float16:
+            self.mxfp4_backend = Mxfp4Backend.MARLIN
 
         self.marlin_input_dtype = None
         self.use_marlin = self.mxfp4_backend == Mxfp4Backend.MARLIN
@@ -360,7 +366,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition_after_pad,
-                dtype=torch.bfloat16,
+                dtype=params_dtype,
             ),
             requires_grad=False,
         )
@@ -396,7 +402,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 hidden_size,
-                dtype=torch.bfloat16,
+                dtype=params_dtype,
             ),
             requires_grad=False,
         )
