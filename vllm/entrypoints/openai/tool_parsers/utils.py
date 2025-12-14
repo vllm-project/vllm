@@ -226,4 +226,5 @@ def get_json_schema_from_tools(
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)
     # tool_choice: "auto"
-    return None
+    # Return the tool schema so the model can choose to call tools
+    return _get_json_schema_from_tools(tools)
