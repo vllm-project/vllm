@@ -36,7 +36,7 @@
 steps:
 ##### fast check tests  #####
 
-- label: Pytorch Nightly Dependency Override Check # 2min
+- label: Pytorch Nightly Dependency Override Checks # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
