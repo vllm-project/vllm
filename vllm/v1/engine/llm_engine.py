@@ -32,7 +32,11 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
+from vllm.v1.metrics.loggers import (
+    StatLoggerFactory,
+    StatLoggerManager,
+    record_aborted_requests,
+)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.utils import record_function_or_nullcontext
@@ -216,8 +220,12 @@ class LLMEngine:
     def abort_request(self, request_ids: list[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
-        self.engine_core.abort_requests(request_ids)
+        all_request_ids, request_states_to_abort = self.output_processor.abort_requests(
+            request_ids
+        )
+        self.engine_core.abort_requests(all_request_ids)
+
+        record_aborted_requests(self.logger_manager, request_states_to_abort)
 
     def add_request(
         self,

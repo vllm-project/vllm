@@ -44,6 +44,7 @@ from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
     StatLoggerManager,
     load_stat_logger_plugin_factories,
+    record_aborted_requests,
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
@@ -546,8 +547,12 @@ class AsyncLLM(EngineClient):
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids, request_states_to_abort = self.output_processor.abort_requests(
+            request_ids
+        )
         await self.engine_core.abort_requests_async(all_request_ids)
+
+        record_aborted_requests(self.logger_manager, request_states_to_abort)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
