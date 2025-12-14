@@ -8,7 +8,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -1132,6 +1132,8 @@ class OpenAIServing:
 
             # Fill in other keys like MM data
             engine_prompt.update(extra_data)  # type: ignore
+
+        engine_prompt = cast(TokensPrompt, engine_prompt)
 
         if request.mm_processor_kwargs is not None:
             engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
