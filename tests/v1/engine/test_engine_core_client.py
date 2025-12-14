@@ -635,7 +635,7 @@ def test_kv_cache_events(
             "Block size should be the same as the block size"
         )
         assert event.parent_block_hash is None, "Parent block hash should be None"
-        assert event.lora_id is None, "Lora id should be None"
+        assert event.lora_name is None, "Lora name should be None"
         assert len(event.token_ids) == num_blocks * block_size, (
             "Token ids should be the same as the custom tokens"
         )
