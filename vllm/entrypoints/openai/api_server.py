@@ -1422,6 +1422,21 @@ async def run_server_worker(
 
         await init_app_state(engine_client, app.state, args)
 
+        # Initialize warmup state and run warmup if configured
+        warmup_config = getattr(args, "warmup_config", None)
+        app.state.warmup_complete = warmup_config is None
+
+        if warmup_config:
+            from vllm.entrypoints.openai.warmup import run_warmup
+
+            try:
+                await run_warmup(app.state, warmup_config)
+            except Exception as e:
+                logger.error("Warmup failed: %s", str(e))
+                # Continue anyway - warmup failure shouldn't block server startup
+            finally:
+                app.state.warmup_complete = True
+
         logger.info(
             "Starting vLLM API server %d on %s",
             engine_client.vllm_config.parallel_config._api_process_rank,
