@@ -44,14 +44,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
 
-DYNAMIC_ARG_DIMS = {
-    "input_ids": 0,
-    # set `positions` to last dim to support Qwen-mrope
-    "positions": -1,
-    "intermediate_tensors": 0,
-    "inputs_embeds": 0,
-}
-
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self):
@@ -290,6 +282,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     )
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
+        # Set dynamic arg dims for MRoPE models.
+        if vllm_config.model_config.uses_mrope:
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            self._dynamic_arg_dims = {
+                "input_ids": 1,  # shape: [1, seq_len]
+                "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
+                "position_ids": 2,  # shape: [3, 1, seq_len]
+            }
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -304,6 +304,10 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
         # Other models will not have `token_type_ids` in kwargs
         kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
+        # Positions shape handling for MRoPE models
+        if self.model_config.uses_mrope:
+            # [3, seq_len] -> [3, 1, seq_len]
+            positions = positions[:, None]
         model_output = super().forward(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
