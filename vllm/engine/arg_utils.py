@@ -491,7 +491,7 @@ class EngineArgs:
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
-    disable_hybrid_kv_cache_manager: bool = (
+    disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
 
