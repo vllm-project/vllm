@@ -501,9 +501,13 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             y=intermediate_cache1,
         )
 
+        intermediate_cache1 = intermediate_cache1.view(-1, N)
+        intermediate_cache1 = intermediate_cache1[gather_indx.dst_indx].clone()
+
         self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            activation, intermediate_cache2, intermediate_cache1
         )
+        intermediate_cache2 = intermediate_cache2[gather_indx.src_indx].clone()
 
         # matmul_ogs grouped reduction fuse sum across multiple experts:
         # y[dst_ind // n_expts_act, :] += x[src_ind, :]
