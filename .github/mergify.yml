@@ -1,4 +1,11 @@
 pull_request_rules:
+- name: rebase pull request when it's more than 10 commits behind main
+  conditions:
+      - base = main
+      - "#commits-behind >= 5"
+  actions:
+    rebase:
+
 - name: label-documentation
   description: Automatically apply documentation label
   conditions:
