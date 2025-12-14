@@ -612,7 +612,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # DO NOT MOVE THIS IMPORT
         from vllm.compilation.backends import set_model_tag
 
-        with set_model_tag("Qwen2_5_VisionPatchEmbed"):
+        with set_model_tag("Qwen2_5_VisionPatchEmbed", is_encoder=True):
             self.patch_embed = Qwen2_5_VisionPatchEmbed(
                 patch_size=patch_size,
                 temporal_patch_size=temporal_patch_size,
@@ -651,7 +651,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
 
-        with set_model_tag("Qwen2_5_VisionBlock"):
+        with set_model_tag("Qwen2_5_VisionBlock", is_encoder=True):
             self.blocks = nn.ModuleList(
                 [
                     Qwen2_5_VisionBlock(
@@ -670,7 +670,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 ]
             )
 
-        with set_model_tag("Qwen2_5_VisionPatchMerger"):
+        with set_model_tag("Qwen2_5_VisionPatchMerger", is_encoder=True):
             self.merger = Qwen2_5_VisionPatchMerger(
                 d_model=vision_config.out_hidden_size,
                 context_dim=self.hidden_size,
