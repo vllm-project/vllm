@@ -150,8 +150,10 @@ class TestModel(torch.nn.Module):
 GROUP_SHAPES = [
     GroupShape.PER_TOKEN,
     GroupShape.PER_TENSOR,
-    GroupShape(1, 128),
-    GroupShape(1, 64),
+    # TODO: uncomment after fixing group quant rms fusion for VL models
+    # https://github.com/vllm-project/vllm/pull/27883#issuecomment-3624301595
+    # GroupShape(1, 128),
+    # GroupShape(1, 64),
 ]
 
 
