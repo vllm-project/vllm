@@ -34,7 +34,7 @@ class TestSparseTensorValidationContextManager:
         values = torch.tensor([1.0])
         shape = (2, 2)
 
-        with pytest.raises(RuntimeError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:  # noqa: SIM117
             with torch.sparse.check_sparse_tensor_invariants():
                 tensor = torch.sparse_coo_tensor(indices, values, shape)
                 tensor.to_dense()
@@ -50,7 +50,7 @@ class TestSparseTensorValidationContextManager:
         values = torch.tensor([1.0])
         shape = (2, 2)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):  # noqa: SIM117
             with torch.sparse.check_sparse_tensor_invariants():
                 tensor = torch.sparse_coo_tensor(indices, values, shape)
                 tensor.to_dense()
@@ -107,7 +107,7 @@ class TestTorchLoadWithValidation:
         buffer.seek(0)
 
         # Load with validation - should fail on to_dense()
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError):  # noqa: SIM117
             with torch.sparse.check_sparse_tensor_invariants():
                 loaded = torch.load(buffer, weights_only=True)
                 loaded.to_dense()
