@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import weakref
 
 import pytest
@@ -11,16 +12,15 @@ from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 
 
 @pytest.fixture(scope="module")
 def llm():
+    # Set ROCm-specific environment variables before LLM initialization
+    if current_platform.is_rocm():
+        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(

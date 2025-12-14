@@ -46,6 +46,9 @@ steps:
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
   commands:
+  # NOTE: We are going to skip this test on ROCm platform 
+  # as we don't use pytorch nightly builds on ROCm. We
+  # only use stable PyTorch releases built with ROCm support.
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: Async Engine, Inputs, Utils, Worker Test # 10min

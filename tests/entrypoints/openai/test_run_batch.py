@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import subprocess
 import tempfile
 
@@ -44,6 +45,15 @@ INPUT_REASONING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "
 
 
 def test_empty_file():
+    # ROCm: `TritonAttentionImpl`, `FlashAttentionImpl`, and `RocmAttentionImpl`
+    # don't support encoder-only models or cross-attention. Use `FlexAttention`
+    # backend which supports those features.
+    from vllm.platforms import current_platform
+
+    env = os.environ.copy()
+    if current_platform.is_rocm():
+        env["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -61,6 +71,7 @@ def test_empty_file():
                 "--model",
                 "intfloat/multilingual-e5-small",
             ],
+            env=env,
         )
         proc.communicate()
         proc.wait()
@@ -128,6 +139,15 @@ def test_completions_invalid_input():
 
 
 def test_embeddings():
+    # ROCm: `TritonAttentionImpl`, `FlashAttentionImpl`, and `RocmAttentionImpl`
+    # don't support encoder-only models or cross-attention. Use `FlexAttention`
+    # backend which supports those features.
+    from vllm.platforms import current_platform
+
+    env = os.environ.copy()
+    if current_platform.is_rocm():
+        env["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -145,6 +165,7 @@ def test_embeddings():
                 "--model",
                 "intfloat/multilingual-e5-small",
             ],
+            env=env,
         )
         proc.communicate()
         proc.wait()
@@ -159,6 +180,15 @@ def test_embeddings():
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
 def test_score(input_batch):
+    # ROCm: `TritonAttentionImpl`, `FlashAttentionImpl`, and `RocmAttentionImpl`
+    # don't support encoder-only models or cross-attention. Use `FlexAttention`
+    # backend which supports those features.
+    from vllm.platforms import current_platform
+
+    env = os.environ.copy()
+    if current_platform.is_rocm():
+        env["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -176,6 +206,7 @@ def test_score(input_batch):
                 "--model",
                 "BAAI/bge-reranker-v2-m3",
             ],
+            env=env,
         )
         proc.communicate()
         proc.wait()
