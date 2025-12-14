@@ -76,6 +76,9 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 ENV NIXL_VERSION=0.7.0
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 
+# decrease triton kernel compilation scratch space for speculative decoding
+ENV IGC_ForceOCLSIMDWidth=16
+
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall oneccl oneccl-devel -y
