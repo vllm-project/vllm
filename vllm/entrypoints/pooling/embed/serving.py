@@ -69,7 +69,7 @@ class EmbeddingMixin(OpenAIServing):
             else None
         )
 
-    @override  # type: ignore[misc]
+    @override
     async def _preprocess(
         self,
         ctx: ServeContext,
@@ -113,7 +113,7 @@ class EmbeddingMixin(OpenAIServing):
             add_special_tokens=request.add_special_tokens,
         )
 
-    @override  # type: ignore[misc]
+    @override
     def _build_response(
         self,
         ctx: ServeContext,
@@ -347,7 +347,7 @@ class EmbeddingMixin(OpenAIServing):
             priority=getattr(ctx.request, "priority", 0),
         )
 
-    @override  # type: ignore[misc]
+    @override
     async def _prepare_generators(
         self,
         ctx: ServeContext,
@@ -419,7 +419,7 @@ class EmbeddingMixin(OpenAIServing):
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-    @override  # type: ignore[misc]
+    @override
     async def _collect_batch(
         self,
         ctx: ServeContext,
@@ -651,7 +651,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
 
         return await super().handle(ctx)  # type: ignore
 
-    @override  # type: ignore[misc]
+    @override
     def _create_pooling_params(
         self,
         ctx: ServeContext[EmbeddingRequest],

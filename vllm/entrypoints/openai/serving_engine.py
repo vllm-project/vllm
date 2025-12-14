@@ -12,19 +12,49 @@ from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
+from openai.types.responses import (
+    ToolChoiceFunction,
+)
 from pydantic import ConfigDict, TypeAdapter
 from starlette.datastructures import Headers
 
+import vllm.envs as envs
+from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+    ConversationMessage,
+)
 from vllm.entrypoints.context import (
+    ConversationContext,
     HarmonyContext,
     ParsableContext,
     StreamingHarmonyContext,
 )
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    CompletionRequest,
+    CompletionResponse,
+    DetokenizeRequest,
+    ErrorInfo,
+    ErrorResponse,
     FunctionCall,
+    FunctionDefinition,
     ResponseInputOutputItem,
     ResponsesRequest,
+    TokenizeChatRequest,
+    TokenizeCompletionRequest,
+    TokenizeResponse,
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranslationRequest,
 )
+from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -46,45 +76,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-
-if sys.version_info >= (3, 12):
-    pass
-else:
-    pass
-
-from openai.types.responses import (
-    ToolChoiceFunction,
-)
-
-import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-)
-from vllm.entrypoints.context import ConversationContext
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    CompletionRequest,
-    CompletionResponse,
-    DetokenizeRequest,
-    ErrorInfo,
-    ErrorResponse,
-    FunctionDefinition,
-    TokenizeChatRequest,
-    TokenizeCompletionRequest,
-    TokenizeResponse,
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-)
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.responses_utils import (
     construct_input_messages,
