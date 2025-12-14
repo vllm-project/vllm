@@ -642,19 +642,58 @@ _OPS_REGISTERED = False
 
 
 class rocm_aiter_ops:
+    # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+    # _LINEAR_ENABLED is intended to control GEMMs and Quant Ops
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+    # _RMSNORM_ENABLED is intended to control RMSNorm Ops
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+    # _FMOE_ENABLED is intended to control all MoE related Ops
+    # including routing, fused MoE
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+    # _MLA_ENABLED is intended to control MLA Ops/Backends
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
-    _PG_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+    # _MHA_ENABLED is intended to control MHA Ops/Backends
+    # including flash_attn_varlen
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+    # _TRITON_UNIFIED_ATTN_ENABLED is intended to
+    # control TRITON_UNIFIED_ATTN Ops/Backends
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+    # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+    # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+    # _TRITON_ROTARY_EMBED is intended to control TRITON_ROPE Ops
+    # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+    # _MOE_SHARED_EXPERTS_ENABLED is intended to control
+    # whether to fuse the shared experts with routed experts
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+
+    # ================ Check Functions =================
+    # The decorator @if_aiter_supported
+    # is used to check if aiter is supported on the current device.
+    # Conditions:
+    #   1. platform is ROCm
+    #   2. device arch is supported (on_gfx9()) only
+    #   3. aiter library exists (IS_AITER_FOUND)
+    # So if is_enabled() is decorated by @if_aiter_supported,
+    # calling is_enabled() equivalent to checking the conditions above and
+    # `cls._AITER_ENABLED` is True.
+    # i.e.
+    # is_enabled() == current_platform.is_rocm() and
+    #                 current_platform.is_on_gfx9() and
+    #                 IS_AITER_FOUND and
+    #                 cls._AITER_ENABLED
+
+    ## Usage of check functions in other files:
+    # from vllm._aiter_ops import rocm_aiter_ops
+    # ...
+    # # Check if aiter is enabled
+    # if rocm_aiter_ops.is_enabled():
+    #     ...
 
     @classmethod
     @if_aiter_supported
@@ -702,12 +741,6 @@ class rocm_aiter_ops:
     def is_mha_enabled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MHA_ENABLED
-
-    @classmethod
-    @if_aiter_supported
-    def is_pa_attn_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
-        return cls._AITER_ENABLED and cls._PG_ATTN_ENABLED
 
     @classmethod
     @if_aiter_supported
