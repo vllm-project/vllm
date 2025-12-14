@@ -34,6 +34,13 @@ INPUTS_SLICES = [
 ]
 
 
+# Test that a nested mixed-type list of lists raises a TypeError.
+@pytest.mark.parametrize("invalid_input", [[[1, 2], ["foo", "bar"]]])
+def test_invalid_input_raise_type_error(invalid_input):
+    with pytest.raises(TypeError):
+        parse_raw_prompts(invalid_input)
+
+
 def test_parse_raw_single_batch_empty():
     with pytest.raises(ValueError, match="at least one prompt"):
         parse_raw_prompts([])
