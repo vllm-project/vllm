@@ -35,6 +35,7 @@ import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     AttentionConfig,
+    AFDConfig,
     CacheConfig,
     CompilationConfig,
     ConfigType,
@@ -73,7 +74,7 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
@@ -572,6 +573,8 @@ class EngineArgs:
         CacheConfig.kv_offloading_backend
     )
     tokens_only: bool = False
+    # AFD config
+    afd_config: AFDConfig | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1143,6 +1146,8 @@ class EngineArgs:
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
+        vllm_group.add_argument("--afd-config", **vllm_kwargs["afd_config"])
+
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
@@ -1715,6 +1720,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            afd_config=self.afd_config,
         )
 
         return config
