@@ -120,7 +120,7 @@ class ProcessorBatchItems(ModalityDataItems[Sequence[_T], _T]):
         return self.data[index]
 
     def get_processor_data(self) -> Mapping[str, object]:
-        return {f"{self.modality}s": self.data}
+        return {f"{self.modality}s": self.get_all()}
 
     def get_passthrough_data(self) -> Mapping[str, object]:
         return {}
