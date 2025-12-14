@@ -124,9 +124,7 @@ class MultiprocExecutor(Executor):
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # get_loopback_ip() for communication.
+        # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
@@ -708,7 +706,7 @@ class WorkerProc:
                     death_pipe.recv()
                 except EOFError:
                     # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
+                    logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
                 except Exception as e:

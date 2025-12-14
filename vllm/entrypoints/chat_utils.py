@@ -50,7 +50,6 @@ from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import random_uuid
@@ -60,6 +59,8 @@ from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.tokenizers.mistral import MistralTokenizer
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -1832,7 +1833,7 @@ def apply_hf_chat_template(
 
 
 def apply_mistral_chat_template(
-    tokenizer: MistralTokenizer,
+    tokenizer: "MistralTokenizer",
     messages: list[ChatCompletionMessageParam],
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
