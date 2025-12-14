@@ -80,10 +80,9 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         return dict(engine_prompt), {}
 
     async def _fake_preprocess_chat(*args, **kwargs):
-        # return conversation, request_prompts, engine_prompts
+        # return conversation, engine_prompts
         return (
             [{"role": "user", "content": "Test"}],
-            [[1, 2, 3]],
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
