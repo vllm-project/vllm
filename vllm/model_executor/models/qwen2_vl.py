@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -424,12 +425,12 @@ class Qwen2VisionAttention(nn.Module):
                 k = k.contiguous()
                 v = v.contiguous()
             outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
+
+            lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            q_chunks = torch.split(q, lens, dim=1)
+            k_chunks = torch.split(k, lens, dim=1)
+            v_chunks = torch.split(v, lens, dim=1)
+            for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
                 q_i, k_i, v_i = (
                     rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
                 )
@@ -621,9 +622,9 @@ class Qwen2VisionTransformer(nn.Module):
         head_dim = embed_dim // num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.blocks = nn.ModuleList(
@@ -811,14 +812,14 @@ def _create_qwen2vl_field_factory(
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_embed_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
             video_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_embed_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     return _qwen2vl_field_config
@@ -959,13 +960,42 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return num_video_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        max_image_size, _ = self._get_vision_info(
-            image_width=9999999,
-            image_height=9999999,
-            num_frames=1,
-            image_processor=None,
-        )
-        return max_image_size
+        # NOTE: Simply processing a huge size with _get_vision_info might not give a
+        # size that maximizes the number of featrues, i.e., the number of (merged)
+        # patches. This is because the number of patches limits the allowed aspect
+        # ratios. For example, suppose the maximum number of patches is 1280. A square
+        # image cannot be broken down into 1280 patches, so feeding a giant square image
+        # into _get_vision_info will not yield a size that maximizes the number of
+        # patches. Therefore, we directly factorize the maximum number of patches into
+        # height and width. The tricky part is to avoid extreme aspect ratios (>200 for
+        # qwen2-vl). If we can't find a suitable aspect ratio, we decrease the number of
+        # patches and retry. This is safe because the processor does not accept extreme
+        # aspect ratios, so there is no valid post-resize image with the number of
+        # patches that yields extreme aspect ratios.
+
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+        image_processor = self.get_image_processor()
+        max_pixels = image_processor.max_pixels or image_processor.size["longest_edge"]
+        unit = patch_size * merge_size
+        max_seq_len = max_pixels // (unit * unit)
+
+        def closest_factor_pair(n: int) -> tuple[int, int]:
+            # left <= right
+            for d in range(math.isqrt(n), 0, -1):
+                if n % d == 0:
+                    return d, n // d
+            return 1, n
+
+        height_factor, width_factor = 1, max_seq_len
+        for seq_len in range(max_seq_len, 0, -1):
+            height_factor, width_factor = closest_factor_pair(seq_len)
+            if width_factor / height_factor <= 200:
+                break
+
+        return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
@@ -1131,9 +1161,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
 class Qwen2VLForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-    merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1394,9 +1421,11 @@ class Qwen2VLForConditionalGeneration(
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
-                grid_thw_list = grid_thw.tolist()
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
+                    self.visual,
+                    pixel_values_videos,
+                    grid_thw.tolist(),
+                    rope_type="rope_3d",
                 )
             else:
                 video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)

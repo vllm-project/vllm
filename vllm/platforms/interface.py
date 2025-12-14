@@ -239,6 +239,7 @@ class Platform:
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         attn_type: str | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
@@ -299,6 +300,21 @@ class Platform:
             return current_capability == capability
 
         return current_capability.to_int() == capability
+
+    @classmethod
+    def is_device_capability_family(
+        cls,
+        capability: int,
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Returns True if the device capability is any <major>.x.
+        Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+        return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

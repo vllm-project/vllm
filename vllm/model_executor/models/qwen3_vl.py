@@ -93,6 +93,7 @@ from .interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
+    _require_is_multimodal,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -339,9 +340,9 @@ class Qwen3_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.merger = Qwen3_VisionPatchMerger(
@@ -984,14 +985,14 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
             video_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
+            video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -1190,9 +1191,6 @@ class Qwen3VLForConditionalGeneration(
     SupportsMRoPE,
     SupportsEagle3,
 ):
-    merge_by_field_config = True
-    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1575,12 +1573,7 @@ class Qwen3VLForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        if is_multimodal is None:
-            raise ValueError(
-                "`embed_input_ids` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
+        is_multimodal = _require_is_multimodal(is_multimodal)
 
         if self.use_deepstack:
             (

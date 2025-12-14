@@ -333,9 +333,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
-            rotary_dim=head_dim // 2,
             max_position=8192,
             is_neox_style=True,
+            rope_parameters={"partial_rotary_factor": 0.5},
         )
 
         self.blocks = nn.ModuleList(
@@ -1131,8 +1131,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen3OmniMoeConditionalGenerationMixin,
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
