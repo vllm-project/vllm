@@ -76,6 +76,32 @@ class TritonAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+
+    @property
+    def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+        """Convert mm_prefix_range dict to padded tensor for Triton kernel."""
+        if self.mm_prefix_range is None:
+            return None
+
+        # Use seq count from tensor, not dict length (keys may be non-contiguous)
+        num_seqs = self.seq_lens.shape[0]
+        device = self.seq_lens.device
+
+        range_tensors = [
+            torch.tensor(
+                self.mm_prefix_range.get(i, []),  # Safe access with empty fallback
+                dtype=torch.int32,
+                device=device,
+            )
+            for i in range(num_seqs)
+        ]
+
+        # Return None if all ranges are empty (avoids nested_tensor error)
+        if all(t.numel() == 0 for t in range_tensors):
+            return None
+
+        return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -269,6 +295,10 @@ class TritonAttentionBackend(AttentionBackend):
         return head_size >= 32
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         return True
 
@@ -427,6 +457,7 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
+        mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
 
         unified_attention(
             q=query[:num_actual_tokens],
@@ -453,6 +484,7 @@ class TritonAttentionImpl(AttentionImpl):
             softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range_tensor,
         )
 
         return output
