@@ -106,7 +106,9 @@ from .utils import (
     WeightsMapper,
     cast_overflow_tensors,
     init_vllm_registered_model,
+    maybe_init_language_model,
     maybe_prefix,
+    maybe_skip_language_model_prefix,
 )
 from .vision import (
     get_vit_attn_backend,
@@ -1216,15 +1218,18 @@ class Qwen2_5_VLForConditionalGeneration(
         else:
             self.visual = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
+        self.language_model = maybe_init_language_model(
+            lambda: init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
         )
 
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
+        if self.language_model is not None:
+            self.make_empty_intermediate_tensors = (
+                self.language_model.make_empty_intermediate_tensors
+            )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.language_model.model.aux_hidden_state_layers = layers
@@ -1577,6 +1582,7 @@ class Qwen2_5_VLForConditionalGeneration(
         skip_prefixes = []
         if self.visual is None:
             skip_prefixes.extend(["visual."])
+        maybe_skip_language_model_prefix(self, skip_prefixes, "language_model")
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
