@@ -90,6 +90,7 @@ from vllm.entrypoints.utils import (
     log_non_default_args,
     process_chat_template,
     process_lora_modules,
+    process_score_template,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -1102,6 +1103,8 @@ async def init_app_state(
         args.chat_template, engine_client, vllm_config.model_config
     )
 
+    resolved_score_template = await process_score_template(args.score_template)
+
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
         assert isinstance(tool_server, DemoToolServer)
@@ -1234,6 +1237,7 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            score_template=resolved_score_template,
             log_error_stack=args.log_error_stack,
         )
         if ("embed" in supported_tasks or "score" in supported_tasks)

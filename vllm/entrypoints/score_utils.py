@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, TypeAlias, cast
 
+import jinja2
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
@@ -139,10 +140,20 @@ def _parse_score_content(
     return next(iter(mm_placeholder_storage.values()))[0]
 
 
-def apply_score_template(
-    model_config: ModelConfig,
+def _apply_custom_score_template(
+    score_template: str,
     prompt_1: str,
     prompt_2: str,
+) -> str:
+    try:
+        jinja_template = jinja2.Template(score_template)
+        return jinja_template.render(query=prompt_1, document=prompt_2)
+    except jinja2.TemplateError as e:
+        raise ValueError(f"Error rendering Jinja2 score template: {e}") from e
+
+
+def _apply_model_score_template(
+    model_config: ModelConfig, prompt_1: str, prompt_2: str
 ) -> str:
     # NOTE(Simon): lazy import to avoid bring in all dependencies (e.g. gguf)
     from vllm.model_executor.model_loader import get_model_cls
@@ -181,6 +192,7 @@ def get_score_prompt(
     tokenization_kwargs: dict[str, Any],
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
+    score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data = parse_score_data(
         data_1,
@@ -190,8 +202,12 @@ def get_score_prompt(
     from vllm.model_executor.model_loader import get_model_cls
 
     model = get_model_cls(model_config)
-    if supports_score_template(model):
-        full_prompt = apply_score_template(model_config, prompt_1, prompt_2)
+    if score_template is not None:
+        # explicitly provided score template takes precedence
+        full_prompt = _apply_custom_score_template(score_template, prompt_1, prompt_2)
+        prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+    elif supports_score_template(model):
+        full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
         prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
     elif model_config.use_pad_token:
         # cross_encoder models defaults to using pad_token.
