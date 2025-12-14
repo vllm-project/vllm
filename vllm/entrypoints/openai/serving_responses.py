@@ -420,7 +420,7 @@ class OpenAIServingResponses(OpenAIServing):
                         context = HarmonyContext(messages, available_tools)
                 else:
                     if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
-                        # This is an feature in development for parsing
+                        # This is a feature in development for parsing
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,

@@ -62,7 +62,7 @@ def choose_scaled_mm_linear_kernel(
             continue
 
         # If the current platform uses compute_capability,
-        # make sure the kernel supports the compute cability.
+        # make sure the kernel supports the compute capability.
         is_supported, reason = kernel.is_supported(compute_capability)
         if not is_supported:
             failure_reasons.append(f"{kernel.__name__}: {reason}")
