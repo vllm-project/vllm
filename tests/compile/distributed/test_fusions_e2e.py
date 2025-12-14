@@ -20,7 +20,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import flat_product, multi_gpu_test
 
-is_blackwell = lambda: current_platform.is_device_capability(100)
+is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
