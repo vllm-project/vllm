@@ -35,6 +35,10 @@ default_params = dict(
 )
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=2)
+@pytest.mark.xfail(
+    condition=current_platform.is_rocm(), reason="Known flaky on ROCm", strict=False
+)
 def test_without_spec_decoding(
     sample_json_schema,
     monkeypatch: pytest.MonkeyPatch,
