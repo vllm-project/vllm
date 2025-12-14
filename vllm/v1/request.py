@@ -3,7 +3,9 @@
 
 import enum
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -27,6 +29,35 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
+@dataclass
+class StreamingUpdate:
+    """Lightweight data for streaming session continuation.
+
+    Contains only the fields needed to update an existing streaming session
+    with new input data.
+    """
+
+    resumable: bool
+    mm_features: list[MultiModalFeatureSpec] | None
+    prompt_token_ids: list[int] | None
+    prompt_embeds: torch.Tensor | None
+    max_tokens: int
+    arrival_time: float
+    sampling_params: SamplingParams | None
+
+    @classmethod
+    def from_request(cls, request: "Request") -> "StreamingUpdate":
+        return cls(
+            resumable=request.resumable,
+            mm_features=request.mm_features,
+            prompt_token_ids=request.prompt_token_ids,
+            prompt_embeds=request.prompt_embeds,
+            max_tokens=request.max_tokens,
+            arrival_time=request.arrival_time,
+            sampling_params=request.sampling_params,
+        )
+
+
 class Request:
     def __init__(
         self,
@@ -44,6 +75,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        resumable: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -84,9 +116,6 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            prompt_token_ids, prompt_embeds
-        )
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = (
             self.prompt_token_ids.copy()
@@ -105,8 +134,6 @@ class Request:
 
         # Multi-modal related
         self.mm_features = mm_features or []
-        self.num_encoder_inputs = len(self.mm_features)
-        self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -136,6 +163,12 @@ class Request:
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+
+        # Used for streaming
+        self.resumable = resumable
+        self.streaming_queue: deque[StreamingUpdate] | None = (
+            deque() if resumable else None
+        )
 
     @classmethod
     def from_engine_core_request(
@@ -189,6 +222,20 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
+
+    @property
+    def num_prompt_tokens(self) -> int:
+        return length_from_prompt_token_ids_or_embeds(
+            self.prompt_token_ids, self.prompt_embeds
+        )
+
+    @property
+    def num_encoder_inputs(self) -> int:
+        return len(self.mm_features)
+
+    @property
+    def has_encoder_inputs(self) -> bool:
+        return self.num_encoder_inputs > 0
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (
@@ -247,6 +294,7 @@ class RequestStatus(enum.IntEnum):
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
+    WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
@@ -257,7 +305,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     @staticmethod
@@ -279,4 +327,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
 }
