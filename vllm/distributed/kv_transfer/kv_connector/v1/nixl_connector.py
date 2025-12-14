@@ -12,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import msgspec
 import numpy as np
@@ -20,7 +20,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
@@ -143,7 +143,7 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
 
 def compute_nixl_compatibility_hash(
-    vllm_config: VllmConfig, attn_backend_name: str
+    vllm_config: VllmConfig, attn_backend_name: str, cross_layers: bool
 ) -> str:
     """
     Compute compatibility hash for NIXL KV transfer.
@@ -186,6 +186,7 @@ def compute_nixl_compatibility_hash(
         # Attention backend and KV cache dtype affect memory layout
         "attn_backend_name": attn_backend_name,
         "cache_dtype": str(cache_config.cache_dtype),
+        "cross_layers": cross_layers,
     }
 
     compat_hash = hash_factors(factors)
@@ -251,6 +252,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 
 class NixlConnector(KVConnectorBase_V1):
+    prefer_cross_layer_blocks: ClassVar[bool] = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -346,6 +349,16 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
+        self.connector_worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        assert self.connector_worker is not None
+
+        cross_layer_name = "ALL_LAYERS"
+
+        kv_caches = {cross_layer_name: kv_cache}
         self.connector_worker.register_kv_caches(kv_caches)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
@@ -930,13 +943,6 @@ class NixlConnectorWorker:
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
-        self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name
-        )
-        self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
-            "enforce_handshake_compat", True
-        )
-
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
@@ -944,16 +950,6 @@ class NixlConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        self.kv_topo = TpKVTopology(
-            tp_rank=self.tp_rank,
-            engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
-            is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backend=backend,
-        )
-        self._use_pallas = self.kv_topo._use_pallas
         self._physical_blocks_per_logical_kv_block = 1
 
     def _nixl_handshake(
@@ -1163,6 +1159,33 @@ class NixlConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
+        backend = get_attn_backend(
+            self.model_config.get_head_size(),
+            self.model_config.dtype,
+            self.cache_config.cache_dtype,
+            self.block_size,
+            use_mla=self.use_mla,
+        )
+
+        self.kv_topo = TpKVTopology(
+            tp_rank=self.tp_rank,
+            engine_id=self.engine_id,
+            remote_tp_size=self._tp_size,  # shared state
+            remote_block_size=self._block_size,  # shared state
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=backend,
+            cross_layers=next(iter(kv_caches)) == "ALL_LAYERS",
+        )
+        self._use_pallas = self.kv_topo._use_pallas
+
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config, self.backend_name, self.kv_topo.cross_layers
+        )
+        self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
+            "enforce_handshake_compat", True
+        )
+
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
             assert len(self.host_xfer_buffers) == len(kv_caches), (
@@ -1202,24 +1225,23 @@ class NixlConnectorWorker:
 
         # TODO (NickLucche): Get kernel_block_size in a cleaner way
         # NHD default "view" for non-MLA cache
-        if self.device_type == "cpu":
-            block_size_position = -2
-        else:
-            block_size_position = -2 if self.use_mla else -3
+        block_size_position = self.kv_topo.block_size_position(self.device_type)
 
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         for layer_name, cache_or_caches in xfer_buffers.items():
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
-
+            cache_list = (
+                cache_or_caches
+                if not self.kv_topo.cross_layers and split_k_and_v
+                else [cache_or_caches]
+            )
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 if base_addr in seen_base_addresses:
                     continue
 
                 kernel_block_size = cache.shape[block_size_position]
-
                 if self.block_size != kernel_block_size:
                     logger.info_once(
                         "User-specified logical block size (%s) does not match"
