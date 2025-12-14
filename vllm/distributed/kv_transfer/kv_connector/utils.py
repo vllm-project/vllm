@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+EngineId = str
+
 
 def get_kv_connector_cache_layout():
     # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
@@ -209,12 +211,12 @@ class TpKVTopology:
     """
 
     tp_rank: int
-    remote_tp_size: dict[str, int]
+    remote_tp_size: dict[EngineId, int]
     is_mla: bool
     total_num_kv_heads: int
     attn_backend: type[AttentionBackend]
-    engine_id: str
-    remote_block_size: dict[str, int]
+    engine_id: EngineId
+    remote_block_size: dict[EngineId, int]
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -256,18 +258,28 @@ class TpKVTopology:
         Calculate the tensor parallel ratio between local and remote TP.
         We can think of it as the number of local TP workers-per-remote TP
         workers. Local workers will read from the same remote TP worker in
-        groups of size `tp_ratio`.
+        groups of size `tp_ratio`.If remote tp_size > local tp_size, the
+        ratio is flipped (remote_size/local_size) and the returned value is
+        negative.
         """
-        assert self.tp_size % remote_tp_size == 0, (
-            f"Local tensor parallel size {self.tp_size} is not divisible "
-            f"by remote tensor parallel size {remote_tp_size}."
+        if self.tp_size >= remote_tp_size:
+            assert self.tp_size % remote_tp_size == 0, (
+                f"Local tensor parallel size {self.tp_size} is not divisible "
+                f"by remote tensor parallel size {remote_tp_size}."
+            )
+            return self.tp_size // remote_tp_size
+
+        assert remote_tp_size % self.tp_size == 0, (
+            f"Remote tensor parallel size {remote_tp_size} is not divisible "
+            f"by local tensor parallel size {self.tp_size}."
         )
-        return self.tp_size // remote_tp_size
+        # P TP > D TP case, return the ratio as negative
+        return -remote_tp_size // self.tp_size
 
     def block_size_ratio(
         self,
         remote_block_size: int,
-    ) -> float:
+    ) -> int:
         """
         Calculate the block size ratio between local and remote TP.
         """
@@ -279,19 +291,19 @@ class TpKVTopology:
 
     def tp_ratio_from_engine_id(
         self,
-        remote_engine_id: str,
+        remote_engine_id: EngineId,
     ) -> int:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.tp_ratio(remote_tp_size)
 
     def block_size_ratio_from_engine_id(
         self,
-        remote_engine_id: str,
-    ) -> float:
+        remote_engine_id: EngineId,
+    ) -> int:
         remote_block_size = self.remote_block_size[remote_engine_id]
         return self.block_size_ratio(remote_block_size)
 
-    def is_kv_replicated(self, engine_id: str) -> bool:
+    def is_kv_replicated(self, engine_id: EngineId) -> bool:
         """
         Whether the KV cache is replicated across TP workers due to the
         number of TP workers being greater than the number of KV heads.
@@ -299,24 +311,30 @@ class TpKVTopology:
         tp_size = self.remote_tp_size[engine_id]
         return tp_size // self.total_num_kv_heads >= 1
 
-    def replicates_kv_cache(self, remote_engine_id: str) -> bool:
+    def replicates_kv_cache(self, remote_engine_id: EngineId) -> bool:
         # MLA is always replicated as the hidden dim can't be split.
         return self.is_mla or self.is_kv_replicated(remote_engine_id)
 
-    def get_target_remote_rank(
+    def get_target_remote_ranks(
         self,
         remote_tp_size: int,
-    ) -> int:
+    ) -> list[int]:
         """
         Get the remote TP rank (on P) that the current local TP rank
-        (on D) will read from.
+        (on D) will read from. When remote tp_size > local tp_size, we
+        read from multiple remote ranks.
         """
         tp_ratio = self.tp_ratio(remote_tp_size)
-        return self.tp_rank // tp_ratio
+        if tp_ratio > 0:
+            return [self.tp_rank // tp_ratio]
 
-    def get_target_remote_rank_from_engine_id(
+        # P TP > D TP case, D reads from |tp_ratio| remote workers.
+        tp_ratio = -tp_ratio
+        return [self.tp_rank * tp_ratio + i for i in range(tp_ratio)]
+
+    def get_target_remote_ranks_from_engine_id(
         self,
-        remote_engine_id: str,
-    ) -> int:
+        remote_engine_id: EngineId,
+    ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
-        return self.get_target_remote_rank(remote_tp_size)
+        return self.get_target_remote_ranks(remote_tp_size)
