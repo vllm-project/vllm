@@ -264,7 +264,12 @@ can be compiled once and then reused after they have been compiled. This
 is a layer on top of [torch.compile's compiler cache](https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html).
 
 While torch.compile's compiler cache is rock-stable, vLLM's compiler cache is unfortunately
-not always correct. You can disable it via setting `VLLM_DISABLE_COMPILE_CACHE=1`.
+not always correct. You can disable it by either:
+
+- Setting the config flag: `--compilation-config '{"disable_compile_cache": true}'`
+- Setting the environment variable: `VLLM_DISABLE_COMPILE_CACHE=1`
+
+The environment variable takes precedence over the config flag if both are set.
 
 You can also manually remove this cache.
 

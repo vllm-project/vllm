@@ -166,6 +166,7 @@ def get_inductor_factors() -> list[Any]:
 
 def is_compile_cache_enabled(
     vllm_additional_inductor_config: dict[str, Any],
+    disable_compile_cache: bool = False,
 ) -> bool:
     vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
         "force_disable_caches", False
@@ -175,7 +176,7 @@ def is_compile_cache_enabled(
     # with torch.compiler.config.force_disable_caches when minimum PyTorch
     # version reaches 2.10
     return (
-        not envs.VLLM_DISABLE_COMPILE_CACHE
+        not disable_compile_cache
         and not torch._inductor.config.force_disable_caches
         and not vllm_inductor_config_disable_cache
     )
@@ -220,6 +221,12 @@ class InductorStandaloneAdaptor(CompilerInterface):
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
+
+        # Remove vllm-specific keys that are not valid inductor config options
+        # before passing to standalone_compile. These keys are used internally
+        # by vLLM for cache control but would cause AttributeError in torch._inductor.
+        current_config.pop("vllm_disable_compile_cache", None)
+
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
@@ -324,6 +331,11 @@ class InductorAdaptor(CompilerInterface):
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
+
+        # Remove vllm-specific keys that are not valid inductor config options
+        # before passing to compile_fx. These keys are used internally by vLLM
+        # for cache control but would cause AttributeError in torch._inductor.
+        current_config.pop("vllm_disable_compile_cache", None)
 
         # disable remote cache
         current_config["fx_graph_cache"] = True
