@@ -1087,9 +1087,59 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
+            # Swizzle block scales and then pad the packed NVFP4 weights so that
+            # both N (rows) and K (columns) satisfy the alignment constraints
+            # implied by the FlashInfer / Cutlass kernels.
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+            weight = layer.weight.data
+
+            weight_current_rows = weight.shape[0]
+            weight_scale_rows_padded = swizzled_weight_scale.shape[0]
+
+            # Pad weight to match swizzled scale dimensions
+            if weight_scale_rows_padded != weight_current_rows:
+                pad_rows = weight_scale_rows_padded - weight_current_rows
+                assert pad_rows >= 0, (
+                    f"Weight scale rows ({weight_scale_rows_padded}) < "
+                    f"weight rows ({weight_current_rows})."
+                )
+                if pad_rows > 0:
+                    weight = torch.nn.functional.pad(
+                        weight, (0, 0, 0, pad_rows)
+                    ).contiguous()
+
+            # Calculate the number of k blocks padded to satisfy alignment
+            # constraints for the weight
+            layer.execution_padding_k_bytes = 0
+            group_size = self.quant_config.group_size
+            num_k_blocks_padded = swizzled_weight_scale.shape[1]
+            k_bytes_padded = (num_k_blocks_padded * group_size) // 2
+            k_bytes_orig = weight.shape[1]
+
+            logger.info(
+                "[FP4 Weight Prep] K-dim alignment: original_bytes=%d, "
+                "padded_bytes=%d, group_size=%d",
+                k_bytes_orig,
+                k_bytes_padded,
+                group_size,
+            )
+
+            if k_bytes_padded != k_bytes_orig:
+                pad_bytes = k_bytes_padded - k_bytes_orig
+                assert pad_bytes > 0
+                logger.info(
+                    "[FP4 Weight Prep] Padding K-dim: %d -> %d (pad_bytes=%d)",
+                    weight.shape[1],
+                    weight.shape[1] + pad_bytes,
+                    pad_bytes,
+                )
+                weight = torch.nn.functional.pad(
+                    weight, (0, pad_bytes, 0, 0)
+                ).contiguous()
+                layer.execution_padding_k_bytes = pad_bytes
+
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1114,6 +1164,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        # x_blockscale is implicitly padded/rounded by the kernel to satisfy alignment
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
         # validate dtypes of quantized input, input block scale,
@@ -1124,23 +1175,60 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
-        mm_args = (
-            x_fp4,
-            layer.weight,
-            x_blockscale,
-            layer.weight_scale,
-            layer.alpha,
-            output_dtype,
-        )
-        if self.backend.startswith("flashinfer-"):
+        if self.backend.startswith("flashinfer-cutlass"):
             backend_name = self.backend[len("flashinfer-") :]
+
+            # Match packed-K bytes between activations and weights using
+            # pre-calculated padding
+            pad_k_bytes = getattr(layer, "execution_padding_k_bytes", 0)
+            output_shape = [x.shape[0], layer.output_size_per_partition]
+            x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
+
+            # If we pad x_fp4 so we maybe need to add pad x_block scale as well
+            original_scale_blocks = x_blockscale.shape[1]
+            k_elements = (
+                x_fp4.shape[1] * 2
+            )  # 2 fp4 items are packed in the input dimension
+            required_scale_blocks = k_elements // layer.quant_config.group_size
+
+            # Align to 4 to be safe with int32 packing assumptions in kernels
+            if required_scale_blocks % 4 != 0:
+                required_scale_blocks += 4 - (required_scale_blocks % 4)
+
+            if original_scale_blocks < required_scale_blocks:
+                pad_scales = required_scale_blocks - original_scale_blocks
+                x_blockscale = torch.nn.functional.pad(
+                    x_blockscale, (0, pad_scales), value=0.0
+                ).contiguous()
+
+            mm_args = (
+                x_fp4,
+                layer.weight,
+                x_blockscale,
+                layer.weight_scale,
+                layer.alpha,
+                output_dtype,
+            )
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
+
+            # Slice output to remove padding if weight was padded in N dimension
+            if out.shape[1] != output_shape[1]:
+                out = out[:, : output_shape[1]].contiguous()
         else:
             assert self.backend == "cutlass"
+            mm_args = (
+                x_fp4,
+                layer.weight,
+                x_blockscale,
+                layer.weight_scale,
+                layer.alpha,
+                output_dtype,
+            )
             out = cutlass_scaled_fp4_mm(*mm_args)
 
         if bias is not None:
             out = out + bias
+
         return out.view(*output_shape)
 
 
