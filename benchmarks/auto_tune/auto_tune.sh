@@ -19,6 +19,10 @@ MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
 NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
 NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
 HOSTNAME=$(hostname)
+if [[ -z "$HOSTNAME" ]]; then
+    echo "Error: Failed to determine hostname." >&2
+    exit 1
+fi
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
