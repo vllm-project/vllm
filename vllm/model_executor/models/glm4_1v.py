@@ -992,7 +992,8 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
-        return max(max_frames_per_video, 3)
+        min_fallback_frames = self.get_hf_config().vision_config.temporal_patch_size + 1
+        return max(max_frames_per_video, min_fallback_frames)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int
