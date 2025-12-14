@@ -3,6 +3,7 @@
 
 #include <type_traits>
 #include <cstddef>
+#include <fstream>
 
 #if defined(__APPLE__)
   #include <sys/sysctl.h>
@@ -761,6 +762,39 @@ class AttentionScheduler {
       }
       // Fallback if sysctlbyname fails
       return 128LL * 1024 >> 1;  // use 50% of 128KB
+#elif defined(__aarch64__)
+      std::ifstream l2_cache_file(
+          "/sys/devices/system/cpu/cpu0/cache/index2/size");
+      if (!l2_cache_file.is_open()) {
+        std::printf(
+            "Failed to open L2 cache size file, setting l2_cache_size=1MB. "
+            "This might have an impact on performance.");
+        // default to 1MB
+        return static_cast<long>(1024 * 1024);
+      }
+      std::string size_str;
+      std::getline(l2_cache_file, size_str);
+      l2_cache_file.close();
+      // Parse size based on suffix
+      char suffix = size_str.back();
+      size_str.pop_back();
+      long l2_cache_size = std::stol(size_str);
+      switch (suffix) {
+        case 'K':
+        case 'k':
+          l2_cache_size *= 1024;
+          break;
+        case 'M':
+        case 'm':
+          l2_cache_size *= 1024 * 1024;
+          break;
+        default:
+          break;
+      }
+      // use 70% of L2 cache to keep a good balance
+      // between cache usage and other processes
+      l2_cache_size = l2_cache_size * 0.7;
+      return l2_cache_size;
 #else
       long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
       TORCH_CHECK_NE(l2_cache_size, -1);
