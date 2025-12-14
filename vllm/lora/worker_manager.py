@@ -49,7 +49,12 @@ class WorkerLoRAManager:
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
 
-        self.max_position_embeddings = text_config.max_position_embeddings
+        # Whisper uses max_target_positions instead of max_position_embeddings
+        self.max_position_embeddings = getattr(
+            text_config,
+            "max_position_embeddings",
+            getattr(text_config, "max_target_positions", None),
+        )
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
