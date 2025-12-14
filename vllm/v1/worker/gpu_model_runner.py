@@ -595,9 +595,23 @@ class GPUModelRunner(
         # with dedicated stream for overlapping and event for coordination.
         self.valid_sampled_token_count_event: torch.Event | None = None
         self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
+        # Pre-allocated tensor for copying draft token ids to CPU,
+        # with dedicated stream for overlapping and event for coordination.
+        self.draft_token_ids_copy_event: torch.Event | None = None
+        self.draft_token_ids_copy_stream: torch.cuda.Stream | None = None
+        self.draft_token_ids_cpu: torch.Tensor | None = None
         if self.use_async_scheduling and self.num_spec_tokens:
             self.valid_sampled_token_count_event = torch.Event()
             self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+            self.draft_token_ids_copy_event = torch.Event()
+            self.draft_token_ids_copy_stream = torch.cuda.Stream()
+            self.draft_token_ids_cpu = torch.empty(
+                (self.max_num_reqs, self.num_spec_tokens),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+            self._prev_copy_draft_num_reqs: int = 0
         self.valid_sampled_token_count_cpu = torch.empty(
             self.max_num_reqs,
             dtype=torch.int64,
@@ -2559,14 +2573,21 @@ class GPUModelRunner(
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
+        # Update output token ids with tokens sampled in last step
+        # if async scheduling and required by current sampling params.
+        self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            # Update output token ids with tokens sampled in last step
-            # if async scheduling and required by current sampling params.
-            self.input_batch.update_async_output_token_ids()
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+
+        # Update spec_token_ids with real draft tokens from previous step
+        draft_token_ids_cpu = self._get_draft_token_ids_cpu()
+        self.input_batch.update_async_spec_token_ids(
+            draft_token_ids_cpu,
+            num_draft_tokens=spec_decode_metadata.num_draft_tokens,
+        )
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
@@ -3381,6 +3402,43 @@ class GPUModelRunner(
         self.valid_sampled_token_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
+    def _copy_draft_token_ids(
+        self, draft_token_ids: torch.Tensor, num_reqs: int
+    ) -> None:
+        """Copy draft token ids to CPU asynchronously."""
+        if self.draft_token_ids_copy_event is None or not isinstance(
+            draft_token_ids, torch.Tensor
+        ):
+            return
+
+        self._prev_copy_draft_num_reqs = num_reqs
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self.draft_token_ids_copy_stream):
+            self.draft_token_ids_copy_stream.wait_stream(default_stream)  # type: ignore
+            # Copy draft_token_ids [num_reqs, num_spec_tokens] to pinned CPU
+            assert self.draft_token_ids_cpu is not None
+            self.draft_token_ids_cpu[:num_reqs].copy_(
+                draft_token_ids[:num_reqs], non_blocking=True
+            )
+            self.draft_token_ids_copy_event.record()
+
+    def _get_draft_token_ids_cpu(self) -> list[list[int]] | None:
+        """Get previously copied draft token ids from CPU."""
+        if isinstance(self._draft_token_ids, list):
+            return self._draft_token_ids
+
+        if (
+            self.draft_token_ids_copy_event is None
+            or self.draft_token_ids_cpu is None
+            or not self._prev_copy_draft_num_reqs
+        ):
+            return None
+
+        _prev_copy_draft_num_reqs = self._prev_copy_draft_num_reqs
+        self._prev_copy_draft_num_reqs = 0
+        self.draft_token_ids_copy_event.synchronize()
+        return self.draft_token_ids_cpu[:_prev_copy_draft_num_reqs].tolist()
+
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3541,6 +3599,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
             )
 
+        self._copy_draft_token_ids(draft_token_ids, self.input_batch.num_reqs)
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:

@@ -949,9 +949,53 @@ class InputBatch:
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
-                sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
-            # Replace placeholder token id with actual sampled id.
-            req_output_token_ids[-1] = sampled_token_ids[prev_index]
+                sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            # Replace placeholder token id(s) with actual sampled id(s).
+            if sampled_ids := sampled_token_ids[prev_index]:
+                num_placeholders = 0
+                for t in reversed(req_output_token_ids):
+                    if t == -1:
+                        num_placeholders += 1
+                    else:
+                        break
+                if num_placeholders == 0:
+                    continue
+                assert num_placeholders <= len(sampled_ids)
+                req_output_token_ids[-num_placeholders:] = sampled_ids[
+                    :num_placeholders
+                ]
+
+    def update_async_spec_token_ids(
+        self,
+        draft_token_ids_cpu: list[list[int]] | None,
+        num_draft_tokens: list[int] | None = None,
+    ) -> None:
+        """
+        In async scheduling case, update spec_token_ids in sampling metadata with
+        real draft token ids from prior step. This is called right before they are
+        needed by the rejection sampler for penalty/bad_words computation.
+        """
+        if draft_token_ids_cpu is None or self.prev_req_id_to_index is None:
+            return
+
+        spec_token_ids = self.sampling_metadata.spec_token_ids
+        if not spec_token_ids:
+            return
+
+        for index, req_id in enumerate(self.req_ids):
+            prev_index = self.prev_req_id_to_index.get(req_id)
+            if prev_index is None:
+                continue
+            draft_ids = draft_token_ids_cpu[prev_index]
+            if not draft_ids:
+                continue
+
+            if num_draft_tokens is not None:
+                scheduled_count = num_draft_tokens[index]
+                assert scheduled_count <= len(draft_ids)
+                draft_ids = draft_ids[:scheduled_count]
+            spec_token_ids[index].clear()
+            spec_token_ids[index].extend(draft_ids)
 
     @property
     def num_reqs(self) -> int:
