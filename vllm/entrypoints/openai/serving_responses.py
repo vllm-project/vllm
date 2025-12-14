@@ -107,7 +107,7 @@ from vllm.entrypoints.responses_utils import (
     make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -258,7 +258,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_server = tool_server
 
     def _validate_generator_input(
-        self, engine_prompt: EngineTokensPrompt
+        self, engine_prompt: TokensPrompt
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
@@ -353,11 +353,11 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer()
 
             if self.use_harmony:
-                messages, request_prompts, engine_prompts = (
-                    self._make_request_with_harmony(request, prev_response)
+                messages, engine_prompts = self._make_request_with_harmony(
+                    request, prev_response
                 )
             else:
-                messages, request_prompts, engine_prompts = await self._make_request(
+                messages, engine_prompts = await self._make_request(
                     request, prev_response, tokenizer
                 )
 
@@ -393,7 +393,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
-            for i, engine_prompt in enumerate(engine_prompts):
+            for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
                 if maybe_error is not None:
                     return maybe_error
@@ -449,7 +449,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
-                    request_prompt=request_prompts[i],
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
                     context=context,
@@ -564,7 +563,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-        _, request_prompts, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await self._preprocess_chat(
             request,
             tokenizer,
             messages,
@@ -573,7 +572,7 @@ class OpenAIServingResponses(OpenAIServing):
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
         )
-        return messages, request_prompts, engine_prompts
+        return messages, engine_prompts
 
     def _make_request_with_harmony(
         self,
@@ -586,13 +585,13 @@ class OpenAIServingResponses(OpenAIServing):
             )
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
-        return messages, [prompt_token_ids], [engine_prompt]
+        return messages, [engine_prompt]
 
     async def _initialize_tool_sessions(
         self,
