@@ -28,6 +28,48 @@ if TYPE_CHECKING:
 
 
 class Request:
+    """Request object representing a single generation request."""
+
+    __slots__ = (
+        "_all_token_ids",
+        "_output_token_ids",
+        "all_token_ids",
+        "arrival_time",
+        "block_hashes",
+        "cache_salt",
+        "client_index",
+        "discard_latest_async_tokens",
+        "eos_token_id",
+        "events",
+        "get_hash_new_full_blocks",
+        "has_encoder_inputs",
+        "kv_transfer_params",
+        "lora_request",
+        "max_tokens",
+        "mm_features",
+        "num_cached_tokens",
+        "num_computed_tokens",
+        "num_encoder_inputs",
+        "num_external_computed_tokens",
+        "num_nans_in_logits",
+        "num_output_placeholders",
+        "num_preemptions",
+        "num_prompt_tokens",
+        "output_token_ids",
+        "pooling_params",
+        "priority",
+        "prompt_embeds",
+        "prompt_token_ids",
+        "request_id",
+        "sampling_params",
+        "skip_reading_prefix_cache",
+        "spec_token_ids",
+        "status",
+        "stop_reason",
+        "structured_output_request",
+        "trace_headers",
+    )
+
     def __init__(
         self,
         request_id: str,
