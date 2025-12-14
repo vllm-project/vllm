@@ -40,8 +40,8 @@ from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.tokenizers.protocol import TokenizerLike
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.renderers import RendererLike
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -229,8 +229,8 @@ class ParsableContext(ConversationContext):
         self,
         *,
         response_messages: list[ResponseInputOutputItem],
-        tokenizer: AnyTokenizer,
-        reasoning_parser_cls: Callable[[AnyTokenizer], ReasoningParser] | None,
+        renderer: RendererLike,
+        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
         tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
@@ -248,6 +248,7 @@ class ParsableContext(ConversationContext):
         if reasoning_parser_cls is None:
             raise ValueError("reasoning_parser_cls must be provided.")
 
+        tokenizer = renderer.get_tokenizer()
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
             reasoning_parser_cls=reasoning_parser_cls,
@@ -257,6 +258,7 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
+        self.renderer = renderer
         self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []

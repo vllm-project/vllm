@@ -63,6 +63,7 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         drop_thinking = messages[-1]["role"] == "user"
 
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
+
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
 
         if kwargs.get("tokenize", True):
