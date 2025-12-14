@@ -1,3 +1,4 @@
+# mypy: disable-error-code="attr-defined"
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
@@ -118,6 +119,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
+
+    def _is_model_supported(self, model_name: str | None) -> bool:
+        if not model_name:
+            return True
+        return self.models.is_base_model(model_name)
 
     async def _preprocess_speech_to_text(
         self,
@@ -295,9 +301,19 @@ class OpenAISpeechToText(OpenAIServing):
             # constrained by the size of the input audio, which is mapped to a
             # fixed-size log-mel-spectogram.
             default_max_tokens = self.model_config.max_model_len
-            sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params
-            )
+
+            # Check if beam search is requested
+            use_beam_search = getattr(request, "use_beam_search", False)
+            if use_beam_search:
+                from vllm.sampling_params import BeamSearchParams
+
+                sampling_params = request.to_beam_search_params(
+                    default_max_tokens, self.default_sampling_params
+                )
+            else:
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params
+                )
 
             self._log_inputs(
                 request_id,
@@ -307,20 +323,56 @@ class OpenAISpeechToText(OpenAIServing):
                 lora_request=lora_request,
             )
 
-            list_result_generator = [
-                self.engine_client.generate(
-                    prompt,
-                    sampling_params,
-                    f"{request_id}_{i}",
-                    lora_request=lora_request,
-                )
-                for i, prompt in enumerate(prompts)
-            ]
+            # Generate results for each prompt
+            list_result_generator = []
+            for i, prompt in enumerate(prompts):
+                if use_beam_search and isinstance(sampling_params, BeamSearchParams):
+                    # Beam search: Run on each chunk independently
+                    # Extract priority from raw_request if available
+                    priority = 0
+                    if raw_request and hasattr(raw_request.state, "priority"):
+                        priority = raw_request.state.priority
+
+                    try:
+                        generator = self.beam_search(
+                            prompt,
+                            f"{request_id}_{i}",
+                            sampling_params,
+                            lora_request=lora_request,
+                            priority=priority,
+                        )
+                        list_result_generator.append(generator)
+                    except Exception as e:
+                        logger.exception(
+                            (
+                                "Error in beam_search: request_id=%s, "
+                                "beam_width=%s, length_penalty=%s, "
+                                "chunk=%s, error=%s"
+                            ),
+                            request_id,
+                            sampling_params.beam_width,
+                            sampling_params.length_penalty,
+                            i,
+                            e,
+                        )
+                        raise
+                else:
+                    # Regular generation
+                    generator = self.engine_client.generate(
+                        prompt,
+                        sampling_params,
+                        f"{request_id}_{i}",
+                        lora_request=lora_request,
+                    )
+                    list_result_generator.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        if request.stream:
+        # We do not stream the results when using beam search.
+        stream = request.stream and not request.use_beam_search
+
+        if stream:
             return stream_generator_method(
                 request, list_result_generator, request_id, request_metadata, duration_s
             )
@@ -390,7 +442,9 @@ class OpenAISpeechToText(OpenAIServing):
                     )
             return final_response
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            # Client cancelled - no need to return response, just log and re-raise
+            logger.info("Client disconnected for request %s", request_id)
+            raise
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
@@ -436,8 +490,15 @@ class OpenAISpeechToText(OpenAIServing):
                     # the result_generator, it needs to be sent as the FIRST
                     # response (by the try...catch).
 
-                    # Just one output (n=1) supported.
-                    assert len(res.outputs) == 1
+                    # Streaming only supports single output (n=1).
+                    # Note: Beam search is disabled for streaming (see above),
+                    # so this should always be 1.
+                    if len(res.outputs) != 1:
+                        raise ValueError(
+                            f"Streaming expects exactly 1 output, got "
+                            f"{len(res.outputs)}. Note: Beam search is "
+                            "not supported with streaming."
+                        )
                     output = res.outputs[0]
 
                     delta_message = DeltaMessage(content=output.text)

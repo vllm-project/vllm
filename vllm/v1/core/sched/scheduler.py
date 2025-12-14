@@ -235,7 +235,11 @@ class Scheduler(SchedulerInterface):
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
+        deduplicated_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
+        # Track which multimodal hashes have been scheduled in this batch
+        # to avoid recomputing encoders for concurrent requests with same input
+        mm_hashes_scheduled_in_batch: set[str] = set()
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -285,6 +289,7 @@ class Scheduler(SchedulerInterface):
             if request.has_encoder_inputs:
                 (
                     encoder_inputs_to_schedule,
+                    deduplicated_inputs,
                     num_new_tokens,
                     new_encoder_compute_budget,
                     external_load_encoder_input,
@@ -293,6 +298,7 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
+                    mm_hashes_scheduled_in_batch,
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
@@ -398,9 +404,17 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs[request.request_id] = (
                     encoder_inputs_to_schedule
                 )
-                # Allocate the encoder cache.
+                # Track deduplicated inputs
+                if deduplicated_inputs:
+                    deduplicated_encoder_inputs[request.request_id] = (
+                        deduplicated_inputs
+                    )
+                # Allocate the encoder cache (only for non-deduplicated inputs).
+                # Deduplicated inputs already had their reference added in
+                # _try_schedule_encoder_inputs.
                 for i in encoder_inputs_to_schedule:
-                    self.encoder_cache_manager.allocate(request, i)
+                    if i not in deduplicated_inputs:
+                        self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
             if external_load_encoder_input:
                 for i in external_load_encoder_input:
@@ -545,6 +559,7 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         (
                             encoder_inputs_to_schedule,
+                            deduplicated_inputs,
                             num_new_tokens,
                             new_encoder_compute_budget,
                             external_load_encoder_input,
@@ -553,6 +568,7 @@ class Scheduler(SchedulerInterface):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
+                            mm_hashes_scheduled_in_batch,
                             shift_computed_tokens=1 if self.use_eagle else 0,
                         )
                         if num_new_tokens == 0:
@@ -646,9 +662,17 @@ class Scheduler(SchedulerInterface):
                     scheduled_encoder_inputs[request.request_id] = (
                         encoder_inputs_to_schedule
                     )
-                    # Allocate the encoder cache.
+                    # Track deduplicated inputs
+                    if deduplicated_inputs:
+                        deduplicated_encoder_inputs[request.request_id] = (
+                            deduplicated_inputs
+                        )
+                    # Allocate the encoder cache (only for non-deduplicated inputs).
+                    # Deduplicated inputs already had their reference added in
+                    # _try_schedule_encoder_inputs.
                     for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
+                        if i not in deduplicated_inputs:
+                            self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
                 # Allocate for external load encoder cache
                 if external_load_encoder_input:
@@ -725,6 +749,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            deduplicated_encoder_inputs=deduplicated_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
@@ -874,8 +899,9 @@ class Scheduler(SchedulerInterface):
         num_computed_tokens: int,
         num_new_tokens: int,
         encoder_compute_budget: int,
+        mm_hashes_scheduled_in_batch: set[str],
         shift_computed_tokens: int = 0,
-    ) -> tuple[list[int], int, int, list[int]]:
+    ) -> tuple[list[int], list[int], int, int, list[int]]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
         and update `num_new_tokens` and encoder token budget accordingly.
@@ -897,8 +923,9 @@ class Scheduler(SchedulerInterface):
         blocks and externally cached blocks (via KVConnector).
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
-            return [], num_new_tokens, encoder_compute_budget, []
+            return [], [], num_new_tokens, encoder_compute_budget, []
         encoder_inputs_to_schedule: list[int] = []
+        deduplicated_inputs: list[int] = []
         mm_features = request.mm_features
         assert mm_features is not None
         assert len(mm_features) > 0
@@ -908,9 +935,10 @@ class Scheduler(SchedulerInterface):
         if self.ec_connector is not None:
             remote_cache_has_item = self.ec_connector.has_caches(request)
         # NOTE: since scheduler operates on the request level (possibly with
-        # multiple encoder inputs per request), we need to create temporary
-        # trackers for accounting at the encoder input level.
-        mm_hashes_to_schedule = set()
+        # multiple encoder inputs per request), we need to track accounting
+        # at the encoder input level.
+        # mm_hashes_scheduled_in_batch is shared across all requests in this
+        # scheduling cycle to enable encoder sharing (e.g., for beam search).
         num_tokens_to_schedule = 0
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
@@ -946,18 +974,28 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if not self.is_encoder_decoder:
-                # We are not using the encoder cache for encoder-decoder models,
-                # yet.
-                if request.mm_features[i].identifier in mm_hashes_to_schedule:
-                    # The same encoder input has already been scheduled in the
-                    # current step.
-                    continue
+            # Check if encoder already scheduled (enables beam search dedup)
+            # Deduplicated requests skip computation but need cross-attn KV
+            mm_hash = request.mm_features[i].identifier
+            if mm_hash in mm_hashes_scheduled_in_batch:
+                # Track as deduplicated
+                deduplicated_inputs.append(i)
+                # Still add for cross-attention KV allocation
+                encoder_inputs_to_schedule.append(i)
+                # Add reference to cached encoder (no new memory)
+                if mm_hash not in self.encoder_cache_manager.cached:
+                    self.encoder_cache_manager.cached[mm_hash] = set()
+                self.encoder_cache_manager.cached[mm_hash].add(request.request_id)
+                # Skip: don't deduct budget, don't add to token schedule
+                continue
 
-                if self.encoder_cache_manager.check_and_update_cache(request, i):
-                    # The encoder input is already computed and cached from a
-                    # previous step.
-                    continue
+            # Encoder cache across requests (non-encoder-decoder only)
+            if (
+                not self.is_encoder_decoder
+                and self.encoder_cache_manager.check_and_update_cache(request, i)
+            ):
+                # Encoder input already computed and cached
+                continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
@@ -993,18 +1031,19 @@ class Scheduler(SchedulerInterface):
                 break
 
             if self.ec_connector is not None and remote_cache_has_item[i]:
-                mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+                mm_hashes_scheduled_in_batch.add(request.mm_features[i].identifier)
                 external_load_encoder_input.append(i)
                 num_tokens_to_schedule += num_encoder_tokens
                 continue
 
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
-            mm_hashes_to_schedule.add(request.mm_features[i].identifier)
+            mm_hashes_scheduled_in_batch.add(request.mm_features[i].identifier)
             encoder_inputs_to_schedule.append(i)
 
         return (
             encoder_inputs_to_schedule,
+            deduplicated_inputs,
             num_new_tokens,
             encoder_compute_budget,
             external_load_encoder_input,

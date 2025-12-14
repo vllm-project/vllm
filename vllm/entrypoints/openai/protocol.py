@@ -2045,6 +2045,28 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
+
+    # Beam search parameters
+    use_beam_search: bool = False
+    """Whether to use beam search for transcription generation."""
+
+    beam_width: int = Field(default=4, ge=1)
+    """The number of beams to use in beam search. Higher values may improve
+    quality but increase computation time.
+    
+    Recommended values:
+    - 2-4: Good quality/speed balance for most use cases
+    - 4-8: Best performance sweet spot (encoder deduplication optimized)
+    - 8+: Diminishing returns, performance may degrade beyond beam_width=8
+    
+    Note: Performance is hardware-dependent. Larger machines may benefit from
+    higher beam widths. The implementation uses encoder deduplication to minimize
+    redundant computation."""
+
+    length_penalty: float = Field(default=1.0, ge=0.0, le=2.0)
+    """Length penalty for beam search. Values > 1.0 favor longer sequences,
+    values < 1.0 favor shorter sequences. For transcription, 1.0 (no penalty)
+    is recommended to avoid artificially shortening transcripts."""
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2104,6 +2126,33 @@ class TranscriptionRequest(OpenAIBaseModel):
             extra_args=self.vllm_xargs,
         )
 
+    def to_beam_search_params(
+        self, default_max_tokens: int, default_sampling_params: dict | None = None
+    ) -> BeamSearchParams:
+        """Convert transcription request to beam search parameters."""
+        # Use full default_max_tokens to support longer audio files
+        max_tokens = default_max_tokens
+
+        if default_sampling_params is None:
+            default_sampling_params = {}
+
+        # Use temperature for beam search
+        DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE = 0.8
+        temperature = (
+            self.temperature
+            if self.temperature is not None
+            else DEFAULT_TRANSCRIPTION_BEAM_TEMPERATURE
+        )
+
+        return BeamSearchParams(
+            beam_width=self.beam_width,
+            max_tokens=max_tokens,
+            ignore_eos=False,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=False,
+        )
+
     @model_validator(mode="before")
     @classmethod
     def validate_transcription_request(cls, data):
@@ -2112,6 +2161,34 @@ class TranscriptionRequest(OpenAIBaseModel):
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                 detail="Expected 'file' to be a file-like object, not 'str'.",
             )
+
+        # Handle beam search parameters from form data
+        if isinstance(data, dict):
+            # Convert string boolean for use_beam_search
+            if "use_beam_search" in data:
+                use_beam_search = data["use_beam_search"]
+                if isinstance(use_beam_search, str):
+                    data["use_beam_search"] = use_beam_search.lower() in (
+                        "true",
+                        "1",
+                        "yes",
+                        "on",
+                    )
+                elif isinstance(use_beam_search, bool):
+                    data["use_beam_search"] = use_beam_search
+                else:
+                    data["use_beam_search"] = bool(use_beam_search)
+
+            # Convert string to int/float for beam search params
+            import contextlib
+
+            if "beam_width" in data and isinstance(data["beam_width"], str):
+                with contextlib.suppress(ValueError, TypeError):
+                    data["beam_width"] = int(data["beam_width"])
+
+            if "length_penalty" in data and isinstance(data["length_penalty"], str):
+                with contextlib.suppress(ValueError, TypeError):
+                    data["length_penalty"] = float(data["length_penalty"])
 
         stream_opts = ["stream_include_usage", "stream_continuous_usage_stats"]
         stream = data.get("stream", False)

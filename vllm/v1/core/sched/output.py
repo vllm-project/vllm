@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -197,6 +197,13 @@ class SchedulerOutput:
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
 
+    # req_id -> encoder input indices that are deduplicated (reuse cached output).
+    # For beam search optimization: when multiple requests share the same encoder
+    # input (e.g., all beams from same audio), deduplicated requests skip encoder
+    # computation but still need cross-attention KV cache allocated.
+    # BC: New optional field added for encoder deduplication (Dec 2025)
+    deduplicated_encoder_inputs: dict[str, list[int]] = field(default_factory=dict)
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
@@ -216,6 +223,7 @@ class SchedulerOutput:
             total_num_scheduled_tokens=0,
             scheduled_spec_decode_tokens={},
             scheduled_encoder_inputs={},
+            deduplicated_encoder_inputs={},
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],

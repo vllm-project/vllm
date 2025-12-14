@@ -118,7 +118,11 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id, new_computed_blocks[i])
 
     def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_encoder_tokens: int = 0
+        self,
+        request_id: str,
+        num_tokens: int,
+        num_encoder_tokens: int = 0,
+        encoder_hash: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
@@ -130,6 +134,8 @@ class KVCacheCoordinator(ABC):
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
+            encoder_hash: The mm_hash of the encoder input, used for sharing
+                cross-attention blocks between requests with identical encoders.
 
         Returns:
             The new allocated blocks.
@@ -137,10 +143,11 @@ class KVCacheCoordinator(ABC):
         return tuple(
             manager.allocate_new_blocks(
                 request_id,
-                num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
-                else num_tokens,
+                num_encoder_tokens,
+                encoder_hash=encoder_hash,
             )
+            if isinstance(manager, CrossAttentionManager)
+            else manager.allocate_new_blocks(request_id, num_tokens)
             for manager in self.single_type_managers
         )
 
