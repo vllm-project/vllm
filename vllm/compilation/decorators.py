@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import dataclasses
 import hashlib
 import inspect
 import os
 import sys
+import threading
 from collections.abc import Callable
 from typing import TypeVar, overload
 from unittest.mock import patch
@@ -37,6 +39,29 @@ logger = init_logger(__name__)
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
+
+# Module-level cache for compiled code reuse
+# Key: compilation cache key (hash), Value: CompiledCodeCacheEntry
+_compiled_code_cache: dict[str, "CompiledCodeCacheEntry"] = {}
+_cache_lock = threading.Lock()
+
+
+@dataclasses.dataclass
+class CompiledCodeCacheEntry:
+    """
+    Stores compiled callable that can be reused across instances.
+
+    The cached compiled_callable retains Dynamo's guard logic, so when
+    reused by instances with different weights, guards will fail and
+    trigger recompilation with the correct weight bindings.
+    """
+
+    # Whether compilation has been completed
+    compiled: bool = False
+    # The compiled callable (includes guard logic)
+    compiled_callable: object | None = None
+    # AOT compiled function (if using AOT mode)
+    aot_compiled_fn: object | None = None
 
 
 def ignore_torch_compile(cls: _T) -> _T:
@@ -232,6 +257,59 @@ def _model_hash_key(fn) -> str:
     sha256_hash.update(fn.__qualname__.encode())
     sha256_hash.update(str(fn.__code__.co_firstlineno).encode())
     return sha256_hash.hexdigest()
+
+
+def _compute_compilation_cache_key(
+    module: nn.Module, forward_fn: Callable, vllm_config: VllmConfig
+) -> str:
+    """
+    Compute a unique cache key for compilation that identifies whether
+    compiled code can be reused across instances.
+
+    The key includes:
+    - Code location and version (_model_hash_key)
+    - Compilation configuration (from caching.compilation_config_hash_factors)
+    - Device/parallel configuration factors
+    - Module structure (parameter/buffer shapes and dtypes)
+    """
+    from vllm.compilation.caching import compilation_config_hash_factors
+
+    sha256_hash = hashlib.sha256()
+
+    # 1. Code identity (class, method, version)
+    code_key = _model_hash_key(forward_fn)
+    sha256_hash.update(code_key.encode())
+
+    # 2. Compilation configuration
+    config_factors = compilation_config_hash_factors(vllm_config)
+    for factor in config_factors:
+        sha256_hash.update(factor.encode())
+
+    # 3. Parallel/device configuration (for distributed setups)
+    parallel_config = vllm_config.parallel_config
+    sha256_hash.update(str(parallel_config.tensor_parallel_size).encode())
+    sha256_hash.update(str(parallel_config.pipeline_parallel_size).encode())
+
+    # 4. Compilation mode
+    sha256_hash.update(str(vllm_config.compilation_config.mode).encode())
+
+    # 5. Module structure (parameters and buffers)
+    # This ensures different shapes/dtypes get different cache keys
+    structure_info = []
+    for name, param in sorted(module.named_parameters()):
+        structure_info.append(f"{name}:{param.dtype}:{tuple(param.shape)}")
+    for name, buffer in sorted(module.named_buffers()):
+        structure_info.append(f"{name}:{buffer.dtype}:{tuple(buffer.shape)}")
+    if structure_info:
+        sha256_hash.update("|".join(structure_info).encode())
+
+    cache_key = sha256_hash.hexdigest()
+    logger.debug(
+        "Computed compilation cache key for %s: %s",
+        forward_fn.__qualname__,
+        cache_key[:16],
+    )
+    return cache_key
 
 
 def _verify_source_unchanged(source_info, vllm_config) -> None:
