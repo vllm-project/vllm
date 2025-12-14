@@ -27,7 +27,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalFieldElem,
     MultiModalFlatField,
-    MultiModalKwargs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalSharedField,
@@ -176,9 +175,6 @@ class MsgpackEncoder:
         if isinstance(obj, MultiModalKwargsItems):
             return self._encode_mm_items(obj)
 
-        if isinstance(obj, MultiModalKwargs):
-            return self._encode_mm_kwargs(obj)
-
         if isinstance(obj, UtilityResult):
             result = obj.result
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
@@ -259,11 +255,6 @@ class MsgpackEncoder:
             "field": self._encode_mm_field(elem.field),
         }
 
-    def _encode_mm_kwargs(self, kw: MultiModalKwargs) -> dict[str, Any]:
-        return {
-            modality: self._encode_nested_tensors(data) for modality, data in kw.items()
-        }
-
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
             return self._encode_tensor(nt)
@@ -278,10 +269,11 @@ class MsgpackEncoder:
         name = MMF_CLASS_TO_FACTORY.get(field.__class__)
         if not name:
             raise TypeError(f"Unsupported field type: {field.__class__}")
+
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        field_values = (getattr(field, f.name) for f in dataclasses.fields(field))
-        return name, *field_values
+        factory_kw = {f.name: getattr(field, f.name) for f in dataclasses.fields(field)}
+        return name, factory_kw
 
 
 class MsgpackDecoder:
@@ -325,8 +317,6 @@ class MsgpackDecoder:
                 return self._decode_mm_item(obj)
             if issubclass(t, MultiModalKwargsItems):
                 return self._decode_mm_items(obj)
-            if issubclass(t, MultiModalKwargs):
-                return self._decode_mm_kwargs(obj)
             if t is UtilityResult:
                 return self._decode_utility_result(obj)
         return obj
@@ -403,24 +393,16 @@ class MsgpackDecoder:
             obj["data"] = self._decode_nested_tensors(obj["data"])
 
         # Reconstruct the field processor using MultiModalFieldConfig
-        factory_meth_name, *field_args = obj["field"]
+        factory_meth_name, factory_kw = obj["field"]
         factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
 
         # Special case: decode the union "slices" field of
         # MultiModalFlatField
         if factory_meth_name == "flat":
-            field_args[0] = self._decode_nested_slices(field_args[0])
+            factory_kw["slices"] = self._decode_nested_slices(factory_kw["slices"])
 
-        obj["field"] = factory_meth(None, *field_args).field
+        obj["field"] = factory_meth("", **factory_kw).field
         return MultiModalFieldElem(**obj)
-
-    def _decode_mm_kwargs(self, obj: dict[str, Any]) -> MultiModalKwargs:
-        return MultiModalKwargs(
-            {
-                modality: self._decode_nested_tensors(data)
-                for modality, data in obj.items()
-            }
-        )
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):

@@ -6,12 +6,14 @@ from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
     PoolerConfig,
+    SchedulerConfig,
     VllmConfig,
     update_config,
 )
@@ -85,64 +87,6 @@ def test_update_config():
     # Nested update with invalid type
     with pytest.raises(AssertionError):
         new_config3 = update_config(config3, {"a": "new_value"})
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("distilbert/distilgpt2", "generate", "none", "generate"),
-        ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
-        ("openai/whisper-small", "generate", "none", "transcription"),
-    ],
-)
-def test_auto_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="auto")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
-        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
-        ("openai/whisper-small", "pooling", "embed", "embed"),
-    ],
-)
-def test_score_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="score")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
-
-
-# Can remove once --task option is fully deprecated
-@pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type", "expected_task"),
-    [
-        ("openai/whisper-small", "generate", "none", "transcription"),
-    ],
-)
-def test_transcription_task(
-    model_id, expected_runner_type, expected_convert_type, expected_task
-):
-    config = ModelConfig(model_id, task="transcription")
-
-    assert config.runner_type == expected_runner_type
-    assert config.convert_type == expected_convert_type
 
 
 @pytest.mark.parametrize(
@@ -627,8 +571,8 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support chunked prefill.",
+            True,
+            "Pooling models with causal attn and all pooling support chunked prefill.",
         ),
         (
             "BAAI/bge-base-en",
@@ -716,7 +660,7 @@ def test_is_chunked_prefill_supported(
 ):
     model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
-    with caplog_vllm.at_level(level=logging.DEBUG):
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_chunked_prefill_supported == expected_result
     assert reason in caplog_vllm.text
 
@@ -746,8 +690,8 @@ def test_is_chunked_prefill_supported(
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
-            False,
-            "Pooling models with all pooling does not support prefix caching.",
+            True,
+            "Pooling models with causal attn and all pooling support prefix caching.",
         ),
         (
             "BAAI/bge-base-en",
@@ -835,7 +779,7 @@ def test_is_prefix_caching_supported(
 ):
     model_config = ModelConfig(model_id, trust_remote_code=True)
     assert model_config.attn_type == expected_attn_type
-    with caplog_vllm.at_level(level=logging.DEBUG):
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
         assert model_config.is_prefix_caching_supported == expected_result
     assert reason in caplog_vllm.text
 
@@ -1021,17 +965,17 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
     # Explicit pass config flags to override defaults
-    pass_config = PassConfig(enable_noop=True, enable_attn_fusion=True)
+    pass_config = PassConfig(eliminate_noops=True, fuse_attn_quant=True)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
         optimization_level=OptimizationLevel.O0,
         compilation_config=compilation_config,
     )
-    assert config.compilation_config.pass_config.enable_noop is True
-    assert config.compilation_config.pass_config.enable_attn_fusion is True
+    assert config.compilation_config.pass_config.eliminate_noops is True
+    assert config.compilation_config.pass_config.fuse_attn_quant is True
 
     # Explicit cudagraph mode override on quantized model at O2
-    pass_config = PassConfig(enable_async_tp=True)
+    pass_config = PassConfig(fuse_gemm_comms=True)
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
     )
@@ -1041,7 +985,7 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_async_tp is True
+    assert config.compilation_config.pass_config.fuse_gemm_comms is True
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
@@ -1083,7 +1027,7 @@ def test_vllm_config_explicit_overrides():
     )
 
     # Override one field but not others
-    pass_config = PassConfig(enable_noop=False)
+    pass_config = PassConfig(eliminate_noops=False)
     compilation_config = CompilationConfig(pass_config=pass_config)
     config = VllmConfig(
         model_config=regular_model,
@@ -1091,7 +1035,18 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     # Explicit override should be respected
-    assert config.compilation_config.pass_config.enable_noop is False
+    assert config.compilation_config.pass_config.eliminate_noops is False
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_scheduler_config_init():
+    with pytest.raises(ValidationError):
+        # Positional InitVars missing
+        # (InitVars cannot have defaults otherwise they will become attributes)
+        SchedulerConfig()
+
+    with pytest.raises(AttributeError):
+        # InitVar does not become an attribute
+        print(SchedulerConfig.default_factory().max_model_len)
