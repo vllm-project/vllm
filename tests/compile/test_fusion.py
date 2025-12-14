@@ -284,10 +284,10 @@ def test_fusion_rmsnorm_quant(
         noop_pass = NoOpEliminationPass(vllm_config)
         if model_class is TestRmsnormGroupFp8QuantModel:
             from vllm.compilation.rocm_aiter_fusion import (
-                RocmAiterRMSNormFp8GroupQuantFusionPass,
+                RocmAiterRMSNormFusionPass,
             )
 
-            fusion_pass = RocmAiterRMSNormFp8GroupQuantFusionPass(vllm_config)
+            fusion_pass = RocmAiterRMSNormFusionPass(vllm_config)
         else:
             fusion_pass = RMSNormQuantFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
