@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import itertools
 from dataclasses import dataclass
 
@@ -134,6 +135,8 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
+    supports_update_block_table: bool = True
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -346,3 +349,17 @@ class Mamba2AttentionMetadataBuilder(
             num_computed_tokens_p=num_computed_tokens_p,
         )
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: Mamba2AttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> Mamba2AttentionMetadata:
+        new_metadata = copy.copy(metadata)
+        if self.vllm_config.cache_config.enable_prefix_caching:
+            state_indices_t = blk_table
+        else:
+            state_indices_t = blk_table[:, 0]
+        new_metadata.state_indices_tensor = state_indices_t
+        return new_metadata
