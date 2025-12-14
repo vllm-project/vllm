@@ -1025,14 +1025,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             shape_kv = (1,)
             shape_q = (1,)
         else:  # strategy == "attn_head"
-            from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-
-            assert (
-                isinstance(layer.impl, FlashAttentionImpl)
-                and layer.impl.vllm_flash_attn_version >= 3
-            ), (
-                "FP8 KV-cache and attention quantization with attn_head strategy is"
-                " only supported for FlashAttentionImpl v3 and above"
+            assert layer.impl.supports_per_head_quant_scales(), (
+                f"Layer {layer.__class__.__name__} with implementation "
+                f"{layer.impl.__class__.__name__} does not support per-head scales."
             )
             shape_kv = (int(layer.num_kv_heads), 1, 1)
             shape_q = (int(layer.num_heads), 1, 1)

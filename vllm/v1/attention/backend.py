@@ -703,6 +703,16 @@ class AttentionImpl(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def supports_per_head_quant_scales(self) -> bool:
+        """
+        Check if this attention implementation supports per-head quant scales.
+        This is currently used for FP8 KV-cache and attention quantization.
+
+        Returns:
+            bool: True if the implementation can accept per-head quant scales.
+        """
+        return False
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     @abstractmethod

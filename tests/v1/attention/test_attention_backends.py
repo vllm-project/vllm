@@ -199,6 +199,7 @@ class MockAttentionLayer:
         self._q_scale = torch.tensor(1.0, device=device)
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
+        self._q_scale_for_fa = torch.tensor(1.0, device=device)
         # Add float versions for flashinfer
         self._q_scale_float = 1.0
         self._k_scale_float = 1.0
