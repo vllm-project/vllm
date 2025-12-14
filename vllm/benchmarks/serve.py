@@ -235,7 +235,6 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
     selected_percentiles: list[float],
@@ -258,7 +257,7 @@ def calculate_metrics_for_embeddings(
         if outputs[i].success:
             e2els.append(outputs[i].latency)
             completed += 1
-            total_input += input_requests[i].prompt_len
+            total_input += outputs[i].prompt_len
         else:
             failed += 1
 
@@ -745,7 +744,6 @@ async def benchmark(
         )
     else:
         metrics = calculate_metrics_for_embeddings(
-            input_requests=input_requests,
             outputs=outputs,
             dur_s=benchmark_duration,
             selected_percentiles=selected_percentiles,
