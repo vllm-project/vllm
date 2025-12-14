@@ -78,8 +78,8 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
-    && uv pip install --system -r requirements/rocm-test.txt \
+    && uv pip install --system -r requirements/rocm.txt -c requirements/constraints/rocm.txt \
+    && uv pip install --system -r requirements/rocm-test.txt -c requirements/constraints/rocm-test.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
@@ -125,7 +125,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system -r requirements/rocm.txt -c requirements/constraints/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
