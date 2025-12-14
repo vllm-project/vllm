@@ -15,6 +15,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 # This import automatically registers `torch.ops.silly.attention`
@@ -67,7 +68,10 @@ def run_model(
         return output.cpu()
 
 
-@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+@pytest.mark.parametrize(
+    "use_inductor_graph_partition",
+    [True, False] if not current_platform.is_rocm() else [False],
+)
 def test_ignore_torch_compile_decorator(use_inductor_graph_partition, monkeypatch):
     # disable compile cache so that we can count the number of compilations
     # appropriately
@@ -199,7 +203,10 @@ class A(nn.Module):
         return x
 
 
-@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+@pytest.mark.parametrize(
+    "use_inductor_graph_partition",
+    [True, False] if not current_platform.is_rocm() else [False],
+)
 def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch):
     # disable compile cache so that we can count the number of compilations
     # appropriately

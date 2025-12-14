@@ -13,6 +13,10 @@ from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+INDUCTOR_GRAPH_PARTITION_PARAMS = (
+    [True, False] if not current_platform.is_rocm() else [False]
+)
+
 
 @contextlib.contextmanager
 def temporary_environ(env_vars):
@@ -70,6 +74,10 @@ def llm_pair(request):
         elif backend_config.specific_gpu_arch == (10, 0):
             pytest.skip("Only Blackwell GPUs support Cutlass MLA")
 
+    # FlashInfer is not supported on ROCm
+    if backend_config.name == "FlashInfer" and current_platform.is_rocm():
+        pytest.skip("FlashInfer is not supported on ROCm")
+
     env_vars = {
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
@@ -114,7 +122,7 @@ def llm_pair(request):
     [
         pytest.param((model, backend_config, use_inductor_graph_partition))
         for model, backend_config in model_backends_full_cudagraph
-        for use_inductor_graph_partition in [True, False]
+        for use_inductor_graph_partition in INDUCTOR_GRAPH_PARTITION_PARAMS
     ],
     indirect=True,
 )
