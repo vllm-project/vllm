@@ -120,8 +120,8 @@ class RerankResult(BaseModel):
 
 
 class RerankUsage(BaseModel):
+    prompt_tokens: int
     total_tokens: int
-    prompt_tokens: int | None = None
 
 
 class RerankResponse(OpenAIBaseModel):
