@@ -992,7 +992,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             max_total_frames // max(max_videos, 1), _MAX_FRAMES_PER_VIDEO
         )
 
-        return max(max_frames_per_video, 1)
+        return max(max_frames_per_video, 3)
 
     def _get_video_second_idx_glm4v(
         self, metadata: dict[str, Any], total_frames: int
@@ -1844,3 +1844,4 @@ class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
             "up_proj",
         ],
     }
+
