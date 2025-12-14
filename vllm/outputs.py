@@ -15,6 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sequence import RequestMetrics
 from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 logger = init_logger(__name__)
 
@@ -103,6 +104,7 @@ class RequestOutput:
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
         kv_transfer_params: The params for remote K/V transfer.
+        spec_decoding_stats: Speculative decoding statistics.
     """
 
     def __init__(
@@ -121,6 +123,7 @@ class RequestOutput:
         *,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
+        spec_decoding_stats: SpecDecodingStats | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -142,6 +145,7 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.spec_decoding_stats = spec_decoding_stats
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
