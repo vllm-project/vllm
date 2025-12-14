@@ -1018,8 +1018,7 @@ class VllmRunner:
 
         perplexities = []
         for output in outputs:
-            assert isinstance(output, TokensTextLogprobsPromptLogprobs)
-
+            output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[LogprobsOnePosition | None], output[3])
             assert token_datas[0] is None
             token_log_probs = []
