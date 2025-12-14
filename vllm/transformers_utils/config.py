@@ -617,6 +617,28 @@ def get_config(
         hf_overrides=hf_overrides_kw,
         **kwargs,
     )
+
+    # Patching defaults for GGUF models
+    if _is_gguf:
+        # Some models have different default values between GGUF and HF.
+        def apply_gguf_default(key: str, gguf_default: Any):
+            """
+            Apply GGUF defaults unless explicitly configured.
+
+            This function reads/writes external `config` and `config_dict`.
+            If the specified `key` is not in `config_dict` (i.e. not explicitly
+            configured and the default HF value is used), it updates the
+            corresponding `config` value to `gguf_default`.
+            """
+            if key not in config_dict:
+                config.update({key: gguf_default})
+
+        # Apply architecture-specific GGUF defaults.
+        if config.model_type in {"qwen3_moe"}:
+            # Qwen3 MoE: norm_topk_prob is always true.
+            # Note that, this parameter is always false (HF default) on Qwen2 MoE.
+            apply_gguf_default("norm_topk_prob", True)
+
     # Special architecture mapping check for GGUF models
     if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
