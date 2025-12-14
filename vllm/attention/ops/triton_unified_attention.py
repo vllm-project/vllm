@@ -278,6 +278,7 @@ def kernel_unified_attention_2d(
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
+        # Optimization: skip ranges where range_start==range_end (empty/invalid)
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -287,12 +288,19 @@ def kernel_unified_attention_2d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
+                # Skip empty ranges (range_start==range_end indicates unused slot)
+                is_valid = range_start < range_end
+
                 # Bidirectional: range_end inclusive (matches FlexAttention)
-                q_in_range = (query_abs_pos >= range_start) & (
-                    query_abs_pos <= range_end
+                q_in_range = (
+                    (query_abs_pos >= range_start)
+                    & (query_abs_pos <= range_end)
+                    & is_valid
                 )
-                k_in_range = (seq_offset[None, :] >= range_start) & (
-                    seq_offset[None, :] <= range_end
+                k_in_range = (
+                    (seq_offset[None, :] >= range_start)
+                    & (seq_offset[None, :] <= range_end)
+                    & is_valid
                 )
                 seq_mask |= q_in_range & k_in_range
 
@@ -591,6 +599,7 @@ def kernel_unified_attention_3d(
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
+        # Optimization: skip ranges where range_start==range_end (empty/invalid)
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -600,12 +609,19 @@ def kernel_unified_attention_3d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
+                # Skip empty ranges (range_start==range_end indicates unused slot)
+                is_valid = range_start < range_end
+
                 # Bidirectional: range_end inclusive (matches FlexAttention)
-                q_in_range = (query_abs_pos >= range_start) & (
-                    query_abs_pos <= range_end
+                q_in_range = (
+                    (query_abs_pos >= range_start)
+                    & (query_abs_pos <= range_end)
+                    & is_valid
                 )
-                k_in_range = (seq_offset[None, :] >= range_start) & (
-                    seq_offset[None, :] <= range_end
+                k_in_range = (
+                    (seq_offset[None, :] >= range_start)
+                    & (seq_offset[None, :] <= range_end)
+                    & is_valid
                 )
                 seq_mask |= q_in_range & k_in_range
 

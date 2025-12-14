@@ -68,26 +68,31 @@ class TritonAttentionMetadata:
 
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
-        """Convert mm_prefix_range dict to padded tensor for Triton kernel."""
+        """Convert mm_prefix_range dict to padded tensor for Triton kernel.
+
+        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
+        Empty ranges have start==end==0, which kernel skips via is_valid check.
+        """
         if self.mm_prefix_range is None:
             return None
 
-        # Use seq count from tensor, not dict length (keys may be non-contiguous)
         num_seqs = self.seq_lens.shape[0]
         device = self.seq_lens.device
 
-        range_tensors = [
-            torch.tensor(
-                self.mm_prefix_range.get(i, []),  # Safe access with empty fallback
-                dtype=torch.int32,
-                device=device,
-            )
-            for i in range(num_seqs)
+        # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
+        range_lists = [
+            self.mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
         ]
 
-        # Return None if all ranges are empty (avoids nested_tensor error)
-        if all(t.numel() == 0 for t in range_tensors):
+        # Return None if all ranges are trivial (only (0,0) placeholders)
+        if all(r == [(0, 0)] for r in range_lists):
             return None
+
+        # Create 2D tensors with shape (num_ranges, 2) for each sequence
+        range_tensors = [
+            torch.tensor(r, dtype=torch.int32, device=device).view(-1, 2)
+            for r in range_lists
+        ]
 
         return torch.nested.nested_tensor(range_tensors).to_padded_tensor(0)
 
