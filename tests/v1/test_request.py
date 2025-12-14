@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Import test utilities from v1/core (relative import works in pytest)
 import sys
 from pathlib import Path
 
