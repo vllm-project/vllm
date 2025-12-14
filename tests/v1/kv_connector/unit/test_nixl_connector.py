@@ -461,7 +461,7 @@ class TestNixlHandshake:
             metadata = NixlConnectorMetadata()
             if num_xfers > 0:
                 num_xfers -= 1
-                metadata.add_new_req(
+                metadata.add_new_req_to_recv(
                     request_id=request_id,
                     local_block_ids=[num_xfers + 1, num_xfers + 2, num_xfers + 3],
                     kv_transfer_params={
@@ -532,7 +532,7 @@ class TestNixlHandshake:
             vllm_config, connector.engine_id
         )
         metadata = NixlConnectorMetadata()
-        metadata.add_new_req(
+        metadata.add_new_req_to_recv(
             request_id="id",
             local_block_ids=[1, 2, 3],
             kv_transfer_params={
@@ -588,7 +588,7 @@ class TestNixlHandshake:
         metadata = NixlConnectorMetadata()
         total_reqs = 5
         for i in range(total_reqs):
-            metadata.add_new_req(
+            metadata.add_new_req_to_recv(
                 request_id=f"id_{i}",
                 local_block_ids=[1, 2, 3],
                 kv_transfer_params={
@@ -752,7 +752,7 @@ def test_kv_connector_stats(dist_init):
     # Create transfer metadata
     request_id = "test_req_for_stats"
     metadata = NixlConnectorMetadata()
-    metadata.add_new_req(
+    metadata.add_new_req_to_recv(
         request_id=request_id,
         local_block_ids=[1, 2, 3],
         kv_transfer_params={
@@ -1515,7 +1515,7 @@ def test_handshake_failure_returns_finished(dist_init):
 
     request_id = "test_handshake_fail"
     metadata = NixlConnectorMetadata()
-    metadata.add_new_req(
+    metadata.add_new_req_to_recv(
         request_id=request_id,
         local_block_ids=[1, 2, 3],
         kv_transfer_params={
@@ -1565,7 +1565,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
 
     request_id = "test_transfer_fail"
     metadata = NixlConnectorMetadata()
-    metadata.add_new_req(
+    metadata.add_new_req_to_recv(
         request_id=request_id,
         local_block_ids=[7, 8, 9],
         kv_transfer_params={
