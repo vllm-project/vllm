@@ -24,13 +24,16 @@ from vllm.platforms.rocm import RocmPlatform
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
-    # Clear xformers availability cache
-    import vllm.attention.layer as layer_module
-
-    layer_module.USE_XFORMERS_OPS = None
 
 
-@pytest.mark.parametrize("device", ["cpu", "hip", "cuda"])
+devices = ["cpu"]
+if current_platform.is_cuda():
+    devices.append("cuda")
+if current_platform.is_rocm():
+    devices.append("hip")
+
+
+@pytest.mark.parametrize("device", devices)
 def test_mha_attn_platform(device: str):
     """
     Test the attention selector between different platform and device.
@@ -50,7 +53,7 @@ def test_mha_attn_platform(device: str):
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
+            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
@@ -62,38 +65,10 @@ def test_mha_attn_platform(device: str):
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
-        # - with upstream FA not available
-        # - should use xformers
+        # - should use vLLM's FlashAttention
         with (
             patch("vllm.attention.layer.current_platform", CudaPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
-            patch(
-                "vllm.attention.layer.check_upstream_fa_availability",
-                return_value=False,
-            ),
-        ):
-            attn = MultiHeadAttention(16, 72, scale=1)
-            assert attn.attn_backend == AttentionBackendEnum.XFORMERS
-
-        # Test CUDA with head_size=72 (not divisible by 32)
-        # - with upstream FA available
-        # - should use upstream FA
-        with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
-            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
-            patch(
-                "vllm.attention.layer.check_upstream_fa_availability", return_value=True
-            ),
-            patch.dict(
-                "sys.modules",
-                {
-                    "flash_attn": type(
-                        "MockFlashAttn",
-                        (),
-                        {"flash_attn_varlen_func": lambda *args, **kwargs: None},
-                    )()
-                },
-            ),
         ):
             attn = MultiHeadAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN

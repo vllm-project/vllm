@@ -119,15 +119,17 @@ class EngineCore:
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        if len(kv_cache_config.kv_cache_groups) == 0:
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
-            logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.enable_chunked_prefill = False
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
             * vllm_config.parallel_config.decode_context_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
@@ -180,7 +182,7 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
-        self.ec_producer = (
+        self.is_ec_producer = (
             vllm_config.ec_transfer_config is not None
             and vllm_config.ec_transfer_config.is_ec_producer
         )
@@ -202,9 +204,16 @@ class EngineCore:
         )
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
+        self.aborts_queue = queue.Queue[list[str]]()
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -343,6 +352,9 @@ class EngineCore:
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -390,7 +402,7 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            if not self.ec_producer:
+            if not self.is_ec_producer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if self.is_pooling_model or not model_executed:
@@ -436,6 +448,9 @@ class EngineCore:
         with self.log_error_detail(scheduler_output):
             model_output = future.result()
 
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -453,6 +468,18 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
+
+    def _process_aborts_queue(self):
+        if not self.aborts_queue.empty():
+            request_ids = []
+            while not self.aborts_queue.empty():
+                ids = self.aborts_queue.get_nowait()
+                if isinstance(ids, str):
+                    # Should be a list here, but also handle string just in case.
+                    ids = (ids,)
+                request_ids.extend(ids)
+            # More efficient to abort all as a single batch.
+            self.abort_requests(request_ids)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -479,8 +506,12 @@ class EngineCore:
 
         self.model_executor.reset_mm_cache()
 
-    def reset_prefix_cache(self):
-        self.scheduler.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.scheduler.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
@@ -643,13 +674,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
-
-        # Enable environment variable cache (e.g. assume no more
-        # environment variable overrides after this point)
-        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(
@@ -870,9 +894,13 @@ class EngineCoreProc(EngineCore):
             and not self.scheduler.has_requests()
             and not self.batch_queue
         ):
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
+            if self.input_queue.empty():
+                # Drain aborts queue; all aborts are also processed via input_queue.
+                with self.aborts_queue.mutex:
+                    self.aborts_queue.queue.clear()
+                if logger.isEnabledFor(DEBUG):
+                    logger.debug("EngineCore waiting for work.")
+                    waited = True
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
@@ -1025,6 +1053,13 @@ class EngineCoreProc(EngineCore):
                         request = self.preprocess_add_request(request)
                     else:
                         request = generic_decoder.decode(data_frames)
+
+                        if request_type == EngineCoreRequestType.ABORT:
+                            # Aborts are added to *both* queues, allows us to eagerly
+                            # process aborts while also ensuring ordering in the input
+                            # queue to avoid leaking requests. This is ok because
+                            # aborting in the scheduler is idempotent.
+                            self.aborts_queue.put_nowait(request)
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))

@@ -13,7 +13,7 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library
+from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 
@@ -28,6 +28,7 @@ else:
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
+    "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
@@ -78,7 +79,6 @@ def guard_cuda_initialization():
         yield
         return
 
-    had_key = "CUDA_VISIBLE_DEVICES" in os.environ
     old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     try:
@@ -90,10 +90,10 @@ def guard_cuda_initialization():
             err_msg = str(e)
         raise RuntimeError(err_msg) from e
     finally:
-        if had_key:
-            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        if old_value is None:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
         else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES")
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -194,12 +194,33 @@ def get_kv_cache_torch_dtype(
     return torch_dtype
 
 
+def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
+    quant_method = quant_cfg.get("quant_method", "")
+    if quant_method.startswith("modelopt"):
+        quantization_inner = quant_cfg.get("quantization", quant_cfg)
+        # Check if quant config is specified and use kv cache quant algo
+        kv_algo = quantization_inner.get("kv_cache_quant_algo") or quant_cfg.get(
+            "kv_cache_quant_algo"
+        )
+        if isinstance(kv_algo, str):
+            return STR_DTYPE_TO_TORCH_DTYPE[kv_algo.lower()]
+    return None
+
+
 def kv_cache_dtype_str_to_dtype(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> torch.dtype:
+    # Model config may not be specified for unit tests, default to float16
+    dtype = model_config.dtype if model_config else torch.half
     if kv_cache_dtype == "auto":
-        # Model config may not be specified for unit tests, default to float16
-        return model_config.dtype if model_config else torch.half
+        hf_cfg = getattr(model_config, "hf_config", None)
+        if hf_cfg is not None:
+            quant_cfg = getattr(hf_cfg, "quantization_config", None)
+            if quant_cfg is not None:
+                kv_algo_dtype = get_kv_cache_quant_algo_dtype(quant_cfg)
+                return kv_algo_dtype if kv_algo_dtype is not None else dtype
+        return dtype
+
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
@@ -426,8 +447,7 @@ def aux_stream() -> torch.cuda.Stream | None:
 
     from vllm.platforms import current_platform
 
-    # TODO: validate this works properly on ROCm platform.
-    if _aux_stream is None and current_platform.is_cuda():
+    if _aux_stream is None and current_platform.is_cuda_alike():
         _aux_stream = torch.cuda.Stream()
 
     return _aux_stream
@@ -526,8 +546,7 @@ def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
 
 # Helper function used in testing.
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    torch_version = version.parse(torch_version)
-    return torch_version >= version.parse(target)
+    return version.parse(torch_version) >= version.parse(target)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
@@ -641,15 +660,8 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    import torch.library
+    schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

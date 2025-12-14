@@ -62,7 +62,7 @@ If a single node lacks sufficient GPUs to hold the model, deploy vLLM across mul
 
 ### What is Ray?
 
-Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments require Ray as the runtime engine.
+Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments can use Ray as the runtime engine.
 
 vLLM uses Ray to manage the distributed execution of tasks across multiple nodes and control where execution happens.
 
@@ -118,14 +118,38 @@ The common practice is to set the tensor parallel size to the number of GPUs in 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
     --tensor-parallel-size 8 \
-    --pipeline-parallel-size 2
+    --pipeline-parallel-size 2 \
+    --distributed-executor-backend ray
 ```
 
 Alternatively, you can set `tensor_parallel_size` to the total number of GPUs in the cluster:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
-     --tensor-parallel-size 16
+     --tensor-parallel-size 16 \
+     --distributed-executor-backend ray
+```
+
+### Running vLLM with MultiProcessing
+
+Besides Ray, Multi-node vLLM deployments can also use `multiprocessing` as the runtime engine. Here's an example to deploy model across 2 nodes (8 GPUs per node) with `tp_size=8` and `pp_size=2`.
+
+Choose one node as the head node and run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 0 \
+  --master-addr <HEAD_NODE_IP>
+```
+
+On the other worker node, run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 1 \
+  --master-addr <HEAD_NODE_IP> --headless
 ```
 
 ## Optimizing network communication for tensor parallelism

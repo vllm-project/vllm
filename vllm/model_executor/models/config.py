@@ -4,7 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -42,12 +42,12 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -78,12 +78,13 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
+            rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+            config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
-                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": max_position,
-                "base": getattr(config, "rope_theta", config.rotary_emb_base),
-                "rope_scaling": getattr(config, "rope_scaling", None),
+                "rope_parameters": config.rope_parameters,
             }
 
 
@@ -115,20 +116,18 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
+
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": rotary_emb_dim,
             "max_position": max_trained_positions,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
         # we ignore config.rotary_scaling_factor so that for datasets shorter
         # than max_trained_positions 2048, the results are consistent
         # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_scaling.
+        # The context extension uses vllm style rope_theta and rope_parameters.
         # See #17785 #18755
         if (
             not vllm_config.model_config.hf_overrides
@@ -172,7 +171,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             if hasattr(hf_text_config, "max_model_len"):
                 delattr(hf_text_config, "max_model_len")
             hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+            hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
@@ -216,7 +215,7 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         tokens = getattr(config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, (
             "Try loading the original Qwen3 Reranker?, see: "
-            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py"
+            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
         )
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
@@ -242,12 +241,12 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -287,9 +286,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        if cache_config.mamba_block_size is None:
-            cache_config.mamba_block_size = model_config.max_model_len
-
         if cache_config.enable_prefix_caching:
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
@@ -297,12 +293,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
+                # By default, mamba block size will be set to max_model_len (see
+                # below). When enabling prefix caching, we align mamba block size
+                # to the block size as the basic granularity for prefix caching.
+                if cache_config.mamba_block_size is None:
+                    cache_config.mamba_block_size = cache_config.block_size
             else:
                 logger.info(
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
                 cache_config.enable_prefix_caching = False
+
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
@@ -329,6 +333,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
+        attention_config = vllm_config.attention_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -345,7 +350,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         #   * CUTLASS_MLA backend: kernel_block_size 128 alignment
         #   * Other MLA backends: kernel_block_size 64 alignment
         if model_config.use_mla:
-            use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
+            use_cutlass_mla = (
+                attention_config.backend == AttentionBackendEnum.CUTLASS_MLA
+            )
             kernel_block_alignment_size = 128 if use_cutlass_mla else 64
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
@@ -356,11 +363,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kernel_block_alignment_size = 16
             if (
-                current_platform.is_device_capability(100)
+                current_platform.is_device_capability_family(100)
                 and model_config.get_head_size() == 256
                 and (
-                    envs.VLLM_ATTENTION_BACKEND is None
-                    or envs.VLLM_ATTENTION_BACKEND == "FLASHINFER"
+                    attention_config.backend is None
+                    or attention_config.backend == AttentionBackendEnum.FLASHINFER
                 )
             ):
                 # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
@@ -483,6 +490,26 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config, or to
+        float16 if not specified.
+        """
+        cache_config = vllm_config.cache_config
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            hf_config = vllm_config.model_config.hf_config
+            mamba_ssm_cache_dtype = getattr(
+                hf_config, "mamba_ssm_cache_dtype", "float16"
+            )
+            logger.info(
+                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -500,4 +527,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "NemotronHForCausalLM": NemotronHForCausalLMConfig,
 }

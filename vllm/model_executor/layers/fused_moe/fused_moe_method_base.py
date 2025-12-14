@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable
 
 import torch
 
@@ -50,10 +49,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        return maybe_make_prepare_finalize(
+            self.moe, self.moe_quant_config, routing_tables
+        )
 
     def select_gemm_impl(
         self,
@@ -85,28 +89,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def allow_inplace(self) -> bool:
         return False
 
+    @property
+    def method_name(self) -> str:
+        return self.__class__.__name__
+
     @abstractmethod
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

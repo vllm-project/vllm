@@ -251,17 +251,6 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         endif()
 
         # Build ACL with CMake
-        set(ARM_COMPUTE_BUILD_SHARED_LIB "OFF")
-        set(CMAKE_BUILD_TYPE "Release")
-        set(ARM_COMPUTE_ARCH "armv8.2-a")
-        set(ARM_COMPUTE_ENABLE_ASSERTS "OFF")
-        set(ARM_COMPUTE_ENABLE_CPPTHREADS "OFF")
-        set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
-        set(ARM_COMPUTE_ENABLE_OPENMP "ON")
-        set(ARM_COMPUTE_ENABLE_WERROR "OFF")
-        set(ARM_COMPUTE_BUILD_EXAMPLES "OFF")
-        set(ARM_COMPUTE_BUILD_TESTING "OFF")
-
         set(_cmake_config_cmd
              ${CMAKE_COMMAND} -G Ninja -B build 
             -DARM_COMPUTE_BUILD_SHARED_LIB=OFF 
@@ -375,6 +364,7 @@ set(VLLM_EXT_SRC
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/cpu_wna16.cpp"
         ${VLLM_EXT_SRC})
     if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
         set(VLLM_EXT_SRC
