@@ -611,9 +611,17 @@ class ModelConfig:
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
         if not isinstance(self.tokenizer, str):
-            raise ValueError("tokenizer must be a string after __post_init__.")
-        if not isinstance(self.max_model_len, int):
-            raise ValueError("max_model_len must be an integer after __post_init__.")
+            raise ValueError(
+                f"tokenizer must be a string, got "
+                f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
+                "Please provide a valid tokenizer path or HuggingFace model ID."
+            )
+        if not isinstance(self.max_model_len, int) or self.max_model_len <= 0:
+            raise ValueError(
+                f"max_model_len must be a positive integer, "
+                f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
+                "Example: max_model_len=2048"
+            )
         return self
 
     def _get_transformers_backend_cls(self) -> str:
@@ -1186,7 +1194,15 @@ class ModelConfig:
                         // block.attention.n_heads_in_group
                     )
 
-            raise RuntimeError("Couldn't determine number of kv heads")
+            raise RuntimeError(
+                "Could not determine the number of key-value attention heads "
+                "from model configuration. "
+                f"Model: {self.model}, Architecture: {self.architectures}. "
+                "This usually indicates an unsupported model architecture or "
+                "missing configuration. "
+                "Please check if your model is supported at: "
+                "https://docs.vllm.ai/en/latest/models/supported_models.html"
+            )
 
         if self.is_attention_free:
             return 0
