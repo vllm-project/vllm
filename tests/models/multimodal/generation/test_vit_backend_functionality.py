@@ -140,6 +140,21 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             "pruning_rates": [0.0, 0.75],
         },
     },
+    "qwen2_5_omni": {
+        "model_name": "Qwen/Qwen2.5-Omni-3B",
+        "interface": "llm_generate",
+        "max_model_len": 32768,
+        "max_num_seqs": 2,
+        "limit_mm_per_prompt": {"image": 3, "video": 3, "audio": 3},
+        "sampling_params": {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "max_tokens": 16384,
+        },
+        "use_processor": True,
+        "question": "What is the content of each image?",
+    },
     "qwen3_omni": {
         "model_name": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         "interface": "llm_generate",
