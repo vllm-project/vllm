@@ -181,30 +181,34 @@ class Base(
             if "gptq" in quant_method_name:
                 self.ignore_unexpected_suffixes.append(".bias")
 
-        # Set correct attn and init on "meta" to delay allocating GPU tensors
+        # Set correct attn
         self.text_config._attn_implementation = "vllm"
-        with init_on_device_without_buffers("meta"):
-            from_config_kwargs = dict(
-                config=self.config,
-                dtype=self.model_config.dtype,
-                trust_remote_code=self.model_config.trust_remote_code,
-            )
-            # Create a dummy model to get the decoder class
-            model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
-            language_model = model.get_decoder()
-            language_model_cls = type(language_model)
+        from_config_kwargs = dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
 
-            # Decorate the language_model_cls for torch compile and patch it
+        # Globally patch the language model class to support torch compile
+        with torch.device("meta"):
+            # Extract the language model class
+            model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
+            language_model_cls = type(model.get_decoder())
+            del model
+
+            # Decorate the language_model_cls for torch compile
             @support_torch_compile(
                 dynamic_arg_dims=self._dynamic_arg_dims,
                 enable_if=can_enable_torch_compile,
             )
-            class Wrapper(language_model_cls):
-                pass
+            class SupportTorchCompileWrapper(language_model_cls): ...
 
+            # Patch the class in its module
             module = sys.modules[language_model_cls.__module__]
-            setattr(module, language_model_cls.__name__, Wrapper)
-            del model
+            setattr(module, language_model_cls.__name__, SupportTorchCompileWrapper)
+
+        # init on "meta" to delay allocating GPU tensors
+        with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Remove layers not on this pipeline parallel rank
