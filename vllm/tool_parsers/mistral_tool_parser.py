@@ -69,6 +69,16 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     )
 
 
+def _dump_pre_v11_arguments(loaded_pre_v11: list[dict]) -> list[dict]:
+    return [
+        {
+            "name": fn["name"],
+            "arguments": json.dumps(fn["arguments"], ensure_ascii=False),
+        }
+        for fn in loaded_pre_v11
+    ]
+
+
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with
@@ -131,9 +141,7 @@ class MistralToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         """
-        Extract the tool calls from a complete model response. Requires
-        find-and-replacing single quotes with double quotes for JSON parsing,
-        make sure your tool call arguments don't ever include quotes!
+        Extract the tool calls from a complete model response
         """
 
         # case -- if a tool call token is not present, return a text response
@@ -142,67 +150,65 @@ class MistralToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        # first remove the BOT token
-        tool_content = model_output.replace(self.bot_token, "").strip()
+        if not self._is_pre_v11:
+            function_call_arr = []
+            for single_tool_content in model_output.split(self.bot_token)[1:]:
+                if "{" not in single_tool_content:
+                    continue
 
-        try:
+                end_name = single_tool_content.find("{")
+                fn_name, args = (
+                    single_tool_content[:end_name],
+                    single_tool_content[end_name:],
+                )
+
+                # fn_name is encoded outside serialized json dump
+                # only arguments are serialized
+                function_call_arr.append({"name": fn_name, "arguments": args})
+
+        else:
+            tool_content = model_output.replace(self.bot_token, "").strip()
             try:
-                if not self._is_pre_v11:
-                    function_call_arr = []
-                    for single_tool_content in model_output.split(self.bot_token):
-                        if "{" not in single_tool_content:
-                            continue
-
-                        end_name = single_tool_content.find("{")
-                        fn_name, args = (
-                            single_tool_content[:end_name],
-                            single_tool_content[end_name:],
-                        )
-
-                        # fn_name is encoded outside serialized json dump
-                        # only arguments are serialized
-                        function_call_arr.append(
-                            {"name": fn_name, "arguments": json.loads(args)}
-                        )
-                else:
-                    function_call_arr = json.loads(tool_content)
+                loaded_pre_v11 = json.loads(tool_content)
             except json.JSONDecodeError:
                 # use a regex to find the part corresponding to the tool call.
                 # NOTE: This use case should not happen if the model is trained
                 # correctly. It's an easy possible fix so it's included, but
                 # can be brittle for very complex / highly nested tool calls
-                raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
-                function_call_arr = json.loads(raw_tool_call)
+                try:
+                    raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
+                    loaded_pre_v11 = json.loads(raw_tool_call)
+                except Exception:
+                    logger.exception("Error in extracting tool call from response.")
+                    # return information to just treat the tool call as regular JSON
+                    return ExtractedToolCallInformation(
+                        tools_called=False,
+                        tool_calls=[],
+                        content=tool_content,
+                    )
+            else:
+                function_call_arr = _dump_pre_v11_arguments(loaded_pre_v11)
 
-            # Tool Call
-            tool_calls: list[MistralToolCall] = [
-                MistralToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=raw_function_call["name"],
-                        # function call args are JSON but as a string
-                        arguments=json.dumps(
-                            raw_function_call["arguments"], ensure_ascii=False
-                        ),
-                    ),
-                )
-                for raw_function_call in function_call_arr
-            ]
-
-            # get any content before  the tool call
-            content = model_output.split(self.bot_token)[0]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=content if len(content) > 0 else None,
+        # Tool Call
+        tool_calls: list[MistralToolCall] = [
+            MistralToolCall(
+                type="function",
+                function=FunctionCall(
+                    name=raw_function_call["name"],
+                    # function call args are JSON but as a string
+                    arguments=raw_function_call["arguments"],
+                ),
             )
+            for raw_function_call in function_call_arr
+        ]
 
-        except Exception:
-            logger.exception("Error in extracting tool call from response.")
-            # return information to just treat the tool call as regular JSON
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=tool_content
-            )
+        # get any content before  the tool call
+        content = model_output.split(self.bot_token)[0]
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=tool_calls,
+            content=content if len(content) > 0 else None,
+        )
 
     def extract_tool_calls_streaming(
         self,
