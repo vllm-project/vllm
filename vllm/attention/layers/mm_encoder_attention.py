@@ -80,7 +80,7 @@ class MMEncoderAttention(CustomOp):
     def enabled(cls) -> bool:
         return True
 
-    def reshape_qkv_to_4d(
+    def maybe_reshape_qkv_to_4d(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
@@ -113,8 +113,9 @@ class MMEncoderAttention(CustomOp):
     ) -> torch.Tensor:
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
+        is_reshaped = query.dim() != 4
 
-        query, key, value = self.reshape_qkv_to_4d(
+        query, key, value = self.maybe_reshape_qkv_to_4d(
             query, key, value, bsz, q_len, kv_len
         )
 
@@ -124,6 +125,8 @@ class MMEncoderAttention(CustomOp):
             v=value,
             cu_seqlens=cu_seqlens,
         )
+        if is_reshaped:
+            output = output.view(bsz, q_len, -1)
         return output
 
     def _forward_fa(
@@ -134,10 +137,17 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
-        bsz = query.shape[0]
         assert (cu_seqlens is not None and max_seqlen is not None) or (
             cu_seqlens is None and max_seqlen is None
         ), "cu_seqlens and max_seqlen should be both set or both None."
+
+        bsz, q_len = query.size()[:2]
+        kv_len = key.size(1)
+        is_reshaped = query.dim() != 4
+
+        query, key, value = self.maybe_reshape_qkv_to_4d(
+            query, key, value, bsz, q_len, kv_len
+        )
 
         output = vit_flash_attn_wrapper(
             q=query,
@@ -148,6 +158,8 @@ class MMEncoderAttention(CustomOp):
             batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
         )
+        if is_reshaped:
+            output = output.view(bsz, q_len, -1)
         return output
 
     def forward_native(

@@ -79,13 +79,19 @@ def vit_flash_attn_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter
+        q,
+        k,
+        v,
+        batch_size,
+        is_rocm_aiter,
+        cu_seqlens,
+        max_seqlen,
     )
 
 
@@ -140,6 +146,6 @@ def vit_torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.torch_sdpa_wrapper(q, k, v, cu_seqlens)
