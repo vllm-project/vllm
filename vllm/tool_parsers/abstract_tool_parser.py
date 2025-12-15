@@ -17,12 +17,12 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesRequest,
     ResponseTextConfig,
 )
-from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
@@ -203,7 +203,7 @@ class ToolParserManager:
         Example:
             ToolParserManager.register_lazy_module(
                 name="kimi_k2",
-                module_path="vllm.entrypoints.openai.tool_parsers.kimi_k2_parser",
+                module_path="vllm.tool_parsers.kimi_k2_parser",
                 class_name="KimiK2ToolParser",
             )
         """

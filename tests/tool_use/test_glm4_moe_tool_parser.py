@@ -7,10 +7,10 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers.glm4_moe_tool_parser import (
+from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
 )
-from vllm.tokenizers import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
 

@@ -12,8 +12,8 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.minimax_tool_parser import MinimaxToolParser
 from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers.minimax_tool_parser import MinimaxToolParser
 
 pytestmark = pytest.mark.cpu_test
 

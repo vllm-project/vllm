@@ -10,8 +10,8 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser
 
 
 class StreamingToolReconstructor:
