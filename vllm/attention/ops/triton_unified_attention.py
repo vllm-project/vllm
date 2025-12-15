@@ -277,6 +277,9 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
+        if SLIDING_WINDOW > 0:
+            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
         # Optimization: skip ranges where range_start==range_end (empty/invalid)
         if USE_MM_PREFIX:
@@ -315,13 +318,6 @@ def kernel_unified_attention_2d(
         S = tl.where(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
-
-        if SLIDING_WINDOW > 0:
-            S = tl.where(
-                (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
-                S,
-                float("-inf"),
-            )
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -598,6 +594,9 @@ def kernel_unified_attention_3d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
+        if SLIDING_WINDOW > 0:
+            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
         # Optimization: skip ranges where range_start==range_end (empty/invalid)
         if USE_MM_PREFIX:
@@ -635,13 +634,6 @@ def kernel_unified_attention_3d(
         S = tl.where(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
-
-        if SLIDING_WINDOW > 0:
-            S = tl.where(
-                (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
-                S,
-                float("-inf"),
-            )
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -810,6 +802,7 @@ def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
+    is_mm_prefix: bool,
     is_prefill: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
@@ -818,6 +811,10 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
+    if is_mm_prefix:
+        # Multimodal bidirectional attention needs a larger tile size
+        return 64
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
@@ -900,10 +897,18 @@ def unified_attention(
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
     TILE_SIZE_PREFILL = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=True
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_mm_prefix=use_mm_prefix,
+        is_prefill=True,
     )
     TILE_SIZE_DECODE = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=False
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_mm_prefix=use_mm_prefix,
+        is_prefill=False,
     )
 
     # if batch contains a prefill

@@ -73,6 +73,8 @@ class TritonAttentionMetadata:
         Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
         Empty ranges have start==end==0, which kernel skips via is_valid check.
         """
+        # TODO(Isotr0py): Move to model runner's attention metadata
+        # preparation to avoid duplicate computation.
         if self.mm_prefix_range is None:
             return None
 
