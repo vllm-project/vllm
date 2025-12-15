@@ -5,8 +5,6 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
-import torch
-
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
@@ -681,6 +679,8 @@ class InputProcessor:
             )
 
             baseline_snapshot = MemorySnapshot(device=device)
+
+            import torch
 
             # Only check init memory if we are sure that the EngineCore is not
             # loading weights or running profiling on the same GPU

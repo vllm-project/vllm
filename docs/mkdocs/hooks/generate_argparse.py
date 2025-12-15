@@ -27,6 +27,10 @@ def mock_if_no_torch(mock_module: str, mock: MagicMock):
         sys.modules[mock_module] = mock
 
 
+# Make torch.nn.Parameter safe to inherit from
+mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
+
+
 # Mock custom op code
 class MockCustomOp:
     @staticmethod
@@ -48,10 +52,6 @@ mock_if_no_torch(
 with open(ROOT_DIR / "requirements/test.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
-
-
-# Make torch.nn.Parameter safe to inherit from
-mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
 
 
 class PydanticMagicMock(MagicMock):
