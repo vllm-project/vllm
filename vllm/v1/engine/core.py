@@ -109,7 +109,6 @@ class EngineCore:
 
         self.afd_config = vllm_config.afd_config
         if self.afd_config and self.afd_config.afd_role == "ffn":
-            logger.info("jcz EngineCore ffn role")
             return
 
         self.available_gpu_memory_for_kv_cache = -1
