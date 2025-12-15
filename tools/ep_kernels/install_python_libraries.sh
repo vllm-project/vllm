@@ -93,6 +93,7 @@ pushd "$WORKSPACE"
 echo "Downloading NVSHMEM ${NVSHMEM_VER} for ${NVSHMEM_SUBDIR} ..."
 curl -fSL "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
 tar -xf "${NVSHMEM_FILE}"
+rm -rf nvshmem
 mv "${NVSHMEM_FILE%.tar.xz}" nvshmem
 rm -f "${NVSHMEM_FILE}"
 rm -rf nvshmem/lib/bin nvshmem/lib/share
