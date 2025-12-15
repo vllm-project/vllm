@@ -2161,9 +2161,7 @@ class GPUModelRunner(
                 # pos_info.length may overcount (e.g., special tokens in Qwen-VL).
                 # Fall back to length if is_embed is None.
                 num_tokens = self.info.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.length
-                    if pos_info.is_embed is None
-                    else pos_info.is_embed.sum()
+                    pos_info.get_num_embeds()
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
