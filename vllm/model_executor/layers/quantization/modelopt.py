@@ -1461,9 +1461,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.w2_weight = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
             layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
