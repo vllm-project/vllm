@@ -112,6 +112,100 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
+        # Warm up audio preprocessing to avoid first-request latency
+        self._warmup_audio_preprocessing()
+        # Warm up input processor with dummy audio
+        self._warmup_input_processor()
+
+    def _warmup_audio_preprocessing(self) -> None:
+        """Warm up audio processing libraries to avoid first-request latency.
+
+        The first call to librosa functions (load, get_duration, mel-spectrogram)
+        triggers JIT compilation and library initialization which can take ~7s.
+        This method warms up these operations during server initialization.
+        """
+        try:
+            warmup_start = time.perf_counter()
+            logger.info("Warming up audio preprocessing libraries...")
+
+            # Create a minimal dummy audio (1 second of silence at target sample rate)
+            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
+
+            # Warm up librosa.load by using librosa functions on the dummy data
+            # This initializes FFTW, numba JIT, and other audio processing libraries
+            _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
+
+            # Warm up mel-spectrogram computation (used in feature extraction)
+            _ = librosa.feature.melspectrogram(
+                y=dummy_audio,
+                sr=self.asr_config.sample_rate,
+                n_mels=128,  # Whisper uses 128 mel bins
+                n_fft=400,  # Whisper uses 400 FFT bins
+                hop_length=160,  # Whisper uses 160 hop length
+            )
+
+            warmup_elapsed = time.perf_counter() - warmup_start
+            logger.info("Audio preprocessing warmup completed in %.2fs", warmup_elapsed)
+        except Exception as e:
+            # Don't fail initialization if warmup fails - log warning and continue
+            logger.warning(
+                "Audio preprocessing warmup failed (non-fatal): %s. "
+                "First request may experience higher latency.",
+                e,
+            )
+
+    def _warmup_input_processor(self) -> None:
+        """Warm up input processor with dummy audio to avoid first-request latency.
+
+        The first call to input_processor.process_inputs() with multimodal audio
+        triggers multimodal processing initialization which can take ~2.5s.
+        This method processes a dummy audio request to warm up the pipeline.
+        """
+        try:
+            from vllm.sampling_params import SamplingParams
+
+            warmup_start = time.perf_counter()
+            logger.info("Warming up multimodal input processor...")
+
+            # Create minimal dummy audio (1 second of silence)
+            dummy_audio = np.zeros(int(self.asr_config.sample_rate), dtype=np.float32)
+
+            # Use the same method that _preprocess_speech_to_text uses
+            # to create the prompt
+            dummy_prompt = self.model_cls.get_generation_prompt(
+                audio=dummy_audio,
+                stt_config=self.asr_config,
+                model_config=self.model_config,
+                language="en",
+                task_type=self.task_type,
+                request_prompt="",
+                to_language=None,
+            )
+
+            # Create minimal sampling params
+            dummy_params = SamplingParams(
+                max_tokens=1,
+                temperature=0.0,
+            )
+
+            # Process the dummy input through the input processor
+            # This will trigger all the multimodal processing initialization
+            _ = self.input_processor.process_inputs(
+                request_id="warmup",
+                prompt=dummy_prompt,
+                params=dummy_params,
+            )
+
+            warmup_elapsed = time.perf_counter() - warmup_start
+            logger.info("Input processor warmup completed in %.2fs", warmup_elapsed)
+        except Exception as e:
+            # Don't fail initialization if warmup fails - log warning and continue
+            logger.warning(
+                "Input processor warmup failed (non-fatal): %s. "
+                "First request may experience higher latency.",
+                e,
+            )
+
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
         from vllm.model_executor.model_loader import get_model_cls
