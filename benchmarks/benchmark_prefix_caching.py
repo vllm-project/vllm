@@ -37,10 +37,10 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 except ImportError:
     from backend_request_func import get_tokenizer
 
@@ -69,7 +69,7 @@ def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> list[int]:
 
     # Remove the special tokens.
     return random.choices(
-        [v for k, v in vocab.items() if k not in all_special_ids],
+        [v for v in vocab.values() if v not in all_special_ids],
         k=length,
     )
 

@@ -6,7 +6,17 @@ from json import JSONDecodeError, JSONDecoder
 from typing import Any
 
 import partial_json_parser
+from openai.types.responses import (
+    FunctionTool,
+    ToolChoiceFunction,
+)
+from openai.types.responses.tool import Tool
 from partial_json_parser.core.options import Allow
+
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionToolsParam,
+)
 
 
 def find_common_prefix(s1: str, s2: str) -> str:
@@ -122,3 +132,98 @@ def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+
+def _extract_tool_info(
+    tool: Tool | ChatCompletionToolsParam,
+) -> tuple[str, dict[str, Any] | None]:
+    if isinstance(tool, FunctionTool):
+        return tool.name, tool.parameters
+    elif isinstance(tool, ChatCompletionToolsParam):
+        return tool.function.name, tool.function.parameters
+    else:
+        raise TypeError(f"Unsupported tool type: {type(tool)}")
+
+
+def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+    name, params = _extract_tool_info(tool)
+    params = params if params else {"type": "object", "properties": {}}
+    return {
+        "properties": {
+            "name": {"type": "string", "enum": [name]},
+            "parameters": params,
+        },
+        "required": ["name", "parameters"],
+    }
+
+
+def _get_tool_schema_defs(
+    tools: list[Tool | ChatCompletionToolsParam],
+) -> dict:
+    all_defs: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        _, params = _extract_tool_info(tool)
+        if params is None:
+            continue
+        defs = params.pop("$defs", {})
+        for def_name, def_schema in defs.items():
+            if def_name in all_defs and all_defs[def_name] != def_schema:
+                raise ValueError(
+                    f"Tool definition '{def_name}' has multiple schemas, "
+                    "which is not supported."
+                )
+            all_defs[def_name] = def_schema
+    return all_defs
+
+
+def _get_json_schema_from_tools(
+    tools: list[Tool | ChatCompletionToolsParam],
+) -> dict:
+    json_schema = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+        },
+    }
+    json_schema_defs = _get_tool_schema_defs(tools)
+    if json_schema_defs:
+        json_schema["$defs"] = json_schema_defs
+    return json_schema
+
+
+def get_json_schema_from_tools(
+    tool_choice: str | ToolChoiceFunction | ChatCompletionNamedToolChoiceParam,
+    tools: list[FunctionTool | ChatCompletionToolsParam] | None,
+) -> str | dict | None:
+    # tool_choice: "none"
+    if tool_choice in ("none", None) or tools is None:
+        return None
+    # tool_choice: Forced Function (Responses)
+    if (not isinstance(tool_choice, str)) and isinstance(
+        tool_choice, ToolChoiceFunction
+    ):
+        tool_name = tool_choice.name
+        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
+        if tool_name not in tool_map:
+            raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
+        return tool_map[tool_name].parameters
+    # tool_choice: Forced Function (ChatCompletion)
+    if (not isinstance(tool_choice, str)) and isinstance(
+        tool_choice, ChatCompletionNamedToolChoiceParam
+    ):
+        tool_name = tool_choice.function.name
+        tool_map = {
+            tool.function.name: tool
+            for tool in tools
+            if isinstance(tool, ChatCompletionToolsParam)
+        }
+        if tool_name not in tool_map:
+            raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
+        return tool_map[tool_name].function.parameters
+    # tool_choice: "required"
+    if tool_choice == "required":
+        return _get_json_schema_from_tools(tools)
+    # tool_choice: "auto"
+    return None

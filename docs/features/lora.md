@@ -4,7 +4,7 @@ This document shows you how to use [LoRA adapters](https://arxiv.org/abs/2106.09
 
 LoRA adapters can be used with any vLLM model that implements [SupportsLoRA][vllm.model_executor.models.interfaces.SupportsLoRA].
 
-Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
+Adapters can be efficiently served on a per-request basis with minimal overhead. First we download the adapter(s) and save
 them locally with
 
 ```python

@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
+from math import lcm
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils import cdiv, round_up
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -40,12 +42,12 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -53,8 +55,8 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         pooler_config = vllm_config.model_config.pooler_config
-        if pooler_config.activation is None:
-            pooler_config.activation = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
@@ -76,12 +78,13 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
+            rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+            config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
+
             config.rotary_kwargs = {
                 "head_size": head_dim,
-                "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": max_position,
-                "base": getattr(config, "rope_theta", config.rotary_emb_base),
-                "rope_scaling": getattr(config, "rope_scaling", None),
+                "rope_parameters": config.rope_parameters,
             }
 
 
@@ -113,20 +116,18 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
+
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": rotary_emb_dim,
             "max_position": max_trained_positions,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
         # we ignore config.rotary_scaling_factor so that for datasets shorter
         # than max_trained_positions 2048, the results are consistent
         # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_scaling.
+        # The context extension uses vllm style rope_theta and rope_parameters.
         # See #17785 #18755
         if (
             not vllm_config.model_config.hf_overrides
@@ -170,7 +171,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             if hasattr(hf_text_config, "max_model_len"):
                 delattr(hf_text_config, "max_model_len")
             hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
+            hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
 
             # The priority of sentence_bert_config.json is higher
             # than max_position_embeddings
@@ -214,7 +215,7 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         tokens = getattr(config, "classifier_from_token", None)
         assert tokens is not None and len(tokens) == 2, (
             "Try loading the original Qwen3 Reranker?, see: "
-            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/qwen3_reranker.py"
+            "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/offline_reranker.py"
         )
         vllm_config.model_config.hf_config.method = "from_2_way_softmax"
 
@@ -240,12 +241,12 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
+        rotary_dim = getattr(config, "rotary_emb_dim", head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / head_dim
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None),
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -256,24 +257,20 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         if structured_outputs_config.reasoning_parser == "":
             structured_outputs_config.reasoning_parser = "openai_gptoss"
 
-        # Increase the max capture size from 512 to 992 for performance.
+        # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
-        # from 67 to 81.
-        scheduler_config = vllm_config.scheduler_config
-        if len(scheduler_config.cuda_graph_sizes) == 1:
-            max_capture_size = scheduler_config.cuda_graph_sizes[0]
-            # FIXME(woosuk): When using full cuda graph with FA3, the max
-            # supported size is 992.
-            if max_capture_size < 992:
-                cuda_graph_sizes = [1, 2, 4]
-                # Step size 8 for small batch sizes
-                cuda_graph_sizes += [i for i in range(8, 256, 8)]
-                # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 993, 16)]
-                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
-                logger.info(
-                    "Overriding max cuda graph capture size to %d for performance.", 992
-                )
+        # from 67 to 83.
+        compilation_config = vllm_config.compilation_config
+        # Only override when the user has not set either of
+        # cudagraph_capture_sizes or max_cudagraph_capture_size.
+        if (
+            compilation_config.cudagraph_capture_sizes is None
+            and compilation_config.max_cudagraph_capture_size is None
+        ):
+            compilation_config.max_cudagraph_capture_size = 1024
+            logger.info(
+                "Overriding max cuda graph capture size to %d for performance.", 1024
+            )
 
 
 class MambaModelConfig(VerifyAndUpdateConfig):
@@ -286,39 +283,30 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
-        # Set mamba block size to max_model_len (this may get
-        # override by prefix caching logic later)
-        cache_config.mamba_block_size = model_config.max_model_len
-
-        # TODO(@tdoublep) find a better way to do this than whitelist
-        MAMBA2_MODELS = [
-            "BambaForCausalLM",
-            "FalconH1ForCausalLM",
-            "GraniteMoeHybridForCausalLM",
-            "Mamba2ForCausalLM",
-            "NemotronHForCausalLM",
-            "Zamba2ForCausalLM",
-        ]
         if cache_config.enable_prefix_caching:
-            if model_config.architecture in MAMBA2_MODELS:
+            if model_config.supports_mamba_prefix_caching:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
+                    "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
+                # By default, mamba block size will be set to max_model_len (see
+                # below). When enabling prefix caching, we align mamba block size
+                # to the block size as the basic granularity for prefix caching.
+                if cache_config.mamba_block_size is None:
+                    cache_config.mamba_block_size = cache_config.block_size
             else:
                 logger.info(
                     "Hybrid or mamba-based model detected without "
                     "support for prefix caching: disabling."
                 )
                 cache_config.enable_prefix_caching = False
+
+        if cache_config.mamba_block_size is None:
+            cache_config.mamba_block_size = model_config.max_model_len
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
@@ -340,13 +328,12 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
+        # Save the user input before it gets modified by MambaModelConfig
+        mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
+        attention_config = vllm_config.attention_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -357,12 +344,41 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # get attention page size (for 1 token)
-        attn_page_size_1_token = FullAttentionSpec(
-            block_size=1,
-            num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-            head_size=model_config.get_head_size(),
-            dtype=kv_cache_dtype,
-        ).page_size_bytes
+        # Attention backend constraints:
+        # - FlashAttention (FA) requires block size to be multiple of 16
+        # - MLA (Multi-head Latent Attention) requires larger alignment:
+        #   * CUTLASS_MLA backend: kernel_block_size 128 alignment
+        #   * Other MLA backends: kernel_block_size 64 alignment
+        if model_config.use_mla:
+            use_cutlass_mla = (
+                attention_config.backend == AttentionBackendEnum.CUTLASS_MLA
+            )
+            kernel_block_alignment_size = 128 if use_cutlass_mla else 64
+            attn_page_size_1_token = MLAAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+            ).page_size_bytes
+        else:
+            kernel_block_alignment_size = 16
+            if (
+                current_platform.is_device_capability_family(100)
+                and model_config.get_head_size() == 256
+                and (
+                    attention_config.backend is None
+                    or attention_config.backend == AttentionBackendEnum.FLASHINFER
+                )
+            ):
+                # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
+                # head size 256 and block size 16 is not supported on blackwell.
+                kernel_block_alignment_size = 32
+            attn_page_size_1_token = FullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+            ).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
             model_config.architecture,
@@ -382,22 +398,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if mamba_page_size == 0:
             return
 
-        # Attention backend constraints:
-        # - FlashAttention (FA) requires block size to be multiple of 16
-        # - MLA (Multi-head Latent Attention) requires larger alignment:
-        #   * CUTLASS_MLA backend: 128-byte alignment
-        #   * Other MLA backends: 64-byte alignment
-        if model_config.use_mla:
-            use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
-            kernel_block_alignment_size = 128 if use_cutlass_mla else 64
-        else:
-            kernel_block_alignment_size = 16
-
         if cache_config.enable_prefix_caching:
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
-            # mamba SSD kernel uses a chunk_size, e.g. 256
+            # Mamba2 SSD kernel uses a chunk_size, e.g. 256
             # Align the block to the kernel: use lowest multiple of chunk_size
             # of attention tokens that would fit mamba_page_size:
             # e.g. for mamba page size = 788kB
@@ -410,14 +415,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
 
-            from math import gcd
-
-            def lcm(a, b):
-                return a * b // gcd(a, b)
-
-            base_chunk_size = model_config.get_mamba_chunk_size()
+            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
@@ -491,6 +490,26 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
 
+class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config, or to
+        float16 if not specified.
+        """
+        cache_config = vllm_config.cache_config
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            hf_config = vllm_config.model_config.hf_config
+            mamba_ssm_cache_dtype = getattr(
+                hf_config, "mamba_ssm_cache_dtype", "float16"
+            )
+            logger.info(
+                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -508,4 +527,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "NemotronHForCausalLM": NemotronHForCausalLMConfig,
 }

@@ -31,7 +31,7 @@ if not USE_TPU_INFERENCE:
         )
 
         if USE_RAY:
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
@@ -97,11 +97,3 @@ class TpuCommunicator(DeviceCommunicatorBase):
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         assert dim == -1, "TPUs only support dim=-1 for all-gather."
         return xm.all_gather(input_, dim=dim)
-
-
-if USE_TPU_INFERENCE:
-    from tpu_inference.distributed.device_communicators import (
-        TpuCommunicator as TpuInferenceCommunicator,
-    )
-
-    TpuCommunicator = TpuInferenceCommunicator  # type: ignore

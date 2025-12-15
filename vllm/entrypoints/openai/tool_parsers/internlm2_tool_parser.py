@@ -19,22 +19,21 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["internlm"])
 class Internlm2ToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
         self.position = 0
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because internlm use the special
             # tokens to indicate the start and end of the tool calls

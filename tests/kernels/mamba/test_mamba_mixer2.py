@@ -13,7 +13,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 
 @multi_gpu_test(num_gpus=2)

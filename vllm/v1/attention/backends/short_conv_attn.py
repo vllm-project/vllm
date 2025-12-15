@@ -81,13 +81,12 @@ class ShortConvAttentionMetadataBuilder(
         elif (
             num_decodes > 0
             and num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
             self.state_indices_tensor[:num_decodes].copy_(
                 state_indices_tensor, non_blocking=True
             )
-            state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
+            state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
             state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
         attn_metadata = ShortConvAttentionMetadata(

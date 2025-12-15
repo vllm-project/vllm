@@ -18,6 +18,7 @@ import pytest
 from vllm.config.compilation import CompilationMode
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -31,7 +32,8 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
-    enable_fusion: bool
+    fuse_norm_quant: bool
+    fuse_act_quant: bool
     eager_mode: bool
     chunked_prefill: bool
 
@@ -65,7 +67,8 @@ class SPTestSettings:
                         ParallelSetup(
                             tp_size=tp_base,
                             pp_size=pp_multiplier * pp_base,
-                            enable_fusion=False,
+                            fuse_norm_quant=False,
+                            fuse_act_quant=False,
                             eager_mode=eager_mode_val,
                             chunked_prefill=chunked_prefill_val,
                         )
@@ -96,7 +99,8 @@ class SPTestSettings:
                         ParallelSetup(
                             tp_size=tp_base,
                             pp_size=pp_multiplier * pp_base,
-                            enable_fusion=False,
+                            fuse_norm_quant=False,
+                            fuse_act_quant=False,
                             eager_mode=eager_mode_val,
                             chunked_prefill=chunked_prefill_val,
                         )
@@ -125,7 +129,8 @@ class SPTestSettings:
                 ParallelSetup(
                     tp_size=tp_base,
                     pp_size=pp_base,
-                    enable_fusion=fusion_val,
+                    fuse_norm_quant=fusion_val,
+                    fuse_act_quant=fusion_val,
                     eager_mode=True,
                     chunked_prefill=False,
                 )
@@ -161,6 +166,7 @@ def _compare_sp(
     test_options: SPTestOptions,
     num_gpus_available: int,
     use_inductor_graph_partition: bool,
+    fuse_gemm_comms: bool,
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
@@ -168,7 +174,8 @@ def _compare_sp(
     (
         tp_size,
         pp_size,
-        enable_fusion,
+        fuse_norm_quant,
+        fuse_act_quant,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -181,7 +188,7 @@ def _compare_sp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
-    skip_tokenizer_init = model_info.skip_tokenizer_init
+    require_embed_inputs = model_info.require_embed_inputs
 
     if load_format == "dummy":
         # Avoid OOM
@@ -233,17 +240,24 @@ def _compare_sp(
         common_args.extend(["--load-format", load_format])
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
-    if skip_tokenizer_init:
-        common_args.append("--skip-tokenizer-init")
+    if require_embed_inputs:
+        common_args.extend(
+            [
+                "--skip-tokenizer-init",
+                "--enable-prompt-embeds",
+                "--enable-mm-embeds",
+            ]
+        )
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
-        "custom_ops": ["+rms_norm"],
         "compile_sizes": [4, 8],
         "pass_config": {
-            "enable_sequence_parallelism": True,
-            "enable_fusion": enable_fusion,
-            "enable_noop": True,
+            "enable_sp": True,
+            "fuse_gemm_comms": fuse_gemm_comms,
+            "fuse_norm_quant": fuse_norm_quant,
+            "fuse_act_quant": fuse_act_quant,
+            "eliminate_noops": True,
         },
         "use_inductor_graph_partition": use_inductor_graph_partition,
     }
@@ -301,6 +315,7 @@ SP_TEST_MODELS = [
     ],
 )
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+@pytest.mark.parametrize("fuse_gemm_comms", [False])  # TODO: enable async TP
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
@@ -310,9 +325,18 @@ def test_tp_sp_generation(
     test_options: SPTestOptions,
     num_gpus_available,
     use_inductor_graph_partition: bool,
+    fuse_gemm_comms: bool,
 ):
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
+    # Skip FP8 SP-only test on sm89 (compute capability 8.9)
+    if (
+        "fp8" in model_id.lower()
+        and current_platform.get_device_capability() < (9, 0)
+        and (not fuse_gemm_comms)
+    ):
+        pytest.skip("FP8 reduction support begins with sm90 capable devices.")
 
     _compare_sp(
         model_id,
@@ -322,6 +346,7 @@ def test_tp_sp_generation(
         test_options,
         num_gpus_available,
         use_inductor_graph_partition,
+        fuse_gemm_comms=fuse_gemm_comms,
         method="generate",
         is_multimodal=False,
     )
