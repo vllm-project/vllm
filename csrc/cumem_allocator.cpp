@@ -109,9 +109,11 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 #ifndef USE_ROCM
   int flag = 0;
-  CUDA_CHECK(cuDeviceGetAttribute(&flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device));
+  CUDA_CHECK(cuDeviceGetAttribute(
+      &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+      device));
   if (flag) {  // support GPUDirect RDMA if possible
-      prop.allocFlags.gpuDirectRDMACapable = 1;
+    prop.allocFlags.gpuDirectRDMACapable = 1;
   }
 #endif
 
