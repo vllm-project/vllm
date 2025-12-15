@@ -51,14 +51,13 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-)
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -5680,7 +5679,9 @@ class GPUModelRunner(
             self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
             + 1
         ) * block_size
-        self.instance_id = f"rank_{self.vllm_config.parallel_config.rank // self.vllm_config.parallel_config.world_size}"
+        rank = self.vllm_config.parallel_config.rank
+        world_size = self.vllm_config.parallel_config.world_size
+        self.instance_id = f"rank_{rank // world_size}"
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
