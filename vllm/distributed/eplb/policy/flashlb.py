@@ -690,6 +690,3 @@ def warmup_flashlb():
             hotness, 288, 4, 2, 32, expert_tensor)
         expert_tensor = physical_to_logical_map.reshape((58, 32, 9))
 
-
-# Execute warmup on import
-warmup_flashlb()
