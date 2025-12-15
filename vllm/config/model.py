@@ -1796,6 +1796,7 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForTextEncoding", ("pooling", "embed")),
     ("EmbeddingModel", ("pooling", "embed")),
     ("ForSequenceClassification", ("pooling", "classify")),
+    ("ForTokenClassification", ("pooling", "classify")),
     ("ForAudioClassification", ("pooling", "classify")),
     ("ForImageClassification", ("pooling", "classify")),
     ("ForVideoClassification", ("pooling", "classify")),
