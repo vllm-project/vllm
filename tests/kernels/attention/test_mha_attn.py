@@ -42,20 +42,12 @@ def test_mha_attn_platform(device: str):
 
     if device == "cpu":
         with (
-            patch(
-                "vllm.attention.layers.mm_encoder_attention.current_platform",
-                CpuPlatform(),
-            ),
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
         with (
-            patch(
-                "vllm.attention.layers.mm_encoder_attention.current_platform",
-                RocmPlatform(),
-            ),
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
@@ -64,10 +56,6 @@ def test_mha_attn_platform(device: str):
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch(
-                "vllm.attention.layers.mm_encoder_attention.current_platform",
-                CudaPlatform(),
-            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
@@ -76,10 +64,6 @@ def test_mha_attn_platform(device: str):
         # Test CUDA with head_size=72 (not divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch(
-                "vllm.attention.layers.mm_encoder_attention.current_platform",
-                CudaPlatform(),
-            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
             attn = MMEncoderAttention(16, 72, scale=1)
