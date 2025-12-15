@@ -381,7 +381,9 @@ class QuarkConfig(QuantizationConfig):
             )
             return global_quant_config
 
-    def _get_scheme_from_config(self, config: dict[str, Any], exclude: bool = False) -> "QuarkScheme":
+    def _get_scheme_from_config(
+        self, config: dict[str, Any], exclude: bool = False
+    ) -> "QuarkScheme":
         if config.get("output_tensors") or config.get("bias"):
             raise NotImplementedError(
                 "Currently, Quark models with output_tensors "
@@ -412,7 +414,9 @@ class QuarkConfig(QuantizationConfig):
             f"Input config: {input_config}"
         )
 
-    def get_scheme(self, layer: torch.nn.Module, layer_name: str, exclude: bool = False) -> "QuarkScheme":
+    def get_scheme(
+        self, layer: torch.nn.Module, layer_name: str, exclude: bool = False
+    ) -> "QuarkScheme":
         layer_quant_config = self._find_matched_config(layer_name, layer)
 
         # Find the quant_scheme

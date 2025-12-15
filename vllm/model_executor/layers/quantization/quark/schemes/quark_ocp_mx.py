@@ -24,11 +24,15 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
 )
-from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter, ModelWeightParameter
+from vllm.model_executor.parameter import (
+    GroupQuantScaleParameter,
+    ModelWeightParameter,
+    PackedvLLMParameter,
+)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
-from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -160,7 +164,10 @@ except (ImportError, AttributeError):
 
 class QuarkOCP_MX(QuarkScheme):
     def __init__(
-        self, weight_quant_spec: dict[str, Any], input_quant_spec: dict[str, Any], exclude: bool = False
+        self,
+        weight_quant_spec: dict[str, Any],
+        input_quant_spec: dict[str, Any],
+        exclude: bool = False,
     ):
         self.out_dtype = torch.get_default_dtype()
         self.qscheme = "per_group"
@@ -262,14 +269,14 @@ class QuarkOCP_MX(QuarkScheme):
             )
         else:
             if self.exclude:
-                layer.weight = torch.nn.Parameter(layer.weight.data,
-                                                requires_grad=False)
+                layer.weight = torch.nn.Parameter(
+                    layer.weight.data, requires_grad=False
+                )
                 w_q, w_s = dynamic_mxfp4_quant(layer.weight)
                 layer.weight_scale = torch.nn.Parameter(
-                            w_s.T.contiguous(),
-                            requires_grad=False)
-                layer.weight = torch.nn.Parameter(w_q,
-                                                requires_grad=False)
+                    w_s.T.contiguous(), requires_grad=False
+                )
+                layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
             elif self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
