@@ -76,6 +76,9 @@ RUN python3 -m pip install -e tests/vllm_test_utils
 ENV NIXL_VERSION=0.7.0
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 
+# PyJWT-2.7.0 will influence some wheel behaviors, remove its dist-info to avoid conflicts
+RUN rm /usr/lib/python3/dist-packages/PyJWT-2.7.0.dist-info/ -rf
+
 # remove torch bundled oneccl to avoid conflicts
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip uninstall oneccl oneccl-devel -y
