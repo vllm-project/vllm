@@ -370,6 +370,7 @@ def fused_moe_kernel(
     HAS_BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
     USE_GDC: tl.constexpr,
+    IS_PRIMARY: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -504,8 +505,8 @@ def fused_moe_kernel(
         SPLIT_K,
         False,
         None,
-        base_k,
         USE_GDC,
+        base_k,
         a_scale_ptrs if a_scale_ptr else None,
         b_scale_ptrs if b_scale_ptr else None,
         stride_ask,
@@ -516,6 +517,7 @@ def fused_moe_kernel(
         use_fp8_w8a8,
         use_int8_w8a8,
         compute_type,
+        IS_PRIMARY,
     )
 
     if HAS_BIAS:
@@ -523,6 +525,9 @@ def fused_moe_kernel(
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
+    if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+        tl.extra.cuda.gdc_launch_dependents()
     if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
     elif use_fp8_w8a8 or use_int8_w8a8:
@@ -563,6 +568,7 @@ def invoke_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    IS_PRIMARY: bool = True,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -734,6 +740,7 @@ def invoke_fused_moe_kernel(
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             EVEN_K=EVEN_K,
             USE_GDC=use_gdc,
+            IS_PRIMARY=IS_PRIMARY,
             **config,
         )
 
@@ -1965,6 +1972,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w1_bias,
+            IS_PRIMARY= True,
         )
 
         # Activation function with multiplication
@@ -2024,6 +2032,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w2_bias,
+            IS_PRIMARY= False,
         )
 
         ops.moe_sum(

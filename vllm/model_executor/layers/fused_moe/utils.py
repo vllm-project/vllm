@@ -397,7 +397,6 @@ def mm_k(
         base_k: Base offset along K dimension for current SPLIT_K group
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
     # Step size along K for each iteration
     STEP_K = BLOCK_K * SPLIT_K
 
