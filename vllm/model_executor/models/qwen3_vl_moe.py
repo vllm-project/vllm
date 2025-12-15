@@ -416,10 +416,13 @@ class Qwen3VLMoeForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        self.vllm_config = vllm_config
         self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
         if not multimodal_config.get_limit_per_prompt(
             "image"
         ) and not multimodal_config.get_limit_per_prompt("video"):
