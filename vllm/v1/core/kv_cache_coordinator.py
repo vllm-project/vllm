@@ -142,14 +142,10 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens`
-        token slots. If `num_blocks_to_allocate_per_group[i]` is smaller than
-        the number of blocks needed (in the case of sliding window attention),
-        the leading blocks will be padded with null blocks.
+        token slots.
 
         Args:
             request_id: The request ID.
-            num_blocks_to_allocate_per_group: The number of blocks to allocate
-                for each kv cache group.
             num_tokens: The total number of tokens that need a slot (including
                 tokens that are already allocated).
             num_encoder_tokens: The number of encoder tokens for allocating
