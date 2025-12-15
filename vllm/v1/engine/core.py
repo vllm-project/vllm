@@ -613,6 +613,7 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: str | None = None,
         *,
         engine_index: int = 0,
+        tensor_queues: list[Any] | None = None,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
@@ -632,6 +633,16 @@ class EngineCoreProc(EngineCore):
             client_handshake_address,
         ) as addresses:
             self.client_count = len(addresses.outputs)
+
+            # Get this engine's tensor IPC queue for receiving CUDA tensors
+            # Queues are passed directly via constructor since they can't be serialized
+            self.tensor_queue = None
+            if tensor_queues and addresses.tensor_queue_index is not None:
+                self.tensor_queue = tensor_queues[addresses.tensor_queue_index]
+                logger.info(
+                    "Engine %d using tensor IPC queue for CUDA tensor sharing",
+                    self.engine_index,
+                )
 
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
@@ -840,10 +851,20 @@ class EngineCoreProc(EngineCore):
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
 
-        return init_message.addresses
+        # Store tensor_queue_index for engine to access
+        addresses = init_message.addresses
+        addresses.tensor_queue_index = init_message.tensor_queue_index
+        
+        return addresses
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    def run_engine_core(
+        *args,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+        tensor_queues: list[Any] | None = None,
+        **kwargs
+    ):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -880,15 +901,10 @@ class EngineCoreProc(EngineCore):
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
+                parallel_config.data_parallel_rank_local = local_dp_rank
+                engine_core = DPEngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
             else:
-                # Non-MoE DP ranks are completely independent, so treat like DP=1.
-                # Note that parallel_config.data_parallel_index will still reflect
-                # the original DP rank.
-                parallel_config.data_parallel_size = 1
-                parallel_config.data_parallel_size_local = 1
-                parallel_config.data_parallel_rank = 0
-                engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+                engine_core = EngineCoreProc(*args, tensor_queues=tensor_queues, **kwargs)
 
             engine_core.run_busy_loop()
 
@@ -1038,9 +1054,11 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        generic_decoder = MsgpackDecoder()
+        # Msgpack serialization decoding with tensor queue for CUDA tensors.
+        add_request_decoder = MsgpackDecoder(
+            EngineCoreRequest, tensor_queue=self.tensor_queue
+        )
+        generic_decoder = MsgpackDecoder(tensor_queue=self.tensor_queue)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
@@ -1217,6 +1235,7 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queues: list[Any] | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -1238,6 +1257,7 @@ class DPEngineCoreProc(EngineCoreProc):
             log_stats,
             client_handshake_address,
             engine_index=dp_rank,
+            tensor_queues=tensor_queues,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):

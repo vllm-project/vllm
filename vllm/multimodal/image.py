@@ -152,4 +152,4 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return tensor.to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        return pybase64.b64encode(media.numpy()).decode("utf-8")
+        return pybase64.b64encode(media.cpu().numpy()).decode("utf-8")

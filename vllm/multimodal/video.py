@@ -6,11 +6,13 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
+import threading
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
+import torch
 
 if TYPE_CHECKING:
     import cv2
@@ -18,11 +20,14 @@ if TYPE_CHECKING:
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.registry import ExtensionManager
+from vllm.v1.utils import record_function_or_nullcontext
 
 from .base import MediaIO
 from .image import ImageMediaIO
 
 logger = init_logger(__name__)
+
+VideoData = Union[npt.NDArray, torch.Tensor]
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -63,7 +68,7 @@ class VideoLoader:
     @abstractmethod
     def load_bytes(
         cls, data: bytes, num_frames: int = -1, **kwargs
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> tuple[VideoData, dict[str, Any]]:
         raise NotImplementedError
 
     @staticmethod
@@ -439,7 +444,156 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         return frames, metadata
 
 
-class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
+@VIDEO_LOADER_REGISTRY.register("pynvvideocodec")
+class PyNVVideoBackend(VideoLoader):
+
+    # One decoder instance per Python thread to avoid cross-thread
+    # reconfigure/usage issues while still amortizing decoder
+    # initialization cost within each worker thread.
+    _thread_local: threading.local = threading.local()
+
+    @classmethod
+    def _get_thread_decoder(cls):
+        return getattr(cls._thread_local, "decoder", None)
+
+    @classmethod
+    def _set_thread_decoder(cls, decoder):
+        cls._thread_local.decoder = decoder
+
+    _cuda_stream: torch.cuda.Stream | None = None
+    _cuda_stream_lock = threading.Lock()
+
+    @classmethod
+    def get_cuda_stream(cls):
+        """Get or create CUDA stream for video decoding."""
+        if cls._cuda_stream is None:
+            with cls._cuda_stream_lock:
+                if cls._cuda_stream is None:
+                    cls._cuda_stream = torch.cuda.Stream(device=torch.cuda.current_device())
+        return cls._cuda_stream
+
+    @classmethod
+    def _decode_from_file(
+        cls,
+        file_path: str,
+        num_frames: int = -1,
+        fps: float = 0.0,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        import PyNvVideoCodec as nvc
+
+        gpu_id = torch.cuda.current_device()
+        cuda_stream = cls.get_cuda_stream()
+        with torch.cuda.stream(cuda_stream):
+            cuda_stream_handle = cuda_stream.cuda_stream
+
+            decoder = cls._get_thread_decoder()
+            if decoder is not None:
+                # Reuse existing decoder on this thread by
+                # reconfiguring it for the new file.
+                decoder.reconfigure_decoder(file_path)
+            else:
+                decoder = nvc.SimpleDecoder(
+                    file_path,
+                    output_color_type=nvc.OutputColorType.RGB,
+                    use_device_memory=True,
+                    need_scanned_stream_metadata=False,
+                    gpu_id=gpu_id,
+                    cuda_stream=cuda_stream_handle,
+                    decoder_cache_size=2,
+                )
+                cls._set_thread_decoder(decoder)
+
+            total_frames_num = len(decoder)
+            metadata = decoder.get_stream_metadata()
+            original_fps = metadata.average_fps
+            duration = (total_frames_num / original_fps if original_fps > 0 else 0.0)
+
+            # Ensure num_frames is not greater than the total number of frames in the video
+            num_frames = min(num_frames, total_frames_num)
+
+            # If fps > 0, derive num_frames from fps. Any incoming
+            # num_frames value is ignored in this case, so that callers
+            # can safely set only `fps` via --media-io-kwargs without
+            # having to override the VideoMediaIO default num_frames.
+            if fps > 0:
+                if fps > original_fps:
+                    # raise ValueError(
+                    #     f"Target fps ({fps}) must be <= than original "
+                    #     f"fps ({original_fps}).")
+                    fps = original_fps
+
+                num_frames = int(total_frames_num * fps / original_fps)
+                num_frames = max(1, num_frames)
+
+            full_read = (num_frames == -1
+                            or total_frames_num <= num_frames)
+            if full_read:
+                num_frames = total_frames_num
+                frame_idx = list(range(0, num_frames))
+            else:
+                uniform_sampled_frames = np.linspace(
+                    0,
+                    total_frames_num - 1,
+                    num_frames,
+                    dtype=int,
+                )
+                frame_idx = uniform_sampled_frames.tolist()
+
+            dlpack_frames = decoder.get_batch_frames_by_index(frame_idx)
+
+            # PyNvVideoCodec returns DLPack tensors; convert to NCHW
+            # torch tensor in RGB format stacked as (N, H, W, C).
+            torch_frames = [torch.from_dlpack(f) for f in dlpack_frames]
+            torch_frames = torch.stack(torch_frames)
+
+            # Permute to the expected format (N, C, H, W) in RGB
+            frames = torch_frames.permute(0, 3, 1, 2)
+
+            torch.cuda.empty_cache()
+
+        # Use transformers transformers.video_utils.VideoMetadata format
+        # and keep semantics close to the OpenCV backend.
+        video_metadata: dict[str, Any] = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "pynvvideocodec",
+            "frames_indices": frame_idx,
+            # Loader may subsample frames, so by default HF processors should
+            # not re-sample based on this metadata.
+            "do_sample_frames": False,
+        }
+
+        return frames, video_metadata
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: float = 0.0,
+        **kwargs,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """
+        Video loader using PyNvVideoCodec for hardware-accelerated decoding.
+
+        Supports either a fixed `num_frames` or a target `fps` passed via
+        `--media-io-kwargs '{"video":{"fps": <fps>}}'`. If `fps > 0`, then
+        `num_frames` is derived from the original fps of the video. When
+        `fps == 0`, the behavior is the same as not specifying fps at all.
+        
+        Returns:
+            A tuple of (frames, metadata) where frames is a torch.Tensor on GPU
+            in (N, H, W, C) format.
+        """
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as temp_file:
+            temp_file.write(data)
+            temp_file.flush()
+            return cls._decode_from_file(temp_file.name, num_frames, fps)
+
+class VideoMediaIO(MediaIO[tuple[VideoData, dict[str, Any]]]):
     def __init__(
         self,
         image_io: ImageMediaIO,
@@ -466,14 +620,13 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(
-            data, num_frames=self.num_frames, **self.kwargs
-        )
+    def load_bytes(self, data: bytes) -> tuple[VideoData, dict[str, Any]]:
+        with record_function_or_nullcontext("video.load_bytes"):
+            return self.video_loader.load_bytes(data, self.num_frames, **self.kwargs)
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> tuple[VideoData, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -486,7 +639,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
 
         return self.load_bytes(base64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_file(self, filepath: Path) -> tuple[VideoData, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
 
@@ -494,11 +647,15 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
 
     def encode_base64(
         self,
-        media: npt.NDArray,
+        media: VideoData,
         *,
         video_format: str = "JPEG",
     ) -> str:
-        video = media
+        # Convert to numpy array if it's a tensor
+        if isinstance(media, torch.Tensor):
+            video = media.cpu().numpy()
+        else:
+            video = media
 
         if video_format == "JPEG":
             encode_frame = partial(
