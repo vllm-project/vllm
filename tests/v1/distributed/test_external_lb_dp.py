@@ -21,7 +21,7 @@ DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 # Make sure CCL worker count is set for data parallelism
-os.environ["CCL_WORKER_COUNT"] = "2"
+os.environ["CCL_WORKER_COUNT"] = str(DP_SIZE)
 
 import socket
 from contextlib import closing
