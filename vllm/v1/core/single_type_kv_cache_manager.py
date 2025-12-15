@@ -94,8 +94,8 @@ class SingleTypeKVCacheManager(ABC):
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
 
-        # Fast-path: nothing is skipped.
         if num_skipped_tokens <= 0:
+            # Nothing is skipped.
             num_new_blocks = (
                 num_required_blocks
                 - len(new_computed_blocks)
@@ -571,7 +571,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return num_computed_tokens - self.sliding_window + 1
+        return max(0, num_computed_tokens - self.sliding_window + 1)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
