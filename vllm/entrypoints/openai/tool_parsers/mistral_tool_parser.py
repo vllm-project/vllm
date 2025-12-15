@@ -67,6 +67,16 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     )
 
 
+def _dump_pre_v11_arguments(loaded_pre_v11: list[dict]) -> list[dict]:
+    return [
+        {
+            "name": fn["name"],
+            "arguments": json.dumps(fn["arguments"], ensure_ascii=False),
+        }
+        for fn in loaded_pre_v11
+    ]
+
+
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with
@@ -158,18 +168,18 @@ class MistralToolParser(ToolParser):
 
                         # fn_name is encoded outside serialized json dump
                         # only arguments are serialized
-                        function_call_arr.append(
-                            {"name": fn_name, "arguments": json.loads(args)}
-                        )
+                        function_call_arr.append({"name": fn_name, "arguments": args})
                 else:
-                    function_call_arr = json.loads(tool_content)
+                    loaded_pre_v11 = json.loads(tool_content)
+                    function_call_arr = _dump_pre_v11_arguments(loaded_pre_v11)
             except json.JSONDecodeError:
                 # use a regex to find the part corresponding to the tool call.
                 # NOTE: This use case should not happen if the model is trained
                 # correctly. It's an easy possible fix so it's included, but
                 # can be brittle for very complex / highly nested tool calls
                 raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
-                function_call_arr = json.loads(raw_tool_call)
+                loaded_pre_v11 = json.loads(raw_tool_call)
+                function_call_arr = _dump_pre_v11_arguments(loaded_pre_v11)
 
             # Tool Call
             tool_calls: list[MistralToolCall] = [
@@ -178,9 +188,7 @@ class MistralToolParser(ToolParser):
                     function=FunctionCall(
                         name=raw_function_call["name"],
                         # function call args are JSON but as a string
-                        arguments=json.dumps(
-                            raw_function_call["arguments"], ensure_ascii=False
-                        ),
+                        arguments=raw_function_call["arguments"],
                     ),
                 )
                 for raw_function_call in function_call_arr
