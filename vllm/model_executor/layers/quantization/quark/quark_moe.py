@@ -966,7 +966,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
         layer.w13_weight.is_shuffled = True
         layer.w2_weight.is_shuffled = True
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
