@@ -271,8 +271,8 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
                     preserved_positions[layer_indices, slot_idx] = True
 
             # Second pass: fill remaining slots with remaining new experts
-            remaining_mask = ~used_new_indices  # [L, S]
-            fill_mask = ~preserved_positions  # [L, S]
+            remaining_mask = ~used_new_indices  # [layers, slots]
+            fill_mask = ~preserved_positions  # [layers, slots]
             if remaining_mask.any() and fill_mask.any():
                 idx_base = np.tile(np.arange(slots_per_gpu), (num_layers, 1))
                 # Sentinel value for unavailable positions.
