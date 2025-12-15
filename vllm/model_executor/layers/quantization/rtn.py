@@ -15,7 +15,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEMethodBase,
+    FusedMoEParams,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -355,30 +359,30 @@ class RTNMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, _ = layer.select_experts(
+        topk_weights, topk_ids, _ = params.router.select_experts(
             hidden_states=x,
             router_logits=router_logits,
         )
 
         return fused_marlin_moe(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scale,
-            layer.w2_scale,
+            params.w13_weight,
+            params.w2_weight,
+            getattr(params, "w13_bias", None),
+            getattr(params, "w2_bias", None),
+            params.w13_scale,
+            params.w2_scale,
             router_logits,
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_config.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
+            apply_router_weight_on_input=params.apply_router_weight_on_input,
+            global_num_experts=params.global_num_experts,
+            expert_map=params.expert_map,
             workspace=workspace,
         )
 

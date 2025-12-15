@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEParams,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -888,53 +889,53 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if layer.enable_eplb:
+        if params.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids, _ = params.router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
 
             return fused_marlin_moe(
                 x,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_bias,
-                layer.w2_bias,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
+                params.w13_weight,
+                params.w2_weight,
+                params.w13_bias,
+                params.w2_bias,
+                params.w13_weight_scale,
+                params.w2_weight_scale,
                 router_logits,
                 topk_weights,
                 topk_ids,
                 global_scale1=None,
                 global_scale2=None,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                activation=layer.activation,
-                expert_map=layer.expert_map,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
+                global_num_experts=params.global_num_experts,
+                activation=params.activation,
+                expert_map=params.expert_map,
                 input_dtype=self.marlin_input_dtype,
             )
 
         assert _can_support_mxfp4(
-            layer.use_grouped_topk,
-            layer.topk_group,
-            layer.num_expert_group,
-            layer.expert_map,
-            layer.custom_routing_function,
-            layer.e_score_correction_bias,
-            layer.apply_router_weight_on_input,
-            layer.scoring_func,
-            layer.activation,
-            layer.expert_load_view,
-            layer.logical_to_physical_map,
-            layer.logical_replica_count,
+            params.use_grouped_topk,
+            params.topk_group,
+            params.num_expert_group,
+            params.expert_map,
+            params.custom_routing_function,
+            params.e_score_correction_bias,
+            params.apply_router_weight_on_input,
+            params.scoring_func,
+            params.activation,
+            params.expert_load_view,
+            params.logical_to_physical_map,
+            params.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
@@ -958,28 +959,28 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,  # routing_bias
                 x_quant,
                 x_scale,
-                layer.w13_weight,  # uint8 (e2m1 x 2)
-                layer.w13_weight_scale,  # uint8 (e4m3 x 2)
-                layer.w13_bias,  # fp32 per expert per channel
-                layer.gemm1_alpha,  # fp32 per expert
-                layer.gemm1_beta,  # fp32 per expert
-                layer.gemm1_clamp_limit,  # fp32 per expert
-                layer.w2_weight,  # uint8 (e2m1 x 2)
-                layer.w2_weight_scale,  # ue8m0
-                layer.w2_bias,  # fp32 per expert per channel
+                params.w13_weight,  # uint8 (e2m1 x 2)
+                params.w13_weight_scale,  # uint8 (e4m3 x 2)
+                params.w13_bias,  # fp32 per expert per channel
+                params.gemm1_alpha,  # fp32 per expert
+                params.gemm1_beta,  # fp32 per expert
+                params.gemm1_clamp_limit,  # fp32 per expert
+                params.w2_weight,  # uint8 (e2m1 x 2)
+                params.w2_weight_scale,  # ue8m0
+                params.w2_bias,  # fp32 per expert per channel
                 None,  # output1_scale_scalar
                 None,  # output1_scale_gate_scalar
                 None,  # output2_scale_scalar
-                layer.global_num_experts,
-                layer.top_k,
+                params.global_num_experts,
+                params.top_k,
                 None,  # n_group
                 None,  # topk_group
                 self.intermediate_size,  # padded to multiple of 256
-                layer.ep_rank * layer.local_num_experts,  # local_expert_offset
+                params.ep_rank * params.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
                 None,
-                1 if layer.renormalize else 0,  # routing_method_type, renormalize
+                1 if params.renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]
@@ -990,7 +991,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ):
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
-            topk_weights, topk_ids, _ = layer.select_experts(
+            topk_weights, topk_ids, _ = params.router.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
             )
@@ -1003,9 +1004,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
                 fake_input_scale = torch.ones(self.num_experts, device=x.device)
                 quant_scales = [
-                    layer.w13_weight_scale.contiguous().view(torch.int32),
+                    params.w13_weight_scale.contiguous().view(torch.int32),
                     fake_input_scale,
-                    layer.w2_weight_scale.contiguous().view(torch.int32),
+                    params.w2_weight_scale.contiguous().view(torch.int32),
                     fake_input_scale,
                 ]
 
@@ -1013,22 +1014,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 extra_kwargs = dict(
                     use_mxfp8_act_scaling=True,
                     input_sf=x_scale,
-                    fc1_expert_weights=layer.w13_weight.contiguous().view(torch.long),
-                    fc2_expert_weights=layer.w2_weight.contiguous().view(torch.long),
+                    fc1_expert_weights=params.w13_weight.contiguous().view(torch.long),
+                    fc2_expert_weights=params.w2_weight.contiguous().view(torch.long),
                 )
             elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
                 assert x.dtype == torch.bfloat16
 
                 quant_scales = [
-                    layer.w13_weight_scale,
-                    layer.w2_weight_scale,
+                    params.w13_weight_scale,
+                    params.w2_weight_scale,
                 ]
 
                 fi_input = x
                 extra_kwargs = dict(
                     use_w4_group_scaling=True,
-                    fc1_expert_weights=layer.w13_weight,
-                    fc2_expert_weights=layer.w2_weight,
+                    fc1_expert_weights=params.w13_weight,
+                    fc2_expert_weights=params.w2_weight,
                 )
 
             output = torch.empty_like(x, dtype=torch.bfloat16)
@@ -1039,11 +1040,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 output_dtype=torch.bfloat16,
                 output=output,
                 quant_scales=quant_scales,
-                fc1_expert_biases=layer.w13_bias,
-                fc2_expert_biases=layer.w2_bias,
-                swiglu_alpha=layer.gemm1_alpha,
-                swiglu_beta=layer.gemm1_beta,
-                swiglu_limit=layer.gemm1_clamp_limit,
+                fc1_expert_biases=params.w13_bias,
+                fc2_expert_biases=params.w2_bias,
+                swiglu_alpha=params.gemm1_alpha,
+                swiglu_beta=params.gemm1_beta,
+                swiglu_limit=params.gemm1_clamp_limit,
                 tp_size=self.moe.tp_size,
                 tp_rank=self.moe.tp_rank,
                 ep_size=self.moe.ep_size,
@@ -1060,15 +1061,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             return triton_kernel_moe_forward(
                 hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                w1=params.w13_weight,
+                w2=params.w2_weight,
                 gating_output=router_logits,
-                topk=layer.top_k,
-                renormalize=layer.renormalize,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
+                topk=params.top_k,
+                renormalize=params.renormalize,
+                global_num_experts=params.global_num_experts,
+                expert_map=params.expert_map,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                apply_router_weight_on_input=params.apply_router_weight_on_input,
             )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
@@ -1117,23 +1118,23 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        params: FusedMoEParams,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer.activation == "swigluoai", (
+        assert params.activation == "swigluoai", (
             "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
         )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
-        hidden_states = layer.ipex_fusion(
+        hidden_states = params.ipex_fusion(
             x_pad,
-            layer.use_grouped_topk,
-            layer.top_k,
+            params.use_grouped_topk,
+            params.top_k,
             router_logits,
-            layer.renormalize,
-            layer.topk_group,
-            layer.num_expert_group,
+            params.renormalize,
+            params.topk_group,
+            params.num_expert_group,
             activation="swiglu_oai",
         )
         hidden_states = hidden_states[..., : self.original_hidden_size].contiguous()

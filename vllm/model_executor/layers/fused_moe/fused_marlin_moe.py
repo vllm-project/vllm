@@ -13,9 +13,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
@@ -709,16 +706,6 @@ class MarlinExperts(MarlinExpertsBase):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
         ops.moe_sum(input, output)
-
-
-def modular_marlin_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
-) -> mk.FusedMoEModularKernel:
-    return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        MarlinExperts(quant_config),
-        shared_experts,
-    )
 
 
 class BatchedMarlinExperts(MarlinExpertsBase):
