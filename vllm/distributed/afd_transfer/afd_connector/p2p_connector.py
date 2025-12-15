@@ -317,4 +317,5 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         self._current_afd_connector_metadata.recv_handle_list = work_list
         self._current_afd_connector_metadata.layer_idx = layer_idx
+        self._current_afd_connector_metadata.stage_idx = stage_idx
         return hidden_states, self._current_afd_connector_metadata
