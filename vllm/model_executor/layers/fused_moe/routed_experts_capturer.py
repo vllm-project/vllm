@@ -101,7 +101,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_hidden_layers,
                     model_config.hf_text_config.num_experts_per_tok,
                 ),
-                dtype=torch.int32,
+                dtype=torch.int16,
                 device="cuda",
             )
 
@@ -112,31 +112,42 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_hidden_layers,
                     model_config.hf_text_config.num_experts_per_tok,
                 )
-                self.dest_size = int(np.prod(shape)) * np.dtype(np.int32).itemsize
+                self.dest_size = int(np.prod(shape)) * np.dtype(np.int16).itemsize
                 self.lock_file = f"{LOCK_FILE_PREFIX}_{instance_id}.lock"
                 self.shm_name = f"{BUFFER_PREFIX}_{instance_id}"
 
                 with open(self.lock_file, "wb") as fp:
                     lock_file(fp)
                     try:
-                        shm = shared_memory.SharedMemory(name=self.shm_name, create=True, size=self.dest_size)
-                    except:
-                        shm = shared_memory.SharedMemory(name=self.shm_name, create=False, size=self.dest_size)
+                        shm = shared_memory.SharedMemory(
+                            name=self.shm_name, create=True, size=self.dest_size
+                        )
+                    except FileExistsError:
+                        shm = shared_memory.SharedMemory(
+                            name=self.shm_name, create=False, size=self.dest_size
+                        )
 
                     if shm.size != self.dest_size:
-                        logger.warning(f"size not same, unlink shm {self.shm_name} and create again")
+                        logger.warning(
+                            "Shared memory %s size mismatch; recreate",
+                            self.shm_name,
+                        )
                         shm.close()
                         shm.unlink()
                         try:
-                            shm = shared_memory.SharedMemory(name=self.shm_name, create=True, size=self.dest_size)
-                            logger.info(f"create shm {self.shm_name}")
-                        except:
-                            shm = shared_memory.SharedMemory(name=self.shm_name, create=False, size=self.dest_size)
-                            logger.info(f"link shm {self.shm_name}")
+                            shm = shared_memory.SharedMemory(
+                                name=self.shm_name, create=True, size=self.dest_size
+                            )
+                            logger.info("Create shared memory %s", self.shm_name)
+                        except FileExistsError:
+                            shm = shared_memory.SharedMemory(
+                                name=self.shm_name, create=False, size=self.dest_size
+                            )
+                            logger.info("Link shared memory %s", self.shm_name)
 
                     self._shm = shm
                     self._host_buffer_view = np.ndarray(
-                        shape, dtype=np.int32, buffer=self._shm.buf
+                        shape, dtype=np.int16, buffer=self._shm.buf
                     )
                     # init 0
                     self._host_buffer_view.fill(0)
@@ -283,7 +294,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
                         )
 
                     self._host_buffer_view = np.ndarray(
-                        shape, dtype=np.int32, buffer=self._shm.buf
+                        shape, dtype=np.int16, buffer=self._shm.buf
                     )
                 finally:
                     unlock_file(fp)
