@@ -22,6 +22,7 @@ class Matches(NamedTuple):
     allreduce_fusion: int = 0
     sequence_parallel: int = 0
     async_tp: int = 0
+    rms_quant_norm_fusion: int = 0
 
 
 class ModelBackendTestCase(NamedTuple):
@@ -106,7 +107,7 @@ if current_platform.is_cuda():
             ),
         ),
     ]
-    
+
     MODELS_GROUP_FP8 = [
         ModelBackendTestCase(
             model_name="Qwen/Qwen3-30B-A3B-FP8",
