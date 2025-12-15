@@ -17,17 +17,17 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
-from vllm.entrypoints.openai.tool_parsers.utils import (
+from vllm.tool_parsers.utils import (
     consume_space,
     find_common_prefix,
     is_complete_json,
     partial_json_loads,
 )
-from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 

@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import json
 from collections.abc import Sequence
-from typing import Any
 
 import regex as re
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -18,42 +15,56 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import (
+    ToolParser,
+)
 
 logger = init_logger(__name__)
 
 
-class Glm4MoeModelToolParser(ToolParser):
+class Ernie45ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
+        """
+        Ernie thinking model format:
+        abc\n</think>\n\n\n<tool_call>\ndef\n</tool_call>\n
+        """
         super().__init__(tokenizer)
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id = -1
         self.streamed_args_for_tool: list[str] = []
+        self.think_end_token = "</think>"
+        self.response_start_token: str = "<response>"
+        self.response_end_token: str = "</response>"
         self.tool_call_start_token = "<tool_call>"
         self.tool_call_end_token = "</tool_call>"
-
         self.tool_calls_start_token = self.tool_call_start_token
+        self.newline_token: str = "<0x0A>"
 
-        self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
-        self.func_detail_regex = re.compile(
-            r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL
+        self.tool_call_regex = re.compile(
+            r"<tool_call>\s*(?P<json>\{.*?\})\s*</tool_call>", re.DOTALL
         )
-        self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL
-        )
+
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
                 "constructor during construction."
             )
 
+        self.think_end_token_id = self.vocab.get(self.think_end_token)
+        self.response_start_token_id = self.vocab.get(self.response_start_token)
+        self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.tool_call_start_token_id = self.vocab.get(self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
+        self.newline_token_id = self.vocab.get(self.newline_token)
+        self.parser_token_ids = [
+            self.think_end_token_id,
+            self.response_start_token_id,
+            self.response_end_token_id,
+        ]
+
         self._buffer = ""
 
     def extract_tool_calls(
@@ -61,77 +72,46 @@ class Glm4MoeModelToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        def _is_string_type(
-            tool_name: str,
-            arg_name: str,
-            tools: list[ChatCompletionToolsParam] | None,
-        ) -> bool:
-            if tools is None:
-                return False
-            for tool in tools:
-                if tool.function.name == tool_name:
-                    if tool.function.parameters is None:
-                        return False
-                    arg_type = (
-                        tool.function.parameters.get("properties", {})
-                        .get(arg_name, {})
-                        .get("type", None)
-                    )
-                    return arg_type == "string"
-            logger.debug("No tool named '%s'.", tool_name)
-            return False
-
-        def _deserialize(value: str) -> Any:
-            try:
-                return json.loads(value)
-            except Exception:
-                pass
-
-            try:
-                return ast.literal_eval(value)
-            except Exception:
-                pass
-            return value
-
-        matched_tool_calls = self.func_call_regex.findall(model_output)
-        logger.debug("model_output: %s", model_output)
-        try:
-            tool_calls = []
-            for match in matched_tool_calls:
-                tc_detail = self.func_detail_regex.search(match)
-                tc_name = tc_detail.group(1)
-                tc_args = tc_detail.group(2)
-                pairs = self.func_arg_regex.findall(tc_args)
-                arg_dct = {}
-                for key, value in pairs:
-                    arg_key = key.strip()
-                    arg_val = value.strip()
-                    if not _is_string_type(tc_name, arg_key, request.tools):
-                        arg_val = _deserialize(arg_val)
-                    logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
-                    arg_dct[arg_key] = arg_val
-                tool_calls.append(
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=tc_name, arguments=json.dumps(arg_dct)
-                        ),
-                    )
-                )
-        except Exception:
-            logger.exception("Failed to extract tool call spec")
+        # sanity check; avoid unnecessary processing
+        if self.tool_calls_start_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
+
         else:
-            if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+            try:
+                tool_call_json_list = self.tool_call_regex.findall(model_output)
+
+                tool_calls = []
+                for tool_call_json in tool_call_json_list:
+                    tool_call_dict = json.loads(tool_call_json)
+                    args_str = json.dumps(
+                        tool_call_dict.get("arguments", {}), ensure_ascii=False
+                    )
+                    tool_calls.append(
+                        ToolCall(
+                            type="function",
+                            function=FunctionCall(
+                                name=tool_call_dict.get("name", ""),
+                                arguments=args_str,
+                            ),
+                        )
+                    )
+
+                content = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ].rstrip("\n")
                 return ExtractedToolCallInformation(
-                    tools_called=True, tool_calls=tool_calls, content=content
+                    tools_called=True,
+                    tool_calls=tool_calls,
+                    content=content if content else None,
                 )
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
+
+            except Exception:
+                logger.exception("Error in extracting tool call from response.")
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
 
     def extract_tool_calls_streaming(
         self,
@@ -148,9 +128,38 @@ class Glm4MoeModelToolParser(ToolParser):
         start_idx = cur_text.find(self.tool_call_start_token)
         if start_idx == -1:
             self._buffer = ""
+            # At least one toolcall has been completed
             if self.current_tool_id > 0:
                 cur_text = ""
-            return DeltaMessage(content=cur_text)
+            if self.current_tool_id == -1 and all(
+                token_id == self.newline_token_id for token_id in previous_token_ids
+            ):
+                cur_text = cur_text.strip("\n")
+
+            # handle <response> </response> when tool_call is not triggered
+            # cur_text === delta_text
+            content = cur_text
+            if self.response_start_token_id in delta_token_ids:
+                content = content.lstrip("\n")
+                response_start_idx = content.find(self.response_start_token)
+                content = content[response_start_idx + len(self.response_start_token) :]
+                # if have </response>, remove it
+                response_end_idx = content.rfind(self.response_end_token)
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
+            elif self.response_end_token_id in delta_token_ids:
+                response_end_idx = content.rfind(self.response_end_token)
+                content = content[:response_end_idx]
+            # remove \n after </think> or <response> or </response>
+            if (
+                len(previous_token_ids) > 0
+                and previous_token_ids[-1] in self.parser_token_ids
+            ) and (
+                len(delta_token_ids) > 0 and delta_token_ids[0] == self.newline_token_id
+            ):
+                content = content.lstrip("\n")
+
+            return DeltaMessage(content=content if content else None)
         logger.debug("cur_text = %s", cur_text)
         end_idx = cur_text.find(self.tool_call_end_token)
         if end_idx != -1:
@@ -197,4 +206,5 @@ class Glm4MoeModelToolParser(ToolParser):
             return delta
 
         self._buffer = cur_text[start_idx:]
-        return DeltaMessage(content=cur_text[:start_idx])
+        content = cur_text[:start_idx].rstrip("\n")
+        return DeltaMessage(content=content if content else None)
