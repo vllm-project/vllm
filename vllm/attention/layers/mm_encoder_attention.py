@@ -36,7 +36,7 @@ class MMEncoderAttention(CustomOp):
             scale: scale factor.
             num_kv_heads: number of kv heads.
             prefix: This has no effect, it is only here to make it easier to
-                    swap between Attention and MultiHeadAttention
+                    swap between Attention and MMEncoderAttention.
             multimodal_config: configs for multi-modal.
         """
         super().__init__()
@@ -111,9 +111,6 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # TODO(Isotr0py): Migrate MultiHeadAttention
-        assert cu_seqlens is not None
-
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
