@@ -389,11 +389,39 @@ class VllmConfig:
                     )
             supported_dtypes = quant_config.get_supported_act_dtypes()
             if model_config.dtype not in supported_dtypes:
-                raise ValueError(
-                    f"{model_config.dtype} is not supported for quantization "
-                    f"method {model_config.quantization}. Supported dtypes: "
-                    f"{supported_dtypes}"
-                )
+                # Handle dtype conflict between model restrictions and
+                # quantization restrictions (e.g., Gemma3 GGUF on Blackwell
+                # where Gemma3 blocks float16 and GGUF blocks bfloat16)
+                from vllm.config.model import _is_valid_dtype
+
+                model_type = getattr(model_config.hf_config, "model_type", None)
+                compatible_dtypes = [
+                    d
+                    for d in supported_dtypes
+                    if model_type is None or _is_valid_dtype(model_type, d)
+                ]
+                if compatible_dtypes:
+                    # Prefer float16 > bfloat16 > float32 for performance
+                    dtype_preference = [torch.float16, torch.bfloat16, torch.float32]
+                    for preferred in dtype_preference:
+                        if preferred in compatible_dtypes:
+                            logger.warning(
+                                "dtype=%s is not supported for quantization "
+                                "method %s with model type %s. "
+                                "Automatically selecting %s as compatible dtype.",
+                                model_config.dtype,
+                                model_config.quantization,
+                                model_type,
+                                preferred,
+                            )
+                            model_config.dtype = preferred
+                            break
+                else:
+                    raise ValueError(
+                        f"{model_config.dtype} is not supported for quantization "
+                        f"method {model_config.quantization}. Supported dtypes: "
+                        f"{supported_dtypes}"
+                    )
             quant_config.maybe_update_config(model_config.model)
             return quant_config
         return None
@@ -666,9 +694,8 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
-
         if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(
@@ -693,29 +720,22 @@ class VllmConfig:
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
-            if model_config := self.model_config:
-                if (
-                    self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                    and model_config.pooler_config is not None
-                ):
+            if (
+                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                and self.model_config is not None
+            ):
+                if self.model_config.pooler_config is not None:
                     logger.warning_once(
                         "Pooling models do not support full cudagraphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif (
-                    model_config.is_encoder_decoder
-                    and self.compilation_config.cudagraph_mode
-                    not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
-                ):
-                    logger.info_once(
-                        "Encoder-decoder models do not support %s. "
-                        "Overriding cudagraph_mode to FULL_DECODE_ONLY.",
-                        self.compilation_config.cudagraph_mode.name,
+                elif self.model_config.is_encoder_decoder:
+                    logger.warning_once(
+                        "Encoder-decoder models do not support full cudagraphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
                     )
-                    self.compilation_config.cudagraph_mode = (
-                        CUDAGraphMode.FULL_DECODE_ONLY
-                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -750,17 +770,27 @@ class VllmConfig:
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
 
-        if (
-            self.model_config
-            and self.model_config.architecture == "WhisperForConditionalGeneration"
-            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
-        ):
-            logger.warning(
-                "Whisper is known to have issues with "
-                "forked workers. If startup is hanging, "
-                "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                "to 'spawn'."
+        if self.model_config and self.model_config.is_encoder_decoder:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            self.scheduler_config.max_num_encoder_input_tokens = (
+                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
             )
+            logger.debug(
+                "Encoder-decoder model detected: setting "
+                "`max_num_encoder_input_tokens` to encoder length (%s)",
+                self.scheduler_config.max_num_encoder_input_tokens,
+            )
+            if (
+                self.model_config.architecture == "WhisperForConditionalGeneration"
+                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+            ):
+                logger.warning(
+                    "Whisper is known to have issues with "
+                    "forked workers. If startup is hanging, "
+                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                    "to 'spawn'."
+                )
 
         if (
             self.kv_events_config is not None
@@ -809,6 +839,11 @@ class VllmConfig:
                 "than or equal to and divisible by cp_kv_cache_interleave_size "
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
+
+        assert (
+            self.parallel_config.cp_kv_cache_interleave_size == 1
+            or self.speculative_config is None
+        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         self.compilation_config.set_splitting_ops_for_v1(
@@ -887,48 +922,17 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        # Hybrid KV cache manager (HMA) runtime rules:
-        # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
-        #   disables it
-        # - No preference: auto-disable for unsupported features (e.g. kv connector)
-        # - Explicit disable (--disable-kv-cache-manager): always respect it
-        need_disable_hybrid_kv_cache_manager = False
-        # logger should only print warning message for hybrid models. As we
-        # can't know whether the model is hybrid or not now, so we don't log
-        # warning message here and will log it later.
-        if not current_platform.support_hybrid_kv_cache():
-            # Hybrid KV cache manager is not supported on non-GPU platforms.
-            need_disable_hybrid_kv_cache_manager = True
-        if self.kv_events_config is not None:
-            # Hybrid KV cache manager is not compatible with KV events.
-            need_disable_hybrid_kv_cache_manager = True
-        if (
-            self.model_config is not None
-            and self.model_config.attention_chunk_size is not None
-        ):
-            if (
-                self.speculative_config is not None
-                and self.speculative_config.use_eagle()
-            ):
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                need_disable_hybrid_kv_cache_manager = True
-            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                logger.warning(
-                    "There is a latency regression when using chunked local"
-                    " attention with the hybrid KV cache manager. Disabling"
-                    " it, by default. To enable it, set the environment "
-                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                )
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention.
-                need_disable_hybrid_kv_cache_manager = True
-
-        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
+        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
+            # logger should only print warning message for hybrid models. As we
+            # can't know whether the model is hybrid or not now, so we don't log
+            # warning message here and will log it later.
+            if not current_platform.support_hybrid_kv_cache():
+                # Hybrid KV cache manager is not supported on non-GPU platforms.
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
-                need_disable_hybrid_kv_cache_manager = True
+                # NOTE(Kuntai): turn HMA off for connector for now.
+                # TODO(Kuntai): have a more elegent solution to check and
+                # turn off HMA for connector that does not support HMA.
                 logger.warning(
                     "Turning off hybrid kv cache manager because "
                     "`--kv-transfer-config` is set. This will reduce the "
@@ -936,26 +940,33 @@ class VllmConfig:
                     "or Mamba attention. If you are a developer of kv connector"
                     ", please consider supporting hybrid kv cache manager for "
                     "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py and"
-                    " use --no-disable-hybrid-kv-cache-manager to start vLLM."
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
                 )
-            self.scheduler_config.disable_hybrid_kv_cache_manager = (
-                need_disable_hybrid_kv_cache_manager
-            )
-        elif (
-            self.scheduler_config.disable_hybrid_kv_cache_manager is False
-            and need_disable_hybrid_kv_cache_manager
-        ):
-            raise ValueError(
-                "Hybrid KV cache manager was explicitly enabled but is not "
-                "supported in this configuration. Consider omitting the "
-                "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
-                " automatically."
-            )
-
-        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to enable HMA if not explicitly disabled by user or logic above.
-            self.scheduler_config.disable_hybrid_kv_cache_manager = False
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if self.kv_events_config is not None:
+                # Hybrid KV cache manager is not compatible with KV events.
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if (
+                self.model_config is not None
+                and self.model_config.attention_chunk_size is not None
+            ):
+                if (
+                    self.speculative_config is not None
+                    and self.speculative_config.use_eagle()
+                ):
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention + eagle.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                    logger.warning(
+                        "There is a latency regression when using chunked local"
+                        " attention with the hybrid KV cache manager. Disabling"
+                        " it, by default. To enable it, set the environment "
+                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                    )
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
@@ -1023,7 +1034,7 @@ class VllmConfig:
         max_graph_size = min(max_num_seqs * 2, 512)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
-        cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
+        cuda_graph_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
@@ -1064,14 +1075,8 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
-                decode_query_len = 1
-                if (
-                    self.speculative_config
-                    and self.speculative_config.num_speculative_tokens
-                ):
-                    decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
+                    self.scheduler_config.max_num_seqs * 2, 512
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
