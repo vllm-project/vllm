@@ -27,16 +27,14 @@ import socket
 from contextlib import closing
 
 def is_port_available(port: int, host: str = '127.0.0.1') -> bool:
-    try:
-        # Use context manager to ensure the socket is properly closed
-        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-            sock.settimeout(1)  # Set 1 second timeout
-            result = sock.connect_ex((host, port))
-            # If connection is successful (returns 0), the port is already in use
-            return result != 0
-    except socket.error:
-        # When a socket error occurs, conservatively assume the port is unavailable
-        return False
+    # Try to bind to the port to check if it's available. This is more reliable
+    # than trying to connect.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, port))
+            return True
+        except socket.error:
+            return False
 
 def get_unique_port(start_port=8000):
     """Find an available port"""
