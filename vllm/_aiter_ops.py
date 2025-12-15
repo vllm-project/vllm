@@ -1376,8 +1376,8 @@ class rocm_aiter_ops:
         rope_cached_thd_positions_2c_fwd_inplace(
             query_,
             key_,
-            sin,
             cos,
+            sin,
             positions,
             rotate_style,
             reuse_freqs_front_part=True,
