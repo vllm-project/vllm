@@ -452,12 +452,17 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             device=device,
         )
 
-        # Initialize dense MHA fallback builder for short sequences
+        # Initialize dense MLA fallback builder for short sequences
         # (enabled via VLLM_MLA_MHA_THRESHOLD environment variable)
-        # When sequence length <= threshold, use dense TritonMLA instead of
+        # When sequence length <= threshold, use dense FlashMLA instead of
         # sparse FlashMLA to avoid indexer overhead for short sequences.
+        #
+        # Note: Dense fallback is only supported for BF16 KV cache because
+        # fp8_ds_mla uses a custom FP8 format (656 bytes per token with embedded
+        # scale factors) that is not compatible with the standard FlashMLA dense
+        # kernel. For FP8 mode, we always use sparse FlashMLA.
         self._dense_builder: MLACommonMetadataBuilder | None = None
-        if envs.VLLM_MLA_MHA_THRESHOLD > 0:
+        if envs.VLLM_MLA_MHA_THRESHOLD > 0 and not self.use_fp8_kv_cache:
             self._dense_builder = MLACommonMetadataBuilder(
                 kv_cache_spec, layer_names, vllm_config, device
             )
@@ -688,13 +693,22 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
 
-        # Check if we should use dense MHA fallback for short sequences
+        # Check if we should use dense MLA fallback for short sequences
         # This is controlled by VLLM_MLA_MHA_THRESHOLD environment variable
+        #
+        # Following sglang's approach: only apply dense MLA to prefill requests
+        # where the sequence length (context + query) is <= threshold.
+        # Decode always uses sparse MLA since it needs the indexer to select
+        # top-k tokens from the full KV cache.
+        #
+        # The threshold should typically be set to index_topk (e.g., 2048)
+        # since for sequences shorter than index_topk, the sparse attention
+        # doesn't provide benefits as there's no token selection to do.
         threshold = envs.VLLM_MLA_MHA_THRESHOLD
         prefer_sparse = True
         dense_metadata: MLACommonMetadata | None = None
 
-        # Calculate number of prefill tokens for threshold check
+        # Calculate number of prefill/decode tokens for threshold check
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 cm,
@@ -703,12 +717,21 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             )
         )
 
+        # Only apply dense MLA when:
+        # 1. Dense builder is available (threshold > 0)
+        # 2. All requests in batch are prefills (no decode)
+        # 3. Maximum sequence length <= threshold (short enough for dense MLA)
+        #
+        # Note: Unlike checking num_prefill_tokens, we check max_seq_len because
+        # that represents the actual context length that attention operates on.
+        # For sparse attention to be beneficial, the context needs to be longer
+        # than index_topk so the indexer can select relevant tokens.
         if (
             self._dense_builder is not None
             and threshold > 0
-            and num_prefill_tokens > 0
-            and num_prefill_tokens <= threshold
-            and num_prefills == cm.num_reqs  # All requests are prefills
+            and num_prefills > 0
+            and num_prefills == cm.num_reqs  # All requests are prefills (no decode)
+            and cm.max_seq_len <= threshold  # All sequences are short enough
         ):
             candidate_dense_metadata = self._dense_builder.build(
                 common_prefix_len, cm, fast_build=fast_build
@@ -799,7 +822,15 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         # (enabled via VLLM_MLA_MHA_THRESHOLD environment variable)
         # When sequence length <= threshold, use dense FlashMLA instead of
         # sparse FlashMLA to avoid indexer overhead for short sequences.
-        self._enable_dense_fallback = envs.VLLM_MLA_MHA_THRESHOLD > 0
+        #
+        # Note: Dense fallback is only supported for BF16 KV cache because
+        # fp8_ds_mla uses a custom FP8 format (656 bytes per token with embedded
+        # scale factors) that is not compatible with the standard FlashMLA dense
+        # kernel. For FP8 mode, we always use sparse FlashMLA.
+        use_fp8_cache = kv_cache_dtype == "fp8_ds_mla"
+        self._enable_dense_fallback = (
+            envs.VLLM_MLA_MHA_THRESHOLD > 0 and not use_fp8_cache
+        )
         self._dense_impl_vllm_config = (
             get_current_vllm_config() if self._enable_dense_fallback else None
         )
