@@ -511,13 +511,20 @@ def maybe_override_with_speculators(
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
-        revision=revision,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
-    speculators_config = config_dict.get("speculators_config")
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model if gguf_model_repo is None else gguf_model_repo,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
+        speculators_config = config_dict.get("speculators_config")
+    except OSError:
+        # GGUF models without config.json cannot have speculators config
+        # (speculators is defined in config.json), so skip gracefully
+        if gguf_model_repo is not None:
+            return model, tokenizer, vllm_speculative_config
+        raise
 
     if speculators_config is None:
         # No speculators config found, return original values
