@@ -27,6 +27,7 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import flat_product, multi_gpu_test
 
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
