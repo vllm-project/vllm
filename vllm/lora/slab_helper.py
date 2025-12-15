@@ -16,12 +16,21 @@ from vllm.logger import init_logger
 from vllm.lora.layers import FusedMoEWithLoRA
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.distributed.utils import divide
+from vllm.lora.layers import FusedMoE3DWithLoRA
+# Import here to avoid circular dependency
+from vllm.lora.utils import parse_fine_tuned_lora_name
+from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+
 
 logger = init_logger(__name__)
 
 # Global slab cache
 _GLOBAL_SLAB_CACHE = {}
 _CACHE_LOCK = threading.RLock()
+
+# Global LoRAModel cache for early checking
+_GLOBAL_LORA_MODEL_CACHE = {}
+_LORA_MODEL_CACHE_LOCK = threading.RLock()
 
 # ULTIMATE SOLUTION: Global result storage to eliminate ALL large object returns
 _GLOBAL_RESULT_STORAGE = {}
@@ -199,240 +208,6 @@ def get_ultra_fast_pool():
     return _ULTRA_FAST_POOL
 
 
-
-
-
-def use_layer_pre_allocated_tensors_directly(module, module_lora, dtype=torch.bfloat16, device=torch.device('cpu')):
-    """
-    DIRECT APPROACH: Use the layer's own pre-allocated stacked tensors directly without any shape checking.
-    This leverages the fact that layers like FusedMoE already define and pre-allocate these tensors 
-    (e.g., self.w1_lora_a_stacked) with the correct shapes and dimensions.
-    """
-    tensors_for_slab = {}
-    
-    # Validate LoRA scaling consistency - ensure uniform scaling across module
-    scaling_factor = getattr(module_lora, 'scaling', 1.0)
-    
-    # Check if scaling is needed (non-one scaling factor)
-    apply_scaling = scaling_factor != 1.0
-    
-    # --- FusedMoE: Use the layer's pre-allocated stacked tensors directly ---
-    if hasattr(module, 'w1_lora_a_stacked'):
-        # FusedMoEWithLoRA with separate w1, w2, w3
-        weight_types = ['w1_lora_a', 'w1_lora_b', 'w2_lora_a', 'w2_lora_b', 'w3_lora_a', 'w3_lora_b']
-        
-        for weight_type in weight_types:
-            stacked_attr = f"{weight_type}_stacked"
-            if hasattr(module, stacked_attr):
-                layer_tensor = getattr(module, stacked_attr)
-                    
-            # Get shape from GPU tensor without D2H transfer, create CPU tensor directly
-            shape = layer_tensor.shape
-            cpu_tensor = torch.zeros(shape, dtype=dtype, device=device)
-            
-            # Populate with actual LoRA data if available AND apply scaling during slab building
-            if weight_type.endswith('_lora_a') and hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
-                # Handle list case for FusedMoE experts
-                if isinstance(module_lora.lora_a, list):
-                    for expert_idx in range(min(len(module_lora.lora_a), cpu_tensor.shape[1])):
-                        if module_lora.lora_a[expert_idx] is not None:
-                            src_tensor = module_lora.lora_a[expert_idx].to(dtype)
-                            min_h = min(src_tensor.shape[0], cpu_tensor.shape[2])
-                            min_w = min(src_tensor.shape[1], cpu_tensor.shape[3])
-                            cpu_tensor[0, expert_idx, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                # Handle single tensor case 
-                elif isinstance(module_lora.lora_a, torch.Tensor):
-                    src_tensor = module_lora.lora_a.to(dtype)
-                    min_h = min(src_tensor.shape[0], cpu_tensor.shape[2])
-                    min_w = min(src_tensor.shape[1], cpu_tensor.shape[3])
-                    cpu_tensor[0, 0, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                            
-            elif weight_type.endswith('_lora_b') and hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
-                # Handle list case for FusedMoE experts
-                if isinstance(module_lora.lora_b, list):
-                    for expert_idx in range(min(len(module_lora.lora_b), cpu_tensor.shape[1])):
-                        if module_lora.lora_b[expert_idx] is not None:
-                            src_tensor = module_lora.lora_b[expert_idx].to(dtype)
-                            # Apply validated scaling during slab building - cached in slab
-                            if apply_scaling:
-                                scaled_tensor = src_tensor * scaling_factor
-                            else:
-                                scaled_tensor = src_tensor
-                            min_h = min(scaled_tensor.shape[0], cpu_tensor.shape[2])
-                            min_w = min(scaled_tensor.shape[1], cpu_tensor.shape[3])
-                            cpu_tensor[0, expert_idx, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-                # Handle single tensor case with scaling
-                elif isinstance(module_lora.lora_b, torch.Tensor):
-                    src_tensor = module_lora.lora_b.to(dtype)
-                    # Apply validated scaling during slab building - cached in slab
-                    if apply_scaling:
-                        scaled_tensor = src_tensor * scaling_factor
-                    else:
-                        scaled_tensor = src_tensor
-                    min_h = min(scaled_tensor.shape[0], cpu_tensor.shape[2])
-                    min_w = min(scaled_tensor.shape[1], cpu_tensor.shape[3])
-                    cpu_tensor[0, 0, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-            
-            tensors_for_slab[weight_type] = cpu_tensor
-            
-        # Mark scaling as applied to prevent double-scaling
-        if apply_scaling:
-            module_lora.scaling = 1.0
-    
-    # --- FusedMoE3D: Use combined w13 stacked tensors ---
-    elif hasattr(module, 'w13_lora_a_stacked'):
-        # FusedMoE3DWithLoRA with combined w13
-        weight_types = ['w13_lora_a', 'w13_lora_b', 'w2_lora_a', 'w2_lora_b']
-        
-        for weight_type in weight_types:
-            stacked_attr = f"{weight_type}_stacked"
-            if hasattr(module, stacked_attr):
-                layer_tensor = getattr(module, stacked_attr)[0]  # It's a tuple with 1 element
-                    
-            # Get shape from GPU tensor without D2H transfer, create CPU tensor directly
-            shape = layer_tensor.shape
-            cpu_tensor = torch.zeros(shape, dtype=dtype, device=device)
-            
-            # Populate with actual LoRA data if available AND apply scaling during slab building
-            if weight_type.endswith('_lora_a') and hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
-                # Handle list case for FusedMoE experts
-                if isinstance(module_lora.lora_a, list):
-                    for expert_idx in range(min(len(module_lora.lora_a), cpu_tensor.shape[1])):
-                        if module_lora.lora_a[expert_idx] is not None:
-                            src_tensor = module_lora.lora_a[expert_idx].to(dtype)
-                            min_h = min(src_tensor.shape[0], cpu_tensor.shape[2])
-                            min_w = min(src_tensor.shape[1], cpu_tensor.shape[3])
-                            cpu_tensor[0, expert_idx, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                # Handle single tensor case 
-                elif isinstance(module_lora.lora_a, torch.Tensor):
-                    src_tensor = module_lora.lora_a.to(dtype)
-                    min_h = min(src_tensor.shape[0], cpu_tensor.shape[2])
-                    min_w = min(src_tensor.shape[1], cpu_tensor.shape[3])
-                    cpu_tensor[0, 0, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                            
-            elif weight_type.endswith('_lora_b') and hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
-                # Handle list case for FusedMoE experts
-                if isinstance(module_lora.lora_b, list):
-                    for expert_idx in range(min(len(module_lora.lora_b), cpu_tensor.shape[1])):
-                        if module_lora.lora_b[expert_idx] is not None:
-                            src_tensor = module_lora.lora_b[expert_idx].to(dtype)
-                            # Apply validated scaling during slab building - cached in slab
-                            if apply_scaling:
-                                scaled_tensor = src_tensor * scaling_factor
-                            else:
-                                scaled_tensor = src_tensor
-                            min_h = min(scaled_tensor.shape[0], cpu_tensor.shape[2])
-                            min_w = min(scaled_tensor.shape[1], cpu_tensor.shape[3])
-                            cpu_tensor[0, expert_idx, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-                # Handle single tensor case with scaling
-                elif isinstance(module_lora.lora_b, torch.Tensor):
-                    src_tensor = module_lora.lora_b.to(dtype)
-                    # Apply validated scaling during slab building - cached in slab
-                    if apply_scaling:
-                        scaled_tensor = src_tensor * scaling_factor
-                    else:
-                        scaled_tensor = src_tensor
-                    min_h = min(scaled_tensor.shape[0], cpu_tensor.shape[2])
-                    min_w = min(scaled_tensor.shape[1], cpu_tensor.shape[3])
-                    cpu_tensor[0, 0, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-            
-            tensors_for_slab[weight_type] = cpu_tensor
-            
-        # Mark scaling as applied to prevent double-scaling
-        if apply_scaling:
-            module_lora.scaling = 1.0
-    
-    # --- ColumnParallel/BaseLinear: Use the layer's pre-allocated stacked tensors directly ---
-    elif hasattr(module, 'lora_a_stacked'):
-        # Get the layer's pre-allocated tensors
-        lora_a_stacked = module.lora_a_stacked
-        lora_b_stacked = module.lora_b_stacked
-        
-        # Handle multi-slice case (tuples)
-        if isinstance(lora_a_stacked, tuple):
-            tensors_for_slab['lora_a'] = []
-            tensors_for_slab['lora_b'] = []
-            
-            for slice_idx in range(len(lora_a_stacked)):
-                # Get shapes without D2H transfer, create CPU tensors directly
-                shape_a = lora_a_stacked[slice_idx].shape
-                shape_b = lora_b_stacked[slice_idx].shape
-                cpu_tensor_a = torch.zeros(shape_a, dtype=dtype, device=device)
-                cpu_tensor_b = torch.zeros(shape_b, dtype=dtype, device=device)
-                
-                # Handle both single tensor and list cases for LoRA data
-                if hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
-                    if isinstance(module_lora.lora_a, torch.Tensor) and slice_idx == 0:
-                        src_tensor = module_lora.lora_a.to(dtype)
-                        min_h = min(src_tensor.shape[0], cpu_tensor_a.shape[2])
-                        min_w = min(src_tensor.shape[1], cpu_tensor_a.shape[3])
-                        cpu_tensor_a[0, 0, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                    elif isinstance(module_lora.lora_a, list) and slice_idx < len(module_lora.lora_a):
-                        if module_lora.lora_a[slice_idx] is not None:
-                            src_tensor = module_lora.lora_a[slice_idx].to(dtype)
-                            min_h = min(src_tensor.shape[0], cpu_tensor_a.shape[2])
-                            min_w = min(src_tensor.shape[1], cpu_tensor_a.shape[3])
-                            cpu_tensor_a[0, 0, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-                
-                if hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
-                    if isinstance(module_lora.lora_b, torch.Tensor) and slice_idx == 0:
-                        src_tensor = module_lora.lora_b.to(dtype)
-                        if apply_scaling:
-                            scaled_tensor = src_tensor * scaling_factor
-                        else:
-                            scaled_tensor = src_tensor
-                        min_h = min(scaled_tensor.shape[0], cpu_tensor_b.shape[2])
-                        min_w = min(scaled_tensor.shape[1], cpu_tensor_b.shape[3])
-                        cpu_tensor_b[0, 0, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-                    elif isinstance(module_lora.lora_b, list) and slice_idx < len(module_lora.lora_b):
-                        if module_lora.lora_b[slice_idx] is not None:
-                            src_tensor = module_lora.lora_b[slice_idx].to(dtype)
-                            if apply_scaling:
-                                scaled_tensor = src_tensor * scaling_factor
-                            else:
-                                scaled_tensor = src_tensor
-                            min_h = min(scaled_tensor.shape[0], cpu_tensor_b.shape[2])
-                            min_w = min(scaled_tensor.shape[1], cpu_tensor_b.shape[3])
-                            cpu_tensor_b[0, 0, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-                
-                tensors_for_slab['lora_a'].append(cpu_tensor_a)
-                tensors_for_slab['lora_b'].append(cpu_tensor_b)
-        
-        # Handle single tensor case
-        else:
-            # Get shapes without D2H transfer, create CPU tensors directly
-            shape_a = lora_a_stacked.shape
-            shape_b = lora_b_stacked.shape
-            tensors_for_slab['lora_a'] = torch.zeros(shape_a, dtype=dtype, device=device)
-            tensors_for_slab['lora_b'] = torch.zeros(shape_b, dtype=dtype, device=device)
-            
-            # Populate with actual LoRA data and apply scaling during slab building
-            if hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
-                src_tensor = module_lora.lora_a.to(dtype)
-                min_h = min(src_tensor.shape[0], tensors_for_slab['lora_a'].shape[2])
-                min_w = min(src_tensor.shape[1], tensors_for_slab['lora_a'].shape[3])
-                tensors_for_slab['lora_a'][0, 0, :min_h, :min_w] = src_tensor[:min_h, :min_w]
-            
-            if hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
-                src_tensor = module_lora.lora_b.to(dtype)
-                if apply_scaling:
-                    scaled_tensor = src_tensor * scaling_factor
-                else:
-                    scaled_tensor = src_tensor
-                min_h = min(scaled_tensor.shape[0], tensors_for_slab['lora_b'].shape[2])
-                min_w = min(scaled_tensor.shape[1], tensors_for_slab['lora_b'].shape[3])
-                tensors_for_slab['lora_b'][0, 0, :min_h, :min_w] = scaled_tensor[:min_h, :min_w]
-
-        # Mark scaling as applied to prevent double-scaling
-        if apply_scaling:
-            module_lora.scaling = 1.0
-    
-    else:
-        raise RuntimeError(f"Module {module.__class__.__name__} doesn't have expected pre-allocated stacked tensors")
-    
-    return tensors_for_slab
-
-
 # Main public interface with CPU caching and disk save/load
 def build_target_matched_slab(lora_model, target_modules, max_loras, lora_config, slab_path: Optional[str] = None):
     """
@@ -448,8 +223,16 @@ def build_target_matched_slab(lora_model, target_modules, max_loras, lora_config
         slab_path: Optional path to save/load slab to/from disk
     """
     
-    cache_key = _generate_slab_cache_key(lora_model, 'cpu')
+    # Get TP info for cache key when fully_sharded=True
+    fully_sharded = lora_config.fully_sharded_loras if lora_config else False
+    tp_rank = None
+    if fully_sharded and target_modules:
+        first_module = next(iter(target_modules.values()), None)
+        if first_module:
+            tp_rank = getattr(first_module, 'tp_rank', 0)
     
+    cache_key = _generate_slab_cache_key(lora_model, 'cpu', tp_rank, fully_sharded)
+
     # Get pre-initialized pool ONCE to avoid repeated calls
     pool = get_ultra_fast_pool()  # Pre-initialized in envs.py - no re-creation
     
@@ -468,141 +251,95 @@ def build_target_matched_slab(lora_model, target_modules, max_loras, lora_config
         all_flattened_tensors = []  # Direct collection of all flattened tensors
         global_metadata = SlabMetadata()
         current_global_offset = 0
-        
-        
-        # VALIDATION: Calculate expected total size from LoRA model
-        expected_total_elements = 0
-        expected_size_breakdown = {}
-        for module_name, module_lora_weights in lora_model.loras.items():
-            module_size = 0
-            if hasattr(module_lora_weights, 'lora_a') and module_lora_weights.lora_a is not None:
-                if isinstance(module_lora_weights.lora_a, list):
-                    for expert_tensor in module_lora_weights.lora_a:
+    
+        for module_name, module_lora in lora_model.loras.items():
+            if module_lora is None:
+                continue
+            # Process lora_a (either list of tensors for packed modules, or single tensor)
+            if hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
+                if isinstance(module_lora.lora_a, list):
+                    for expert_idx, expert_tensor in enumerate(module_lora.lora_a):
                         if expert_tensor is not None:
-                            module_size += expert_tensor.numel()
+                            all_flattened_tensors.append(expert_tensor.flatten())
+                            tensor_info = TensorInfo(
+                                f"{module_name}.lora_a.expert_{expert_idx}", 'a', 
+                                expert_tensor.shape, expert_tensor.numel(), current_global_offset
+                            )
+                            global_metadata.tensor_infos.append(tensor_info)
+                            current_global_offset += expert_tensor.numel()
                 else:
-                    module_size += module_lora_weights.lora_a.numel()
+                    # Single tensor
+                    all_flattened_tensors.append(module_lora.lora_a.flatten())
+                    tensor_info = TensorInfo(
+                        f"{module_name}.lora_a", 'a', module_lora.lora_a.shape,
+                        module_lora.lora_a.numel(), current_global_offset
+                    )
+                    global_metadata.tensor_infos.append(tensor_info)
+                    current_global_offset += module_lora.lora_a.numel()
             
-            if hasattr(module_lora_weights, 'lora_b') and module_lora_weights.lora_b is not None:
-                if isinstance(module_lora_weights.lora_b, list):
-                    for expert_tensor in module_lora_weights.lora_b:
+            # Process lora_b (scaling already applied during packing for packed modules)
+            if hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
+                if isinstance(module_lora.lora_b, list):
+                    module_lora_b_count = 0
+                    for expert_idx, expert_tensor in enumerate(module_lora.lora_b):
                         if expert_tensor is not None:
-                            module_size += expert_tensor.numel()
+                            all_flattened_tensors.append(expert_tensor.flatten())
+                            tensor_info = TensorInfo(
+                                f"{module_name}.lora_b.expert_{expert_idx}", 'b',
+                                expert_tensor.shape, expert_tensor.numel(), current_global_offset
+                            )
+                            global_metadata.tensor_infos.append(tensor_info)
+                            module_lora_b_count += expert_tensor.numel()
+                            current_global_offset += expert_tensor.numel()
                 else:
-                    module_size += module_lora_weights.lora_b.numel()
-            
-            if module_size > 0:
-                expected_size_breakdown[module_name] = module_size
-                expected_total_elements += module_size
-        
-        modules_with_weights = []
-        modules_without_weights = []
-        
-        for mod_name in sorted(lora_model.loras.keys()):
-            module_lora = lora_model.loras[mod_name]
-            has_lora_a = hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None
-            has_lora_b = hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None
-            
-            if has_lora_a or has_lora_b:
-                # Module has weights
-                lora_a_info = "None"
-                lora_b_info = "None"
-                
-                if has_lora_a:
-                    if isinstance(module_lora.lora_a, list):
-                        lora_a_info = f"List[{len(module_lora.lora_a)}]"
-                        if len(module_lora.lora_a) > 0 and module_lora.lora_a[0] is not None:
-                            lora_a_info += f" {module_lora.lora_a[0].shape}"
-                    else:
-                        lora_a_info = f"{module_lora.lora_a.shape}"
-                
-                if has_lora_b:
-                    if isinstance(module_lora.lora_b, list):
-                        lora_b_info = f"List[{len(module_lora.lora_b)}]"
-                        if len(module_lora.lora_b) > 0 and module_lora.lora_b[0] is not None:
-                            lora_b_info += f" {module_lora.lora_b[0].shape}"
-                    else:
-                        lora_b_info = f"{module_lora.lora_b.shape}"
-                
-                modules_with_weights.append((mod_name, lora_a_info, lora_b_info))
-            else:
-                # Module exists but has no weights
-                modules_without_weights.append(mod_name)
+                    # Single tensor
+                    all_flattened_tensors.append(module_lora.lora_b.flatten())
+                    tensor_info = TensorInfo(
+                        f"{module_name}.lora_b", 'b', module_lora.lora_b.shape,
+                        module_lora.lora_b.numel(), current_global_offset
+                    )
+                    global_metadata.tensor_infos.append(tensor_info)
+                    current_global_offset += module_lora.lora_b.numel()
+        extraction_map = {}
+        lookup = {info.module_name: info for info in global_metadata.tensor_infos}
         
         for module_name, module_lora in lora_model.loras.items():
             if module_lora is None:
                 continue
-            
-            # Track actual size being added to slab for this module
-            module_start_offset = current_global_offset
-                            
-            if hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None:
-                # Handle expert lists (FusedMoE/FusedMoE3D)
-                if isinstance(module_lora.lora_a, list):
-                    for expert_idx, expert_tensor in enumerate(module_lora.lora_a):
-                        if expert_tensor is not None:
-                            flattened = expert_tensor.flatten()
-                            all_flattened_tensors.append(flattened)
-                            
-                            # Create metadata entry
-                            expert_name = f"{module_name}.lora_a.expert_{expert_idx}"
-                            global_metadata.tensor_infos.append(TensorInfo(
-                                expert_name, 'a', expert_tensor.shape,
-                                expert_tensor.numel(), current_global_offset
-                            ))
-                            current_global_offset += expert_tensor.numel()
-                else:
-                    # Single tensor case
-                    flattened = module_lora.lora_a.flatten()
-                    all_flattened_tensors.append(flattened)
-                    
-                    global_metadata.tensor_infos.append(TensorInfo(
-                        f"{module_name}.lora_a", 'a', module_lora.lora_a.shape,
-                        module_lora.lora_a.numel(), current_global_offset
-                    ))
-                    current_global_offset += module_lora.lora_a.numel()
-            
-            if hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
-                # Handle expert lists (FusedMoE/FusedMoE3D) with scaling
-                if isinstance(module_lora.lora_b, list):
-                    for expert_idx, expert_tensor in enumerate(module_lora.lora_b):
-                        if expert_tensor is not None:
-                            # Apply scaling if needed
-                            scaling_factor = getattr(module_lora, 'scaling', 1.0)
-                            if scaling_factor != 1.0:
-                                expert_tensor = expert_tensor * scaling_factor
-                            
-                            flattened = expert_tensor.flatten()
-                            all_flattened_tensors.append(flattened)
-                            
-                            # Create metadata entry
-                            expert_name = f"{module_name}.lora_b.expert_{expert_idx}"
-                            global_metadata.tensor_infos.append(TensorInfo(
-                                expert_name, 'b', expert_tensor.shape,
-                                expert_tensor.numel(), current_global_offset
-                            ))
-                            current_global_offset += expert_tensor.numel()
-                else:
-                    # Single tensor case with scaling
-                    scaling_factor = getattr(module_lora, 'scaling', 1.0)
-                    tensor_to_use = module_lora.lora_b
-                    if scaling_factor != 1.0:
-                        tensor_to_use = module_lora.lora_b * scaling_factor
-                    
-                    flattened = tensor_to_use.flatten()
-                    all_flattened_tensors.append(flattened)
-                    
-                    global_metadata.tensor_infos.append(TensorInfo(
-                        f"{module_name}.lora_b", 'b', tensor_to_use.shape,
-                        tensor_to_use.numel(), current_global_offset
-                    ))
-                    current_global_offset += tensor_to_use.numel()
-                            
-            # Mark scaling as applied to prevent double-scaling during activation
-            if hasattr(module_lora, 'scaling') and module_lora.scaling != 1.0:
-                module_lora.scaling = 1.0
-        
-        # ZERO-COPY OPTIMIZATION: Build slab using views directly - NO .copy() operations!
+            # Check if module has list structure (packed MoE/QKV) or single tensor
+            has_list = isinstance(module_lora.lora_a, list) if hasattr(module_lora, 'lora_a') and module_lora.lora_a is not None else False
+            if has_list:
+                # Packed module with list - collect all expert tensor infos
+                expert_tensors_a = []
+                expert_tensors_b = []
+                
+                for expert_idx in range(len(module_lora.lora_a)):
+                    a_key = f"{module_name}.lora_a.expert_{expert_idx}"
+                    b_key = f"{module_name}.lora_b.expert_{expert_idx}"
+                    if a_key in lookup:
+                        a_info = lookup[a_key]
+                        expert_tensors_a.append((a_info.offset, a_info.size, a_info.shape))
+                    if b_key in lookup:
+                        b_info = lookup[b_key]
+                        expert_tensors_b.append((b_info.offset, b_info.size, b_info.shape))
+                
+                # Determine type based on module name
+                if module_name.endswith('.mlp.experts'):
+                    extraction_map[module_name] = ('moe', expert_tensors_a, expert_tensors_b)
+                elif module_name.endswith('.qkv_proj'):
+                    extraction_map[module_name] = ('qkv', expert_tensors_a, expert_tensors_b)
+            else:
+                # Single tensor module
+                lora_a_key = f"{module_name}.lora_a"
+                lora_b_key = f"{module_name}.lora_b"
+                
+                if lora_a_key in lookup and lora_b_key in lookup:
+                    a_info = lookup[lora_a_key]
+                    b_info = lookup[lora_b_key]
+                    extraction_map[module_name] = ('linear', a_info.offset, a_info.size, a_info.shape, b_info.offset, b_info.size, b_info.shape)
+
+        # Store extraction_map in metadata for zero-overhead extraction
+        global_metadata.extraction_map = extraction_map
         if all_flattened_tensors:
             # Calculate tensor sizes for view allocation
             tensor_sizes = [t.numel() for t in all_flattened_tensors]
@@ -613,15 +350,15 @@ def build_target_matched_slab(lora_model, target_modules, max_loras, lora_config
             full_slab, tensor_views = pool.allocate_slab_views_directly(tensor_sizes, torch.bfloat16)
             
             for i, (source_tensor, view_tensor) in enumerate(zip(all_flattened_tensors, tensor_views)):
-                view_tensor.data = source_tensor.data
+                view_tensor.copy_(source_tensor) 
         else:
             # Empty slab case
             full_slab, _ = pool.allocate_slab_views_directly([], torch.bfloat16)
             global_metadata.total_size = 0            
-        # Direct assignment to return variables - NO function call overhead!
+        
         slab_tensor = full_slab
         metadata = global_metadata
-                
+    
         # Cache the built slab in memory
         with _CACHE_LOCK:
             _GLOBAL_SLAB_CACHE[cache_key] = (slab_tensor, metadata)
@@ -636,152 +373,127 @@ def build_target_matched_slab(lora_model, target_modules, max_loras, lora_config
         # Store large objects in global storage instead of returning them
         with _RESULT_LOCK:
             _GLOBAL_RESULT_STORAGE[result_key] = (slab_tensor, metadata)
-        
-        # CRITICAL: Clear local references to large objects to prevent cleanup overhead
-        slab_tensor = None  # Clear reference to 3.4GB tensor
-        metadata = None     # Clear reference to metadata
-        full_slab = None    # Clear any other large object references
+
+        # Clear local references to large objects to prevent cleanup overhead
+        slab_tensor = None
+        metadata = None
+        full_slab = None
         global_metadata = None
-        all_flattened_tensors = None  # Clear tensor list
-                        
+        all_flattened_tensors = None
+        
         return result_key
 
 
+def extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name):
+    """Extract lora_a and lora_b tensors from GPU slab for a module."""
+    extraction_info = metadata.extraction_map.get(module_name)
+    if not extraction_info:
+        return None, None
+    
+    extraction_type = extraction_info[0]
+    
+    if extraction_type == 'linear':
+        # Single tensor module: ('linear', a_offset, a_size, a_shape, b_offset, b_size, b_shape)
+        _, a_offset, a_size, a_shape, b_offset, b_size, b_shape = extraction_info
+        lora_a = gpu_slab[a_offset:a_offset + a_size].view(a_shape)
+        lora_b = gpu_slab[b_offset:b_offset + b_size].view(b_shape)
+        return lora_a, lora_b
+    
+    elif extraction_type in ('moe', 'qkv'):
+        # List of tensors: ('moe'/'qkv', expert_tensors_a, expert_tensors_b)
+        _, expert_tensors_a, expert_tensors_b = extraction_info
+        
+        lora_a_list = []
+        for i, (offset, size, shape) in enumerate(expert_tensors_a):
+            tensor = gpu_slab[offset:offset + size].view(shape)
+            lora_a_list.append(tensor)
+        
+        lora_b_list = []
+        for i, (offset, size, shape) in enumerate(expert_tensors_b):
+            tensor = gpu_slab[offset:offset + size].view(shape)
+            lora_b_list.append(tensor)
+        return lora_a_list, lora_b_list
+    
+    return None, None
+
+
 def process_slab_activation_loop(modules_dict, lora_model, get_lora_layer_weights_fn, lora_config, gpu_slab, metadata, index):
-    """ZERO-OVERHEAD slab scatter - pre-computed direct memory operations only."""
-    
-    # Build extraction map once if not cached
-    if not hasattr(metadata, '_extraction_map'):
-        extraction_map = {}
-        lookup = {info.module_name: info for info in metadata.tensor_infos}
+    """Extract weights from GPU slab and activate - TRUE zero-copy activation!"""
         
-        for module_name in modules_dict.keys():
-            # Pre-compute all extraction info to eliminate runtime overhead
-            lora_a_key = f"{module_name}.lora_a"
-            lora_b_key = f"{module_name}.lora_b"
-            
-            if lora_a_key in lookup and lora_b_key in lookup:
-                # Simple linear case - store direct slice info
-                a_info = lookup[lora_a_key] 
-                b_info = lookup[lora_b_key]
-                extraction_map[module_name] = ('linear', a_info.offset, a_info.size, a_info.shape, b_info.offset, b_info.size, b_info.shape)
-                
-            elif 'mlp.experts' in module_name:
-                # Check if this is FusedMoE3D (w13) or regular FusedMoE (w1/w2/w3)
-                # Try to detect w13 first
-                test_key_w13 = f"{module_name}.w13_lora_a.expert_0"
-                test_key_w1 = f"{module_name}.w1_lora_a.expert_0"
-                
-                if test_key_w13 in lookup:
-                    # FusedMoE3D case - pre-compute expert tensor lists for w13 and w2
-                    expert_tensors_a, expert_tensors_b = [], []
-                    num_experts = sum(1 for name in lookup if name.startswith(module_name) and '.w13_lora_a.expert_' in name)
-                    
-                    for expert_id in range(num_experts):
-                        for weight_type in ['w13_lora_a', 'w2_lora_a']:
-                            key = f"{module_name}.{weight_type}.expert_{expert_id}"
-                            if key in lookup:
-                                info = lookup[key]
-                                expert_tensors_a.append((info.offset, info.size, info.shape))
-                        
-                        for weight_type in ['w13_lora_b', 'w2_lora_b']:
-                            key = f"{module_name}.{weight_type}.expert_{expert_id}"
-                            if key in lookup:
-                                info = lookup[key]
-                                expert_tensors_b.append((info.offset, info.size, info.shape))
-                    
-                    extraction_map[module_name] = ('moe3d', expert_tensors_a, expert_tensors_b)
-                else:
-                    # Regular FusedMoE case - pre-compute expert tensor lists for w1/w2/w3
-                    expert_tensors_a, expert_tensors_b = [], []
-                    num_experts = sum(1 for name in lookup if name.startswith(module_name) and '.w1_lora_a.expert_' in name)
-                    
-                    for expert_id in range(num_experts):
-                        for weight_type in ['w1_lora_a', 'w2_lora_a', 'w3_lora_a']:
-                            key = f"{module_name}.{weight_type}.expert_{expert_id}"
-                            if key in lookup:
-                                info = lookup[key]
-                                expert_tensors_a.append((info.offset, info.size, info.shape))
-                        
-                        for weight_type in ['w1_lora_b', 'w2_lora_b', 'w3_lora_b']:
-                            key = f"{module_name}.{weight_type}.expert_{expert_id}"
-                            if key in lookup:
-                                info = lookup[key]
-                                expert_tensors_b.append((info.offset, info.size, info.shape))
-                    
-                    extraction_map[module_name] = ('moe', expert_tensors_a, expert_tensors_b)
-                
-            elif module_name.endswith('.attn.qkv_proj'):
-                # QKV case - pre-compute projection tensors
-                base_name = module_name.replace('.attn.qkv_proj', '.attn')
-                qkv_tensors_a, qkv_tensors_b = [], []
-                
-                for proj in ['q_proj', 'k_proj', 'v_proj']:
-                    a_key = f"{base_name}.{proj}.lora_a"
-                    b_key = f"{base_name}.{proj}.lora_b"
-                    
-                    a_info = lookup.get(a_key)
-                    b_info = lookup.get(b_key)
-                    qkv_tensors_a.append((a_info.offset, a_info.size, a_info.shape) if a_info else None)
-                    qkv_tensors_b.append((b_info.offset, b_info.size, b_info.shape) if b_info else None)
-                
-                extraction_map[module_name] = ('qkv', qkv_tensors_a, qkv_tensors_b)
-        
-        metadata._extraction_map = extraction_map
-    
-    # ZERO-OVERHEAD SCATTER LOOP
+    # Loop through model modules
     for module_name, module in modules_dict.items():
-        module_lora = get_lora_layer_weights_fn(lora_model, module_name)
-        if not module_lora:
+        lora_a_gpu, lora_b_gpu = extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name)
+        
+        if lora_a_gpu is None or lora_b_gpu is None:
+            # No weights for this module
             module.reset_lora(index)
             continue
         
-        # Direct extraction using pre-computed info
-        extraction_info = metadata._extraction_map.get(module_name)
-        if not extraction_info:
-            continue
-            
-        extraction_type = extraction_info[0]
-        
-        if extraction_type == 'linear':
-            # Direct linear extraction - zero overhead
-            _, a_offset, a_size, a_shape, b_offset, b_size, b_shape = extraction_info
-            lora_a = gpu_slab[a_offset:a_offset + a_size].view(a_shape)
-            lora_b = gpu_slab[b_offset:b_offset + b_size].view(b_shape)
-            
-            # Remove batch dims if needed
-            if lora_a.ndim == 4:
-                lora_a = lora_a[0, 0]
-            if lora_b.ndim == 4:
-                lora_b = lora_b[0, 0]
+        # Special case: MoE3D needs 2-item list format
+        if isinstance(module, FusedMoE3DWithLoRA):
+            # Check if we need to convert from separate entries
+            if not isinstance(lora_a_gpu, list):                
+                gate_up_a, gate_up_b = extract_tensors_from_gpu_slab(gpu_slab, metadata, module_name + ".base_layer")
+                down_a, down_b = lora_a_gpu, lora_b_gpu
                 
-            # module.set_lora(index, lora_a, lora_b, module_lora.embeddings_tensor)
-            
-        elif extraction_type == 'moe' or extraction_type == 'moe3d':
-            # Direct MoE/MoE3D extraction from pre-computed data
-            _, expert_tensors_a, expert_tensors_b = extraction_info
-            lora_a = [gpu_slab[offset:offset + size].view(shape) for offset, size, shape in expert_tensors_a]
-            lora_b = [gpu_slab[offset:offset + size].view(shape) for offset, size, shape in expert_tensors_b]
-            # module.set_lora(index, lora_a, lora_b, module_lora.embeddings_tensor)
-            
-        elif extraction_type == 'qkv':
-            # Direct QKV extraction from pre-computed data  
-            _, qkv_tensors_a, qkv_tensors_b = extraction_info
-            lora_a = [gpu_slab[offset:offset + size].view(shape) if info else None for info in qkv_tensors_a for offset, size, shape in [info] if info]
-            lora_b = [gpu_slab[offset:offset + size].view(shape) if info else None for info in qkv_tensors_b for offset, size, shape in [info] if info]
-            # module.set_lora(index, lora_a, lora_b, module_lora.embeddings_tensor)
+                if gate_up_a is not None and down_a is not None:
+                    lora_a_gpu = [gate_up_a, down_a]
+                    lora_b_gpu = [gate_up_b, down_b]
+        module.set_lora(index, lora_a_gpu, lora_b_gpu)
+    return True
             
 
 
-def _generate_slab_cache_key(lora_model, device):
-    """Generate simple cache key for LoRA slab - TP-agnostic since we store unsharded tensors."""
+def check_slab_cache(lora_dir, peft_helper, target_lora_config, target_modules_dict):
+    """Check if LoRAModel is already cached for this LoRA directory."""
+    if not lora_dir:
+        return False, None
+    
+    # Generate simple key based on lora_dir only
+    cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
+    
+    # Check LoRAModel cache
+    with _LORA_MODEL_CACHE_LOCK:
+        if cache_key in _GLOBAL_LORA_MODEL_CACHE:
+            logger.info(f"[SLAB_CACHE_HIT] Found cached LoRAModel for {lora_dir}")
+            return True, _GLOBAL_LORA_MODEL_CACHE[cache_key]
+    
+    logger.info(f"[SLAB_CACHE_MISS] No cached LoRAModel for {lora_dir}")
+    return False, None
+
+
+def cache_lora_model(lora_dir, lora_model):
+    """Store LoRAModel in cache for reuse."""
+    if not lora_dir:
+        return
+    
+    cache_key = hashlib.md5(lora_dir.encode()).hexdigest()
+    
+    with _LORA_MODEL_CACHE_LOCK:
+        _GLOBAL_LORA_MODEL_CACHE[cache_key] = lora_model
+        logger.info(f"[SLAB_CACHE] Stored LoRAModel for {lora_dir}")
+
+
+def get_cached_lora_model(cache_key):
+    """Get cached LoRA model."""
+    with _LORA_MODEL_CACHE_LOCK:
+        return _GLOBAL_LORA_MODEL_CACHE.get(cache_key)
+
+
+def _generate_slab_cache_key(lora_model, device, tp_rank=None, fully_sharded=False):
+    """Generate cache key for LoRA slab - includes tp_rank when fully_sharded=True."""
     lora_dir = getattr(lora_model, '_lora_dir', None)
     
     if not lora_dir:
         lora_dir = f"unknown_path_{lora_model.rank}_{len(lora_model.loras)}"
     
-    # Simplified key without TP info since we store unsharded tensors
+    # Base key
     key_str = f"{lora_dir}|{lora_model.rank}|{len(lora_model.loras)}|{str(device)}"
+    
+    # Include tp_rank when fully_sharded=True (each GPU has different slab)
+    if fully_sharded and tp_rank is not None:
+        key_str += f"|tp_rank_{tp_rank}"
+    
     cache_key = hashlib.md5(key_str.encode()).hexdigest()
     
     return cache_key
@@ -822,6 +534,8 @@ def create_slab_optimized_lora_model(
     target_modules_dict = None,  # Target modules for layout matching
     target_lora_config = None,   # LoRAConfig with fully_sharded_loras flag
     slab_path: Optional[str] = None,  # Path to save/load slab
+    packed_modules: dict = None,  # NEW: Packed modules mapping for packing BEFORE slab build
+    packed_modules_mapping: dict = None,  # NEW: Module packing configuration
 ):
     """Create a LoRAModel with target-aware slab - adapts to model dimensions for zero-copy."""
     if get_ultra_fast_pool() is None:
@@ -830,9 +544,6 @@ def create_slab_optimized_lora_model(
     # Create LoRA weights as normal
     loras: dict[str, LoRALayerWeights] = {}
     
-    # Import here to avoid circular dependency
-    from vllm.lora.utils import parse_fine_tuned_lora_name
-    from vllm.lora.lora_weights import LoRALayerWeights
     
     for tensor_name, tensor in tensors.items():
         module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name, weights_mapper)
@@ -877,9 +588,83 @@ def create_slab_optimized_lora_model(
     if lora_dir:
         lora_model_instance._lora_dir = lora_dir
     
+    if packed_modules and len(packed_modules) > 0:
+        # Helper function to get lora weights (simplified version without model context)
+        def get_lora_weights(lora_model, module_name):
+            return lora_model.loras.get(module_name, None)
+        
+        # Pack modules similar to _create_merged_loras_inplace
+        for module_name, new_module_names in packed_modules.items():
+            replacement_loras: list[LoRALayerWeights | None] = []
+            replaced_module: set[str] = set()
+            has_replacement = False
+            
+            # Collect individual projections
+            for r in new_module_names:
+                lora = get_lora_weights(lora_model_instance, r)
+                replacement_loras.append(lora)
+                if lora:
+                    has_replacement = True
+                    replaced_module.add(r)
+            
+            if not has_replacement:
+                continue
+            
+            # Ensure None values are explicit
+            for i in range(len(replacement_loras)):
+                if not replacement_loras[i]:
+                    replacement_loras[i] = None
+            
+            # Pack based on module type
+            if module_name.endswith(".experts"):
+                lora_model_instance.loras[module_name] = PackedLoRALayerWeights.pack_moe(
+                    replacement_loras, module_name
+                )
+                # logger.info(f"[SLAB_PRE_PACK] Packed MoE module: {module_name} from {len(replacement_loras)} projections")
+            else:
+                lora_model_instance.loras[module_name] = PackedLoRALayerWeights.pack(
+                    replacement_loras
+                )
+            # Remove individual projections
+            for module in replaced_module:
+                lora_model_instance.loras.pop(module, None)
+        
+    else:
+        logger.warning(f"[SLAB_PRE_PACK] No packed_modules provided - slab will build with unpacked structure (may cause issues)")
+    
+    # TP SHARDING: Shard lora_b weights on CPU if fully_sharded_loras=True
+    fully_sharded = target_lora_config.fully_sharded_loras if target_lora_config else False
+    if fully_sharded and target_modules_dict:
+        logger.info(f"[SLAB_TP_SHARD] fully_sharded_loras=True, sharding lora_b weights on CPU")
+        
+        for module_name, module_lora in lora_model_instance.loras.items():
+            target_module = target_modules_dict.get(module_name)
+            if not target_module:
+                continue
+            
+            tp_rank = getattr(target_module, 'tp_rank', 0)
+            tp_size = getattr(target_module, 'tp_size', 1)
+            
+            if tp_size > 1 and hasattr(module_lora, 'lora_b') and module_lora.lora_b is not None:
+                if isinstance(module_lora.lora_b, list):
+                    # MoE: shard each expert's lora_b
+                    sharded_experts = []
+                    for expert_idx, expert_b in enumerate(module_lora.lora_b):
+                        if expert_b is not None:
+                            shards = expert_b.chunk(tp_size, dim=0)
+                            sharded_experts.append(shards[tp_rank])
+                        else:
+                            sharded_experts.append(None)
+                    module_lora.lora_b = sharded_experts
+                else:
+                    # Single tensor: shard once
+                    original_shape = module_lora.lora_b.shape
+                    shards = module_lora.lora_b.chunk(tp_size, dim=0)
+                    module_lora.lora_b = shards[tp_rank]
+    
     result_key = build_target_matched_slab(
         lora_model_instance, target_modules_dict, 1, target_lora_config, slab_path  
-    )    
+    )
     
     # Handle different return types (cache key vs. direct objects for cache hits)
     if isinstance(result_key, str) and result_key.startswith("slab_result_"):
@@ -888,17 +673,15 @@ def create_slab_optimized_lora_model(
         del _GLOBAL_RESULT_STORAGE[result_key]
         
     else:
-        # Fallback for cache hits that still return objects directly
         slab, metadata = result_key
     
     if not torch.cuda.is_available():
         # Return tuple for consistency even without GPU
         return lora_model_instance, None, None
     
-    # Cache only CPU slab and metadata - GPU transfer happens during activation
     lora_model_instance._cached_cpu_slab = slab
     lora_model_instance._cached_metadata = metadata
     lora_model_instance._loras_dict = loras  # Cache for GPU scaling later
-    
+
     # Return CPU slab reference for now - GPU slab created during activation
     return lora_model_instance, None, metadata  # GPU slab = None until activation
