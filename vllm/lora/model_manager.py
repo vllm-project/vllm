@@ -253,7 +253,8 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
-        if SLAB_OPTIMIZATION:            
+
+        if SLAB_OPTIMIZATION:
             # Check for cached CPU slab and metadata from LoRAModel
             has_cpu_slab = hasattr(lora_model, '_cached_cpu_slab')
             has_gpu_slab = hasattr(lora_model, '_cached_gpu_slab')
@@ -270,17 +271,13 @@ class LoRAModelManager:
                 
                 # Cache GPU slab for this activation (will be cleaned up when deactivated)
                 lora_model._cached_gpu_slab = gpu_slab
-                logger.info(f"[ON_DEMAND_GPU] Created GPU slab during activation - respects max_loras constraint")
             
             elif has_gpu_slab and has_metadata:
                 gpu_slab = lora_model._cached_gpu_slab
                 metadata = lora_model._cached_metadata
             
             else:
-                # No slab available - skip slab optimization
-                logger.warning(f"[SLAB_ACTIVATION] No slab data available for LoRA {lora_model.id}")
-                return False
-            
+                return False            
             # Use helper function for the full activation loop with all optimizations
             process_slab_activation_loop(
                 self.modules, 
@@ -294,6 +291,7 @@ class LoRAModelManager:
             
             return True
         else:
+            
             for module_name, module in self.modules.items():
                 module_lora = self._get_lora_layer_weights(lora_model, module_name)
                 if not module_lora:
@@ -304,7 +302,6 @@ class LoRAModelManager:
                     module_lora.lora_a,
                     module_lora.lora_b,
                 )
-
             return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -319,7 +316,7 @@ class LoRAModelManager:
                     # Free GPU slab to make room for other LoRAs
                     del lora_model._cached_gpu_slab
                     torch.cuda.empty_cache()  # Force GPU memory cleanup
-                    logger.info(f"[MEMORY_CLEANUP] Freed GPU slab for LoRA {lora_id} - respects max_loras constraint")
+                    # logger.info(f"[MEMORY_CLEANUP] Freed GPU slab for LoRA {lora_id} - respects max_loras constraint")
             
         except ValueError:
             pass
@@ -647,19 +644,19 @@ class LoRAModelManager:
         # overhead is significant.
         # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
-
-        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
-        if pin_memory:
-            for lora in lora_model.loras.values():
-                if isinstance(lora.lora_a, list):
-                    for index in range(len(lora.lora_a)):
-                        if lora.lora_a[index] is None:
-                            continue
-                        lora.lora_a[index] = lora.lora_a[index].pin_memory()
-                        lora.lora_b[index] = lora.lora_b[index].pin_memory()
-                else:
-                    lora.lora_a = lora.lora_a.pin_memory()
-                    lora.lora_b = lora.lora_b.pin_memory()
+        if not SLAB_OPTIMIZATION:
+            pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
+            if pin_memory:
+                for lora in lora_model.loras.values():
+                    if isinstance(lora.lora_a, list):
+                        for index in range(len(lora.lora_a)):
+                            if lora.lora_a[index] is None:
+                                continue
+                            lora.lora_a[index] = lora.lora_a[index].pin_memory()
+                            lora.lora_b[index] = lora.lora_b[index].pin_memory()
+                    else:
+                        lora.lora_a = lora.lora_a.pin_memory()
+                        lora.lora_b = lora.lora_b.pin_memory()
 
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str

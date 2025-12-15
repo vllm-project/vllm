@@ -141,14 +141,21 @@ class WorkerLoRAManager:
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
-            # Get target modules and lora_config from the adapter manager for slab optimization
+            # Get target modules, lora_config, AND packed_modules info for slab optimization
             target_modules_dict = None
             target_lora_config = None
+            packed_modules = None
+            packed_modules_mapping = None
+            
             if SLAB_OPTIMIZATION and hasattr(self, '_adapter_manager'):
                 target_modules_dict = getattr(self._adapter_manager, 'modules', None)
                 target_lora_config = getattr(self._adapter_manager, 'lora_config', None)
+                packed_modules = getattr(self._adapter_manager, 'packed_modules', None)
+                packed_modules_mapping = getattr(self._adapter_manager, 'packed_modules_mapping', None)
+                
                 if target_modules_dict and target_lora_config:
                     logger.debug(f"[SLAB_OPTIMIZATION] Passing {len(target_modules_dict)} target modules and lora_config (fully_sharded_loras={target_lora_config.fully_sharded_loras}) to LoRA creation")
+                    logger.debug(f"[SLAB_OPTIMIZATION] Passing {len(packed_modules) if packed_modules else 0} packed_modules for pre-slab packing")
                 else:
                     logger.warning(f"[SLAB_OPTIMIZATION] Missing target info - modules: {target_modules_dict is not None}, lora_config: {target_lora_config is not None}")
 
@@ -165,9 +172,11 @@ class WorkerLoRAManager:
                 embedding_padding_modules=self.embedding_padding_modules,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
-                target_modules_dict=target_modules_dict,  # Pass target modules for slab optimization
-                target_lora_config=target_lora_config,     # Pass lora_config with fully_sharded_loras flag
-                slab_path=lora_request.slab_path,          # Pass slab path for disk save/load
+                target_modules_dict=target_modules_dict,      # Pass target modules for slab optimization
+                target_lora_config=target_lora_config,         # Pass lora_config with fully_sharded_loras flag
+                slab_path=lora_request.slab_path,              # Pass slab path for disk save/load
+                packed_modules=packed_modules,                 # NEW: Pass packed_modules for pre-slab packing
+                packed_modules_mapping=packed_modules_mapping, # NEW: Pass packing mapping
             )
 
         except FileNotFoundError as e:

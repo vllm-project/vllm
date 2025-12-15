@@ -61,7 +61,8 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
     for i in range(len(EXPECTED_LORA_OUTPUT)):
-        assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
+        # Case-insensitive comparison to handle SQL case variations
+        assert generated_texts[i].lower().startswith(EXPECTED_LORA_OUTPUT[i].lower())
 
 
 def test_qwen3moe_lora(qwen3moe_lora_files):

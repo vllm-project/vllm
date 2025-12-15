@@ -17,6 +17,7 @@ from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
+from vllm.logger import init_logger
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -101,6 +102,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # MergedColumnParallelLinearWithLoRA, all other linear LoRA layers
         # store weights in a tuple of size 1. These two layers will
         # override this function.
+        logger = init_logger(__name__)
+
+        # logger.info(f"[SLAB_DEBUG] base.set_lora called for index {index}:")
+
         assert isinstance(lora_a, torch.Tensor)
         assert isinstance(lora_b, torch.Tensor)
         assert (
@@ -112,12 +117,20 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
-        self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
-            lora_a, non_blocking=True
-        )
-        self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
-            lora_b, non_blocking=True
-        )
+        # Device-aware scatter: optimize GPU→GPU case (slab optimization)
+        if lora_a.is_cuda:
+            # Fast path: GPU→GPU scatter (source already on GPU from slab)
+            # Use direct assignment for better performance
+            self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]] = lora_a
+            self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]] = lora_b
+        else:
+            # Standard path: CPU→GPU transfer (baseline case)
+            self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
+                lora_a, non_blocking=True
+            )
+            self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
+                lora_b, non_blocking=True
+            )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
