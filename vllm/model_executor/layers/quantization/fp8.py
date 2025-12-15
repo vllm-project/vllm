@@ -687,6 +687,28 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
 
+abc = "abc"
+
+
+def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute:
+    from vllm.model_executor.layers.fused_moe import (
+        FlashInferExperts,
+        MarlinExperts,
+        TritonExperts,
+        TritonOrDeepGemmExperts,
+    )
+
+    _BACKEND_TO_KERNEL = {
+        FlashinferMoeBackend.FLASHINFER_TRTLLM: FlashInferExperts,
+        FlashinferMoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
+        FlashinferMoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
+        # FlashinferMoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM: # does not support mk yet
+        FlashinferMoeBackend.MARLIN: MarlinExperts,
+        FlashinferMoeBackend.TRITON: TritonExperts,
+    }
+    return _BACKEND_TO_KERNEL[backend]
+
+
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -711,6 +733,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         self.marlin_input_dtype = None
+        self.kernel = get_kernel(self.fp8_backend)
+
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
