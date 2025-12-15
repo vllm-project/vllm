@@ -1005,7 +1005,7 @@ def vllm_is_batch_invariant() -> bool:
 
 
 def override_envs_for_invariance(
-    attention_backend: AttentionBackendEnum,
+    attention_backend: AttentionBackendEnum | None,
 ):
     supported_backends = [
         AttentionBackendEnum.FLASH_ATTN,  # best supported backend
