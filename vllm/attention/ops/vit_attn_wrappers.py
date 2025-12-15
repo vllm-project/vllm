@@ -103,18 +103,18 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if cu_seqlens is None:
+        batch_size, q_len, _, _ = q.shape
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+
     outputs = []
 
     lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
-
-    batch_size, q_len, _, _ = q.shape
-    if cu_seqlens is None:
-        cu_seqlens = torch.arange(
-            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
-        )
     for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
         q_i, k_i, v_i = (
             einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
