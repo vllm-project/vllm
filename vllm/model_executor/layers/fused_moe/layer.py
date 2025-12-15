@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.utils import collect_expert_usage_histogram
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -436,6 +437,13 @@ class FusedMoE(CustomOp):
         self.logical_replica_count: torch.Tensor | None = None
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
+        )
+
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        self.layer_index = (
+            extract_layer_index(prefix)
+            - vllm_config.model_config.get_total_num_dense_moe_layers()
         )
 
         # ROCm aiter shared experts fusion
@@ -1663,6 +1671,14 @@ class FusedMoE(CustomOp):
             )
         else:
             zero_expert_result = None
+
+        expert_usage_histogram = get_forward_context().expert_usage_histogram
+
+        if expert_usage_histogram is not None:
+            collect_expert_usage_histogram(
+                topk_ids, expert_usage_histogram[self.layer_index]
+            )
+
         return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:

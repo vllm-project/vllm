@@ -6,6 +6,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import torch
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -1245,7 +1247,11 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats
+                spec_decoding_stats,
+                kv_connector_stats,
+                cudagraph_stats,
+                model_runner_output.expert_usage_histogram_cpu,
+                model_runner_output.per_ep_rank_tokens_histogram_cpu,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1468,6 +1474,8 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
+        expert_usage_histogram_cpu: torch.Tensor | None = None,
+        per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1493,6 +1501,8 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
+            expert_usage_histogram_cpu=expert_usage_histogram_cpu,
+            per_ep_rank_tokens_histogram_cpu=per_ep_rank_tokens_histogram_cpu,
         )
 
     def make_spec_decoding_stats(

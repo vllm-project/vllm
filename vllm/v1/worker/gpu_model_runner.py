@@ -546,6 +546,24 @@ class GPUModelRunner(
             dtype=np.int64,
         )
 
+        self.expert_usage_histogram: torch.Tensor | None = None
+
+        if envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
+            self.expert_histogram_iter = 0
+
+            logger.warning_once(
+                "Collecting expert routing histogram per layer, "
+                "this can affect performance negatively"
+            )
+
+            self.expert_usage_histogram = torch.zeros(
+                model_config.get_total_num_moe_layers(),
+                model_config.get_num_experts()
+                + self.parallel_config.eplb_config.num_redundant_experts,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -2382,6 +2400,73 @@ class GPUModelRunner(
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
+    def expert_logging(self) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if not envs.VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM:
+            return None, None
+
+        self.expert_histogram_iter += 1
+
+        if self.expert_histogram_iter < envs.VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL:
+            return None, None
+
+        assert self.expert_usage_histogram is not None
+        expert_usage_histogram_cpu: torch.Tensor | None = None
+        per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None
+        should_all_reduce = get_tp_group().world_size > 1 and (
+            envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency"
+            or envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
+        )
+
+        # Collect expert selection stats per rank.
+        hist_shape = self.expert_usage_histogram.shape
+
+        from vllm.distributed.parallel_state import get_ep_group
+
+        self.expert_usage_histogram = self.expert_usage_histogram.reshape(
+            [hist_shape[0], get_ep_group().world_size, -1]
+        )
+        histogram_sum = torch.sum(self.expert_usage_histogram, dim=-1)
+
+        if should_all_reduce:
+            torch.distributed.all_reduce(
+                histogram_sum, group=get_tp_group().device_group
+            )
+        per_ep_rank_tokens_histogram_cpu = histogram_sum.cpu()
+        self.expert_usage_histogram = self.expert_usage_histogram.reshape(hist_shape)
+
+        if self.parallel_config.enable_eplb:
+            assert self.eplb_state is not None
+            eplb_state = self.eplb_state.model_states[self.model_config.compute_hash()]
+
+            # When eplb enabled remap physical to logical experts.
+            logical_expert_usage_histogram = torch.zeros(
+                [
+                    self.model_config.get_total_num_moe_layers(),
+                    self.model_config.get_num_experts(),
+                ],
+                dtype=self.expert_usage_histogram.dtype,
+                device=self.expert_usage_histogram.device,
+            )
+            logical_expert_usage_histogram.scatter_reduce_(
+                -1,
+                eplb_state.physical_to_logical_map,
+                self.expert_usage_histogram,
+                reduce="sum",
+            )
+        else:
+            logical_expert_usage_histogram = self.expert_usage_histogram
+        if should_all_reduce:
+            torch.distributed.all_reduce(
+                logical_expert_usage_histogram, group=get_tp_group().device_group
+            )
+        expert_usage_histogram_cpu = logical_expert_usage_histogram.cpu()
+
+        if self.expert_histogram_iter >= envs.VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL:
+            self.expert_histogram_iter = 0
+            self.expert_usage_histogram.zero_()
+
+        return expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu
+
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -3080,6 +3165,7 @@ class GPUModelRunner(
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
                 ubatch_slices=ubatch_slices_padded,
+                expert_usage_histogram=self.expert_usage_histogram,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
@@ -3298,6 +3384,13 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+
+        with record_function_or_nullcontext("gpu_model_runner: expert_logging"):
+            # Get the expert usage histogram for MoEs
+            expert_usage_histogram_cpu, per_ep_rank_tokens_histogram_cpu = (
+                self.expert_logging()
+            )
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -3312,6 +3405,8 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                expert_usage_histogram_cpu=expert_usage_histogram_cpu,
+                per_ep_rank_tokens_histogram_cpu=per_ep_rank_tokens_histogram_cpu,
             )
 
         if not self.use_async_scheduling:
@@ -4193,6 +4288,7 @@ class GPUModelRunner(
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
+                    expert_usage_histogram=self.expert_usage_histogram,
                 ),
             ):
                 outputs = self.model(

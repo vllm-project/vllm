@@ -166,6 +166,8 @@ if TYPE_CHECKING:
         "full",
         "relax",
     ] = "relax"
+    VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL: int = 100
+    VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
@@ -1196,6 +1198,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "full",
             "relax",
         ],
+    ),
+    # Collects expert routing histogram per layer.
+    "VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM": lambda: bool(
+        int(os.getenv("VLLM_COLLECT_EXPERT_USAGE_HISTOGRAM", "0"))
+    ),
+    # How often should the expert usage histogram be saved.
+    "VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL": lambda: int(
+        os.getenv("VLLM_EXPERT_USAGE_HISTOGRAM_SAVE_INTERVAL", "100")
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(

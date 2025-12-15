@@ -6,6 +6,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import torch
+
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -180,6 +182,9 @@ class SchedulerStats:
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
+
+    expert_usage_histogram_cpu: torch.Tensor | None = None
+    per_ep_rank_tokens_histogram_cpu: torch.Tensor | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)
     running_lora_adapters: dict[str, int] = field(default_factory=dict)

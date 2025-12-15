@@ -1258,6 +1258,14 @@ class ModelConfig:
         # Coerce to 0 if explicitly set to None
         return num_experts or 0
 
+    def get_total_num_dense_moe_layers(self) -> int:
+        return getattr(self.hf_text_config, "first_k_dense_replace", 0)
+
+    def get_total_num_moe_layers(self) -> int:
+        return (
+            self.get_total_num_hidden_layers() - self.get_total_num_dense_moe_layers()
+        )
+
     def get_total_num_hidden_layers(self) -> int:
         if (
             self.hf_text_config.model_type == "deepseek_mtp"
