@@ -3,7 +3,7 @@
 
 import os
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -188,24 +188,6 @@ class RocmPlatform(Platform):
         supported_quantization += ["bitsandbytes"]
 
     @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> AttentionBackendEnum:
-        from importlib.util import find_spec
-
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        if rocm_aiter_ops.is_mha_enabled():
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
-            return AttentionBackendEnum.ROCM_AITER_FA
-
-        if on_gfx9() and find_spec("flash_attn") is not None:
-            return AttentionBackendEnum.FLASH_ATTN
-
-        return AttentionBackendEnum.TORCH_SDPA
-
-    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend,
@@ -321,6 +303,43 @@ class RocmPlatform(Platform):
             f"Attention backend {selected_backend.name} is not supported on "
             "ROCm. Note that V0 attention backends have been removed."
         )
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        from importlib.util import find_spec
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_mha_enabled():
+            # Note: AITER FA is only supported for Qwen-VL models.
+            # TODO: Add support for other VL models in their model class.
+            return AttentionBackendEnum.ROCM_AITER_FA
+
+        if on_gfx9() and find_spec("flash_attn") is not None:
+            return AttentionBackendEnum.FLASH_ATTN
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
