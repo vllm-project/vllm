@@ -1162,7 +1162,9 @@ class DeepseekV2Model(nn.Module):
             if recv_handle is not None:
                 for work in recv_handle:
                     work.wait()
-            current_hidden, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            current_hidden, residual = layer(
+                positions, hidden_states, residual, llama_4_scaling
+            )
             metadata = AFDConnectorMetadata.create_attention_metadata(
                 layer_idx=layer.layer_idx,
                 stage_idx=afd_metadata.afd_stage_idx,
@@ -1183,6 +1185,96 @@ class DeepseekV2Model(nn.Module):
         if recv_handle is not None:
             for work in recv_handle:
                 work.wait()
+
+        return hidden_states, residual
+
+    def forward_with_afd_v2(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        positions: torch.Tensor,
+        afd_metadata: AFDMetadata,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        forward_conext = get_forward_context()
+        recv_handle = None
+
+        ubatch_hidden_states = []
+        ubatch_residual = []
+
+        start_idx = 0
+        for pos in afd_metadata.positions_list:
+            # DeepSeekV2 uses MROPE with shape (3, num_tokens), so use shape[1] if ndim==2
+            # Otherwise use shape[0] as requested
+            num_tokens = pos.shape[1] if pos.ndim == 2 else pos.shape[0]
+            end_idx = start_idx + num_tokens
+            ubatch_hidden_states.append(hidden_states[start_idx:end_idx])
+            ubatch_residual.append(
+                residual[start_idx:end_idx] if residual is not None else None
+            )
+            start_idx = end_idx
+
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            for stage_i in range(forward_conext.afd_metadata.num_of_stages):
+                logger.info(
+                    f"jcz deepseekv2 forward_with_afd_v2 layer_idx: {layer.layer_idx}, stage_i: {stage_i}"
+                )
+                afd_connector = afd_metadata.afd_connector
+                forward_conext.attn_metadata = afd_metadata.attn_metadata_list[stage_i]
+                forward_conext.dp_metadata = afd_metadata.dp_metadata_list[stage_i]
+
+                residual = ubatch_residual[stage_i]
+
+                if layer.layer_idx > 0:
+                    hidden_states, recv_metadata = afd_connector.recv_ffn_output()
+                    if recv_metadata.recv_handle_list is not None:
+                        recv_handle = recv_metadata.recv_handle_list
+                else:
+                    hidden_states = ubatch_hidden_states[stage_i]
+
+                if recv_handle is not None:
+                    for work in recv_handle:
+                        work.wait()
+
+                current_positions = afd_metadata.positions_list[stage_i]
+                logger.info(
+                    f"jcz deepseekv2 forward_with_afd_v2 hidden_states: {hidden_states.shape}"
+                    f" positions:{positions.shape}"
+                )
+                hidden_states, residual = layer(
+                    current_positions, hidden_states, residual, llama_4_scaling
+                )
+
+                ubatch_hidden_states[stage_i] = hidden_states
+                ubatch_residual[stage_i] = residual
+
+                metadata = AFDConnectorMetadata.create_attention_metadata(
+                    layer_idx=layer.layer_idx,
+                    stage_idx=stage_i,
+                    seq_len=hidden_states.shape[0],
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                    num_of_stages=afd_metadata.num_of_stages,
+                    afd_tokens_lens=afd_metadata.afd_tokens_lens,
+                )
+                afd_connector.send_attn_output(hidden_states, metadata)
+
+        # Recv last layer and last stage FFN output.
+        ubatch_hidden_states[afd_metadata.num_of_stages - 1], recv_metadata = (
+            afd_connector.recv_ffn_output()
+        )
+        if recv_metadata.recv_handle_list is not None:
+            recv_handle = recv_metadata.recv_handle_list
+        if recv_handle is not None:
+            for work in recv_handle:
+                work.wait()
+
+        # Re-assemble the batch
+        hidden_states = torch.cat(ubatch_hidden_states, dim=0)
+        if any(r is not None for r in ubatch_residual):
+            residual = torch.cat(ubatch_residual, dim=0)
+        else:
+            residual = None
 
         return hidden_states, residual
 
@@ -1222,12 +1314,14 @@ class DeepseekV2Model(nn.Module):
         afd_metadata = forward_ctx.afd_metadata if forward_ctx is not None else None
 
         if afd_metadata != None:
-            hidden_states, residual = self.forward_with_afd(
+            hidden_states, residual = self.forward_with_afd_v2(
                 hidden_states, residual, positions, afd_metadata, llama_4_scaling
             )
         else:
             for layer in islice(self.layers, self.start_layer, self.end_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, llama_4_scaling
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
