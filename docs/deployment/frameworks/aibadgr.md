@@ -19,7 +19,7 @@ pip install vllm
 1. Start the vLLM server with a supported chat completion model, e.g.:
 
     ```bash
-    vllm serve meta-llama/Llama-3.2-3B-Instruct --host 0.0.0.0 --port 8000
+    vllm serve meta-llama/Meta-Llama-3-8B-Instruct --host 0.0.0.0 --port 8000
     ```
 
 2. Configure AI Badgr to point to your vLLM endpoint:
