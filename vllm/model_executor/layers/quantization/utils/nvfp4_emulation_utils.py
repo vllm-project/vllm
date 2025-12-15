@@ -3,12 +3,17 @@
 import torch
 
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
     "break_fp4_bytes",
+    "dequant_nvfp4",
     "dequantize_to_dtype",
     "ref_nvfp4_quant",
+    "NVFP4_BLOCK_SIZE",
 ]
+
+NVFP4_BLOCK_SIZE = 16
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 
@@ -140,3 +145,57 @@ def run_nvfp4_emulations(
     out = torch.matmul(x_dq, w_dq.t())
     del w_dq, x_dq
     return out
+
+
+def _dequant_nvfp4(
+    tensor_fp4: torch.Tensor,
+    tensor_sf: torch.Tensor,
+    global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    block_size: int = NVFP4_BLOCK_SIZE,
+) -> torch.Tensor:
+    """Dequantize NVFP4 weights to high precision for fused MoE emulation.
+
+    Args:
+        tensor_fp4: Packed FP4 weights as uint8, shape [M, K//2]
+        tensor_sf: FP8 E4M3FN per-group scales (swizzled), shape depends on layout
+        global_scale: FP32 global scale tensor
+        dtype: Target dtype (torch.float16 or torch.bfloat16)
+        block_size: Group size for scaling (default 16 for NVFP4)
+
+    Returns:
+        Dequantized weights, shape [M, K], dtype as specified
+    """
+    return dequantize_to_dtype(
+        tensor_fp4,
+        tensor_sf,
+        global_scale,
+        dtype,
+        tensor_fp4.device,
+        block_size,
+    )
+
+
+def _dequant_nvfp4_fake(
+    tensor_fp4: torch.Tensor,
+    tensor_sf: torch.Tensor,
+    global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    block_size: int = NVFP4_BLOCK_SIZE,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile symbolic tracing."""
+    m, packed_k = tensor_fp4.shape
+    k = packed_k * 2
+    return torch.empty((m, k), dtype=dtype, device=tensor_fp4.device)
+
+
+# Register as custom op for torch.compile compatibility
+try:
+    direct_register_custom_op(
+        op_name="dequant_nvfp4",
+        op_func=_dequant_nvfp4,
+        fake_impl=_dequant_nvfp4_fake,
+    )
+    dequant_nvfp4 = torch.ops.vllm.dequant_nvfp4
+except AttributeError as error:
+    raise error
