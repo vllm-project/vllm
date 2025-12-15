@@ -13,12 +13,12 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
-    Qwen3CoderToolParser,
-)
-from vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
+from vllm.tool_parsers.qwen3coder_tool_parser import (
+    Qwen3CoderToolParser,
+)
+from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
 pytestmark = pytest.mark.cpu_test
 

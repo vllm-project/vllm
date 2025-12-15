@@ -3,8 +3,8 @@
 
 import regex as re
 
-from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):
