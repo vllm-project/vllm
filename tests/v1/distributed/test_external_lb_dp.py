@@ -24,17 +24,18 @@ TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 os.environ["CCL_WORKER_COUNT"] = str(DP_SIZE)
 
 import socket
-from contextlib import closing
 
-def is_port_available(port: int, host: str = '127.0.0.1') -> bool:
+
+def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
     # Try to bind to the port to check if it's available. This is more reliable
     # than trying to connect.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
             s.bind((host, port))
             return True
-        except socket.error:
+        except OSError:
             return False
+
 
 def get_unique_port(start_port=8000):
     """Find an available port"""
