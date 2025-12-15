@@ -53,12 +53,7 @@ class PiecewiseBackend:
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
-        # TODO: we need to generalize encoder compilation to other models
-        self.is_encoder_compilation = vllm_backend.prefix in [
-            "Qwen2_5_VisionPatchEmbed",
-            "Qwen2_5_VisionPatchMerger",
-            "Qwen2_5_VisionBlock",
-        ]
+        self.is_encoder_compilation = vllm_backend.is_encoder
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
         if self.is_encoder_compilation:
