@@ -462,7 +462,12 @@ def download_weights_from_hf(
                 )
                 with open(index_path) as f:
                     weight_map = json.load(f)["weight_map"]
-                allow_patterns = list(set(weight_map.values()))
+                if weight_map:
+                    # Extra [] so that weight_map files are treated as a
+                    # single allow_pattern in the loop below
+                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item]
+                else:
+                    allow_patterns = ["*.safetensors"]
             else:
                 # Use the first pattern found in the HF repo's files.
                 for pattern in allow_patterns:
@@ -471,7 +476,9 @@ def download_weights_from_hf(
                         break
         except Exception as e:
             logger.warning(
-                "Failed to get file list for '%s': %s",
+                "Failed to get file list for '%s'. Trying each pattern in "
+                "allow_patterns individually until weights have been "
+                "downloaded. Error: %s",
                 model_name_or_path,
                 e,
             )
@@ -481,15 +488,23 @@ def download_weights_from_hf(
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        hf_folder = snapshot_download(
-            model_name_or_path,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            cache_dir=cache_dir,
-            tqdm_class=DisabledTqdm,
-            revision=revision,
-            local_files_only=local_only,
-        )
+        for allow_pattern in allow_patterns:
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_pattern,
+                ignore_patterns=ignore_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=DisabledTqdm,
+                revision=revision,
+                local_files_only=local_only,
+            )
+            # If we have downloaded weights for this allow_pattern,
+            # we don't need to check the rest.
+            # allow_pattern can be a list (from weight_map) or str (glob)
+            if isinstance(allow_pattern, list):
+                break
+            if any(Path(hf_folder).glob(allow_pattern)):
+                break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info(
