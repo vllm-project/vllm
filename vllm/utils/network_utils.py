@@ -190,13 +190,13 @@ def get_open_ports_list(max_count: int = 5) -> list[int]:
     if "VLLM_DP_MASTER_PORT" in os.environ:
         starting_port = envs.VLLM_DP_MASTER_PORT
     elif "VLLM_PORT" in os.environ:
+        assert envs.VLLM_PORT is not None
         starting_port = envs.VLLM_PORT
-        # assertion holds because "VLLM_PORT" in os.environ
-        assert starting_port is not None
 
     # give ourselves some room for failure / already taken ports
     num_tries = max(2 * max_count, 10)
 
+    ports_to_try: Iterable
     if starting_port != 0:
         ports_to_try = range(starting_port, starting_port + num_tries)
     else:
