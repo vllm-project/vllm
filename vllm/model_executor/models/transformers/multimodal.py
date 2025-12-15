@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import torch
+from transformers import AutoModel
 
 from vllm.config.utils import getattr_iter
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
@@ -39,7 +40,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from transformers import BatchFeature
+    from transformers import BatchFeature, PreTrainedModel
 
     from vllm.config import VllmConfig
     from vllm.config.multimodal import BaseDummyOptions
@@ -284,19 +285,49 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        # Decorate the vision encoder model class to support torch compile if needed
+        if vllm_config.compilation_config.compile_mm_encoder:
+            encoder_cls = self._get_encoder_cls(
+                config=self.config,
+                dtype=self.model_config.dtype,
+                trust_remote_code=self.model_config.trust_remote_code,
+            )
+            dynamic_arg_dims = {"hidden_states": 1}
+            self._torch_compile(cls=encoder_cls, dynamic_arg_dims=dynamic_arg_dims)
 
-    def _torch_compile(self, dynamic_arg_dims: dict[str, int] | None = None, **kwargs):
+    def _get_encoder_cls(self, **kwargs) -> type["PreTrainedModel"]:
         """
-        See
+        Get the encoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The encoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        encoder_cls = type(model.get_encoder("image"))
+        del model
+        return encoder_cls
+
+    def _torch_compile(
+        self,
+        cls: type["PreTrainedModel"],
+        dynamic_arg_dims: dict[str, int] | None = None,
+    ):
+        """
+        Like
         [`_torch_compile`][vllm.model_executor.models.transformers.base.Base._torch_compile]
+        but with different default `dynamic_arg_dims` for MRoPE models.
         """
-        if self.model_config.uses_mrope:
+        if dynamic_arg_dims is None and self.model_config.uses_mrope:
             dynamic_arg_dims = {
                 "input_ids": 1,  # shape: [1, seq_len]
                 "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
                 "position_ids": 2,  # shape: [3, 1, seq_len]
             }
-        super()._torch_compile(dynamic_arg_dims=dynamic_arg_dims, **kwargs)
+        super()._torch_compile(cls=cls, dynamic_arg_dims=dynamic_arg_dims)
 
     def forward(
         self,

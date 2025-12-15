@@ -183,7 +183,8 @@ class Base(
         )
 
         # Decorate the language model class to support torch compile
-        self._torch_compile(**from_config_kwargs)
+        decoder_cls = self._get_decoder_cls(**from_config_kwargs)
+        self._torch_compile(cls=decoder_cls)
 
         # init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
@@ -221,11 +222,32 @@ class Base(
             ["hidden_states"], self.text_config.hidden_size
         )
 
-    def _torch_compile(self, dynamic_arg_dims: dict[str, int] | None = None, **kwargs):
+    def _get_decoder_cls(self, **kwargs) -> type[PreTrainedModel]:
+        """
+        Get the decoder class from the model.
+
+        Args:
+            kwargs: The kwargs to create the model.
+
+        Returns:
+            The decoder class.
+        """
+        with torch.device("meta"):
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+        decoder_cls = type(model.get_decoder())
+        del model
+        return decoder_cls
+
+    def _torch_compile(
+        self,
+        cls: type[PreTrainedModel],
+        dynamic_arg_dims: dict[str, int] | None = None,
+    ):
         """
         Decorate the model's language model class to support torch compile.
 
         Args:
+            cls: The PreTrainedModel class to decorate.
             dynamic_arg_dims: A mapping from argument name to the dunamic dimensions
                 of the argument. If None, default dynamic arg dims will be used. See
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
@@ -239,23 +261,17 @@ class Base(
                 "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
                 "position_ids": 1,  # shape: [1, seq_len]
             }
-        # Globally patch the language model class to support torch compile
-        with torch.device("meta"):
-            # Extract the language model class
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-            language_model_cls = type(model.get_decoder())
-            del model
 
-            # Decorate the language_model_cls for torch compile
-            @support_torch_compile(
-                dynamic_arg_dims=dynamic_arg_dims,
-                enable_if=can_enable_torch_compile,
-            )
-            class SupportTorchCompileWrapper(language_model_cls): ...
+        # Decorate the cls for torch compile
+        @support_torch_compile(
+            dynamic_arg_dims=dynamic_arg_dims,
+            enable_if=can_enable_torch_compile,
+        )
+        class SupportTorchCompileWrapper(cls): ...
 
-            # Patch the class in its module
-            module = sys.modules[language_model_cls.__module__]
-            setattr(module, language_model_cls.__name__, SupportTorchCompileWrapper)
+        # Patch the class in its module
+        module = sys.modules[cls.__module__]
+        setattr(module, cls.__name__, SupportTorchCompileWrapper)
 
     def pipeline_parallel(self):
         """
