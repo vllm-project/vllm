@@ -55,6 +55,9 @@ apt autoremove -y
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
+# Pre-install torch, torchvision, and torchaudio from PyTorch test index
+pip3 install torch==2.10.0 torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/test/cu129/
+
 VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 
 # Run the script
