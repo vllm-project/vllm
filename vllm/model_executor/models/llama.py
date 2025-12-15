@@ -415,6 +415,9 @@ class LlamaModel(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # Need explicit mark here to avoid recompile from 0/1 spec
+        # since VocabEmbedding uses a different torch.compile decorator
+        torch._dynamo.decorators.mark_unbacked(input_ids, 0)
         return self.embed_tokens(input_ids)
 
     def forward(
