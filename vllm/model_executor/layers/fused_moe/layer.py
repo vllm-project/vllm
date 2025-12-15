@@ -369,7 +369,9 @@ class FusedMoE(CustomOp):
             # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
-                logger.info_once("Enabled separate cuda stream for MoE shared_experts")
+                logger.info_once(
+                    "Enabled separate cuda stream for MoE shared_experts", scope="local"
+                )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -1200,10 +1202,14 @@ class FusedMoE(CustomOp):
         if full_load:
             shard_dim += 1
 
-        # Materialize GGUF UninitializedParameter
+        # Materialize GGUF UninitializedParameter accounting merged weights
         if is_gguf_weight and isinstance(param, UninitializedParameter):
+            # To materialize a tensor, we must have full shape including
+            # number of experts, making this portion to require `full_load`.
+            assert full_load
             final_shape = list(loaded_weight.shape)
-            if shard_id in ["w1", "w3"]:
+            # w1 and w3 are merged per expert.
+            if shard_id in {"w1", "w3"}:
                 final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
@@ -1556,6 +1562,14 @@ class FusedMoE(CustomOp):
                     f"EPLB is not supported for {self.quant_method.method_name}."
                 )
 
+        def valid_grouping() -> bool:
+            # Check if num_experts is greater than num_expert_group
+            # and is divisible by num_expert_group
+            num_experts = router_logits.shape[-1]
+            if num_experts <= self.num_expert_group:
+                return False
+            return num_experts % self.num_expert_group == 0
+
         indices_type = self.quant_method.topk_indices_dtype
 
         # Check if we should use a routing simulation strategy
@@ -1570,7 +1584,7 @@ class FusedMoE(CustomOp):
             )
 
         # DeepSeekv2 uses grouped_top_k
-        elif self.use_grouped_topk:
+        elif self.use_grouped_topk and valid_grouping():
             assert self.topk_group is not None
             assert self.num_expert_group is not None
             if rocm_aiter_ops.is_fused_moe_enabled():
