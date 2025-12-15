@@ -819,9 +819,9 @@ def unified_attention(
         block_q_seq_boundaries_tensor[1:].floor_divide_(BLOCK_Q)
         block_q_seq_boundaries_tensor.cumsum_(dim=0)
         num_q_blocks = block_q_seq_boundaries_tensor[-1]
-        
-    if seq_threshold_3D is None        :
-        seq_threshold_3D = 128 // num_kv_heads      
+
+    if seq_threshold_3D is None:
+        seq_threshold_3D = 128 // num_kv_heads
 
     # Assigning default tile sizes for prefill and decode.
     # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
@@ -887,7 +887,7 @@ def unified_attention(
         )
     else:  # Decode
         # Launch the 2D kernel if
-        # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+        # 1. No intermediate tiled softmax buffers have been allocated, or
         # 2. The number of sequences exceeds the configured threshold
         if (
             seq_threshold_3D is None
@@ -896,7 +896,7 @@ def unified_attention(
             or softmax_segm_max is None
             or softmax_segm_expsum is None
             or num_seqs > seq_threshold_3D
-        ):        
+        ):
             kernel_unified_attention_2d[
                 (
                     num_seqs,
