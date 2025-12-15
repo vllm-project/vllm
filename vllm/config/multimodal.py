@@ -141,11 +141,6 @@ class MultiModalConfig:
     from each video to be pruned.
     """
 
-    mm_encoder_wrap_fa_in_custom_op: bool = False
-    """If True, wrap Flash Attention in custom op for better performance with
-    torch compile. This is only supported on a per-model basis for now, and 
-    may be removed if FA has native tracing support in the future."""
-
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
     def _validate_limit_per_prompt(

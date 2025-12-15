@@ -471,18 +471,6 @@ class MultiHeadAttention(nn.Module):
                 self._flash_attn_varlen_func, fa_version=self.fa_version
             )
 
-        should_override_fa = (
-            multimodal_config is not None
-            and multimodal_config.mm_encoder_wrap_fa_in_custom_op
-        )
-        if self.is_flash_attn_backend and should_override_fa:
-            from vllm.attention.ops.vit_attn_wrappers import (
-                llama4_flash_attn_wrapper_call,
-            )
-
-            self._flash_attn_varlen_func = llama4_flash_attn_wrapper_call
-            assert self._flash_attn_varlen_func is not None
-
         logger.info_once(
             f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )

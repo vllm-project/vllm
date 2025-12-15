@@ -32,9 +32,12 @@ from transformers.models.llama4.image_processing_llama4_fast import (
 )
 
 from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.ops.vit_attn_wrappers import (
+    llama4_flash_attn_wrapper_call,
+)
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -261,16 +264,18 @@ class Llama4VisionAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
-        # Needed for torch.compile compatibility
-        mm_config = MultiModalConfig(
-            mm_encoder_wrap_fa_in_custom_op=True,
-        )
         self.attn = MultiHeadAttention(
             self.num_local_heads,
             self.head_dim,
             self.scaling,
-            multimodal_config=mm_config,
         )
+
+        if self.attn.is_flash_attn_backend:
+            # Needed for torch.compile compatibility since
+            # FA is not currently supported in torch.compile
+            # NOTE: If torch.compile is not enabled, this will be
+            # functionally equivalent to the unwrapped version
+            self.attn._flash_attn_varlen_func = llama4_flash_attn_wrapper_call
 
         if use_data_parallel:
             self.qkv_proj = ReplicatedLinear(

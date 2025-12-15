@@ -12,6 +12,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+import functools
+
 import einops
 import torch
 import torch.nn.functional as F
@@ -33,7 +35,16 @@ def llama4_flash_attn_wrapper(
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+        # Is FA so we need to get version
+        from vllm.attention.utils.fa_utils import (
+            flash_attn_varlen_func,
+            get_flash_attn_version,
+        )
+
+        fa_version = get_flash_attn_version()
+        flash_attn_varlen_func = functools.partial(
+            flash_attn_varlen_func, fa_version=fa_version
+        )
 
     return flash_attn_varlen_func(
         q,
