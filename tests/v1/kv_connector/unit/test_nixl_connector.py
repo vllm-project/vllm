@@ -1144,11 +1144,7 @@ def test_register_kv_caches(dist_init, attn_backend):
        block layout info
     """
 
-    from vllm.config import AttentionConfig
-
-    vllm_config = create_vllm_config(
-        attention_config=AttentionConfig(backend=attn_backend)
-    )
+    vllm_config = create_vllm_config(attention_backend=attn_backend)
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
