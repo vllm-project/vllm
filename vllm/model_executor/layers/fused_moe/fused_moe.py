@@ -351,7 +351,7 @@ def fused_moe_kernel(
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
-    use_unpermute: tl.constexpr,
+    naive_block_assignment: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -387,6 +387,9 @@ def fused_moe_kernel(
     - expert_ids: A tensor containing the indices of the expert for each
         block. It determines which expert matrix from B should be used for
         each block in A.
+    - naive_block_assignment: A boolean flag indicating whether to use naive
+        token wise block assignment. If True, each block corresponds to a
+        single token.
     This kernel performs the multiplication of a token by its corresponding
     expert matrix as determined by `expert_ids`. The sorting of
     `sorted_token_ids` by expert index and padding ensures divisibility by
@@ -416,7 +419,7 @@ def fused_moe_kernel(
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
-    if not use_unpermute:
+    if not naive_block_assignment:
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
         offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     else:
@@ -573,7 +576,6 @@ def invoke_fused_moe_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
-    use_unpermute: bool = False,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
@@ -743,7 +745,7 @@ def invoke_fused_moe_kernel(
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             per_channel_quant=per_channel_quant,
-            use_unpermute=use_unpermute,
+            naive_block_assignment=(sorted_token_ids is None),
             HAS_BIAS=HAS_BIAS,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             **config,
@@ -1902,12 +1904,13 @@ def fused_experts_impl(
             block_shape=block_shape,
         )
 
-        # Enable unpermute when token fan-out is manageable and the WNA16 kernels
-        # (int4/int8 with block groups) are not required.
-
-        use_unpermute = (
+        # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
+        # activates only a small fraction of total experts
+        SPARSITY_FACTOR = 4
+        # block quantized code path is not implemented yet.
+        naive_block_assignment = (
             expert_map is None
-            and tokens_in_chunk * top_k_num * 4 <= global_num_experts
+            and tokens_in_chunk * top_k_num * SPARSITY_FACTOR <= global_num_experts
             and not (
                 (use_int8_w8a16 or use_int4_w4a16)
                 and block_shape is not None
@@ -1915,7 +1918,7 @@ def fused_experts_impl(
             )
         )
 
-        if not use_unpermute:
+        if not naive_block_assignment:
             sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
                 curr_topk_ids,
                 config["BLOCK_SIZE_M"],
@@ -1954,7 +1957,6 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w1_bias,
-            use_unpermute=use_unpermute,
         )
 
         # Activation function with multiplication
@@ -2014,7 +2016,6 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w2_bias,
-            use_unpermute=use_unpermute,
         )
 
         ops.moe_sum(
