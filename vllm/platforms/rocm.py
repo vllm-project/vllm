@@ -15,6 +15,7 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
@@ -190,21 +191,16 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink,
-        use_sparse,
-        use_mm_prefix,
-        attn_type: str | None = None,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if use_sparse:
-            if kv_cache_dtype.startswith("fp8"):
+        block_size = attn_selector_config.block_size
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+
+        if attn_selector_config.use_sparse:
+            if kv_cache_dtype and kv_cache_dtype.startswith("fp8"):
                 raise ValueError(
                     "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                 )
@@ -214,7 +210,7 @@ class RocmPlatform(Platform):
             logger.info_once("Using Sparse MLA backend on V1 engine.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
-        if use_mla:
+        if attn_selector_config.use_mla:
             if selected_backend is None:
                 selected_backend = (
                     AttentionBackendEnum.ROCM_AITER_MLA
