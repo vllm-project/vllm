@@ -576,9 +576,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
-
-    def supports_per_head_quant_scales(self) -> bool:
-        return self.vllm_flash_attn_version >= 3
+        self.supports_per_head_quant_scales = self.vllm_flash_attn_version >= 3
 
     def forward(
         self,

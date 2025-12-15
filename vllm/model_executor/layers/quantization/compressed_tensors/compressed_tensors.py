@@ -1025,7 +1025,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             shape_kv = (1,)
             shape_q = (1,)
         else:  # strategy == "attn_head"
-            assert layer.impl.supports_per_head_quant_scales(), (
+            assert layer.impl.supports_per_head_quant_scales, (
                 f"Layer {layer.__class__.__name__} with implementation "
                 f"{layer.impl.__class__.__name__} does not support per-head scales."
             )

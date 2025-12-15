@@ -325,7 +325,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # for attn backends supporting query quantization
         self.query_quant = None
         is_per_channel = hasattr(self, "q_scale") and self.q_scale.numel() > 1
-        if self.impl.supports_quant_query_input() and self.kv_cache_dtype.startswith(
+        if self.impl.supports_quant_query_input and self.kv_cache_dtype.startswith(
             "fp8"
         ):
             self.query_quant = QuantFP8(
