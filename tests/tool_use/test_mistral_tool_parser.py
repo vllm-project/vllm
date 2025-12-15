@@ -12,10 +12,10 @@ from mistral_common.protocol.instruct.tool_calls import FunctionCall, ToolCall
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import DeltaMessage, DeltaToolCall
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
 
 @pytest.fixture(scope="module")

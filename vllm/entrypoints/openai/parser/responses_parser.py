@@ -12,10 +12,10 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem, ResponsesRequest
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.outputs import CompletionOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
