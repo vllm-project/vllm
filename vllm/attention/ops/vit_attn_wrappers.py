@@ -23,15 +23,23 @@ def flash_attn_maxseqlen_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
@@ -39,8 +47,8 @@ def flash_attn_maxseqlen_wrapper(
         v,
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_k=cu_seqlens,
-        max_seqlen_q=max_seqlen.item(),
-        max_seqlen_k=max_seqlen.item(),
+        max_seqlen_q=max_seqlen,
+        max_seqlen_k=max_seqlen,
         dropout_p=0.0,
         causal=False,
     )
@@ -87,7 +95,7 @@ def torch_sdpa_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     outputs = []
 
@@ -95,6 +103,12 @@ def torch_sdpa_wrapper(
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
+
+    batch_size, q_len, _, _ = q.shape
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
     for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
         q_i, k_i, v_i = (
             einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]

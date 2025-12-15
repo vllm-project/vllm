@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-
 import torch
 
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -16,27 +14,6 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
-
-
-def maybe_get_vit_flash_attn_backend(
-    attn_backend: AttentionBackendEnum | None,
-) -> Callable | None:
-    # At this point,
-    # we already have the attn_backend,
-    # overriding logic is done in the platform-specific implementation.
-    # so we don't need to override backend here.
-    # Just return the attn_backend and flash_attn_varlen_func.
-
-    if attn_backend == AttentionBackendEnum.FLASH_ATTN:
-        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-    elif attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
-        from aiter import flash_attn_varlen_func
-    else:
-        flash_attn_varlen_func = None
-
-    # if attn_backend is TORCH_SDPA,
-    # it will reach here and the flash_attn_varlen_func will be None.
-    return flash_attn_varlen_func
 
 
 @CustomOp.register("mm_encoder_attn")
@@ -96,10 +73,6 @@ class MMEncoderAttention(CustomOp):
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }
-
-        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
-            self.attn_backend,
-        )
 
         logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
 
@@ -188,13 +161,10 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
-        assert self.flash_attn_varlen_func is not None, (
-            "Flash attention function is not set."
-        )
-        # # TODO(Isotr0py): Migrate MultiHeadAttention
-        assert cu_seqlens is not None and max_seqlen is not None
-
         bsz = query.shape[0]
+        assert (cu_seqlens is not None and max_seqlen is not None) or (
+            cu_seqlens is None and max_seqlen is None
+        ), "cu_seqlens and max_seqlen should be both set or both None."
 
         output = vit_flash_attn_wrapper(
             q=query,
