@@ -136,9 +136,12 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
-            feature_extractor = (
-                self.input_processor.info.get_hf_processor().feature_extractor
+            from vllm.transformers_utils.processor import (
+                cached_processor_from_config,
             )
+
+            processor = cached_processor_from_config(self.model_config)
+            feature_extractor = processor.feature_extractor
             _ = librosa.feature.melspectrogram(
                 y=dummy_audio,
                 sr=self.asr_config.sample_rate,
