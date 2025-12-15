@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
+from typing_extensions import deprecated
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
@@ -199,6 +200,12 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
+@deprecated(
+    "scatter_mm_placeholders is deprecated and maintained only for "
+    "backward compatibility with external hardware backends. "
+    "The core GPU backend uses a compact cache implementation instead."
+    "This method will be deprecated soon."
+)
 def scatter_mm_placeholders(
     embeds: torch.Tensor,
     is_embed: torch.Tensor | None,
@@ -235,6 +242,12 @@ def scatter_mm_placeholders(
     return placeholders
 
 
+@deprecated(
+    "gather_mm_placeholders is deprecated and maintained only for "
+    "backward compatibility with external hardware backends. "
+    "The core GPU backend uses a compact cache implementation instead."
+    "This method will be deprecated soon."
+)
 def gather_mm_placeholders(
     placeholders: torch.Tensor,
     is_embed: torch.Tensor | None,
