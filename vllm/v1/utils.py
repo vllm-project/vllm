@@ -405,10 +405,16 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     """Get the raw data of a tensor as a uint8 memoryview, useful for
     serializing and hashing.
 
+    Note:
+        The `.cpu()` call is necessary to handle GPU tensors, as PyTorch's
+        `.numpy()` method only works on CPU tensors. This involves a
+        device-to-memory (device2mem) transfer for GPU tensors. For tensors
+        already on CPU, `.cpu()` is a no-op.
+
     Args:
-        tensor: The input tensor.
+        tensor: The input tensor (can be on CPU or GPU).
 
     Returns:
         A memoryview of the tensor data as uint8.
     """
-    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+    return tensor.flatten().contiguous().view(torch.uint8).cpu().numpy().data
