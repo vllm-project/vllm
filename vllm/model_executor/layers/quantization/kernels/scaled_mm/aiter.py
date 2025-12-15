@@ -14,17 +14,21 @@ from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
 
 class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
-
-    @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return (
                 False,
                 "AiterScaledMMLinearKernel requires `aiter` which is not "
                 + "currently supported on non-ROCm platform.",
             )
+        if compute_capability is None:
+            _cc = current_platform.get_device_capability()
+            if _cc is not None:
+                compute_capability = _cc.major * 10 + _cc.minor
+        if compute_capability is not None and compute_capability < 90:
+            return False, f"requires capability 90, got {compute_capability}"
 
         try:
             import aiter  # noqa: F401 # deliberately attempt to import aiter
@@ -34,8 +38,8 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 "AiterScaledMMLinearKernel requires `aiter` which is not "
                 + "installed on ROCm.",
             )
-        # Check if rocm_aiter_gemm_w8a8_scaled_mm is enabled
-        if not (rocm_aiter_ops.is_linear_enabled()):
+
+        if not rocm_aiter_ops.is_linear_enabled():
             return (
                 False,
                 "AiterScaledMMLinearKernel is disabled. "
@@ -44,6 +48,10 @@ class AiterScaledMMLinearKernel(CutlassScaledMMLinearKernel):
                 + "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
             )
 
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return (
                 False,
