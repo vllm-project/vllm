@@ -26,7 +26,7 @@ pip install vllm
 
     - **Base URL**: `http://{your-vllm-host}:8000/v1`
     - **API Key**: Use any non-empty string (vLLM doesn't require authentication by default)
-    - **Model**: Use the model name from your vLLM deployment (e.g., `meta-llama/Llama-3.2-3B-Instruct`)
+    - **Model**: Use the model name from your vLLM deployment (e.g., `meta-llama/Meta-Llama-3-8B-Instruct`)
 
 ### Connecting to AI Badgr's API
 
