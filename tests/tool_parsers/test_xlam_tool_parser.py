@@ -16,8 +16,6 @@ from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.xlam_tool_parser import xLAMToolParser
 
-pytestmark = pytest.mark.cpu_test
-
 # Use a common model that is likely to be available
 MODEL = "Salesforce/Llama-xLAM-2-8B-fc-r"
 

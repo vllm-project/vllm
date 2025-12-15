@@ -18,8 +18,6 @@ from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.seed_oss_tool_parser import SeedOssToolParser
 
-pytestmark = pytest.mark.cpu_test
-
 # Use a common model that is likely to be available
 MODEL = "ByteDance-Seed/Seed-OSS-36B-Instruct"
 

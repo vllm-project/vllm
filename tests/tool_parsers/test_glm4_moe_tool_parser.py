@@ -12,8 +12,6 @@ from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
 )
 
-pytestmark = pytest.mark.cpu_test
-
 pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
 MODEL = "zai-org/GLM-4.5"
