@@ -209,6 +209,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        ## REMOVE BEFORE MERGE (YIFAN): this is temporary workaround to work with
+        # old versions of LMCache for testing purposes.
+        return None
 
         events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
         if not events:
