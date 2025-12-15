@@ -818,13 +818,13 @@ class GPUModelRunner(
             else:
                 generator = None
 
-                if pooling_params is not None:
-                    task = pooling_params.task
-                    assert task is not None, "You did not set `task` in the API"
+            if pooling_params is not None:
+                task = pooling_params.task
+                assert task is not None, "You did not set `task` in the API"
 
-                    model = cast(VllmModelForPooling, self.get_model())
-                    to_update = model.pooler.get_pooling_updates(task)
-                    to_update.apply(pooling_params)
+                model = cast(VllmModelForPooling, self.get_model())
+                to_update = model.pooler.get_pooling_updates(task)
+                to_update.apply(pooling_params)
 
             req_state = CachedRequestState(
                 req_id=req_id,
