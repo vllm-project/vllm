@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from vllm.entrypoints.openai.tool_parsers.minimax_m2_tool_parser import (
+from vllm.tool_parsers.minimax_m2_tool_parser import (
     MinimaxM2ToolParser,
 )
 
