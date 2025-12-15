@@ -201,12 +201,12 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave1(pcp_rank, dcp_rank,
     ])
 def test_compute_slot_mapping_dcp4_pcp2_interleave16(pcp_rank, dcp_rank,
                                                        expected_positions):
-    """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=128.
+    """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=16.
 
-    With interleave_size=128, tokens are distributed in chunks of 128 across
-    ranks. Virtual block size = 16 * 4 * 2 = 128
+    With interleave_size=16, tokens are distributed in chunks of 16 across
+    ranks. Virtual block size = 16 * 4 * 2 = 16
 
-    Token distribution with interleave_size=128:
+    Token distribution with interleave_size=16:
     - Positions 0-15 belong to rank 0 (first chunk of 16)
     - Positions 16-31 belong to rank 1 (second chunk of 16)
     - Positions 32-47 belong to rank 2 (third chunk of 16)
@@ -242,5 +242,5 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave16(pcp_rank, dcp_rank,
 
     np.testing.assert_array_equal(
         actual_result, expected_result,
-        f"DCP=4, PCP=2, interleave=128, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}"
+        f"DCP=4, PCP=2, interleave=16, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}"
     )
