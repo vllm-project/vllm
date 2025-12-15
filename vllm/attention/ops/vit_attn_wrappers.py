@@ -95,6 +95,17 @@ def vit_flash_attn_wrapper(
     )
 
 
+def apply_sdpa(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """
+    Input shape:
+    (batch_size x seq_len x num_heads x head_size)
+    """
+    q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
+    output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+    output = einops.rearrange(output, "b h s d -> b s h d ")
+    return output
+
+
 # TODO: Once we have a torch 2.10, we can use tensor slices
 # so we won't need to wrap this in custom ops
 def torch_sdpa_wrapper(
@@ -104,10 +115,7 @@ def torch_sdpa_wrapper(
     cu_seqlens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if cu_seqlens is None:
-        batch_size, q_len, _, _ = q.shape
-        cu_seqlens = torch.arange(
-            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
-        )
+        return apply_sdpa(q, k, v)
 
     outputs = []
 
@@ -116,11 +124,7 @@ def torch_sdpa_wrapper(
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
     for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
-        q_i, k_i, v_i = (
-            einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-        )
-        output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-        output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
+        output_i = apply_sdpa(q_i, k_i, v_i)
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
     return context_layer
