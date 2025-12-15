@@ -2400,7 +2400,8 @@ class GPUModelRunner(
             num_scheduled_tokens_np.tolist(), seq_lens_cpu, device=hidden_states.device
         )
 
-        raw_pooler_output: PoolerOutput = self.model.pooler(
+        model = cast(VllmModelForPooling, self.model)
+        raw_pooler_output: PoolerOutput = model.pooler(
             hidden_states=hidden_states,
             pooling_metadata=pooling_metadata,
         )
