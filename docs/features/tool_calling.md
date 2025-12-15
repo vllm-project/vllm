@@ -420,7 +420,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py](../../vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py).
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -468,7 +468,7 @@ Here is a summary of a plugin file:
     # register the tool parser to ToolParserManager
     ToolParserManager.register_lazy_module(
         name="example",
-        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        module_path="vllm.tool_parsers.example",
         class_name="ExampleToolParser",
     )
 
