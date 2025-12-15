@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import torch
@@ -14,6 +14,7 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.distributed.afd_transfer import AFDConnectorBase
 from vllm.logger import init_logger
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
 
@@ -231,6 +232,13 @@ class AFDMetadata:
     afd_connector: "AFDConnectorBase"
     afd_tokens_lens: list[int]  # padded lengths for tensor slicing
     num_of_stages: int
+
+    input_ids_list: list[torch.Tensor] = field(default_factory=list)
+    positions_list: list[torch.Tensor] = field(default_factory=list)
+    inputs_embeds_list: list[torch.Tensor] = field(default_factory=list)
+    intermediate_tensors_list: list[IntermediateTensors] = field(default_factory=list)
+    attn_metadata_list: list[AttentionMetadata] = field(default_factory=list)
+    dp_metadata_list: list[DPMetadata] = field(default_factory=list)
 
 
 @dataclass
