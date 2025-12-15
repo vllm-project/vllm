@@ -148,11 +148,6 @@ class ToolParserManager:
     def _load_lazy_parser(cls, name: str) -> type[ToolParser]:
         """Import and register a lazily loaded parser."""
         module_path, class_name = cls.lazy_parsers[name]
-        if module_path.startswith("vllm.entrypoints.openai.tool_parsers"):
-            logger.warning_once(
-                "Importing tool parsers from 'vllm.entrypoints.openai.tool_parsers''"
-                " is deprecated. Please use 'vllm.tool_parsers' instead."
-            )
         try:
             mod = importlib.import_module(module_path)
             parser_cls = getattr(mod, class_name)
