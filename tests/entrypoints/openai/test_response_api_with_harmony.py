@@ -14,7 +14,7 @@ from openai_harmony import (
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "openai/gpt-oss-20b"
+MODEL_NAME = "/home/jovyan/gpt-oss-20b"
 
 GET_WEATHER_SCHEMA = {
     "type": "function",
@@ -519,6 +519,7 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
+    print("response: ", response, flush=True)
     assert response.usage.output_tokens_details.tool_output_tokens > 0
     for item in response.output:
         if item.type == "message":
