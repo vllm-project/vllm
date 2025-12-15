@@ -74,24 +74,24 @@ class TurnMetrics:
 
     def __init__(
         self,
-        input_tokens=0,
-        output_tokens=0,
-        cached_input_tokens=0,
-        tool_output_tokens=0,
-    ):
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cached_input_tokens: int = 0,
+        tool_output_tokens: int = 0,
+    ) -> None:
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
         self.cached_input_tokens = cached_input_tokens
         self.tool_output_tokens = tool_output_tokens
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset counters for a new turn."""
         self.input_tokens = 0
         self.output_tokens = 0
         self.cached_input_tokens = 0
         self.tool_output_tokens = 0
 
-    def copy(self):
+    def copy(self) -> "TurnMetrics":
         """Create a copy of this turn's token counts."""
         return TurnMetrics(
             self.input_tokens,
