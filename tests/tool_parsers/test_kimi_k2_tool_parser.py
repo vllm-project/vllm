@@ -10,8 +10,6 @@ from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 
-pytestmark = pytest.mark.cpu_test
-
 # Use a common model that is likely to be available
 MODEL = "moonshotai/Kimi-K2-Instruct"
 

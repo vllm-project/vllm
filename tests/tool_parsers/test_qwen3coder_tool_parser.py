@@ -20,8 +20,6 @@ from vllm.tool_parsers.qwen3coder_tool_parser import (
 )
 from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
 
-pytestmark = pytest.mark.cpu_test
-
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 
