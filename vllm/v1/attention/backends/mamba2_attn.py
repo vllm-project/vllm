@@ -361,7 +361,7 @@ class Mamba2AttentionMetadataBuilder(
         state_indices_t = blk_table if prefix_caching else blk_table[:, 0]
         num_reqs = blk_table.shape[0]
 
-        # For CUDA graphs, copy to persistent buffer (graphs capture memory addresses)
+        # For CUDA graphs, copy to persistent buffer
         if (
             metadata.num_prefills == 0
             and num_reqs <= self.decode_cudagraph_max_bs
