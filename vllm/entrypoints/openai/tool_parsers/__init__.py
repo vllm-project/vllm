@@ -3,18 +3,31 @@
 
 import warnings
 
-from vllm.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
 
-warnings.warn(
-    "Importing ToolParserManager from 'vllm.tool_parsers.manager' is deprecated "
-    "and will be removed in a future release. "
-    "Please import from 'vllm.tools.parsers.manager' instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
+def __getattr__(name: str):
+    if name == "ToolParser":
+        from vllm.tool_parsers import ToolParser
 
+        warnings.warn(
+            "`vllm.entrypoints.openai.tool_parsers.ToolParser` has been moved to "
+            "`vllm.tool_parsers.ToolParser`. "
+            "The old name will be removed in v0.14.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
-__all__ = ["ToolParser", "ToolParserManager"]
+        return ToolParser
+    if name == "ToolParserManager":
+        from vllm.tool_parsers import ToolParserManager
+
+        warnings.warn(
+            "`vllm.entrypoints.openai.tool_parsers.ToolParserManager` "
+            "has been moved to `vllm.tool_parsers.ToolParserManager`. "
+            "The old name will be removed in v0.14.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return ToolParserManager
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
