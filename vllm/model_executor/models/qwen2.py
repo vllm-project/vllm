@@ -227,9 +227,24 @@ class Qwen2DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
+        layer_idx = extract_layer_index(prefix)
+        layer_head_num = getattr(config, "layer_head_num", None)
+        layer_inter_size = getattr(config, "layer_inter_size", None)
+
+        if layer_head_num is not None:
+            self.layer_heads = config.layer_head_num[layer_idx]
+        else:
+            self.layer_heads = config.num_attention_heads
+
+        if layer_inter_size is not None:
+            self.layer_inter_size = config.layer_inter_size[layer_idx]
+        else:
+            self.layer_inter_size = config.intermediate_size
+
+
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
+            num_heads=self.layer_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             cache_config=cache_config,
@@ -241,7 +256,7 @@ class Qwen2DecoderLayer(nn.Module):
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
+            intermediate_size=self.layer_inter_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
