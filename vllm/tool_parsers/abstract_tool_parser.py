@@ -203,7 +203,7 @@ class ToolParserManager:
         Example:
             ToolParserManager.register_lazy_module(
                 name="kimi_k2",
-                module_path="vllm.entrypoints.openai.tool_parsers.kimi_k2_parser",
+                module_path="vllm.tool_parsers.kimi_k2_parser",
                 class_name="KimiK2ToolParser",
             )
         """
