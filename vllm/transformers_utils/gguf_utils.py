@@ -95,13 +95,13 @@ def detect_gguf_multimodal(model: str) -> Path | None:
     Returns:
         Path to mmproj file if found, None otherwise
     """
-    if not model.endswith(".gguf"):
+    # Use magic bytes detection instead of file extension heuristic
+    # HuggingFace blob paths don't have .gguf extension
+    if not check_gguf_file(model):
         return None
 
     try:
         model_path = Path(model)
-        if not model_path.is_file():
-            return None
 
         model_dir = model_path.parent
         mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
@@ -213,13 +213,13 @@ def extract_softcap_from_gguf(model: str) -> dict[str, float]:
         Dictionary with 'attn_logit_softcapping' and/or 'final_logit_softcapping'
         keys if found in GGUF metadata, empty dict otherwise
     """
-    if not model.endswith(".gguf"):
+    # Use magic bytes detection instead of file extension heuristic
+    # HuggingFace blob paths don't have .gguf extension
+    if not check_gguf_file(model):
         return {}
 
     try:
         model_path = Path(model)
-        if not model_path.is_file():
-            return {}
 
         reader = gguf.GGUFReader(str(model_path))
 
