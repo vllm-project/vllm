@@ -330,7 +330,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         PUBLIC ${oneDNN_BINARY_DIR}/include
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
-    target_link_libraries(dnnl_ext dnnl)
+    target_link_libraries(dnnl_ext dnnl torch)
     target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
     list(APPEND LIBS dnnl_ext)
     set(USE_ONEDNN ON)
@@ -358,7 +358,6 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_attn.cpp"
-    "csrc/cpu/scratchpad_manager.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)

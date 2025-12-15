@@ -2,15 +2,10 @@
 #define UTILS_HPP
 
 #include <atomic>
-#include <cassert>
-#include <cstdint>
 #include <unistd.h>
+#include <ATen/cpu/Utils.h>
 
-#if defined(__APPLE__)
-  #include <sys/sysctl.h>
-#endif
-
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
 
 namespace cpu_utils {
 enum class ISA { AMX, VEC };
@@ -58,23 +53,10 @@ struct Counter {
   int64_t acquire_counter() { return counter++; }
 };
 
-inline int64_t get_l2_size() {
+inline int64_t get_available_l2_size() {
   static int64_t size = []() {
-#if defined(__APPLE__)
-    // macOS doesn't have _SC_LEVEL2_CACHE_SIZE. Use sysctlbyname.
-    int64_t l2_cache_size = 0;
-    size_t len = sizeof(l2_cache_size);
-    if (sysctlbyname("hw.l2cachesize", &l2_cache_size, &len, NULL, 0) == 0 &&
-        l2_cache_size > 0) {
-      return l2_cache_size >> 1;  // use 50% of L2 cache
-    }
-    // Fallback if sysctlbyname fails
-    return 128LL * 1024 >> 1;  // use 50% of 128KB
-#else
-    long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
-    assert(l2_cache_size != -1);
+    const uint32_t l2_cache_size = at::cpu::L2_cache_size();
     return l2_cache_size >> 1;  // use 50% of L2 cache
-#endif
   }();
   return size;
 }
@@ -107,6 +89,30 @@ inline void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
   ss << "]\n";
   std::printf("%s", ss.str().c_str());
 }
+
+class ScratchPadManager {
+ public:
+  static constexpr size_t allocation_unit = 4 * 1024;  // 4KB
+
+  static ScratchPadManager* get_scratchpad_manager();
+
+  ScratchPadManager();
+
+  template <typename T>
+  T* get_data() {
+    return reinterpret_cast<T*>(ptr_);
+  }
+
+  static size_t round(size_t size) {
+    return ((size + allocation_unit - 1) / allocation_unit) * allocation_unit;
+  }
+
+  void realloc(size_t new_size);
+
+ private:
+  size_t size_;
+  void* ptr_;
+};
 }  // namespace cpu_utils
 
 #endif

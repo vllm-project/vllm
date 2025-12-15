@@ -1,8 +1,7 @@
 #include "cpu/cpu_types.hpp"
 #include "cpu/utils.hpp"
-#include "cpu/scratchpad_manager.h"
 #include "cpu/micro_gemm/cpu_micro_gemm_vec.hpp"
-#include "cpu/cpu_attn_macros.h"
+#include "cpu/cpu_arch_macros.h"
 
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu/micro_gemm/cpu_micro_gemm_amx.hpp"
@@ -49,6 +48,7 @@ void swigluoai_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
                        const int32_t input_stride,
                        const int32_t output_stride) {
   using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
+  // For GPT-OSS interleaved gate-up weights
   alignas(64) static int32_t index[16] = {0,  2,  4,  6,  8,  10, 12, 14,
                                           16, 18, 20, 22, 24, 26, 28, 30};
   vec_op::INT32Vec16 index_vec(index);
@@ -164,7 +164,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
       gemm_m_tile_size * input_size_13 * sizeof(scalar_t));
 
   const int32_t w13_n_tile_size = [&]() {
-    const int64_t cache_size = cpu_utils::get_l2_size();
+    const int64_t cache_size = cpu_utils::get_available_l2_size();
     // input buffer + output buffer + weight
     const int32_t n_size_cache_limit =
         (cache_size - w13_input_buffer_size) /
@@ -180,7 +180,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
       gemm_m_tile_size * input_size_2 * sizeof(scalar_t));
 
   const int32_t w2_n_tile_size = [&]() {
-    const int64_t cache_size = cpu_utils::get_l2_size();
+    const int64_t cache_size = cpu_utils::get_available_l2_size();
     // input tile + weight
     const int32_t n_size_cache_limit =
         (cache_size - w2_input_tile_size) / (input_size_2 * sizeof(scalar_t));
@@ -245,9 +245,10 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
   const int32_t buffer_size =
       common_buffer_offset +
       std::max(w13_thread_buffer_offset, ws_thread_buffer_offset) * thread_num;
-  DNNLScratchPadManager::get_dnnl_scratchpad_manager()->realloc(buffer_size);
+  cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(buffer_size);
   uint8_t* common_buffer_start =
-      DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<uint8_t>();
+      cpu_utils::ScratchPadManager::get_scratchpad_manager()
+          ->get_data<uint8_t>();
   uint8_t* thread_buffer_start = common_buffer_start + common_buffer_offset;
 
   int32_t* __restrict__ token_num_per_group_buffer = reinterpret_cast<int32_t*>(

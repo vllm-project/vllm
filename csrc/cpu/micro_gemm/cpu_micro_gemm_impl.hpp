@@ -13,6 +13,9 @@ namespace cpu_micro_gemm {
 #define CPU_MICRO_GEMM_PARAMS \
   a_ptr, b_ptr, c_ptr, m, k, lda, b_n_group_stride, ldc, accum_c
 
+// Note: weights for MicroGemm should be packed as (output_size / 16) contiguous
+// blocks, means the logical shape of blocks is [16, input_size]. And the actual
+// layout of blocks can be ISA-specific.
 template <cpu_utils::ISA isa, typename scalar_t>
 class MicroGemm {
  public:

@@ -110,6 +110,8 @@ class MicroGemm<cpu_utils::ISA::VEC, scalar_t> {
     TileGemm82<scalar_t>::gemm(CPU_MICRO_GEMM_PARAMS);
   }
 
+  // Note: pack contiguous weight [output_size, input_size] as contiguous
+  // packed weight [output_size / 16, input_size, 16]
   static void pack_weight(const scalar_t* __restrict__ weight,
                           scalar_t* __restrict__ packed_weight,
                           const int32_t output_size, const int32_t input_size) {
