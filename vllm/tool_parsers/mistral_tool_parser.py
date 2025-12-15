@@ -178,7 +178,7 @@ class MistralToolParser(ToolParser):
                 try:
                     raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
                     loaded_pre_v11 = json.loads(raw_tool_call)
-                except Exception:
+                except (IndexError, json.JSONDecodeError):
                     logger.exception("Error in extracting tool call from response.")
                     # return information to just treat the tool call as regular JSON
                     return ExtractedToolCallInformation(
