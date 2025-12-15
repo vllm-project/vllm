@@ -17,6 +17,7 @@
 #   VLLM_CPU_DISABLE_AVX512=false (default)|true
 #   VLLM_CPU_AVX512BF16=false (default)|true
 #   VLLM_CPU_AVX512VNNI=false (default)|true
+#   VLLM_CPU_AMXBF16=false (default)|true
 #
 
 ######################### COMMON BASE IMAGE #########################
@@ -31,11 +32,12 @@ ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends ccache git curl wget ca-certificates \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
         gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
+ENV CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -79,6 +81,9 @@ RUN echo 'ulimit -c 0' >> ~/.bashrc
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
 
+ARG max_jobs=32
+ENV MAX_JOBS=${max_jobs}
+
 ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512=0
@@ -89,6 +94,9 @@ ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
 # Support for building with AVX512VNNI ISA: docker build --build-arg VLLM_CPU_AVX512VNNI="true" ...
 ARG VLLM_CPU_AVX512VNNI=0
 ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
+# Support for building with AMXBF16 ISA: docker build --build-arg VLLM_CPU_AMXBF16="true" ...
+ARG VLLM_CPU_AMXBF16=0
+ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 
 WORKDIR /workspace/vllm
 
@@ -104,16 +112,29 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
     --mount=type=bind,source=.git,target=.git \
-    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel
+    VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
 WORKDIR /workspace/vllm
 
+# TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
 RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
     cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
+    remove_packages_not_supported_on_aarch64() { \
+      case "$(uname -m)" in \
+        aarch64|arm64) \
+          sed -i '/decord/d' requirements/cpu-test.in; \
+          sed -i '/terratorch/d' requirements/cpu-test.in; \
+          ;; \
+      esac; \
+    }; \
+    remove_packages_not_supported_on_aarch64 && \
+    sed -i 's/^torch==.*/torch==2.9.1/g' requirements/cpu-test.in && \
+    sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
     uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \

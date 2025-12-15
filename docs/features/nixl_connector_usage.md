@@ -9,7 +9,7 @@ NixlConnector is a high-performance KV cache transfer connector for vLLM's disag
 Install the NIXL library: `uv pip install nixl`, as a quick start.
 
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
-- The specified required NIXL version can be found in [requirements/kv_connectors.txt](gh-file:requirements/kv_connectors.txt) and other relevant config files
+- The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
 For non-cuda platform, please install nixl with ucx build from source, instructed as below.
 
@@ -22,7 +22,7 @@ python tools/install_nixl_from_source_ubuntu.py
 NixlConnector uses NIXL library for underlying communication, which supports multiple transport backends. UCX (Unified Communication X) is the primary default transport library used by NIXL. Configure transport environment variables:
 
 ```bash
-# Example UCX configuration, adjust according to your enviroment
+# Example UCX configuration, adjust according to your environment
 export UCX_TLS=all  # or specify specific transports like "rc,ud,sm,^cuda_ipc" ..etc
 export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1"
 ```
@@ -81,7 +81,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Default: 5600
     - **Required for both prefiller and decoder instances**
     - Each vLLM worker needs a unique port on its host; using the same port number across different hosts is fine
-    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank * tp_size + tp_rank (e.g., with `--tensor-parallel-size=4` and base_port=5600, tp_rank 0..3 use ports 5600, 5601, 5602, 5603 on that node).
+    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank (e.g., with `--data-parallel-size=2` and base_port=5600, dp_rank 0..1 use port 5600, 5601 on that node).
     - Used for the initial NIXL handshake between the prefiller and the decoder
 
 - `VLLM_NIXL_SIDE_CHANNEL_HOST`: Host for side channel communication
@@ -146,6 +146,8 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8000 8000
 ```
 
+For multi-host DP deployment, only need to provide the host/port of the head instances.
+
 ### KV Role Options
 
 - **kv_producer**: For prefiller instances that generate KV caches
@@ -158,7 +160,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
 
 ## Experimental Feature
 
-### Heterogenuous KV Layout support
+### Heterogeneous KV Layout support
 
 Support use case: Prefill with 'HND' and decode with 'NHD' with experimental configuration
 
@@ -170,6 +172,6 @@ Support use case: Prefill with 'HND' and decode with 'NHD' with experimental con
 
 Refer to these example scripts in the vLLM repository:
 
-- [run_accuracy_test.sh](gh-file:tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)
-- [toy_proxy_server.py](gh-file:tests/v1/kv_connector/nixl_integration/toy_proxy_server.py)
-- [test_accuracy.py](gh-file:tests/v1/kv_connector/nixl_integration/test_accuracy.py)
+- [run_accuracy_test.sh](../../tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh)
+- [toy_proxy_server.py](../../tests/v1/kv_connector/nixl_integration/toy_proxy_server.py)
+- [test_accuracy.py](../../tests/v1/kv_connector/nixl_integration/test_accuracy.py)

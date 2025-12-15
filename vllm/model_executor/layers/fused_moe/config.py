@@ -1,31 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Optional, Union
 
 import torch
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
+from vllm.distributed import (
+    get_dp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_rank,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils import cdiv, has_triton_kernels
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
 if has_triton_kernels():
     try:
         from triton_kernels.matmul_ogs import PrecisionConfig
-    except ImportError:
+    except (ImportError, AttributeError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible."
+            "version is compatible. Error: %s",
+            e,
         )
 
 
@@ -90,6 +97,26 @@ def _quant_flags_to_group_shape(
     return a_shape, w_shape
 
 
+# The type of method in top-K routing
+# Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
+class RoutingMethodType(IntEnum):
+    # Default: Softmax -> TopK
+    Default = (0,)
+    # Renormalize: TopK -> Softmax
+    Renormalize = (1,)
+    # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
+    # -> Top8 experts from the Top4 groups
+    DeepSeekV3 = (2,)
+    # Llama4: Top1 -> Sigmoid
+    Llama4 = (3,)
+    # RenormalizeNaive: Softmax -> TopK -> Renormalize
+    RenormalizeNaive = (4,)
+    # TopK: TopK (no softmax)
+    TopK = (5,)
+    # Unspecified
+    Unspecified = 6.0
+
+
 @dataclass
 class FusedMoEQuantDesc:
     """
@@ -116,6 +143,7 @@ class FusedMoEQuantDesc:
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
     # Quantization alphas or gscales, used for nvfp4 types.
+    # W4A8 FP8: used for per-channel scales
     # TODO(bnell): put some of these in subclasses
     alpha_or_gscale: torch.Tensor | None = None
 
@@ -319,6 +347,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "mxfp4"
 
     @property
+    def use_mxfp4_w4a4(self) -> bool:
+        return self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4"
+
+    @property
     def use_nvfp4_w4a4(self) -> bool:
         return self.quant_dtype == "nvfp4"
 
@@ -411,7 +443,9 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
+            per-channel scales for w1 (for W4A8 FP8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
+            per-channel scales for w2 (for W4A8 FP8).
         - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
         - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
         - w1_bias: Optional biases for w1 (GPT OSS Triton).
@@ -430,6 +464,7 @@ class FusedMoEQuantConfig:
             "mxfp4",
             "mxfp6_e3m2",
             "mxfp6_e2m3",
+            "int4",
         }
 
         if weight_dtype is None:
@@ -462,6 +497,10 @@ def fp8_w8a8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
+    g1_alphas: torch.Tensor | None = None,
+    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
@@ -469,9 +508,13 @@ def fp8_w8a8_moe_quant_config(
     return FusedMoEQuantConfig.make(
         torch.float8_e4m3fn,
         w1_scale=w1_scale,
+        g1_alphas=g1_alphas,
         w2_scale=w2_scale,
+        g2_alphas=g2_alphas,
         a1_scale=a1_scale,
+        a1_gscale=a1_gscale,
         a2_scale=a2_scale,
+        a2_gscale=a2_gscale,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
@@ -500,6 +543,42 @@ def int8_w8a8_moe_quant_config(
     )
 
 
+def gptq_marlin_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    weight_bits: int,
+    group_size: int,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+):
+    """
+    Construct a quant config for gptq marlin quantization.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
+
+    # Activations are NOT quantized for GPTQ (fp16/bf16)
+    a_shape = w_shape  # Same as weight shape for alignment
+
+    # Determine weight dtype
+    if weight_bits == 4:
+        weight_dtype = "int4"
+    elif weight_bits == 8:
+        weight_dtype = torch.int8
+    else:
+        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
+
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
+    )
+
+
 def mxfp4_w4a16_moe_quant_config(
     w1_scale: Union[torch.Tensor, "PrecisionConfig"],
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
@@ -512,6 +591,26 @@ def mxfp4_w4a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+    )
+
+
+def mxfp4_mxfp8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc("mxfp8"),
+        _a2=FusedMoEQuantDesc("mxfp8"),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
     )
@@ -612,6 +711,67 @@ def int8_w8a16_moe_quant_config(
     )
 
 
+def int4_w4afp8_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    per_act_token_quant: bool = False,
+    per_out_ch_quant: bool = False,
+    block_shape: list[int] | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for fp8 activations and int4 weights.
+    """
+    return FusedMoEQuantConfig.make(
+        torch.float8_e4m3fn,  # quant dtype for activations
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        g1_alphas=g1_alphas,
+        g2_alphas=g2_alphas,
+        per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_out_ch_quant,
+        block_shape=block_shape,
+        weight_dtype="int4",  # weight dtype for weights
+    )
+
+
+def awq_marlin_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w1_zp: torch.Tensor | None,
+    w2_zp: torch.Tensor | None,
+    weight_bits: int,
+    group_size: int,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for awq marlin quantization.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
+
+    # Activations are NOT quantized for AWQ (fp16/bf16)
+    a_shape = w_shape  # Same as weight shape for alignment
+
+    # Determine weight dtype
+    if weight_bits == 4:
+        weight_dtype = "int4"
+    elif weight_bits == 8:
+        weight_dtype = torch.int8
+    else:
+        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
+
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
+    )
+
+
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
@@ -634,9 +794,11 @@ FUSED_MOE_UNQUANTIZED_CONFIG: FusedMoEQuantConfig = FusedMoEQuantConfig.make()
 @dataclass
 class FusedMoEParallelConfig:
     tp_size: int
+    pcp_size: int
     dp_size: int
     ep_size: int
     tp_rank: int
+    pcp_rank: int
     dp_rank: int
     ep_rank: int
 
@@ -663,8 +825,22 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @staticmethod
+    def flatten_tp_across_dp_and_pcp(
+        tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
+    ) -> tuple[int, int]:
+        tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
+        # There are actually dp_size * pcp_size * tp_size devices.
+        # Update tp_size and tp_rank so we shard across all devices.
+        flatten_tp_size = dp_size * pcp_size * tp_size
+        flatten_tp_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        return flatten_tp_size, flatten_tp_rank
+
+    @staticmethod
     def make(
-        tp_size_: int, dp_size_: int, vllm_parallel_config: ParallelConfig
+        tp_size_: int,
+        pcp_size_: int,
+        dp_size_: int,
+        vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input `tp_size_`,
@@ -673,19 +849,22 @@ class FusedMoEParallelConfig:
 
         Args:
             tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
             dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
         Examples:
             When there is no parallelism requested,
-            i.e. `tp_size_` = `dp_size_` = 1, we simply return the sizes
+            i.e. `tp_size_` = `pcp_size_` = `dp_size_` = 1, we simply return the sizes
             unaltered and the ranks set to 0.
 
-            Expert Parallelism is considered only when either `dp_size_` or
+            Expert Parallelism is considered only when either `dp_size_`, `pcp_size_` or
             `tp_size_` is non trivial.
 
-            When TP = 2, DP = 1 and EP = False, the configuration on different
+            Note that PCP serves the same function as DP here.
+
+            When TP = 2, DP(PCP) = 1 and EP = False, the configuration on different
             devices:
 
             - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
@@ -693,7 +872,7 @@ class FusedMoEParallelConfig:
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-            When TP = 1, DP = 2 and EP = False, the configuration on different
+            When TP = 1, DP(PCP) = 2 and EP = False, the configuration on different
                 devices:
 
             - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
@@ -701,7 +880,7 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the tensors are sharded
                 across 2 decvices.
 
-            When TP = 2, DP = 2 and EP = False, the configuration on different
+            When TP = 2, DP(PCP) = 2 and EP = False, the configuration on different
                 devices:
 
             - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
@@ -711,14 +890,14 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the tensors are sharded
                 across 4 devices.
 
-            When, TP = 2, DP = 1 and EP = True, the configuration on different
+            When, TP = 2, DP(PCP) = 1 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-            When, TP = 1, DP = 2 and EP = True, the configuration on different
+            When, TP = 1, DP(PCP) = 2 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
@@ -726,7 +905,7 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the experts are split
                 between the 2 devices.
 
-            When TP = 2, DP = 2 and EP = True, the configuration on different
+            When TP = 2, DP(PCP) = 2 and EP = True, the configuration on different
                 devices:
 
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
@@ -737,24 +916,25 @@ class FusedMoEParallelConfig:
                 between the 4 devices.
         """
 
-        def flatten_tp_across_dp(dp_rank: int):
-            tp_rank = 0 if tp_size_ == 1 else get_tensor_model_parallel_rank()
-            # There are actually dp_size_ * tp_size_ devices. Update tp_size
-            # and tp_rank so we shard across all devices.
-            tp_size = dp_size_ * tp_size_
-            tp_rank = dp_rank * tp_size_ + tp_rank
-            return tp_size, tp_rank
-
-        use_ep = dp_size_ * tp_size_ > 1 and vllm_parallel_config.enable_expert_parallel
+        use_ep = (
+            dp_size_ * pcp_size_ * tp_size_ > 1
+            and vllm_parallel_config.enable_expert_parallel
+        )
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
-        tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
+        pcp_size = pcp_size_
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size_, dp_size_, dp_rank, pcp_size_, pcp_rank
+        )
 
         if not use_ep:
             return FusedMoEParallelConfig(
                 tp_size=tp_size,
                 tp_rank=tp_rank,
+                pcp_size=pcp_size,
+                pcp_rank=pcp_rank,
                 dp_size=dp_size,
                 dp_rank=dp_rank,
                 ep_size=1,
@@ -771,6 +951,8 @@ class FusedMoEParallelConfig:
         return FusedMoEParallelConfig(
             tp_size=1,
             tp_rank=0,
+            pcp_size=pcp_size,
+            pcp_rank=pcp_rank,
             dp_size=dp_size,
             dp_rank=dp_rank,
             ep_size=ep_size,
@@ -796,6 +978,10 @@ class FusedMoEConfig:
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
     has_bias: bool = False
+
+    is_act_and_mul: bool = True
+
+    is_lora_enabled: bool = False
 
     def __post_init__(self):
         if self.dp_size > 1:

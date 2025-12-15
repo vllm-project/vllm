@@ -1,1 +1,2 @@
-kernel_*.cu
+sm*_kernel_*.cu
+kernel_selector.h

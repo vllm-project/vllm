@@ -14,6 +14,52 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
+- name: comment-pre-commit-failure
+  description: Comment on PR when pre-commit check fails
+  conditions:
+    - status-failure=pre-commit
+    - -closed
+    - -draft
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the pre-commit checks have failed. Please run:
+
+        ```bash 
+        uv pip install pre-commit
+        pre-commit install
+        pre-commit run --all-files
+        ```
+
+        Then, commit the changes and push to your branch.
+
+        For future commits, `pre-commit` will run automatically on changed files before each commit.
+
+        > [!TIP]
+        > <details>
+        > <summary>Is <code>mypy</code> or <code>markdownlint</code> failing?</summary>
+        > <br/>
+        > <code>mypy</code> and <code>markdownlint</code> are run differently in CI. If the failure is related to either of these checks, please use the following commands to run them locally:
+        >
+        > ```bash
+        > # For mypy (substitute "3.10" with the failing version if needed)
+        > pre-commit run --hook-stage manual mypy-3.10
+        > # For markdownlint
+        > pre-commit run --hook-stage manual markdownlint
+        > ```
+        > </details>
+
+- name: comment-dco-failure
+  description: Comment on PR when DCO check fails
+  conditions:
+    - status-failure=dco
+    - -closed
+    - -draft
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the DCO check has failed. Please click on DCO in the Checks section for instructions on how to resolve this.
+
 - name: label-ci-build
   description: Automatically apply ci/build label
   conditions:
@@ -108,7 +154,7 @@ pull_request_rules:
       - files~=^benchmarks/
       - files~=^vllm/benchmarks/
       - files~=^tests/benchmarks/
-      - files~=^\.buildkite/nightly-benchmarks/
+      - files~=^\.buildkite/performance-benchmarks/
   actions:
     label:
       add:
@@ -140,7 +186,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/test_context.py
       - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
       - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
-      - files~=^vllm/entrypoints/harmony_utils.py
+      - files~=^vllm/entrypoints/openai/parser/harmony_utils.py
       - files~=^vllm/entrypoints/tool_server.py
       - files~=^vllm/entrypoints/tool.py
       - files~=^vllm/entrypoints/context.py
@@ -150,6 +196,23 @@ pull_request_rules:
     label:
       add:
         - gpt-oss
+
+- name: label-nvidia
+  description: Automatically apply nvidia label
+  conditions:
+    - label != stale
+    - or:
+      - files~=cuda
+      - files~=cutlass
+      - files~=flashinfer
+      - files~=trtllm
+      - title~=(?i)NVIDIA
+      - title~=(?i)CUDA
+      - title~=(?i)CUTLASS
+  actions:
+    label:
+      add:
+        - nvidia
 
 - name: label-rocm
   description: Automatically apply rocm label

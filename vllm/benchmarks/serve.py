@@ -19,13 +19,13 @@ On the client side, run:
 import argparse
 import asyncio
 import contextlib
-import gc
 import importlib.util
 import json
 import os
 import random
 import shutil
 import time
+import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
@@ -36,7 +36,6 @@ from typing import Any, Literal
 import aiohttp
 import numpy as np
 from tqdm.asyncio import tqdm
-from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samples
 from vllm.benchmarks.lib.endpoint_request_func import (
@@ -47,7 +46,9 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -64,6 +65,7 @@ class TaskType(Enum):
 @dataclass
 class BenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     total_output: int
     request_throughput: float
@@ -97,6 +99,7 @@ class BenchmarkMetrics:
 @dataclass
 class EmbedBenchmarkMetrics:
     completed: int
+    failed: int
     total_input: int
     request_throughput: float
     total_token_throughput: float
@@ -186,9 +189,16 @@ async def get_request(
             total_requests,
             request_rate,
         )
+        assert current_request_rate > 0.0, (
+            f"Obtained non-positive request rate {current_request_rate}."
+        )
         request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
             delay_ts.append(0)
+        elif burstiness == float("inf"):
+            # when burstiness tends to infinity, the delay time becomes constant
+            # and tends to the inverse of the request rate
+            delay_ts.append(1.0 / current_request_rate)
         else:
             theta = 1.0 / (current_request_rate * burstiness)
 
@@ -225,7 +235,9 @@ async def get_request(
 
 
 def calculate_metrics_for_embeddings(
-    outputs: list[RequestFuncOutput], dur_s: float, selected_percentiles: list[float]
+    outputs: list[RequestFuncOutput],
+    dur_s: float,
+    selected_percentiles: list[float],
 ) -> EmbedBenchmarkMetrics:
     """Calculate the metrics for the embedding requests.
 
@@ -239,12 +251,15 @@ def calculate_metrics_for_embeddings(
     """
     total_input = 0
     completed = 0
+    failed = 0
     e2els: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             e2els.append(outputs[i].latency)
             completed += 1
             total_input += outputs[i].prompt_len
+        else:
+            failed += 1
 
     if completed == 0:
         warnings.warn(
@@ -254,6 +269,7 @@ def calculate_metrics_for_embeddings(
         )
     metrics = EmbedBenchmarkMetrics(
         completed=completed,
+        failed=failed,
         total_input=total_input,
         request_throughput=completed / dur_s,
         total_token_throughput=total_input / dur_s,
@@ -271,7 +287,7 @@ def calculate_metrics(
     input_requests: list[SampleRequest],
     outputs: list[RequestFuncOutput],
     dur_s: float,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
@@ -366,6 +382,7 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_outputs = [output for output in outputs if output.success]
+    failed_outputs = [output for output in outputs if not output.success]
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
         max_end_time = max(
@@ -427,6 +444,7 @@ def calculate_metrics(
 
     metrics = BenchmarkMetrics(
         completed=completed,
+        failed=len(failed_outputs),
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
@@ -472,7 +490,7 @@ async def benchmark(
     base_url: str,
     model_id: str,
     model_name: str,
-    tokenizer: PreTrainedTokenizerBase,
+    tokenizer: TokenizerLike,
     input_requests: list[SampleRequest],
     logprobs: int | None,
     request_rate: float,
@@ -734,6 +752,7 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
     if max_concurrency is not None:
         print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     if request_rate != float("inf"):
@@ -771,7 +790,7 @@ async def benchmark(
         )
     print(
         "{:<40} {:<10.2f}".format(
-            "Total Token throughput (tok/s):", metrics.total_token_throughput
+            "Total token throughput (tok/s):", metrics.total_token_throughput
         )
     )
 
@@ -779,6 +798,7 @@ async def benchmark(
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
+            "failed": metrics.failed,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
@@ -986,7 +1006,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Key-value pairs (e.g, --header x-additional-info=0.3.3) "
         "for headers to be passed with each request. These headers override "
         "per backend constants and values set via environment variable, and "
-        "will be overriden by other arguments (such as request ids).",
+        "will be overridden by other arguments (such as request ids).",
     )
     parser.add_argument(
         "--max-concurrency",
@@ -1012,6 +1032,19 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--tokenizer",
         type=str,
         help="Name or path of the tokenizer, if not using the default tokenizer.",  # noqa: E501
+    )
+    parser.add_argument(
+        "--tokenizer-mode",
+        type=str,
+        default="auto",
+        help="""Tokenizer mode:\n
+        - "auto" will use the tokenizer from `mistral_common` for Mistral models
+        if available, otherwise it will use the "hf" tokenizer.\n
+        - "hf" will use the fast tokenizer if available.\n
+        - "slow" will always use the slow tokenizer.\n
+        - "mistral" will always use the tokenizer from `mistral_common`.\n
+        - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument(
@@ -1066,8 +1099,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--profile",
         action="store_true",
-        help="Use Torch Profiler. The endpoint must be launched with "
-        "VLLM_TORCH_PROFILER_DIR to enable profiler.",
+        help="Use vLLM Profiling. --profiler-config must be provided on the server.",
     )
     parser.add_argument(
         "--save-result",
@@ -1119,7 +1151,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--percentile-metrics",
         type=str,
         default=None,
-        help="Comma-separated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
         'If not specified, defaults to "ttft,tpot,itl" for generative models '
@@ -1150,7 +1182,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--request-id-prefix",
         type=str,
         required=False,
-        default="benchmark-serving",
+        default=f"bench-{uuid.uuid4().hex[:8]}-",
         help="Specify the prefix of request id.",
     )
 
@@ -1202,17 +1234,11 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Repetition penalty sampling parameter. Only has effect on "
         "openai-compatible backends.",
     )
-
-    parser.add_argument(
-        "--tokenizer-mode",
-        type=str,
-        default="auto",
-        choices=["auto", "slow", "mistral", "custom"],
-        help='The tokenizer mode.\n\n* "auto" will use the '
-        'fast tokenizer if available.\n* "slow" will '
-        "always use the slow tokenizer. \n* "
-        '"mistral" will always use the `mistral_common` tokenizer. \n*'
-        '"custom" will use --tokenizer to select the preregistered tokenizer.',
+    sampling_group.add_argument(
+        "--common-prefix-len",
+        type=int,
+        default=None,
+        help="Common prefix length shared by all prompts (used by random dataset)",
     )
 
     parser.add_argument(
@@ -1221,7 +1247,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="The model name used in the API. "
         "If not specified, the model name will be the "
-        "same as the ``--model`` argument. ",
+        "same as the `--model` argument. ",
     )
 
     parser.add_argument(
@@ -1315,8 +1341,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         api_url = f"{args.base_url}{args.endpoint}"
         base_url = f"{args.base_url}"
     else:
-        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        base_url = f"http://{args.host}:{args.port}"
+        host_port = join_host_port(args.host, args.port)
+        api_url = f"http://{host_port}{args.endpoint}"
+        base_url = f"http://{host_port}"
 
     # Headers
     headers = None
@@ -1340,6 +1367,14 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # when using random datasets, default to ignoring EOS
+    # so generation runs to the requested length
+    if (
+        args.dataset_name in ("random", "random-mm")
+        and args.backend in OPENAI_COMPATIBLE_BACKENDS
+    ):
+        args.ignore_eos = True
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
@@ -1388,8 +1423,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
-    gc.collect()
-    gc.freeze()
+    freeze_gc_heap()
 
     benchmark_result = await benchmark(
         task_type=task_type,

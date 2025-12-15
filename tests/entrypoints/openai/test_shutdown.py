@@ -9,7 +9,7 @@ import time
 import openai
 import pytest
 
-from ...utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 

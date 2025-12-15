@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks"""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import ClassVar, NamedTuple
@@ -114,6 +114,12 @@ kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
 
 kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
 kNvfp4Quant = QuantKey(FP4_DTYPE, scale=kNvfp4GroupScale, scale2=kStaticTensorScale)
+
+kDynamic128Scale = ScaleDesc(torch.float32, False, GroupShape(1, 128))
+kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
+
+kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
+kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
@@ -285,7 +291,18 @@ def is_layer_skipped(
     prefix: str,
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    *,
+    skip_with_substr: bool = False,
 ) -> bool:
+    def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return prefix in ignored_layers
+
+    # For case like: ignored_layers = ["self_attn"]
+    def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(layer in prefix for layer in ignored_layers)
+
+    match_func = substr_match if skip_with_substr else prefix_full_match
+
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]
@@ -302,7 +319,7 @@ def is_layer_skipped(
 
         is_skipped = None
         for shard_prefix in shard_prefixes:
-            is_shard_skipped = shard_prefix in ignored_layers
+            is_shard_skipped = match_func(shard_prefix, ignored_layers)
 
             if is_skipped is None:
                 is_skipped = is_shard_skipped
@@ -312,16 +329,16 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix:
+    elif "experts" in prefix and not skip_with_substr:
+        expert_ignore_layers = filter(
+            lambda layer_name: "experts" in layer_name, ignored_layers
+        )
         return any(
-            [
-                prefix in layer_name
-                for layer_name in ignored_layers
-                if "experts" in layer_name
-            ]
+            prefix in layer_name if not skip_with_substr else layer_name in prefix
+            for layer_name in expert_ignore_layers
         )
     else:
-        is_skipped = prefix in ignored_layers
+        is_skipped = match_func(prefix, ignored_layers)
 
     assert is_skipped is not None
     return is_skipped
@@ -674,3 +691,51 @@ def cutlass_fp4_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
     return cutlass_scaled_mm_supports_fp4(capability)
+
+
+def convert_bf16_scales_to_fp8(
+    quant_fp8: Callable, scales: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a BF16 scale tensor into the pair of (fp8_scales, channel_scales)
+    expected by W4A8 GEMM kernels.
+    """
+    assert scales.is_contiguous(), (
+        f"scale tensor must be contiguous, got {scales.stride()=}"
+    )
+    assert scales.is_cuda, "scales must be on gpu"
+
+    orig_shape = scales.shape
+    k_groups = orig_shape[-1]
+    flat_scales = scales.view(-1, k_groups)
+
+    fp8_scales, chan_scales = quant_fp8(flat_scales)
+    fp8_scales = (fp8_scales.float() / 8.0).to(torch.float8_e4m3fn)
+    chan_scales *= 8.0
+
+    # restore original shape
+    fp8_scales = fp8_scales.view(orig_shape)
+    chan_scales = chan_scales.view(orig_shape[:-1], -1)
+
+    return fp8_scales, chan_scales
+
+
+def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tensor:
+    """
+    Convert int4b8 (packed to int32) to signed int4
+    """
+    assert t.is_cuda, "tensor must be on gpu"
+    assert t.dtype == torch.int32, f"expected int32 packed weights but got {t.dtype}"
+
+    # loop through the 8 4-bit nibbles in each int32 entry
+    for i in range(8):
+        shift = 4 * i
+        # extract the i-th 4-bit nibble
+        nib = (t >> shift) & 0xF
+        # clear the original nibble by masking out
+        t &= ~(0xF << shift)
+        # convert int4b8 [0..15] to signed int4 [-8..7] by subtracting 8
+        # and update in-place
+        t |= ((nib - 8) & 0xF) << shift
+
+    return t

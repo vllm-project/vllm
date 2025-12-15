@@ -22,7 +22,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.utils import cuda_device_count_stateless, update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 

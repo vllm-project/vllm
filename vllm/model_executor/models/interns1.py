@@ -182,7 +182,10 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
         hf_processor = self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
         hf_processor.video_processor = cached_video_processor_from_config(
-            self.ctx.model_config, processor_cls=InternVLVideoProcessor, **kwargs
+            self.ctx.model_config,
+            processor_cls=InternVLVideoProcessor,
+            size=hf_processor.image_processor.size,
+            **kwargs,
         )
         return hf_processor
 
@@ -506,8 +509,6 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 class InternS1ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    merge_by_field_config = True
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -739,7 +740,7 @@ class InternS1ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -762,7 +763,7 @@ class InternS1ForConditionalGeneration(
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -775,9 +776,9 @@ class InternS1ForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,

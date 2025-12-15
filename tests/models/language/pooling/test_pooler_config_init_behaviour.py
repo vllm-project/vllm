@@ -24,7 +24,7 @@ def test_classify_models_using_activation(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(activation=False),
+        pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_activation_out = vllm_model.classify(example_prompts)
 
@@ -32,7 +32,7 @@ def test_classify_models_using_activation(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(activation=True),
+        pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_activation_out = vllm_model.classify(example_prompts)
 
@@ -104,7 +104,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
-        pooler_config=PoolerConfig(activation=False),
+        pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_activation = vllm_model.reward(example_prompts)
 
@@ -112,7 +112,7 @@ def test_reward_models_using_activation(
         model,
         max_model_len=1024,
         dtype=dtype,
-        pooler_config=PoolerConfig(activation=True),
+        pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_activation = vllm_model.reward(example_prompts)
 

@@ -166,7 +166,7 @@ class VisualTokenizer(torch.nn.Module):
         # e.g., for hidden_stride=2, this leads to a token length reduction:
         # 1024 -> 256 for aimv2
         if self.config.hidden_stride > 1:
-            # this `d` maybe different from the above `d``
+            # this `d` maybe different from the above `d`
             n, L, d = features.shape
             sqrt_l = int(L**0.5)
             assert sqrt_l**2 == L, (
@@ -414,8 +414,6 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     dummy_inputs=OvisDummyInputsBuilder,
 )
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -514,7 +512,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         return tuple(vision_embeddings)
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

@@ -7,7 +7,7 @@ This document shows you some examples of the different options that are
 available to generate structured outputs.
 
 !!! warning
-    If you are still using the following deprecated API fields, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
+    If you are still using the following deprecated API fields which were removed in v0.12.0, please update your code to use `structured_outputs` as demonstrated in the rest of this document:
 
     - `guided_json` -> `{"structured_outputs": {"json": ...}}` or `StructuredOutputsParams(json=...)`
     - `guided_regex` -> `{"structured_outputs": {"regex": ...}}` or `StructuredOutputsParams(regex=...)`
@@ -61,7 +61,7 @@ Now let´s see an example for each of the cases, starting with the `choice`, as 
     print(completion.choices[0].message.content)
     ```
 
-The next example shows how to use the `regex`. The idea is to generate an email address, given a simple regex template:
+The next example shows how to use the `regex`. The supported regex syntax depends on the structured output backend. For example, `xgrammar`, `guidance`, and `outlines` use Rust-style regex, while `lm-format-enforcer` uses Python's `re` module. The idea is to generate an email address, given a simple regex template:
 
 ??? code
 
@@ -204,7 +204,7 @@ Note that you can use reasoning with any provided structured outputs feature. Th
             }
         },
     )
-    print("reasoning_content: ", completion.choices[0].message.reasoning_content)
+    print("reasoning: ", completion.choices[0].message.reasoning)
     print("content: ", completion.choices[0].message.content)
     ```
 
@@ -298,7 +298,7 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: <gh-file:examples/online_serving/structured_outputs>
+An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
 
 ## Offline Inference
 

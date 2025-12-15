@@ -7,7 +7,7 @@ import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 
 def _kv_cache_update_kernel(

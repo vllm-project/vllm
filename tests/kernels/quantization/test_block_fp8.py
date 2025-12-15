@@ -18,19 +18,18 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     per_block_cast_to_fp8,
+    should_use_deepgemm_for_fp8_linear,
 )
+from vllm.utils.import_utils import has_deep_gemm
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 # Test configurations
 DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
@@ -55,6 +54,10 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "num_tokens,d,dtype,group_size,seed",
     itertools.product(NUM_TOKENS, D, DTYPES, GROUP_SIZE, SEEDS),
@@ -79,14 +82,14 @@ def test_per_token_group_quant_fp8(num_tokens, d, dtype, group_size, seed):
 def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
     factor_for_scale = 1e-2
-    fp8_info = torch.finfo(torch.float8_e4m3fn)
+    fp8_info = torch.finfo(current_platform.fp8_dtype())
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
     A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
-    A_fp8 = A_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    A_fp8 = A_fp32.clamp(min=fp8_min, max=fp8_max).to(current_platform.fp8_dtype())
 
     B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
-    B_fp8 = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
+    B_fp8 = B_fp32.clamp(min=fp8_min, max=fp8_max).to(current_platform.fp8_dtype())
 
     block_n, block_k = block_size[0], block_size[1]
     n_tiles = (N + block_n - 1) // block_n
@@ -104,6 +107,9 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_cutlass_matmul():
     # Test simple case where weight.shape % 128 != 0,
@@ -152,6 +158,10 @@ def test_w8a8_block_fp8_cutlass_matmul():
     assert rel_diff < 0.001
 
 
+@pytest.mark.skipif(
+    current_platform.is_fp8_fnuz(),
+    reason="This platform supports e4m3fnuz, not e4m3fn.",
+)
 @pytest.mark.parametrize(
     "M,N,K,block_size,out_dtype,seed",
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
@@ -159,16 +169,18 @@ def test_w8a8_block_fp8_cutlass_matmul():
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGemm kernels not available.")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
-    # only aligned sizes
-    if M % 4 != 0 or K % 128 != 0 or N % 64 != 0:
-        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
-
     torch.manual_seed(seed)
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max = fp8_info.max
 
     A_fp32 = (torch.rand(M, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
     B_fp32 = (torch.rand(N, K, dtype=torch.float32) - 0.5) * 2 * fp8_max
+
+    # only aligned sizes are supported by deepgemm
+    if not should_use_deepgemm_for_fp8_linear(
+        output_dtype=out_dtype, weight=B_fp32, supports_deep_gemm=True
+    ):
+        pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
     A_fp8, As_fp8 = per_token_group_quant_fp8(A_fp32, block_size[1])
     B_fp8, Bs_fp8 = per_block_cast_to_fp8(B_fp32, block_size=block_size)

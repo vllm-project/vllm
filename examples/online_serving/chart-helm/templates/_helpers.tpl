@@ -123,9 +123,6 @@ runAsUser:
 {{-   end }}
 {{- end }}
 
-{{- define "chart.extraInitImage" -}}
-"amazon/aws-cli:2.6.4"
-{{- end }}
 
 {{- define "chart.extraInitEnv" -}}
 - name: S3_ENDPOINT_URL
@@ -148,10 +145,14 @@ runAsUser:
     secretKeyRef:
       name: {{ .Release.Name }}-secrets
       key: s3accesskey
+{{- if .Values.extraInit.s3modelpath }}
 - name: S3_PATH
   value: "{{ .Values.extraInit.s3modelpath }}"
+{{- end }}
+{{- if hasKey .Values.extraInit "awsEc2MetadataDisabled" }}
 - name: AWS_EC2_METADATA_DISABLED
   value: "{{ .Values.extraInit.awsEc2MetadataDisabled }}"
+{{- end }}
 {{- end }}
 
 {{/*

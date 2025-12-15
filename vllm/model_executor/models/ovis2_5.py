@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -103,16 +103,16 @@ class VisualTokenizer(torch.nn.Module):
         config: PretrainedConfig,
         visual_vocab_size: int,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
         self.vit = self._init_backbone(
             config=config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vit",
-            use_data_parallel=use_data_parallel,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -130,16 +130,16 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
             return Siglip2NavitModel(
                 config=config,
                 quant_config=quant_config,
+                multimodal_config=multimodal_config,
                 prefix=prefix,
-                use_data_parallel=use_data_parallel,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -451,12 +451,11 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
     dummy_inputs=Ovis2_5DummyInputsBuilder,
 )
 class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
@@ -467,6 +466,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
+            multimodal_config=multimodal_config,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
         )
@@ -605,7 +605,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []

@@ -5,19 +5,21 @@ image, embedding, and video support for different VLMs in vLLM.
 """
 
 import math
-import os
 from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
+from packaging.version import Version
 from transformers import (
     AutoModel,
+    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
-from vllm.utils.functools import identity
+from vllm.utils.func_utils import identity
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -37,13 +39,6 @@ from .vlm_utils.types import (
     VLMTestInfo,
     VLMTestType,
 )
-
-# This hack is needed for phi3v & paligemma models
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -109,8 +104,7 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 4},
             )
         ],
-        # TODO: Revert to "auto" when CPU backend can use torch > 2.6
-        dtype="bfloat16" if current_platform.is_cpu() else "auto",
+        vllm_runner_kwargs={"enable_mm_embeds": True},
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "paligemma": VLMTestInfo(
@@ -138,11 +132,12 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
+        enforce_eager=False,
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
@@ -157,8 +152,31 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+    ),
+    "qwen3_vl": VLMTestInfo(
+        models=["Qwen/Qwen3-VL-4B-Instruct"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        enforce_eager=False,
+        needs_video_metadata=True,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",  # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.core_model,
+        ],
     ),
     "ultravox": VLMTestInfo(
         models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
@@ -260,7 +278,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=64)],
     ),
     "aya_vision": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
@@ -276,7 +294,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
     ),
     "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
@@ -332,7 +350,7 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
-        image_size_factors=[(), (1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -364,7 +382,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
-        num_logprobs=10,
     ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
@@ -385,12 +402,13 @@ VLM_TEST_SETTINGS = {
         # So, we need to reduce the number of tokens for the test to pass.
         max_tokens=8,
         num_logprobs=10,
+        auto_cls=AutoModelForCausalLM,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v": VLMTestInfo(
         models=["zai-org/GLM-4.1V-9B-Thinking"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
         video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
         max_model_len=2048,
@@ -405,6 +423,7 @@ VLM_TEST_SETTINGS = {
         models=["zai-org/GLM-4.1V-9B-Thinking"],
         # GLM4.1V require include video metadata for input
         test_type=VLMTestType.CUSTOM_INPUTS,
+        prompt_formatter=lambda vid_prompt: f"[gMASK]<|user|>\n{vid_prompt}<|assistant|>\n",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
@@ -674,6 +693,29 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
         hf_model_kwargs={"revision": "refs/pr/5"},
     ),
+    "paddleocr_vl": VLMTestInfo(
+        models=["PaddlePaddle/PaddleOCR-VL"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        img_idx_to_prompt=lambda idx: (
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+        ),
+        multi_image_prompt=(
+            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Describe these two images separately."
+        ),
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(0.25,)],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
+                reason="This model is broken in Transformers v4.57.3",
+            )
+        ],
+    ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -696,7 +738,13 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=48)],
+        marks=[
+            large_gpu_mark(min_gb=48),
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Model produces a vector of <UNK> output in HF on ROCm",
+            ),
+        ],
     ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
@@ -719,7 +767,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
     "skywork_r1v": VLMTestInfo(
@@ -771,7 +819,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
@@ -836,6 +884,12 @@ VLM_TEST_SETTINGS = {
                     formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
+            )
+        ],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
+                reason="This model is broken in Transformers v4.57.1",
             )
         ],
     ),
