@@ -3,7 +3,7 @@
 """
 Test:
 
-* Tests for MultiHeadAttention layer
+* Tests for MMEncoderAttention layer
 """
 
 from unittest.mock import patch
@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
@@ -42,35 +42,47 @@ def test_mha_attn_platform(device: str):
 
     if device == "cpu":
         with (
-            patch("vllm.attention.layer.current_platform", CpuPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CpuPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
+            attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
         with (
-            patch("vllm.attention.layer.current_platform", RocmPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                RocmPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
+            attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CudaPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
-            attn = MultiHeadAttention(16, 64, scale=1)
+            attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CudaPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
-            attn = MultiHeadAttention(16, 72, scale=1)
+            attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
@@ -130,7 +142,7 @@ def test_mha_attn_forward(
     k = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     v = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     scale = 1.0 / head_size**0.5
-    attn = MultiHeadAttention(
+    attn = MMEncoderAttention(
         num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
     )
     output = attn(q, k, v)
