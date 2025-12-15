@@ -61,7 +61,7 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 20min
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 30min
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
