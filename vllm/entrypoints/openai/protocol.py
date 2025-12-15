@@ -364,6 +364,7 @@ class ResponsesRequest(OpenAIBaseModel):
     max_tool_calls: int | None = None
     metadata: Metadata | None = None
     model: str | None = None
+    logit_bias: dict[str, float] | None = None
     parallel_tool_calls: bool | None = True
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
@@ -377,6 +378,7 @@ class ResponsesRequest(OpenAIBaseModel):
     tools: list[Tool] = Field(default_factory=list)
     top_logprobs: int | None = 0
     top_p: float | None = None
+    top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
 
@@ -431,6 +433,7 @@ class ResponsesRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
         "top_p": 1.0,
+        "top_k": 0,
     }
 
     def to_sampling_params(
@@ -452,6 +455,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
             )
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -472,6 +479,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
+            top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
@@ -479,6 +487,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
+            logit_bias=self.logit_bias,
         )
 
     def is_include_output_logprobs(self) -> bool:

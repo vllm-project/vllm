@@ -25,12 +25,12 @@ from vllm.entrypoints.openai.serving_responses import (
     extract_tool_types,
 )
 from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODEL_NAME = "openai-community/gpt2"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
 ]
@@ -293,7 +293,7 @@ class TestValidateGeneratorInput:
         """Test _validate_generator_input with valid prompt length"""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=valid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=valid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)
@@ -303,7 +303,7 @@ class TestValidateGeneratorInput:
 
         # create an invalid engine prompt
         invalid_prompt_token_ids = list(range(200))  # 100 tokens >= 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)

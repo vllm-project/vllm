@@ -42,60 +42,31 @@ class ModelRequestData(NamedTuple):
 # Unless specified, these settings have been tested to work on a single L4.
 
 
-# Voxtral
-# Make sure to install mistral-common[audio].
-def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
-    from mistral_common.audio import Audio
-    from mistral_common.protocol.instruct.chunk import (
-        AudioChunk,
-        RawAudio,
-        TextChunk,
-    )
-    from mistral_common.protocol.instruct.messages import (
-        UserMessage,
-    )
-    from mistral_common.protocol.instruct.request import ChatCompletionRequest
-    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
-
-    model_name = "mistralai/Voxtral-Mini-3B-2507"
-    tokenizer = MistralTokenizer.from_hf_hub(model_name)
-
+# AudioFlamingo3
+def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "nvidia/audio-flamingo-3-hf"
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
-        config_format="mistral",
-        load_format="mistral",
-        tokenizer_mode="mistral",
         enforce_eager=True,
-        enable_chunked_prefill=False,
     )
 
-    text_chunk = TextChunk(text=question)
-    audios = [
-        Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
-        for i in range(audio_count)
-    ]
-    audio_chunks = [
-        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
-    ]
+    # AudioFlamingo3 uses <sound> token for audio
+    audio_placeholder = "<sound>" * audio_count
 
-    messages = [UserMessage(content=[*audio_chunks, text_chunk])]
-
-    req = ChatCompletionRequest(messages=messages, model=model_name)
-
-    tokens = tokenizer.encode_chat_completion(req)
-    prompt_ids, audios = tokens.tokens, tokens.audios
-
-    audios_and_sr = [(au.audio_array, au.sampling_rate) for au in audios]
-
-    multi_modal_data = {"audio": audios_and_sr}
+    prompt = (
+        "<|im_start|>system\n"
+        "You are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_placeholder}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
-        prompt_token_ids=prompt_ids,
-        multi_modal_data=multi_modal_data,
+        prompt=prompt,
     )
 
 
@@ -361,6 +332,63 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Voxtral
+# Make sure to install mistral-common[audio].
+def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
+    from mistral_common.audio import Audio
+    from mistral_common.protocol.instruct.chunk import (
+        AudioChunk,
+        RawAudio,
+        TextChunk,
+    )
+    from mistral_common.protocol.instruct.messages import (
+        UserMessage,
+    )
+    from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+
+    model_name = "mistralai/Voxtral-Mini-3B-2507"
+    tokenizer = MistralTokenizer.from_hf_hub(model_name)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        config_format="mistral",
+        load_format="mistral",
+        tokenizer_mode="mistral",
+        enforce_eager=True,
+        enable_chunked_prefill=False,
+    )
+
+    text_chunk = TextChunk(text=question)
+    audios = [
+        Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
+        for i in range(audio_count)
+    ]
+    audio_chunks = [
+        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
+    ]
+
+    messages = [UserMessage(content=[*audio_chunks, text_chunk])]
+
+    req = ChatCompletionRequest(messages=messages, model=model_name)
+
+    tokens = tokenizer.encode_chat_completion(req)
+    prompt_ids, audios = tokens.tokens, tokens.audios
+
+    audios_and_sr = [(au.audio_array, au.sampling_rate) for au in audios]
+
+    multi_modal_data = {"audio": audios_and_sr}
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt_token_ids=prompt_ids,
+        multi_modal_data=multi_modal_data,
+    )
+
+
 # Whisper
 def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "Whisper only support single audio input per prompt"
@@ -382,7 +410,7 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
-    "voxtral": run_voxtral,
+    "audioflamingo3": run_audioflamingo3,
     "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
@@ -392,6 +420,7 @@ model_example_map = {
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
     "ultravox": run_ultravox,
+    "voxtral": run_voxtral,
     "whisper": run_whisper,
 }
 

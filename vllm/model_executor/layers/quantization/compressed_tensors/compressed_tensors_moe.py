@@ -1266,9 +1266,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
                     c_strides2=self.ab_strides1_c_strides2,
-                    parallel_config=getattr(
-                        getattr(layer, "vllm_config", None), "parallel_config", None
-                    ),
                 )
 
         else:

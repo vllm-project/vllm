@@ -81,6 +81,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer,
     has_flashinfer_moe,
 )
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -187,7 +188,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
+            # This is a workaround for the weights remapping issue:
+            # https://github.com/vllm-project/vllm/issues/28072
+            # Right now, the Nvidia ModelOpt library use just one wildcard pattern:
+            #        module_path*
+            # It gets applied if the whole tree of modules rooted at module_path
+            # is not quantized. Here we replace such pattern by 2 patterns that are
+            # collectively equivalent to the original pattern:
+            #        module_path
+            #        module_path.*
+            new_exclude_modules = []
+            for exclude in self.exclude_modules:
+                if len(exclude) >= 2 and exclude[-1] == "*" and exclude[-2] != ".":
+                    new_exclude_modules.append(exclude[:-1])
+                    new_exclude_modules.append(exclude[:-1] + ".*")
+                else:
+                    new_exclude_modules.append(exclude)
+
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -607,6 +625,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         Only supports pre-quantized checkpoints with FP8 weights and scales.
         """
 
+        if self.flashinfer_moe_backend is not None:
+            self._maybe_pad_intermediate_for_flashinfer(layer)
+
         layer.w13_weight = Parameter(layer.w13_weight.data, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight.data, requires_grad=False)
 
@@ -683,6 +704,50 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
         register_moe_scaling_factors(layer)
+
+    def _maybe_pad_intermediate_for_flashinfer(self, layer: torch.nn.Module) -> None:
+        """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
+
+        Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+        used for GEMM to be divisible by a small alignment value. When this is
+        not satisfied (e.g. with certain tensor-parallel sizes), we pad the
+        gate/up and down projection weights along the intermediate dim.
+        """
+        if not hasattr(layer, "w13_weight") or not hasattr(layer, "w2_weight"):
+            return
+
+        # Current local intermediate size (per partition) is the K dimension of
+        # the down projection.
+        num_experts, hidden_size, intermediate = layer.w2_weight.shape
+
+        min_alignment = 16
+        padded_intermediate = round_up(intermediate, min_alignment)
+
+        if padded_intermediate == intermediate:
+            return
+
+        logger.info(
+            "Padding intermediate size from %d to %d for up/down projection weights.",
+            intermediate,
+            padded_intermediate,
+        )
+
+        up_mult = 2 if self.moe.is_act_and_mul else 1
+        padded_gate_up_dim = up_mult * padded_intermediate
+
+        # Pad w13 and w12 along its intermediate dimension.
+        w13 = layer.w13_weight.data
+        padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
+        padded_w13[:, : w13.shape[1], :] = w13
+        layer.w13_weight.data = padded_w13
+
+        w2 = layer.w2_weight.data
+        padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
+        padded_w2[:, :, :intermediate] = w2
+        layer.w2_weight.data = padded_w2
+
+        if hasattr(layer, "intermediate_size_per_partition"):
+            layer.intermediate_size_per_partition = padded_intermediate
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
