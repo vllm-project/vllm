@@ -303,15 +303,23 @@ def test_attention_config():
 
     # default value
     args = parser.parse_args([])
-    assert args.attention_config == AttentionConfig()
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config == AttentionConfig()
 
     # set backend via dot notation
     args = parser.parse_args(["--attention-config.backend", "FLASH_ATTN"])
-    assert args.attention_config.backend.name == "FLASH_ATTN"
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.backend is not None
+    assert engine_args.attention_config.backend.name == "FLASH_ATTN"
 
     # set backend via --attention-backend shorthand
     args = parser.parse_args(["--attention-backend", "FLASHINFER"])
-    assert args.attention_config.backend.name == "FLASHINFER"
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_backend is not None
+    assert engine_args.attention_backend.name == "FLASHINFER"
 
     # set all fields via dot notation
     args = parser.parse_args(
@@ -336,15 +344,18 @@ def test_attention_config():
             "true",
         ]
     )
-    assert args.attention_config.backend.name == "FLASH_ATTN"
-    assert args.attention_config.flash_attn_version == 3
-    assert args.attention_config.use_prefill_decode_attention is True
-    assert args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert args.attention_config.use_cudnn_prefill is True
-    assert args.attention_config.use_trtllm_ragged_deepseek_prefill is True
-    assert args.attention_config.use_trtllm_attention is True
-    assert args.attention_config.disable_flashinfer_prefill is True
-    assert args.attention_config.disable_flashinfer_q_quantization is True
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.backend is not None
+    assert engine_args.attention_config.backend.name == "FLASH_ATTN"
+    assert engine_args.attention_config.flash_attn_version == 3
+    assert engine_args.attention_config.use_prefill_decode_attention is True
+    assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
+    assert engine_args.attention_config.use_cudnn_prefill is True
+    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
+    assert engine_args.attention_config.use_trtllm_attention is True
+    assert engine_args.attention_config.disable_flashinfer_prefill is True
+    assert engine_args.attention_config.disable_flashinfer_q_quantization is True
 
     # set to string form of a dict with all fields
     args = parser.parse_args(
@@ -360,15 +371,18 @@ def test_attention_config():
             '"disable_flashinfer_q_quantization": false}',
         ]
     )
-    assert args.attention_config.backend.name == "FLASHINFER"
-    assert args.attention_config.flash_attn_version == 2
-    assert args.attention_config.use_prefill_decode_attention is False
-    assert args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
-    assert args.attention_config.use_cudnn_prefill is False
-    assert args.attention_config.use_trtllm_ragged_deepseek_prefill is False
-    assert args.attention_config.use_trtllm_attention is False
-    assert args.attention_config.disable_flashinfer_prefill is False
-    assert args.attention_config.disable_flashinfer_q_quantization is False
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.attention_config.backend is not None
+    assert engine_args.attention_config.backend.name == "FLASHINFER"
+    assert engine_args.attention_config.flash_attn_version == 2
+    assert engine_args.attention_config.use_prefill_decode_attention is False
+    assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
+    assert engine_args.attention_config.use_cudnn_prefill is False
+    assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
+    assert engine_args.attention_config.use_trtllm_attention is False
+    assert engine_args.attention_config.disable_flashinfer_prefill is False
+    assert engine_args.attention_config.disable_flashinfer_q_quantization is False
 
 
 def test_prefix_cache_default():
