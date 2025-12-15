@@ -35,7 +35,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
-    update_config,
+    update_config, PoolerConfig, set_current_vllm_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -173,6 +173,7 @@ from .utils import (
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
+from ...model_executor.layers.pooler import DispatchPooler, Pooler
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -817,14 +818,13 @@ class GPUModelRunner(
             else:
                 generator = None
 
-            if self.is_pooling_model:
-                assert pooling_params is not None
-                task = pooling_params.task
-                assert task is not None, "You did not set `task` in the API"
+                if pooling_params is not None:
+                    task = pooling_params.task
+                    assert task is not None, "You did not set `task` in the API"
 
-                model = cast(VllmModelForPooling, self.get_model())
-                to_update = model.pooler.get_pooling_updates(task)
-                to_update.apply(pooling_params)
+                    model = cast(VllmModelForPooling, self.get_model())
+                    to_update = model.pooler.get_pooling_updates(task)
+                    to_update.apply(pooling_params)
 
             req_state = CachedRequestState(
                 req_id=req_id,
@@ -2295,12 +2295,12 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def get_supported_generation_tasks(self) -> list[GenerationTask]:
+    def get_supported_generation_tasks(self) -> list[GenerationTask|PoolingTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
 
         if is_text_generation_model(model):
-            supported_tasks.append("generate")
+            supported_tasks.extend(["generate", "embed", "token_embed"])
 
         if supports_transcription(model):
             if model.supports_transcription_only:
@@ -2400,8 +2400,7 @@ class GPUModelRunner(
             num_scheduled_tokens_np.tolist(), seq_lens_cpu, device=hidden_states.device
         )
 
-        model = cast(VllmModelForPooling, self.model)
-        raw_pooler_output: PoolerOutput = model.pooler(
+        raw_pooler_output: PoolerOutput = self.model.pooler(
             hidden_states=hidden_states,
             pooling_metadata=pooling_metadata,
         )
@@ -3110,7 +3109,7 @@ class GPUModelRunner(
                     self.kv_connector_output = kv_connector_output
                     return hidden_states
 
-                if self.is_pooling_model:
+                if len(self.input_batch.pooling_params) > 0:
                     # Return the pooling output.
                     output = self._pool(
                         hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
@@ -3673,6 +3672,16 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+
+        if not self.is_pooling_model:
+            with set_current_vllm_config(self.vllm_config):
+                pooler_config = PoolerConfig(pooling_type="LAST")
+                self.model.pooler = DispatchPooler(
+                    {
+                        "token_embed": Pooler.for_token_embed(pooler_config),
+                        "embed": Pooler.for_embed(pooler_config),
+                    },
+                )
 
         if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)

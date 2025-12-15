@@ -1025,13 +1025,8 @@ class LLM:
             raise ValueError(error_str)
 
         model_config = self.model_config
-        runner_type = model_config.runner_type
-        if runner_type != "pooling":
-            raise ValueError(
-                "LLM.encode() is only supported for pooling models. "
-                "Try passing `--runner pooling` to use the model as a "
-                "pooling model."
-            )
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
 
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
@@ -1068,9 +1063,6 @@ class LLM:
             if pooling_params is None:
                 # Use default pooling params.
                 pooling_params = PoolingParams()
-
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
 
         for param in as_iter(pooling_params):
             param.verify(pooling_task, model_config)

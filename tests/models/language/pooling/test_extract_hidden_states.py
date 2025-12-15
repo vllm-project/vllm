@@ -14,6 +14,7 @@ from vllm import SamplingParams, TokensPrompt
 def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
+    prompts = [TokensPrompt(prompt_token_ids=t) for t in token_prompts]
 
     with vllm_runner(
         model,
@@ -23,7 +24,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         enable_prefix_caching=True,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            prompts=prompts,
             pooling_task="token_embed",
         )
 
@@ -36,7 +37,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         # we need to skip reading cache at this request by
         # request.skip_reading_prefix_cache
         pooling_outputs = vllm_model.llm.encode(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            prompts=prompts,
             pooling_task="token_embed",
         )
 
@@ -48,7 +49,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         # skip_reading_prefix_cache can still write to cache
         # to accelerate following requests
         pooling_outputs = vllm_model.llm.encode(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            prompts=prompts,
             pooling_task="embed",
         )
 
@@ -57,8 +58,8 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
             assert output.num_cached_tokens > 0
 
         # Support generate text and returning Prompt Hidden States
-        generate_outputs = vllm_model.generate(
-            prompts=[TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+        generate_outputs = vllm_model.llm.generate(
+            prompts=prompts,
             sampling_params=SamplingParams(max_tokens=1),
         )
         for n, output in zip(n_prompt_tokens, generate_outputs):
