@@ -94,7 +94,6 @@ def _rocm_aiter_fused_moe_impl(
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
 
-
     return fused_moe(
         hidden_states,
         w1,

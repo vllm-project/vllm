@@ -4,10 +4,11 @@
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from typing import Any
-import torch
+
 import regex as re
-from torch import nn
+import torch
 from aiter.ops.triton.quant import dynamic_mxfp4_quant
+from torch import nn
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -106,6 +107,7 @@ def _is_equal_or_regex_match(
         return True
     return False
 
+
 # utility for tensor dims > 2 cases
 def b_dynamic_mxfp4_quant(x):
     h, b, d = x.shape
@@ -147,22 +149,26 @@ def mxfp4_to_f32(x, is_threed):
 
 def e8m0_to_f32(x):
     # Convert the input tensor `x` (assumed to be in e8m0 format) to float32.
-    # e8m0 is a custom 8-bit floating point format with 8 bits for exponent, 0 for mantissa.
-    # This means the value is essentially 2^(exponent - 127), similar to how IEEE-754 stores floats.
+    # e8m0 is a custom 8-bit floating point format with 8 bits for exponent, 0 for
+    # mantissa. This means the value is essentially 2^(exponent - 127), similar to how
+    # IEEE-754 stores floats.
 
-    # Convert x to float32 for computation, and compute the power of 2 by subtracting the bias (127).
+    # Convert x to float32 for computation, and compute the power of 2 by subtracting
+    # the bias (127).
     x_f32 = 2 ** ((x.to(torch.float32)) - 127)
 
-    # If the exponent value was 255 (i.e., 2^(128)), this is a special case usually used to represent NaN or Inf.
+    # If the exponent value was 255 (i.e., 2^(128)), this is a special case usually used
+    # to represent NaN or Inf.
     # Since this custom format has no mantissa, treat 2^128 as NaN.
     x_f32[x_f32 == 128] = float("nan")
     return x_f32
 
+
 def quark_post_load_weights(self_attn: nn.Module, w: torch.Tensor, quant_format: str):
     if "mxfp4" in quant_format:
-        # when dtype is bf16, the processing flow is to dynamic quantize bf16 tensor to uint8 tensor
-        # do w_kc (bf16) first to get the w_kc(uint8) w_s_kc(uint8)
-        # and w_vc repeating the same procedure of w_kc to get  w_vc(uint8) w_s_vc(uint8)
+        # when dtype is bf16, the processing flow is to dynamic quantize bf16 tensor to
+        # uint8 tensor do w_kc (bf16) first to get the w_kc(uint8) w_s_kc(uint8) and
+        # w_vc repeating the same procedure of w_kc to get  w_vc(uint8) w_s_vc(uint8)
         if w.dtype == torch.bfloat16:
             # w_kc, w_vc = w.split(
             # [self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)

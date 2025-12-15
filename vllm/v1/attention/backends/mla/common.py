@@ -1140,8 +1140,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.q_pad_num_heads = q_pad_num_heads
         self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
-        self.is_aiter_triton_fp4_bmm_enabled = rocm_aiter_ops.is_enabled() and \
-            self.kv_b_proj.weight.dtype == torch.bfloat16
+        self.is_aiter_triton_fp4_bmm_enabled = (
+            rocm_aiter_ops.is_enabled()
+            and self.kv_b_proj.weight.dtype == torch.bfloat16
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1242,6 +1244,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         # Convert from (B, N, L) to (N, B, L)
         if self.is_aiter_triton_fp4_bmm_enabled:
             from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
             out = out.view(-1, self.num_heads, self.v_head_dim)
             x = x.view(-1, self.num_heads, self.kv_lora_rank)
             x = x.transpose(0, 1)
@@ -1264,7 +1267,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 out = out.view(-1, self.num_heads, self.v_head_dim)
                 # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
                 x = rocm_aiter_ops.triton_fp8_bmm(
-                    x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+                    x,
+                    self.W_V,
+                    self.W_V_scale,
+                    group_size=128,
+                    transpose_bm=True,
+                    YQ=out,
                 )
             else:
                 # Convert from (B, N * V) to (N, B, V)
@@ -1274,13 +1282,14 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
 
                 # Convert from (N, B, V) to (B, N * V)
-                out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+                out_new = out.transpose(0, 1).reshape(
+                    -1, self.num_heads * self.v_head_dim
+                )
 
                 # Adjust output buffer shape back to the original (B, N * V)
                 N, B, V = out.shape
                 out.resize_((B, N * V))
                 out.copy_(out_new)  # Copy result
-
 
 
 class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
@@ -1599,10 +1608,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj)
         # If kv_b_proj_weight is unquantized, quantize it to mxfp4 if supported
         if self.is_aiter_triton_fp4_bmm_enabled:
-            from vllm.model_executor.layers.quantization.quark.utils import quark_post_load_weights
-            
-            self.W_K, self.W_K_scale, W_V, self.W_V_scale = (
-                quark_post_load_weights(self, kv_b_proj_weight, "mxfp4"))
+            from vllm.model_executor.layers.quantization.quark.utils import (
+                quark_post_load_weights,
+            )
+
+            self.W_K, self.W_K_scale, W_V, self.W_V_scale = quark_post_load_weights(
+                self, kv_b_proj_weight, "mxfp4"
+            )
             self.W_V = W_V.contiguous().transpose(1, 2)
 
             self.W_K = self.W_K.transpose(-2, -1).contiguous()
@@ -1616,12 +1628,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_b_proj_weight = kv_b_proj_weight.T
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
-                f"{kv_b_proj_weight.shape=}, "
-                f"{self.kv_lora_rank=}, "
-                f"{self.num_heads=}, "
-                f"{self.qk_nope_head_dim=}, "
-                f"{self.v_head_dim=}")
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        ), (
+            f"{kv_b_proj_weight.shape=}, "
+            f"{self.kv_lora_rank=}, "
+            f"{self.num_heads=}, "
+            f"{self.qk_nope_head_dim=}, "
+            f"{self.v_head_dim=}"
+        )
         kv_b_proj_weight = kv_b_proj_weight.view(
             self.kv_lora_rank,
             self.num_heads,
@@ -1629,8 +1643,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         W_UK, W_UV = kv_b_proj_weight.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
 
         if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
@@ -2031,6 +2045,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
                 decode_q_nope = decode_q_nope.transpose(0, 1)
                 decode_ql_nope = None
                 decode_ql_nope = batched_gemm_a16wfp4(
