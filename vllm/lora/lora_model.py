@@ -53,11 +53,23 @@ class LoRAModel:
         """Return a copy of the object with different ids.
 
         Will share the underlying tensors."""
-        return self.__class__(
+        cloned = self.__class__(
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
         )
+        
+        # Copy slab metadata if present (for SLAB optimization)
+        if hasattr(self, '_cached_cpu_slab'):
+            cloned._cached_cpu_slab = self._cached_cpu_slab
+        if hasattr(self, '_cached_metadata'):
+            cloned._cached_metadata = self._cached_metadata
+        if hasattr(self, '_lora_dir'):
+            cloned._lora_dir = self._lora_dir
+        if hasattr(self, '_loras_dict'):
+            cloned._loras_dict = self._loras_dict
+            
+        return cloned
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""
@@ -82,6 +94,8 @@ class LoRAModel:
         target_modules_dict: dict | None = None,
         target_lora_config: LoRAConfig | None = None,
         slab_path: Optional[str] = None,
+        packed_modules: dict | None = None,
+        packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a dictionary of tensors."""
         if not SLAB_OPTIMIZATION:
@@ -118,60 +132,28 @@ class LoRAModel:
                     if pin_memory:
                         loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
                     
-                    # Track size
-                    tensor_bytes = tensor.numel() * tensor.element_size()
-                    module_sizes[module_name]['lora_a'] = tensor_bytes
-                    total_lora_bytes += tensor_bytes
                 else:
                     loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
 
                     if pin_memory:
                         loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
-                    
-                    # Track size
-                    tensor_bytes = tensor.numel() * tensor.element_size()
-                    module_sizes[module_name]['lora_b'] = tensor_bytes
-                    total_lora_bytes += tensor_bytes
-
-            # Log LoRA weight sizes (basic path - no slab optimization)
-            logger.info(f"[BASIC_LORA_PATH] Loading LoRA without slab optimization")
-            logger.info(f"[BASIC_LORA_PATH] Total modules: {len(loras)}")
-            logger.info(f"[BASIC_LORA_PATH] Total LoRA weight size: {total_lora_bytes / (1024**2):.2f} MB ({total_lora_bytes:,} bytes)")
-            
-            # Log individual module sizes (first 20 modules)
-            logger.info(f"[BASIC_LORA_PATH] Module sizes (first 20):")
-            for idx, (mod_name, sizes) in enumerate(sorted(module_sizes.items())[:20]):
-                lora_a_mb = sizes['lora_a'] / (1024**2)
-                lora_b_mb = sizes['lora_b'] / (1024**2)
-                total_mod_mb = (sizes['lora_a'] + sizes['lora_b']) / (1024**2)
-                logger.info(f"  {idx+1}. {mod_name}: lora_a={lora_a_mb:.2f}MB, lora_b={lora_b_mb:.2f}MB, total={total_mod_mb:.2f}MB")
-            
-            if len(module_sizes) > 20:
-                logger.info(f"  ... and {len(module_sizes) - 20} more modules")
-            
-            # Log breakdown by module type
-            moe_size = 0
-            attention_size = 0
-            other_size = 0
-            for mod_name, sizes in module_sizes.items():
-                mod_total = sizes['lora_a'] + sizes['lora_b']
-                if 'mlp.experts' in mod_name:
-                    moe_size += mod_total
-                elif 'attn' in mod_name:
-                    attention_size += mod_total
-                else:
-                    other_size += mod_total
-            
-            logger.info(f"[BASIC_LORA_PATH] Size breakdown:")
-            logger.info(f"  - MoE layers: {moe_size / (1024**2):.2f} MB ({100*moe_size/total_lora_bytes:.1f}%)")
-            logger.info(f"  - Attention layers: {attention_size / (1024**2):.2f} MB ({100*attention_size/total_lora_bytes:.1f}%)")
-            logger.info(f"  - Other layers: {other_size / (1024**2):.2f} MB ({100*other_size/total_lora_bytes:.1f}%)")
 
             return cls(lora_model_id, peft_helper.r, loras)
         else:
-            # Use experimental slab optimization for improved performance
             logger.debug("Using slab-based LoRA tensor optimization")
             
+            from vllm.lora.slab_helper import check_slab_cache, get_cached_lora_model
+            
+            cache_hit, lora_model_cached = check_slab_cache(
+                lora_dir, peft_helper, target_lora_config, target_modules_dict
+            )
+            
+            if cache_hit and lora_model_cached is not None:
+                logger.debug(f"[SLAB_CACHE_HIT] Using cached slab for {lora_dir}, cloning with ID {lora_model_id}")
+                # Clone cached model with correct ID (each add_lora call gets new ID)
+                return lora_model_cached.clone(lora_model_id)
+            
+            logger.debug(f"Building new slab for {lora_dir}")
             lora_model, gpu_slab, metadata = create_slab_optimized_lora_model(
                 lora_model_id=lora_model_id,
                 tensors=tensors,
@@ -185,15 +167,14 @@ class LoRAModel:
                 weights_mapper=weights_mapper,
                 lora_dir=lora_dir,
                 lora_config=peft_helper,
-                target_modules_dict=target_modules_dict,  # Now pass target modules from LoRAManager
-                target_lora_config=target_lora_config,     # Pass target lora_config with fully_sharded_loras
-                slab_path=slab_path,  # Pass slab path for disk save/load
+                target_modules_dict=target_modules_dict,     # Pass target modules from LoRAManager
+                target_lora_config=target_lora_config,        # Pass target lora_config with fully_sharded_loras
+                slab_path=slab_path,                          # Pass slab path for disk save/load
+                packed_modules=packed_modules,                # NEW: Pass packed_modules for packing BEFORE slab build
+                packed_modules_mapping=packed_modules_mapping # NEW: Pass packing mapping
             )
             
-            # EFFICIENT: Update only MoE modules with slab views (most critical for performance)
             if gpu_slab is not None and metadata is not None and target_modules_dict is not None:
-                logger.info(f"[EFFICIENT_SLAB_UPDATE] Updating critical modules with slab views")
-                
                 # Pre-cache metadata lookup once for all modules
                 if not hasattr(metadata, '_lookup_cache'):
                     metadata._lookup_cache = {info.module_name: info for info in metadata.tensor_infos}
@@ -201,19 +182,18 @@ class LoRAModel:
                 # Instead of calling expensive create_lora_weights, just cache slab references
                 for module_name, module in target_modules_dict.items():
                     if hasattr(module, 'create_lora_weights'):
-                        # Cache slab references without triggering expensive operations
                         module._gpu_slab_ref = gpu_slab
                         module._slab_metadata_ref = metadata
                         module._slab_ready = True
-                        # Mark as using slab views to enable ultra-fast SetLoRA path
                         module._using_slab_views = True
-                
-                logger.info(f"[ULTRA_EFFICIENT_SLAB_UPDATE] Cached slab references for all {len(target_modules_dict)} modules - zero H2D transfers")
-            
             # Add any post-processing after slab model creation
             torch.cuda.synchronize()  # Check for pending GPU operations
+            
+            # Cache the built LoRAModel for future reuse
+            from vllm.lora.slab_helper import cache_lora_model
+            cache_lora_model(lora_dir, lora_model)
                 
-            return lora_model            
+            return lora_model
          
 
     @classmethod
@@ -234,6 +214,8 @@ class LoRAModel:
         target_modules_dict: dict | None = None,
         target_lora_config: LoRAConfig | None = None,
         slab_path: Optional[str] = None,
+        packed_modules: dict | None = None,
+        packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -323,21 +305,6 @@ class LoRAModel:
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
-        # return cls.from_lora_tensors(
-        #     lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
-        #     tensors=tensors,
-        #     peft_helper=peft_helper,
-        #     device=device,
-        #     dtype=dtype,
-        #     model_vocab_size=model_vocab_size,
-        #     weights_mapper=weights_mapper,
-        #     lora_dir=lora_dir,
-        #     target_modules_dict=target_modules_dict,
-        #     target_lora_config=target_lora_config,
-        #     slab_path=slab_path,
-
-        # )
-
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
             tensors=tensors,
@@ -352,5 +319,6 @@ class LoRAModel:
             target_modules_dict=target_modules_dict,
             target_lora_config=target_lora_config,
             slab_path=slab_path,
+            packed_modules=packed_modules,
+            packed_modules_mapping=packed_modules_mapping,
         )
-
