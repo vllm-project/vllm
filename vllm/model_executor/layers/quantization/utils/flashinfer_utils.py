@@ -247,11 +247,6 @@ def flashinfer_cutlass_moe_fp8(
     assert quant_config is not None
 
     # Construct modular kernel with block-scale support when requested.
-    parallel_config = getattr(
-        getattr(layer, "vllm_config", None),
-        "parallel_config",
-        None,
-    )
     fused_experts = mk.FusedMoEModularKernel(
         build_flashinfer_fp8_cutlass_moe_prepare_finalize(
             moe=moe, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
@@ -262,7 +257,7 @@ def flashinfer_cutlass_moe_fp8(
             out_dtype=hidden_states.dtype,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         ),
-        parallel_config=parallel_config,
+        moe_parallel_config=layer.moe_parallel_config,
     )
 
     return fused_experts(

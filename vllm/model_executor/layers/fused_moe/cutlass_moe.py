@@ -460,7 +460,6 @@ def cutlass_moe_fp8(
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
-    parallel_config=None,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-quantized Mixture of Experts (MoE) layer
@@ -538,7 +537,6 @@ def cutlass_moe_fp8(
             c_strides2=c_strides2,
             quant_config=quant_config,
         ),
-        parallel_config=parallel_config,
     )
 
     return fn(
