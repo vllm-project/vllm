@@ -7,6 +7,7 @@ import torch
 
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
@@ -169,6 +170,20 @@ def test_triton_unified_attn(
 
     num_decodes = num_seqs if max_query_len == 1 else query_lens.count(1)
     num_prefills = num_seqs - num_decodes
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
 
     unified_attention(
         q=maybe_quantized_query,
@@ -191,6 +206,10 @@ def test_triton_unified_attn(
         num_decodes=num_decodes,
         seq_threshold_3D=seq_threshold_3D,
         split_launch=split_launch,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
     )
 
     ref_output = ref_paged_attn(

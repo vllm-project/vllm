@@ -776,6 +776,10 @@ def unified_attention(
     num_decodes=None,
     seq_threshold_3D=None,
     split_launch=None,
+    num_par_softmax_segments=None,
+    softmax_segm_output=None,
+    softmax_segm_max=None,
+    softmax_segm_expsum=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -836,6 +840,7 @@ def unified_attention(
     TILE_SIZE_2D_DECODE = 32
     TILE_SIZE_3D_DECODE = 16 if q.element_size() >= 2 else 32
 
+    # Launch the 2D kernel if batch contains a prefill
     if num_prefills > 0:
         # batch contains prefills
 
@@ -909,10 +914,19 @@ def unified_attention(
         )
 
     if (num_decodes > 0) and ((num_prefills == 0) or split_launch):
-        # batch contains decodes that are not processed in unified fashion
+        # Batch contains decodes that are not processed in unified fashion
 
-        if num_decodes > seq_threshold_3D:
-            # use 2D kernel
+        # Launch the 2D kernel if
+        # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+        # 2. The number of sequences exceeds the configured threshold
+        if (
+            seq_threshold_3D is None
+            or num_par_softmax_segments is None
+            or softmax_segm_output is None
+            or softmax_segm_max is None
+            or softmax_segm_expsum is None
+            or num_seqs > seq_threshold_3D
+        ):
             kernel_unified_attention_2d[
                 (
                     num_decodes,
@@ -967,39 +981,12 @@ def unified_attention(
                 USE_FP8=output_scale is not None,
             )
         else:
-            # use 3D kernel
-
-            # for initial version, NUM_SEGMENTS = 16 is chosen as a default
-            # value that showed good performance in tests
-            NUM_SEGMENTS = 16
-
-            segm_output = torch.empty(
-                num_decodes,
-                num_query_heads,
-                NUM_SEGMENTS,
-                triton.next_power_of_2(head_size),
-                dtype=torch.float32,
-                device=q.device,
-            )
-            segm_max = torch.empty(
-                num_decodes,
-                num_query_heads,
-                NUM_SEGMENTS,
-                dtype=torch.float32,
-                device=q.device,
-            )
-            segm_expsum = torch.empty(
-                num_decodes,
-                num_query_heads,
-                NUM_SEGMENTS,
-                dtype=torch.float32,
-                device=q.device,
-            )
-
-            kernel_unified_attention_3d[(num_decodes, num_kv_heads, NUM_SEGMENTS)](
-                segm_output_ptr=segm_output,
-                segm_max_ptr=segm_max,
-                segm_expsum_ptr=segm_expsum,
+            kernel_unified_attention_3d[
+                (num_decodes, num_kv_heads, num_par_softmax_segments)
+            ](
+                segm_output_ptr=softmax_segm_output,
+                segm_max_ptr=softmax_segm_max,
+                segm_expsum_ptr=softmax_segm_expsum,
                 query_ptr=q,
                 key_cache_ptr=k,
                 value_cache_ptr=v,
@@ -1039,16 +1026,16 @@ def unified_attention(
                 BLOCK_Q=BLOCK_Q_3D_DECODE,
                 num_seqs=num_decodes,
                 BLOCK_M=BLOCK_M_3D_DECODE,
-                NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
                 q_block_offset=0,
                 decode_only=True,
             )
 
             reduce_segments[(num_decodes, num_query_heads)](
                 output_ptr=out,
-                segm_output_ptr=segm_output,
-                segm_max_ptr=segm_max,
-                segm_expsum_ptr=segm_expsum,
+                segm_output_ptr=softmax_segm_output,
+                segm_max_ptr=softmax_segm_max,
+                segm_expsum_ptr=softmax_segm_expsum,
                 seq_lens_ptr=seqused_k,
                 num_seqs=num_decodes,
                 num_query_heads=num_query_heads,
@@ -1061,7 +1048,7 @@ def unified_attention(
                 HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
                 query_start_len_ptr=cu_seqlens_q,
                 BLOCK_Q=BLOCK_Q_3D_DECODE,
-                NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+                NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
                 query_token_idx_offset=0,
                 decode_only=True,
                 USE_FP8=output_scale is not None,
