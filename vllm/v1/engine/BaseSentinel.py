@@ -129,7 +129,7 @@ class BaseSentinel:
         cmd_str (str): JSON string representing a serialized method call.
 
         Returns:
-            tuple[str, str, str | None]:
+            tuple[bool, str, str | None]:
             - success (bool): execution status of method call.
             - method_uuid (str): The UUID identifying the method call.
             - reason (str | None): reason for executing method call when failed.
