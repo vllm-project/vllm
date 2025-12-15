@@ -17,7 +17,7 @@ from vllm.distributed.parallel_state import (
     get_world_group,
     graph_capture,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.utils.mem_utils import DeviceMemoryProfiler, GiB_bytes
@@ -130,6 +130,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
         try:
             hidden_states, recv_metadata = self.connector.recv_attn_output()
+            if hasattr(self.connector, 'dp_metadata_list'):
+                dp_metadata = self.connector.dp_metadata_list.get(recv_metadata.stage_idx, None)
+            else:
+                dp_metadata = None
             current_layer_idx = recv_metadata.layer_idx
             logger.info(
                 f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
@@ -145,6 +149,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 with set_forward_context(
                     attn_metadata=None, vllm_config=self.vllm_config
                 ):
+                    get_forward_context().dp_metadata = dp_metadata
                     rank_ffn_output = self._execute_with_cuda_graph(
                         hidden_states, cuda_graph_info
                     )
@@ -153,6 +158,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 with set_forward_context(
                     attn_metadata=None, vllm_config=self.vllm_config
                 ):
+                    get_forward_context().dp_metadata = dp_metadata
                     rank_ffn_output = self._execute_eager_mode(
                         hidden_states, current_layer_idx
                     )
