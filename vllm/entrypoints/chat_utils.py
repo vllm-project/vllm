@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import inspect
 import json
 from abc import ABC, abstractmethod
@@ -18,6 +17,7 @@ import jinja2.meta
 import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
+import pybase64
 import transformers.utils.chat_template_utils as hf_chat_utils
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -1306,7 +1306,7 @@ MM_PARSER_MAP: dict[
     "input_audio": lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal": lambda part: _RefusalParser(part).get("refusal", None),
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
-    "video": lambda part: _VideoParser(part).get("video", []),
+    "video_frames": lambda part: _VideoParser(part).get("video", []),
 }
 
 
@@ -1520,14 +1520,14 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
-    elif part_type == "video":
+    elif part_type == "video_frames":
         str_content = "data:video/jpeg;base64,"
         list_content = cast(list[str], content)
         base64_list = []
         for content in list_content:
             with open(content, "rb") as f:
                 data = f.read()
-                base64_list.append(base64.b64encode(data).decode('utf-8'))
+                base64_list.append(pybase64.b64encode(data).decode("utf-8"))
         str_content += ",".join(base64_list)
 
         mm_parser.parse_video(str_content, uuid)
