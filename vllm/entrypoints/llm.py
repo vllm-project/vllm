@@ -18,6 +18,7 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
     ProfilerConfig,
@@ -175,6 +176,10 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        attention_config: Configuration for attention mechanisms. Can be a
+            dictionary or an AttentionConfig instance. If a dictionary, it will
+            be converted to an AttentionConfig. Allows specifying the attention
+            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -213,6 +218,7 @@ class LLM:
         | StructuredOutputsConfig
         | None = None,
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
+        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -298,6 +304,20 @@ class LLM:
         else:
             profiler_config_instance = ProfilerConfig()
 
+        if attention_config is not None:
+            if isinstance(attention_config, dict):
+                attention_config_instance = AttentionConfig(
+                    **{
+                        k: v
+                        for k, v in attention_config.items()
+                        if is_init_field(AttentionConfig, k)
+                    }
+                )
+            else:
+                attention_config_instance = attention_config
+        else:
+            attention_config_instance = AttentionConfig()
+
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
         _distributed_executor_backend = kwargs.get("distributed_executor_backend")
@@ -341,6 +361,7 @@ class LLM:
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
             profiler_config=profiler_config_instance,
+            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
