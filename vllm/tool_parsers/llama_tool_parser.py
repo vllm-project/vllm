@@ -3,12 +3,13 @@
 
 import json
 from collections.abc import Sequence
-from json import JSONDecoder
 
 import partial_json_parser
 import regex as re
 from partial_json_parser.core.options import Allow
+from transformers import PreTrainedTokenizerBase
 
+import vllm.envs as envs
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -19,95 +20,140 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+from vllm.logger import init_logger
+from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
-from vllm.entrypoints.openai.tool_parsers.utils import (
-    consume_space,
+from vllm.tool_parsers.utils import (
     find_common_prefix,
     is_complete_json,
     partial_json_loads,
 )
-from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
 
-class Granite20bFCToolParser(ToolParser):
+class Llama3JsonToolParser(ToolParser):
     """
-    Tool call parser for the granite-20b-functioncalling model intended
-    for use with the examples/tool_chat_template_granite20b_fc.jinja
-    template.
+    Tool call parser for Llama 3.x and 4 models intended for use with the
+    examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser granite-20-fc
-    are all set
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or
+    llama4_json are set.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
 
-        self.bot_token = "<function_call>"
-        self.tool_start_token = self.bot_token
-        self.tool_call_regex = re.compile(r"<function_call>\s*")
+        # initialize properties used for state when parsing tool calls in
+        # streaming mode
+        self.prev_tool_call_arr: list[dict] = []
+        self.current_tool_id: int = -1
+        self.current_tool_name_sent: bool = False
+        self.streamed_args_for_tool: list[
+            str
+        ] = []  # map what has been streamed for each tool so far to a list
+        self.bot_token = "<|python_tag|>"
+        self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
+            0
+        ]
+        # Simple regex to find opening braces - we'll use JSON decoder for parsing
+        # This handles arbitrary nesting depth correctly
+        self.tool_call_start_regex = re.compile(r"\{")
+        self.json_decoder = json.JSONDecoder()
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
     ) -> ExtractedToolCallInformation:
-        if self.tool_start_token not in model_output:
+        """
+        Extract the tool calls from a complete model response.
+        Only extracts JSON content and ignores any surrounding plain text.
+        Supports both single JSON and multiple JSONs separated by semicolons.
+        """
+        # Quick check before running regex
+        if not (self.bot_token in model_output or "{" in model_output):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        dec = JSONDecoder()
+        # Keep track of the end index of the last parsed JSON object
+        # so we don't parse inner brackets
+        end_index = -1
+        tool_calls: list[ToolCall] = []
+
         try:
-            matches = list(self.tool_call_regex.finditer(model_output))
-            logger.debug("Found %d tool call matches", len(matches))
+            for match in self.tool_call_start_regex.finditer(
+                model_output, timeout=envs.VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS
+            ):
+                start_index = match.start()
+                # Skip if this brace is inside a previously parsed JSON object
+                if start_index <= end_index:
+                    continue
 
-            raw_function_calls = []
+                try:
+                    obj, json_end_index = self.json_decoder.raw_decode(
+                        model_output[start_index:]
+                    )
+                    end_index = start_index + json_end_index
 
-            for i, match in enumerate(matches):
-                # position after the <function_call> tag
-                start_of_json = match.end()
-                # end_index == the start of the next function call
-                # (if exists)
-                next_function_call_start = (
-                    matches[i + 1].start() if i + 1 < len(matches) else None
-                )
+                    # raise KeyError if missing
+                    name = obj["name"]
+                    arguments_or_params = (
+                        obj["arguments"] if "arguments" in obj else obj["parameters"]
+                    )
 
-                raw_function_calls.append(
-                    dec.raw_decode(
-                        model_output[start_of_json:next_function_call_start]
-                    )[0]
-                )
-
-            logger.debug("Extracted %d tool calls", len(raw_function_calls))
-            tool_calls = [
-                ToolCall(
-                    type="function",
-                    function=FunctionCall(
-                        name=function_call["name"],
-                        # function call args are JSON but as a string
-                        arguments=json.dumps(
-                            function_call["arguments"], ensure_ascii=False
-                        ),
-                    ),
-                )
-                for function_call in raw_function_calls
-            ]
-
-            content = model_output[: model_output.find(self.bot_token)]
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=content if content else None,
+                    tool_calls.append(
+                        ToolCall(
+                            type="function",
+                            function=FunctionCall(
+                                name=name,
+                                # function call args are JSON but as a string
+                                arguments=json.dumps(
+                                    arguments_or_params, ensure_ascii=False
+                                ),
+                            ),
+                        )
+                    )
+                except KeyError as e:
+                    # Missing required key
+                    missing_key = str(e).strip("'\"")
+                    logger.exception(
+                        "Couldn't extract tool call from JSON response. "
+                        "Required key '%s' not present. "
+                        "Returning output in content with empty tool calls.",
+                        missing_key,
+                    )
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+                except Exception:
+                    # Any other error during parsing
+                    logger.exception(
+                        "Error in extracting tool call from response. "
+                        "Returning output in content with empty tool calls"
+                    )
+                    return ExtractedToolCallInformation(
+                        tools_called=False, tool_calls=[], content=model_output
+                    )
+        except TimeoutError:
+            logger.warning("Regex timeout occurred when matching tool call pattern.")
+            logger.debug(
+                "Regex timeout occurred when matching user input: %s", model_output
             )
-
-        except Exception as e:
-            logger.error("Error in extracting tool call from response %s", e)
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
+
+        # If we have valid tool calls, return them normally
+        if tool_calls:
+            return ExtractedToolCallInformation(
+                tools_called=True, tool_calls=tool_calls, content=None
+            )
+
+        # No valid tool calls found
+        return ExtractedToolCallInformation(
+            tools_called=False, tool_calls=[], content=model_output
+        )
 
     def extract_tool_calls_streaming(
         self,
@@ -119,12 +165,9 @@ class Granite20bFCToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        if len(current_text) < len(self.bot_token) and self.bot_token.startswith(
-            current_text
+        if not (
+            current_text.startswith(self.bot_token) or current_text.startswith("{")
         ):
-            return None
-
-        if not current_text.startswith(self.bot_token):
             return DeltaMessage(content=delta_text)
 
         # bit mask flags for partial JSON parsing. If the name hasn't been
@@ -136,18 +179,26 @@ class Granite20bFCToolParser(ToolParser):
             tool_call_arr = []
             is_complete = []
             try:
-                start_idx = len(self.bot_token)
-                start_idx = consume_space(start_idx, current_text)
-
+                # depending on the prompt format the Llama model may or may not
+                # prefix the output with the <|python_tag|> token
+                start_idx = (
+                    len(self.bot_token)
+                    if current_text.startswith(self.bot_token)
+                    else 0
+                )
                 while start_idx < len(current_text):
                     (obj, end_idx) = partial_json_loads(current_text[start_idx:], flags)
                     is_complete.append(
                         is_complete_json(current_text[start_idx : start_idx + end_idx])
                     )
-                    start_idx += end_idx
-                    start_idx = consume_space(start_idx, current_text)
-                    start_idx += len(self.bot_token)
-                    start_idx = consume_space(start_idx, current_text)
+                    start_idx += end_idx + len("; ")
+                    # depending on the prompt Llama can use
+                    # either arguments or parameters
+                    if "parameters" in obj:
+                        assert "arguments" not in obj, (
+                            "model generated both parameters and arguments"
+                        )
+                        obj["arguments"] = obj["parameters"]
                     tool_call_arr.append(obj)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug("not enough tokens to parse into JSON yet")
@@ -265,8 +316,8 @@ class Granite20bFCToolParser(ToolParser):
             self.prev_tool_call_arr = tool_call_arr
             return delta
 
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction error"
             )

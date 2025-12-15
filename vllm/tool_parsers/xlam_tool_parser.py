@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
 from vllm.logger import init_logger
