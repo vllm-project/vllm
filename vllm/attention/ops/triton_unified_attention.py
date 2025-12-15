@@ -277,11 +277,14 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
+
+        # Apply sliding window to base mask BEFORE mm_prefix OR.
+        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
         if SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
-        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
-        # Optimization: skip ranges where range_start==range_end (empty/invalid)
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
+        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -291,10 +294,7 @@ def kernel_unified_attention_2d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Skip empty ranges (range_start==range_end indicates unused slot)
                 is_valid = range_start < range_end
-
-                # Bidirectional: range_end inclusive (matches FlexAttention)
                 q_in_range = (
                     (query_abs_pos >= range_start)
                     & (query_abs_pos <= range_end)
@@ -594,11 +594,14 @@ def kernel_unified_attention_3d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
+
+        # Apply sliding window to base mask BEFORE mm_prefix OR.
+        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
         if SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
-        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens
-        # Optimization: skip ranges where range_start==range_end (empty/invalid)
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
+        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
         if USE_MM_PREFIX:
             for i in range(MAX_MM_RANGES):
                 range_start = tl.load(
@@ -608,10 +611,7 @@ def kernel_unified_attention_3d(
                     mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
                 )
 
-                # Skip empty ranges (range_start==range_end indicates unused slot)
                 is_valid = range_start < range_end
-
-                # Bidirectional: range_end inclusive (matches FlexAttention)
                 q_in_range = (
                     (query_abs_pos >= range_start)
                     & (query_abs_pos <= range_end)
