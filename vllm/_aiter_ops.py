@@ -4,6 +4,7 @@ import functools
 from collections.abc import Callable
 
 import torch
+from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
@@ -529,16 +530,10 @@ def _rocm_aiter_per_tensor_quant_fake(
 
 
 def _rocm_aiter_per_token_quant_impl(
-    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
-) -> tuple[torch.Tensor, torch.Tensor]:
+    x: torch.Tensor, out: torch.Tensor, scale: torch.Tensor
+) -> None:
     from aiter.ops.quant import dynamic_per_token_scaled_quant
 
-    assert quant_dtype in [torch.int8, _FP8_DTYPE]
-
-    out_shape = x.shape
-    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
-    if scale is None:
-        scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
         out,
         x,
@@ -548,17 +543,12 @@ def _rocm_aiter_per_token_quant_impl(
         num_rows=None,
         num_rows_factor=1,
     )
-    return out, scale
 
 
 def _rocm_aiter_per_token_quant_fake(
-    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
-) -> tuple[torch.Tensor, torch.Tensor]:
-    out_shape = x.shape
-    return (
-        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
-        torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
-    )
+    x: torch.Tensor, out: torch.Tensor, scale: torch.Tensor
+) -> None:
+    pass
 
 
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
@@ -715,6 +705,27 @@ class rocm_aiter_ops:
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+
+    @classmethod
+    def refresh_env_vars(cls) -> None:
+        """Refresh the cached environment variables.
+
+        This is useful in testing scenarios where environment variables
+        are modified after the module has been imported.
+        """
+        cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+        cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+        cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+        cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+        cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+        cls._PG_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+        cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+        cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+        cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+        cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @classmethod
     @if_aiter_supported
@@ -934,12 +945,54 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
-                mutates_args=["scale"],
+                mutates_args=["out", "scale"],
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
             _OPS_REGISTERED = True
+
+    @staticmethod
+    def get_rmsnorm_fused_add_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+
+    @staticmethod
+    def get_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rms_norm.default
+
+    @staticmethod
+    def get_rmsnorm_fused_add_dynamic_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default
+
+    @staticmethod
+    def get_rmsnorm_fused_dynamic_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default
+
+    @staticmethod
+    def get_rmsnorm_group_fused_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+
+    @staticmethod
+    def get_per_token_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_per_token_quant.default
+
+    @staticmethod
+    def get_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant.default
+
+    @staticmethod
+    def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def rms_norm(
+        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
     def rms_norm2d_with_add(
@@ -954,12 +1007,6 @@ class rocm_aiter_ops:
             out, x, residual, residual_out, weight, variance_epsilon
         )
         return out, residual_out
-
-    @staticmethod
-    def rms_norm(
-        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
 
     @staticmethod
     def gemm_a8w8(
@@ -1137,42 +1184,6 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def rmsnorm_fused_add_dynamic_quant(
-        out: torch.Tensor,
-        input: torch.Tensor,
-        residual: torch.Tensor,
-        residual_out: torch.Tensor,
-        weight: torch.Tensor,
-        y_scale: torch.Tensor,
-        epsilon: float,
-    ) -> None:
-        torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant(
-            out,
-            input,
-            residual,
-            residual_out,
-            weight,
-            y_scale,
-            epsilon,
-        )
-
-    @staticmethod
-    def rmsnorm_fused_dynamic_quant(
-        out: torch.Tensor,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        y_scale: torch.Tensor,
-        epsilon: float,
-    ) -> None:
-        torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant(
-            out,
-            input,
-            weight,
-            y_scale,
-            epsilon,
-        )
-
-    @staticmethod
     def per_tensor_quant(
         x: torch.Tensor,
         quant_dtype: torch.dtype,
@@ -1186,7 +1197,17 @@ class rocm_aiter_ops:
         quant_dtype: torch.dtype,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
+        assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+        out_shape = x.shape
+        out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+        if scale is None:
+            scale = torch.empty(
+                (*out_shape[:-1], 1), dtype=torch.float32, device=x.device
+            )
+
+        torch.ops.vllm.rocm_aiter_per_token_quant(x, out, scale)
+        return out, scale
 
     @staticmethod
     def triton_fp4_gemm_dynamic_qaunt(

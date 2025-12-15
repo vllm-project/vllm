@@ -98,6 +98,12 @@ class FixFunctionalizationPass(VllmInductorPass):
                 mutated_args = {1: "result", 2: "scale", 3: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
             elif (
+                hasattr(torch.ops.vllm, "rocm_aiter_per_token_quant")
+                and at_target == torch.ops.vllm.rocm_aiter_per_token_quant.default
+            ):
+                mutated_args = {1: "out", 2: "scale"}
+                self.defunctionalize(graph, node, mutated_args)
+            elif (
                 hasattr(torch.ops.vllm, "rocm_aiter_rmsnorm_fused_dynamic_quant")
                 and at_target
                 == torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant.default
