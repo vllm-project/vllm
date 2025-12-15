@@ -18,8 +18,9 @@ DEVICE = torch.device("cpu")
 KERNEL_BLOCK_SIZE = 16
 
 
-def create_block_table(dcp_world_size, dcp_rank, pcp_world_size, pcp_rank,
-                       cp_kv_cache_interleave_size):
+def create_block_table(
+    dcp_world_size, dcp_rank, pcp_world_size, pcp_rank, cp_kv_cache_interleave_size
+):
     """Helper function to create BlockTable with mocked distributed groups.
 
     Args:
@@ -32,10 +33,11 @@ def create_block_table(dcp_world_size, dcp_rank, pcp_world_size, pcp_rank,
     Returns:
         BlockTable instance with mocked distributed groups
     """
-    
-    with patch('vllm.v1.worker.block_table.get_dcp_group') as mock_get_dcp_group, \
-         patch('vllm.v1.worker.block_table.get_pcp_group') as mock_get_pcp_group:
 
+    with (
+        patch("vllm.v1.worker.block_table.get_dcp_group") as mock_get_dcp_group,
+        patch("vllm.v1.worker.block_table.get_pcp_group") as mock_get_pcp_group,
+    ):
         # Mock DCP group
         mock_dcp_group = MagicMock(spec=GroupCoordinator)
         mock_dcp_group.world_size = dcp_world_size
@@ -99,53 +101,51 @@ def test_compute_slot_mapping_dcp1_pcp1_interleave1():
     positions = np.array([0, 1, 0, 1], dtype=np.int32)
     expected_result = np.array([0, 1, 64, 65], dtype=np.int32)
 
-    block_table = create_block_table(dcp_world_size=1,
-                                     dcp_rank=0,
-                                     pcp_world_size=1,
-                                     pcp_rank=0,
-                                     cp_kv_cache_interleave_size=1)
+    block_table = create_block_table(
+        dcp_world_size=1,
+        dcp_rank=0,
+        pcp_world_size=1,
+        pcp_rank=0,
+        cp_kv_cache_interleave_size=1,
+    )
 
     num_reqs = max(req_indices) + 1 if len(req_indices) > 0 else 1
     setup_block_table_data(block_table, num_reqs=num_reqs)
 
     block_table.compute_slot_mapping(req_indices, positions)
 
-    actual_result = block_table.slot_mapping.np[:len(positions)]
+    actual_result = block_table.slot_mapping.np[: len(positions)]
     np.testing.assert_array_equal(
-        actual_result, expected_result,
-        f"DCP=1, PCP=1, interleave=1, dcp_rank=0, pcp_rank=0")
+        actual_result,
+        expected_result,
+        "DCP=1, PCP=1, interleave=1, dcp_rank=0, pcp_rank=0",
+    )
 
 
 @pytest.mark.parametrize(
     "pcp_rank,dcp_rank,expected_result",
     [
         # Rank 0 (pcp=0, dcp=0): positions 0, 8
-        (0, 0,
-         [0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1, -1]),
+        (0, 0, [0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1, -1]),
         # Rank 1 (pcp=0, dcp=1): positions 1, 9
-        (0, 1,
-         [-1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1]),
+        (0, 1, [-1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1, -1]),
         # Rank 2 (pcp=0, dcp=2): positions 2, 10
-        (0, 2,
-         [-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1]),
+        (0, 2, [-1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1, -1]),
         # Rank 3 (pcp=0, dcp=3): positions 3, 11
-        (0, 3,
-         [-1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1]),
+        (0, 3, [-1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1, -1]),
         # Rank 4 (pcp=1, dcp=0): positions 4, 12
-        (1, 0,
-         [-1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1]),
+        (1, 0, [-1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1, -1]),
         # Rank 5 (pcp=1, dcp=1): positions 5, 13
-        (1, 1,
-         [-1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1]),
+        (1, 1, [-1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1, -1]),
         # Rank 6 (pcp=1, dcp=2): positions 6, 14
-        (1, 2,
-         [-1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1]),
+        (1, 2, [-1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1, -1]),
         # Rank 7 (pcp=1, dcp=3): positions 7, 15
-        (1, 3,
-         [-1, -1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1]),
-    ])
-def test_compute_slot_mapping_dcp4_pcp2_interleave1(pcp_rank, dcp_rank,
-                                                     expected_result):
+        (1, 3, [-1, -1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, -1, 1]),
+    ],
+)
+def test_compute_slot_mapping_dcp4_pcp2_interleave1(
+    pcp_rank, dcp_rank, expected_result
+):
     """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=1.
 
     With interleave_size=1, tokens are distributed round-robin across all 8
@@ -161,21 +161,24 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave1(pcp_rank, dcp_rank,
     positions = np.arange(16, dtype=np.int32)
     expected_result = np.array(expected_result, dtype=np.int32)
 
-    block_table = create_block_table(dcp_world_size=4,
-                                     dcp_rank=dcp_rank,
-                                     pcp_world_size=2,
-                                     pcp_rank=pcp_rank,
-                                     cp_kv_cache_interleave_size=1)
+    block_table = create_block_table(
+        dcp_world_size=4,
+        dcp_rank=dcp_rank,
+        pcp_world_size=2,
+        pcp_rank=pcp_rank,
+        cp_kv_cache_interleave_size=1,
+    )
 
     num_reqs = max(req_indices) + 1 if len(req_indices) > 0 else 1
     setup_block_table_data(block_table, num_reqs=num_reqs)
 
     block_table.compute_slot_mapping(req_indices, positions)
 
-    actual_result = block_table.slot_mapping.np[:len(positions)]
+    actual_result = block_table.slot_mapping.np[: len(positions)]
     np.testing.assert_array_equal(
-        actual_result, expected_result,
-        f"DCP=4, PCP=2, interleave=1, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}"
+        actual_result,
+        expected_result,
+        f"DCP=4, PCP=2, interleave=1, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
     )
 
 
@@ -198,9 +201,11 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave1(pcp_rank, dcp_rank,
         (1, 2, None),
         # Rank 7 gets no positions
         (1, 3, None),
-    ])
-def test_compute_slot_mapping_dcp4_pcp2_interleave16(pcp_rank, dcp_rank,
-                                                       expected_positions):
+    ],
+)
+def test_compute_slot_mapping_dcp4_pcp2_interleave16(
+    pcp_rank, dcp_rank, expected_positions
+):
     """Test compute_slot_mapping with DCP=4, PCP=2, interleave_size=16.
 
     With interleave_size=16, tokens are distributed in chunks of 16 across
@@ -219,18 +224,20 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave16(pcp_rank, dcp_rank,
     req_indices = np.array([0] * num_positions, dtype=np.int32)
     positions = np.arange(num_positions, dtype=np.int32)
 
-    block_table = create_block_table(dcp_world_size=4,
-                                     dcp_rank=dcp_rank,
-                                     pcp_world_size=2,
-                                     pcp_rank=pcp_rank,
-                                     cp_kv_cache_interleave_size=16)
+    block_table = create_block_table(
+        dcp_world_size=4,
+        dcp_rank=dcp_rank,
+        pcp_world_size=2,
+        pcp_rank=pcp_rank,
+        cp_kv_cache_interleave_size=16,
+    )
 
     num_reqs = max(req_indices) + 1 if len(req_indices) > 0 else 1
     setup_block_table_data(block_table, num_reqs=num_reqs)
 
     block_table.compute_slot_mapping(req_indices, positions)
 
-    actual_result = block_table.slot_mapping.np[:len(positions)]
+    actual_result = block_table.slot_mapping.np[: len(positions)]
 
     # Build expected result based on which positions this rank owns
     expected_result = np.full(num_positions, -1, dtype=np.int32)
@@ -241,6 +248,7 @@ def test_compute_slot_mapping_dcp4_pcp2_interleave16(pcp_rank, dcp_rank,
             expected_result[pos] = i
 
     np.testing.assert_array_equal(
-        actual_result, expected_result,
-        f"DCP=4, PCP=2, interleave=16, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}"
+        actual_result,
+        expected_result,
+        f"DCP=4, PCP=2, interleave=16, dcp_rank={dcp_rank}, pcp_rank={pcp_rank}",
     )
