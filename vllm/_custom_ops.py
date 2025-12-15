@@ -2445,9 +2445,12 @@ def concat_and_cache_mla_rope_fused(
 
 
 def swap_blocks(
-    src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tensor
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    block_size_in_bytes: int,
+    block_mapping: torch.Tensor,
 ) -> None:
-    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
 
 def convert_fp8(
