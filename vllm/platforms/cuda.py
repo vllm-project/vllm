@@ -7,7 +7,7 @@ pynvml. However, it should not initialize cuda context.
 import os
 from collections.abc import Callable
 from functools import cache, wraps
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Optional, TypeVar
 
 import torch
 from typing_extensions import ParamSpec
@@ -182,7 +182,7 @@ class CudaPlatformBase(Platform):
 
             if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability(100) and not use_sparse:
+                if cls.is_device_capability_family(100) and not use_sparse:
                     # Blackwell => Force CutlassMLA (unless sparse, i.e. DSv3.2).
                     use_cutlass_mla = True
                     # Set the backend in AttentionConfig so it's used during
@@ -254,23 +254,6 @@ class CudaPlatformBase(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
-
-    @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> "AttentionBackendEnum":
-        # Try FlashAttention first
-        if (cc := cls.get_device_capability()) and cc.major >= 8:
-            try:
-                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-                if backend_class.supports_head_size(
-                    head_size
-                ) and backend_class.supports_dtype(dtype):
-                    return AttentionBackendEnum.FLASH_ATTN
-            except ImportError:
-                pass
-
-        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_valid_backends(
@@ -409,13 +392,49 @@ class CudaPlatformBase(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        logger.info(
+        logger.info_once(
             "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
-            [b[0].name for b in valid_backends_priorities],
+            tuple(b[0].name for b in valid_backends_priorities),
+            scope="local",
         )
 
         return selected_backend.get_path()
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.FLASH_ATTN,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        # Try FlashAttention first
+        if (cc := cls.get_device_capability()) and cc.major >= 8:
+            try:
+                backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
+                if backend_class.supports_head_size(
+                    head_size
+                ) and backend_class.supports_dtype(dtype):
+                    return AttentionBackendEnum.FLASH_ATTN
+            except ImportError:
+                pass
+
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
