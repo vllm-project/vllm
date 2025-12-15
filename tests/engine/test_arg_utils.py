@@ -299,6 +299,8 @@ def test_compilation_config():
 
 
 def test_attention_config():
+    from vllm.attention.backends.registry import AttentionBackendEnum
+
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
     # default value
@@ -319,7 +321,7 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     assert engine_args.attention_backend is not None
-    assert engine_args.attention_backend.name == "FLASHINFER"
+    assert engine_args.attention_backend == "FLASHINFER"
 
     # set all fields via dot notation
     args = parser.parse_args(
@@ -383,6 +385,50 @@ def test_attention_config():
     assert engine_args.attention_config.use_trtllm_attention is False
     assert engine_args.attention_config.disable_flashinfer_prefill is False
     assert engine_args.attention_config.disable_flashinfer_q_quantization is False
+
+    # test --attention-backend flows into VllmConfig.attention_config
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "FLASH_ATTN",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+
+    # test --attention-config.backend flows into VllmConfig.attention_config
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-config.backend",
+            "FLASHINFER",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+    # test --attention-backend and --attention-config.backend are mutually exclusive
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--attention-backend",
+            "FLASH_ATTN",
+            "--attention-config.backend",
+            "FLASHINFER",
+        ]
+    )
+    assert args is not None
+    engine_args = EngineArgs.from_cli_args(args)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
 
 
 def test_prefix_cache_default():
