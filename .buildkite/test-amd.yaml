@@ -761,7 +761,7 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m tool_use
+    - pytest -v -s tool_use
 
 #####  models test  #####
 
