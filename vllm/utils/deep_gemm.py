@@ -38,7 +38,7 @@ class DeepGemmQuantScaleFMT(Enum):
             return DeepGemmQuantScaleFMT.FLOAT32
         return (
             DeepGemmQuantScaleFMT.UE8M0
-            if current_platform.is_device_capability(100)
+            if current_platform.is_device_capability_family(100)
             else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
         )
 
@@ -50,7 +50,7 @@ def is_deep_gemm_supported() -> bool:
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
-        or current_platform.is_device_capability(100)
+        or current_platform.is_device_capability_family(100)
     )
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
@@ -381,22 +381,6 @@ def should_use_deepgemm_for_fp8_linear(
     )
 
 
-def should_use_deepgemm_for_fp8_linear_for_nk(
-    output_dtype: torch.dtype,
-    shape0: int,
-    shape1: int,
-    supports_deep_gemm: bool | None = None,
-):
-    if supports_deep_gemm is None:
-        supports_deep_gemm = is_deep_gemm_supported()
-    return (
-        supports_deep_gemm
-        and output_dtype == torch.bfloat16
-        and shape0 % 128 == 0
-        and shape1 % 128 == 0
-    )
-
-
 __all__ = [
     "calc_diff",
     "DeepGemmQuantScaleFMT",
@@ -411,7 +395,6 @@ __all__ = [
     "is_deep_gemm_supported",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
-    "should_use_deepgemm_for_fp8_linear_for_nk",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
 ]
