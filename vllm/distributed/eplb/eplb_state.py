@@ -907,7 +907,9 @@ class EplbState:
                     )
             else:
                 eplb_model_state.eplb_stats = EplbStats(
-                    global_expert_load_window=global_expert_load_window,
+                    # We copy the tensor to snapshot the workload on the main
+                    # thread to be used on the async thread.
+                    global_expert_load_window=global_expert_load_window.clone(),
                     num_replicas=num_replicas,
                     num_groups=num_groups,
                     num_nodes=num_nodes,

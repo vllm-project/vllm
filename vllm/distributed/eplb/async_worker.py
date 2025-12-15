@@ -79,8 +79,8 @@ def run_rebalance_experts(
         eplb_stats.num_gpus,
         model_state.physical_to_logical_map,
     )
+    assert new_physical_to_logical_map.device == torch.device("cpu")
 
-    # Move map to cpu
     model_state.new_physical_to_logical_map = new_physical_to_logical_map
 
     max_slots = model_state.logical_to_physical_map.shape[-1]
@@ -109,6 +109,10 @@ async def transfer_run_periodically(
         for model_state in state.model_states.values():
             if not model_state.new_indices_computed:
                 run_rebalance_experts(model_state, state)
+                logger.info(
+                    "Async worker computed new indices for model %s",
+                    model_state.model_name,
+                )
 
             current_num_layers = model_state.model.num_moe_layers
             while (
