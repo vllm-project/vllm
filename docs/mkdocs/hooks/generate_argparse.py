@@ -27,8 +27,12 @@ def mock_if_no_torch(mock_module: str, mock: MagicMock):
         sys.modules[mock_module] = mock
 
 
-# Make torch.nn.Parameter safe to inherit from
+# Make these classes safe to inherit from
 mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
+mock_if_no_torch(
+    "vllm.model_executor.layers.attention_layer_base",
+    MagicMock(AttentionLayerBase=object),
+)
 
 
 # Mock custom op code
