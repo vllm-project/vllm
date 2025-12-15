@@ -188,7 +188,10 @@ class PlaceholderRange:
             Returns full placeholder range if `is_embed` is `None`.
         """
         if self.is_embed is None:
-            return [(self.offset, self.offset + self.length - 1)]
+            if self.length == 0:
+                return []
+            else:
+                return [(self.offset, self.offset + self.length - 1)]
 
         mask_i = self.is_embed.int()
         starts = torch.nonzero(

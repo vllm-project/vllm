@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -214,12 +215,15 @@ def scatter_mm_placeholders(
         is_embed: A boolean mask indicating which positions in the placeholder
             tokens need to be filled with multimodal embeddings.
             Shape: `(num_placeholders, num_embeds)`
-    Note:
-        This function is maintained for backward compatibility with external
-        hardware backends (HPU via vllm_gaudi, etc.). The core GPU backend
-        no longer uses this approach as of the encoder cache optimization
-        (see GPUModelRunner for the new compact cache implementation).
     """
+    warnings.warn(
+        "scatter_mm_placeholders is deprecated and maintained only for "
+        "backward compatibility with external hardware backends. "
+        "The core GPU backend uses a compact cache implementation instead."
+        "This method will be deprecated soon.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if is_embed is None:
         return embeds
 
@@ -240,13 +244,15 @@ def gather_mm_placeholders(
 
     This is the operation of [`scatter_mm_placeholders`]
     [vllm.v1.worker.utils.scatter_mm_placeholders].
-
-    Note:
-        This function is maintained for backward compatibility with external
-        hardware backends (HPU via vllm_gaudi, etc.). The core GPU backend
-        no longer uses this approach as of the encoder cache optimization
-        (see GPUModelRunner for the new compact cache implementation).
     """
+    warnings.warn(
+        "gather_mm_placeholders is deprecated and maintained only for "
+        "backward compatibility with external hardware backends. "
+        "The core GPU backend uses a compact cache implementation instead."
+        "This method will be deprecated soon.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if is_embed is None:
         return placeholders
 
