@@ -167,17 +167,20 @@ class BaseRenderer(ABC):
             )
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
-            tensor = torch.load(
-                io.BytesIO(pybase64.b64decode(embed, validate=True)),
-                weights_only=True,
-                map_location=torch.device("cpu"),
-            )
-            assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
-                torch.float32,
-                torch.bfloat16,
-                torch.float16,
-            )
-            tensor = tensor.to_dense()
+            # Enable sparse tensor integrity checks to prevent out-of-bounds
+            # writes from maliciously crafted tensors
+            with torch.sparse.check_sparse_tensor_invariants():
+                tensor = torch.load(
+                    io.BytesIO(pybase64.b64decode(embed, validate=True)),
+                    weights_only=True,
+                    map_location=torch.device("cpu"),
+                )
+                assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
+                    torch.float32,
+                    torch.bfloat16,
+                    torch.float16,
+                )
+                tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
