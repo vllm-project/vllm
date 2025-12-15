@@ -349,6 +349,9 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.wte(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
