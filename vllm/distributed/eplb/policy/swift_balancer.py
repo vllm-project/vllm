@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
-
+from typing import Optional
 from .abstract import AbstractEplbPolicy
 
 
@@ -922,7 +922,7 @@ class SwiftBalancerPolicy(AbstractEplbPolicy):
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
-        old_global_expert_indices: torch.Tensor,
+        old_global_expert_indices: Optional[torch.Tensor] = None,
         is_node_redundant: bool = False,
         increment: float = 0.01,
         imbalance_threshold: float = 1.01,
