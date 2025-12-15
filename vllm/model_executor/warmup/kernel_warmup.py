@@ -82,7 +82,11 @@ def kernel_warmup(worker: "Worker"):
     #
     # Here we force a small attention-inclusive dummy run so the attention path
     # is exercised during startup across backends.
-    if (not worker.model_runner.is_pooling_model) and worker.model_runner.attn_groups:
+    if (
+        (not worker.model_runner.is_pooling_model)
+        and worker.model_runner.attn_groups
+        and (not worker.model_config.is_encoder_decoder)
+    ):
         try:
             max_batched_tokens = worker.scheduler_config.max_num_batched_tokens
             max_num_seqs = worker.scheduler_config.max_num_seqs
