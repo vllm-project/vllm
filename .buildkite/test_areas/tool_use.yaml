@@ -10,14 +10,4 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
-
-- label: OpenAI-Compatible Tool Use (CPU)
-  depends_on: ~
-  timeout_in_minutes: 10
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  no_gpu: true
-  commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - pytest -v -s tool_use
