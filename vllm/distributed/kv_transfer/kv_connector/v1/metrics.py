@@ -3,13 +3,18 @@
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypeVar
 
-from prometheus_client import Counter, Gauge, Histogram
-
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
+from vllm.v1.metrics.backends import (
+    AbstractCounter,
+    AbstractGauge,
+    AbstractHistogram,
+    MetricBackend,
+    PrometheusBackend,
+)
 
-PromMetric: TypeAlias = Gauge | Counter | Histogram
+PromMetric: TypeAlias = AbstractGauge | AbstractCounter | AbstractHistogram
 PromMetricT = TypeVar("PromMetricT", bound=PromMetric)
 
 logger = init_logger(__name__)
@@ -115,14 +120,12 @@ class KVConnectorPromMetrics:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        backend: MetricBackend,
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
     ):
         self._kv_transfer_config = vllm_config.kv_transfer_config
-        self._gauge_cls = metric_types[Gauge]
-        self._counter_cls = metric_types[Counter]
-        self._histogram_cls = metric_types[Histogram]
+        self._backend = backend
         self._labelnames = labelnames
         self.per_engine_labelvalues = per_engine_labelvalues
 
@@ -154,28 +157,24 @@ class KVConnectorPrometheus:
     KVConnectorBase.build_prom_metrics().
     """
 
-    _gauge_cls = Gauge
-    _counter_cls = Counter
-    _histogram_cls = Histogram
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
+        backend: MetricBackend | None = None,
     ):
         self.prom_metrics: KVConnectorPromMetrics | None = None
         kv_transfer_config = vllm_config.kv_transfer_config
+
+        # Use provided backend or default to Prometheus
+        backend = backend if backend is not None else PrometheusBackend()
+
         if kv_transfer_config and kv_transfer_config.kv_connector:
             connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
-            metric_types = {
-                Gauge: self._gauge_cls,
-                Counter: self._counter_cls,
-                Histogram: self._histogram_cls,
-            }
             self.prom_metrics = connector_cls.build_prom_metrics(
                 vllm_config,
-                metric_types,
+                backend,
                 labelnames,
                 per_engine_labelvalues,
             )
