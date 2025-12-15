@@ -932,9 +932,13 @@ class CompilationConfig:
                 self.splitting_ops = list(self._attention_ops)
                 added_default_splitting_ops = True
             elif len(self.splitting_ops) == 0:
-                logger.warning_once(
-                    "Using piecewise compilation with empty splitting_ops"
-                )
+                if (
+                    self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+                ):
+                    logger.warning_once(
+                        "Using piecewise compilation with empty splitting_ops"
+                    )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
                         "Piecewise compilation with empty splitting_ops do not"
