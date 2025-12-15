@@ -247,14 +247,11 @@ def scaled_dequantize(
     return (x_q.to(torch.float32) * x_s).to(out_dtype)
 
 
-def get_layer_weight(layer):
-    WEIGHT_NAMES = ("weight", "qweight", "weight_packed")
-    for attr in WEIGHT_NAMES:
-        if hasattr(layer, attr):
-            return getattr(layer, attr)
-    raise AttributeError(
-        f"Layer '{layer}' has no recognized weight attribute: {WEIGHT_NAMES}."
-    )
+def get_attribute_fallback(obj, attributes: list[str]):
+    for attr in attributes:
+        if hasattr(obj, attr):
+            return getattr(obj, attr)
+    raise AttributeError(f"'{obj}' has no recognized attributes: {attributes}.")
 
 
 def get_and_maybe_dequant_weights(
@@ -264,7 +261,7 @@ def get_and_maybe_dequant_weights(
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
-    weight = get_layer_weight(layer)
+    weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
     assert layer.quant_method is not None
 
     # Unquantized layer: just return base weights
@@ -273,10 +270,13 @@ def get_and_maybe_dequant_weights(
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if isinstance(layer.quant_method, Fp8LinearMethod):
+        weight_scales = get_attribute_fallback(
+            layer, ["weight_scale", "weight_scale_inv"]
+        )
         dequant_weights = scaled_dequantize(
             weight,
-            layer.weight_scale,
-            layer.weight_block_size,
+            weight_scales,
+            group_shape=layer.weight_block_size,
             out_dtype=out_dtype,
         )
         # per-tensor scaling stores weights in [in, out] layout
