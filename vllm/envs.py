@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_MLA_MHA_THRESHOLD: int = 0
     VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
@@ -1057,6 +1058,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    # If set to a positive value (e.g., 2048), prefill requests with total
+    # tokens <= this threshold will use dense FlashMLA instead of sparse
+    # FlashMLA. This improves performance for short sequences in DeepSeek
+    # V3.2 models by avoiding sparse indexer overhead when all tokens would
+    # be selected anyway. Recommended value: model's index_topk (2048).
+    "VLLM_MLA_MHA_THRESHOLD": lambda: int(
+        os.getenv("VLLM_MLA_MHA_THRESHOLD", "0")
+    ),
     # If set, vLLM will pick up the provided Flash Attention MLA
     # max number splits for cuda graph decode
     "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH": lambda: int(

@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
@@ -18,14 +19,18 @@ from vllm.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl
+from vllm.v1.attention.backends.mla.common import (
+    MLACommonBaseImpl,
+    MLACommonMetadata,
+    MLACommonMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -195,6 +200,12 @@ class FlashMLASparseMetadata:
 
     fp8_extra_metadata: FP8SeperatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
+
+    # For MHA fallback on short sequences (VLLM_MLA_MHA_THRESHOLD)
+    # When prefer_sparse is False and dense_metadata is not None,
+    # we use dense MHA (TritonMLA) instead of sparse MLA for prefill.
+    prefer_sparse: bool = True
+    dense_metadata: MLACommonMetadata | None = None
 
 
 # Kernel with prefill workspace support
@@ -441,6 +452,16 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             device=device,
         )
 
+        # Initialize dense MHA fallback builder for short sequences
+        # (enabled via VLLM_MLA_MHA_THRESHOLD environment variable)
+        # When sequence length <= threshold, use dense TritonMLA instead of
+        # sparse FlashMLA to avoid indexer overhead for short sequences.
+        self._dense_builder: MLACommonMetadataBuilder | None = None
+        if envs.VLLM_MLA_MHA_THRESHOLD > 0:
+            self._dense_builder = MLACommonMetadataBuilder(
+                kv_cache_spec, layer_names, vllm_config, device
+            )
+
     def _build_fp8_mixed_decode_prefill(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -667,6 +688,43 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
 
+        # Check if we should use dense MHA fallback for short sequences
+        # This is controlled by VLLM_MLA_MHA_THRESHOLD environment variable
+        threshold = envs.VLLM_MLA_MHA_THRESHOLD
+        prefer_sparse = True
+        dense_metadata: MLACommonMetadata | None = None
+
+        # Calculate number of prefill tokens for threshold check
+        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
+            split_decodes_and_prefills(
+                cm,
+                decode_threshold=self.reorder_batch_threshold or 1,
+                require_uniform=True,
+            )
+        )
+
+        if (
+            self._dense_builder is not None
+            and threshold > 0
+            and num_prefill_tokens > 0
+            and num_prefill_tokens <= threshold
+            and num_prefills == cm.num_reqs  # All requests are prefills
+        ):
+            candidate_dense_metadata = self._dense_builder.build(
+                common_prefix_len, cm, fast_build=fast_build
+            )
+            if candidate_dense_metadata is not None:
+                prefill_meta = getattr(candidate_dense_metadata, "prefill", None)
+                has_chunked_prefill = False
+                if prefill_meta is not None:
+                    has_chunked_prefill = (
+                        getattr(prefill_meta, "chunked_context", None) is not None
+                    )
+                # Chunked prefills only cover part of the prompt; keep sparse MLA.
+                if not has_chunked_prefill:
+                    dense_metadata = candidate_dense_metadata
+                    prefer_sparse = False
+
         metadata = FlashMLASparseMetadata(
             num_reqs=cm.num_reqs,
             max_query_len=cm.max_query_len,
@@ -678,6 +736,8 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            prefer_sparse=prefer_sparse,
+            dense_metadata=dense_metadata,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
         )
@@ -734,6 +794,63 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                     (self.prefill_workspace_shape, torch.bfloat16)
                 )
             )
+
+        # Initialize dense MLA fallback implementation for short sequences
+        # (enabled via VLLM_MLA_MHA_THRESHOLD environment variable)
+        # When sequence length <= threshold, use dense FlashMLA instead of
+        # sparse FlashMLA to avoid indexer overhead for short sequences.
+        self._enable_dense_fallback = envs.VLLM_MLA_MHA_THRESHOLD > 0
+        self._dense_impl_vllm_config = (
+            get_current_vllm_config() if self._enable_dense_fallback else None
+        )
+        self._dense_impl_kwargs = dict(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            **mla_args,
+        )
+        self._dense_impl: MLACommonBaseImpl | None = None
+        self._dense_impl_weight_dtype: torch.dtype | None = None
+
+    def _get_dense_impl(self) -> MLACommonBaseImpl | None:
+        """Get or lazily initialize the dense MLA implementation.
+
+        Uses FlashMLAImpl for better performance and FP8 support.
+        Both FlashMLAImpl and TritonMLAImpl share the same prefill path
+        (from MLACommonImpl), but FlashMLAImpl has better decode performance
+        and supports FP8 KV cache.
+        """
+        if not self._enable_dense_fallback:
+            return None
+        if self._dense_impl is None:
+            from vllm.v1.attention.backends.mla.flashmla import FlashMLAImpl
+
+            if self._dense_impl_vllm_config is not None:
+                with set_current_vllm_config(self._dense_impl_vllm_config):
+                    self._dense_impl = FlashMLAImpl(**self._dense_impl_kwargs)
+            else:
+                self._dense_impl = FlashMLAImpl(**self._dense_impl_kwargs)
+            if self._dense_impl_weight_dtype is not None:
+                self._dense_impl.process_weights_after_loading(
+                    self._dense_impl_weight_dtype
+                )
+                self._dense_impl_weight_dtype = None
+        return self._dense_impl
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        super().process_weights_after_loading(act_dtype)
+        if self._dense_impl is not None:
+            self._dense_impl.process_weights_after_loading(act_dtype)
+            self._dense_impl_weight_dtype = None
+        else:
+            self._dense_impl_weight_dtype = act_dtype
 
     def _forward_bf16_kv(
         self,
@@ -972,6 +1089,30 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             # to ensure all ranks within a DP group compute the
             # same expert outputs.
             return output.fill_(0)
+
+        # Check if we should use dense MHA fallback for short sequences
+        if self._enable_dense_fallback and not getattr(
+            attn_metadata, "prefer_sparse", True
+        ):
+            dense_metadata = getattr(attn_metadata, "dense_metadata", None)
+            dense_impl = self._get_dense_impl()
+            if dense_impl is None or dense_metadata is None:
+                raise RuntimeError(
+                    "FlashMLA sparse fallback requested but dense implementation "
+                    "metadata is unavailable. Ensure dense fallback support is "
+                    "enabled and metadata builder produced dense information."
+                )
+            return dense_impl.forward(
+                layer,
+                q,
+                k_c_normed,
+                k_pe,
+                kv_cache,
+                dense_metadata,
+                output=output,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+            )
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
