@@ -325,9 +325,8 @@ class MatcherQuantFP8(MatcherCustomOp):
                 "Only QuantFP8 supported by"
             )
             assert quant_key.scale2 is None
-            self.quant_fp8 = QuantFP8(
-                quant_key.scale.static, quant_key.scale.group_shape
-            )
+
+        self.quant_fp8 = QuantFP8(quant_key.scale.static, quant_key.scale.group_shape)
 
     def forward_rocm_aiter(
         self,
