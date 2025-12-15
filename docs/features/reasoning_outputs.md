@@ -18,6 +18,7 @@ vLLM currently supports the following reasoning models:
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
+| [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
@@ -28,6 +29,7 @@ vLLM currently supports the following reasoning models:
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
+    Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
 
 ## Quickstart
 
@@ -216,14 +218,13 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
     # import the required packages
 
     from vllm.reasoning import ReasoningParser, ReasoningParserManager
-    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                                DeltaMessage)
+    from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used
     # in --reasoning-parser.
     class ExampleParser(ReasoningParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         def extract_reasoning_streaming(
@@ -298,6 +299,9 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
         def is_reasoning_end(self, input_ids: list[int]) -> bool:
             return self.end_token_id in input_ids
+
+        def is_reasoning_end_streaming(self, input_ids: list[int], delta_ids: list[int]) -> bool:
+            return self.end_token_id in delta_token_ids
         ...
     ```
 

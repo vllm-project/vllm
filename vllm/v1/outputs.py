@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
+from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
+    KVConnectorKVEvents = object
 
 
 class LogprobsLists(NamedTuple):
@@ -88,7 +91,7 @@ class LogprobsTensors(NamedTuple):
 
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
-PoolerOutput = torch.Tensor | list[torch.Tensor]
+PoolerOutput = list[torch.Tensor | None] | torch.Tensor | None
 
 
 @dataclass
@@ -107,6 +110,7 @@ class KVConnectorOutput:
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
+    kv_cache_events: KVConnectorKVEvents | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -122,6 +126,7 @@ class KVConnectorOutput:
             not self.finished_sending
             and not self.finished_recving
             and not self.kv_connector_stats
+            and not self.kv_cache_events
             and not self.invalid_block_ids
         )
 
@@ -168,6 +173,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # information related to cudagraph execution
+    cudagraph_stats: CUDAGraphStat | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

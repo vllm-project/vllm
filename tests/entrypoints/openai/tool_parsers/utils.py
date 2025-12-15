@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 
 class StreamingToolReconstructor:
@@ -111,7 +111,7 @@ def run_tool_extraction_nonstreaming(
     return tool_parser.extract_tool_calls(model_output, request)
 
 
-def split_string_into_token_deltas(tokenizer: AnyTokenizer, text: str) -> list[str]:
+def split_string_into_token_deltas(tokenizer: TokenizerLike, text: str) -> list[str]:
     # Split a string into a series of deltas using the provided tokenizer. Each
     # delta will be the string equivalent of a single token.
     token_ids = tokenizer.encode(text, add_special_tokens=False)

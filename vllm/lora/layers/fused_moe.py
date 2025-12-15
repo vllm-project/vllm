@@ -20,14 +20,23 @@ from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    modular_marlin_fused_moe,
+    MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
+    TritonExperts,
     try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
+)
+from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+    UnfusedOAITritonExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 
 from .utils import _get_lora_device
@@ -114,15 +123,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        m_fused_moe_fn = (
-            modular_triton_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
-            )
-            if not quant_config.use_mxfp4_w4a16
-            else modular_marlin_fused_moe(
-                quant_config, shared_experts=self.base_layer.shared_experts
-            )
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        m_fused_moe_fn = FusedMoEModularKernel(
+            prepare_finalize,
+            self.base_layer.quant_method.select_gemm_impl(
+                prepare_finalize, self.base_layer
+            ),
+            self.base_layer.shared_experts,
+            getattr(self.base_layer, "shared_experts_stream", None),
         )
+        if quant_config.use_mxfp4_w4a16:
+            assert isinstance(
+                m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
+            )
+        else:
+            assert isinstance(
+                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
+            )
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):

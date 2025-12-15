@@ -86,7 +86,7 @@ Every plugin has three parts:
         },
         ...
     )
-        ```
+    ```
 
     Please make sure `vllm_add_dummy_platform:register` is a callable function and returns the platform class's fully qualified name. for example:
 
@@ -152,5 +152,5 @@ The interface for the model/module may change during vLLM's development. If you 
 ## Deprecation announcement
 
 !!! warning "Deprecations"
-    - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It will be removed in v0.13.0 or v1.0.0.
-    - `_Backend` in `vllm.attention` is deprecated. It will be removed in v0.13.0 or v1.0.0. Please use `vllm.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
+    - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It has been removed in v0.13.0.
+    - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.

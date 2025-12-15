@@ -12,7 +12,7 @@ from typing import Any, NewType, TypeAlias, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.hashing import sha256_cbor
+from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
@@ -83,18 +83,19 @@ logger = init_logger(__name__)
 #
 # The function `init_none_hash` initializes this variable globally.
 NONE_HASH: BlockHash
+_CBOR_HASH_FUNCTIONS = frozenset({sha256_cbor, xxhash_cbor})
 
 
 def init_none_hash(hash_fn: Callable[[Any], bytes]):
     global NONE_HASH
 
     hash_seed = os.getenv("PYTHONHASHSEED")
-    if hash_seed is None and hash_fn is sha256_cbor:
+    if hash_seed is None and hash_fn in _CBOR_HASH_FUNCTIONS:
         logger.warning(
             "PYTHONHASHSEED is not set. This will lead to non-reproducible "
-            "block-hashes when using sha256_cbor as the hash function."
-            "Consider setting PYTHONHASHSEED to a fixed value for "
-            "reproducibility."
+            "block-hashes when using CBOR-based hash functions such as "
+            "sha256_cbor or xxhash_cbor. Consider setting PYTHONHASHSEED to a "
+            "fixed value for reproducibility."
         )
 
     if hash_seed is None:
@@ -686,7 +687,9 @@ def check_enough_kv_cache_memory(
         raise ValueError(
             "No available memory for the cache blocks. "
             "Try increasing `gpu_memory_utilization` when "
-            "initializing the engine."
+            "initializing the engine. "
+            "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            "for more details."
         )
 
     max_model_len = vllm_config.model_config.max_model_len
@@ -710,8 +713,10 @@ def check_enough_kv_cache_memory(
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({available_memory / GiB_bytes:.2f} GiB). "
             f"{estimated_msg} "
-            f"Try increasing `gpu_memory_utilization` or decreasing "
-            f"`max_model_len` when initializing the engine."
+            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
+            f"when initializing the engine. "
+            f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
+            f"for more details."
         )
 
 

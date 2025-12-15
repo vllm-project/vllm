@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
     import xgrammar as xgr
 
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -36,7 +36,7 @@ else:
         "transformers.models.gpt2.tokenization_gpt2",
     )
 
-    AnyTokenizer = object
+    TokenizerLike = object
     SchedulerOutput = object
     InputBatch = object
 
@@ -195,7 +195,7 @@ re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
 def _reduced_vocabulary(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     eos_token_id: int,
 ) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
@@ -222,7 +222,7 @@ def _reduced_vocabulary(
     vocabulary: dict[bytes, list[int]] = {}
     empty_token_ids: list[int] = []
     for token, token_idx in tokenizer.get_vocab().items():
-        if token in tokenizer.all_special_tokens:  # type: ignore
+        if token in tokenizer.all_special_tokens:
             continue
 
         token_str = convert_token_to_string(token)
@@ -261,7 +261,7 @@ def _reduced_vocabulary(
     return vocabulary
 
 
-def get_outlines_vocabulary(tokenizer: AnyTokenizer) -> oc.Vocabulary:
+def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     """Get the `Vocabulary` object for a given tokenizer."""
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore

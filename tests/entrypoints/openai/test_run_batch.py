@@ -7,7 +7,7 @@ import tempfile
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import BatchRequestOutput
+from vllm.entrypoints.openai.run_batch import BatchRequestOutput
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 

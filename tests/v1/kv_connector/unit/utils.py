@@ -24,8 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
-    SharedStorageConnector,
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
+    ExampleConnector,
 )
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -90,32 +90,39 @@ def create_vllm_config(
     max_model_len: int = 10000,
     enable_chunked_prefill: bool = True,
     enable_permute_local_kv: bool = False,
+    kv_connector_extra_config: dict[str, Any] | None = None,
+    dtype: str = "float16",
+    cache_dtype: str = "auto",
+    hf_overrides: dict[str, Any] | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
+    model_config = ModelConfig(
+        model=model,
+        trust_remote_code=True,
+        dtype=dtype,
+        seed=42,
+        hf_overrides=hf_overrides or {},
+    )
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
-    )
-    model_config = ModelConfig(
-        model=model,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
         swap_space=0,
-        cache_dtype="auto",
+        cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
         enable_permute_local_kv=enable_permute_local_kv,
+        kv_connector_extra_config=kv_connector_extra_config or {},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -187,6 +194,7 @@ def create_request(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_engine_id="my-engine-id",
+            remote_request_id=f"prefill-{request_id}",
             remote_block_ids=list(range(num_remote_blocks)),
             remote_host="my-host",
             remote_port=1234,
@@ -256,10 +264,10 @@ def create_model_runner_output(
     )
 
 
-class TestSharedStorageConnector(SharedStorageConnector):
+class TestExampleConnector(ExampleConnector):
     def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = SharedStorageConnector(config, role)
+        self._connector = ExampleConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -386,7 +394,7 @@ class MockKVConnector(KVConnectorBase_V1):
 
 
 KVConnectorFactory.register_connector(
-    "TestSharedStorageConnector", __name__, TestSharedStorageConnector.__name__
+    "TestExampleConnector", __name__, TestExampleConnector.__name__
 )
 
 KVConnectorFactory.register_connector(

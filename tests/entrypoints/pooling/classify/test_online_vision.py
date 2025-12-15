@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import ClassificationResponse
+from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
 
 VLM_MODEL_NAME = "muziyongshixin/Qwen2.5-VL-7B-for-VideoCls"
 MAXIMUM_VIDEOS = 1
