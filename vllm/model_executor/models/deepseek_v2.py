@@ -378,7 +378,6 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states
             )
-
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
@@ -1216,9 +1215,6 @@ class DeepseekV2Model(nn.Module):
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             for stage_i in range(forward_conext.afd_metadata.num_of_stages):
-                logger.info(
-                    f"jcz deepseekv2 forward_with_afd_v2 layer_idx: {layer.layer_idx}, stage_i: {stage_i}"
-                )
                 afd_connector = afd_metadata.afd_connector
                 forward_conext.attn_metadata = afd_metadata.attn_metadata_list[stage_i]
                 forward_conext.dp_metadata = afd_metadata.dp_metadata_list[stage_i]
@@ -1237,10 +1233,6 @@ class DeepseekV2Model(nn.Module):
                         work.wait()
 
                 current_positions = afd_metadata.positions_list[stage_i]
-                logger.info(
-                    f"jcz deepseekv2 forward_with_afd_v2 hidden_states: {hidden_states.shape}"
-                    f" positions:{positions.shape}"
-                )
                 hidden_states, residual = layer(
                     current_positions, hidden_states, residual, llama_4_scaling
                 )
@@ -1259,15 +1251,11 @@ class DeepseekV2Model(nn.Module):
                 )
                 afd_connector.send_attn_output(hidden_states, metadata)
 
-        # Recv last layer and last stage FFN output.
-        ubatch_hidden_states[afd_metadata.num_of_stages - 1], recv_metadata = (
-            afd_connector.recv_ffn_output()
-        )
-        if recv_metadata.recv_handle_list is not None:
-            recv_handle = recv_metadata.recv_handle_list
-        if recv_handle is not None:
-            for work in recv_handle:
-                work.wait()
+        # Recv last layer FFN output.
+        for stage_i in range(afd_metadata.num_of_stages):
+            ubatch_hidden_states[stage_i], recv_metadata = (
+                afd_connector.recv_ffn_output()
+            )
 
         # Re-assemble the batch
         hidden_states = torch.cat(ubatch_hidden_states, dim=0)
