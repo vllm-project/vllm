@@ -573,6 +573,7 @@ _AUTOMATIC_CONVERTED_MODELS = {
     "Qwen3ForSequenceClassification": _HfExamplesInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     ),
+    "Qwen3ForTokenClassification": _HfExamplesInfo("bd2lcco/Qwen3-0.6B-finetuned"),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
