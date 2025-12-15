@@ -1814,7 +1814,6 @@ def fused_experts_impl(
         else:
             raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
     elif nvfp4_scheme is not None:
-        # 16bit activation and fp4x2 packed weight
         assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (

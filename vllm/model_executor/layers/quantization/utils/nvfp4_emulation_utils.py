@@ -154,18 +154,7 @@ def _dequant_nvfp4(
     dtype: torch.dtype,
     block_size: int = NVFP4_BLOCK_SIZE,
 ) -> torch.Tensor:
-    """Dequantize NVFP4 weights to high precision for fused MoE emulation.
 
-    Args:
-        tensor_fp4: Packed FP4 weights as uint8, shape [M, K//2]
-        tensor_sf: FP8 E4M3FN per-group scales (swizzled), shape depends on layout
-        global_scale: FP32 global scale tensor
-        dtype: Target dtype (torch.float16 or torch.bfloat16)
-        block_size: Group size for scaling (default 16 for NVFP4)
-
-    Returns:
-        Dequantized weights, shape [M, K], dtype as specified
-    """
     return dequantize_to_dtype(
         tensor_fp4,
         tensor_sf,
@@ -175,7 +164,6 @@ def _dequant_nvfp4(
         block_size,
     )
 
-
 def _dequant_nvfp4_fake(
     tensor_fp4: torch.Tensor,
     tensor_sf: torch.Tensor,
@@ -183,13 +171,11 @@ def _dequant_nvfp4_fake(
     dtype: torch.dtype,
     block_size: int = NVFP4_BLOCK_SIZE,
 ) -> torch.Tensor:
-    """Fake implementation for torch.compile symbolic tracing."""
     m, packed_k = tensor_fp4.shape
     k = packed_k * 2
     return torch.empty((m, k), dtype=dtype, device=tensor_fp4.device)
 
 
-# Register as custom op for torch.compile compatibility
 try:
     direct_register_custom_op(
         op_name="dequant_nvfp4",
