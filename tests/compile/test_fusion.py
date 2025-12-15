@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-
-import pytest
-import torch
 import logging
-import re
 from typing import Any
 
+import pytest
+import regex as re
+import torch
+
+import vllm.plugins
 from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_QUANT_RMS_NORM,
     MODELS_GROUP_FP8,
     Matches,
     run_model,
 )
-
-import vllm.plugins
+from tests.utils import flat_product
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
-from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
@@ -27,6 +27,7 @@ from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     VllmConfig,
@@ -46,10 +47,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     maybe_create_device_identity,
 )
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.platforms import current_platform
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
@@ -349,9 +349,6 @@ def test_fusion_rmsnorm_quant(
             # 7 = 1 (RMS) + 3x2 (3xRMS_ADD, 2 each)
             assert n_add_nodes(backend.graph_pre_pass) == 7
             assert n_add_nodes(backend.graph_post_pass) == 2
-
-
-
 
 
 @pytest.mark.parametrize(
