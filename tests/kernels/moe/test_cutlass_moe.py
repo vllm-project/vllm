@@ -274,7 +274,6 @@ def test_cutlass_moe_8_bit_no_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
-    workspace_init,
     ep_size: int | None = None,
 ):
     current_platform.seed_everything(7)
@@ -330,7 +329,6 @@ def test_cutlass_moe_8_bit_cuda_graph(
     per_act_token: bool,
     per_out_ch: bool,
     monkeypatch,
-    workspace_init,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
@@ -387,19 +385,9 @@ def test_cutlass_moe_8_bit_EP(
     per_out_channel: bool,
     ep_size: int,
     monkeypatch,
-    workspace_init,
 ):
     test_cutlass_moe_8_bit_no_graph(
-        m,
-        n,
-        k,
-        e,
-        topk,
-        per_act_token,
-        per_out_channel,
-        monkeypatch,
-        workspace_init,
-        ep_size,
+        m, n, k, e, topk, per_act_token, per_out_channel, monkeypatch, ep_size
     )
 
 
@@ -431,19 +419,9 @@ def test_cutlass_moe_8_bit_EP_large(
     per_out_channel: bool,
     ep_size: int,
     monkeypatch,
-    workspace_init,
 ):
     test_cutlass_moe_8_bit_no_graph(
-        m,
-        n,
-        k,
-        e,
-        topk,
-        per_act_token,
-        per_out_channel,
-        monkeypatch,
-        workspace_init,
-        ep_size,
+        m, n, k, e, topk, per_act_token, per_out_channel, monkeypatch, ep_size
     )
 
 
@@ -467,7 +445,6 @@ def test_run_cutlass_moe_fp8(
     per_act_token: bool,
     per_out_channel: bool,
     ep_size: int,
-    workspace_init,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(vllm_config):
