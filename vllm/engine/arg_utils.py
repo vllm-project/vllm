@@ -771,19 +771,7 @@ class EngineArgs:
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
-        parallel_group.add_argument(
-            "--numa-node",
-            type=int,
-            nargs="+",
-            default=None,
-            help=(
-                "NUMA nodes for each GPU worker (indexed by local_rank). "
-                "Example: --numa-node 0 0 1 1 for 4 GPUs where GPU 0-1 are on "
-                "NUMA node 0 and GPU 2-3 are on NUMA node 1. "
-                "Use 'nvidia-smi topo -m' to determine GPU-to-NUMA topology. "
-                "Requires VLLM_WORKER_MULTIPROC_METHOD=spawn."
-            ),
-        )
+        parallel_group.add_argument("--numa-node", **parallel_kwargs["numa_node"])
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
