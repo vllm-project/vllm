@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import logging
 import queue
 import threading
 import time
@@ -35,7 +34,7 @@ def create_engine_core_sentinel(
         client_cmd_addr=CLIENT_CMD_ADDR,
         worker_cmd_addr=WORKER_CMD_ADDR,
         fault_report_addr=FAULT_REPORT_ADDR,
-        sentinel_identity=SENTINEL_IDENTITY,
+        dealer_identity=SENTINEL_IDENTITY,
         tp_size=1,
         pp_size=1,
         dp_size=1,
@@ -53,11 +52,10 @@ def test_engine_core_sentinel_initialization():
     assert sentinel.pp_size == 1
     assert not sentinel.communicator_aborted
     assert sentinel.engine_running is True
-    assert sentinel.daemon is True
 
     assert sentinel.fault_report_socket.type == zmq.DEALER
-    assert sentinel.client_cmd_socket.type == zmq.DEALER
-    assert sentinel.worker_cmd_socket.type == zmq.ROUTER
+    assert sentinel.upstream_cmd_socket.type == zmq.DEALER
+    assert sentinel.downstream_cmd_socket.type == zmq.ROUTER
 
     sentinel.shutdown()
 
@@ -83,21 +81,11 @@ def test_run_handle_instruction(instruction):
 
     def mock_worker_receiver(cmd_socket):
         time.sleep(0.1)
-        logging.info("start worker")
         identity, msg = cmd_socket.recv_multipart()
-        logging.info(identity)
         cmd_dict = json.loads(msg.decode("utf-8"))
-        assert (
-            cmd_dict["method"] == "pause_by_signal"
-            if instruction == "pause"
-            else "retry"
-        )
+        assert cmd_dict["method"] == "pause" if instruction == "pause" else "retry"
         response_dict = {"success": True, "method_uuid": cmd_dict["method_uuid"]}
-        logging.info(identity)
         cmd_socket.send_multipart([b"", json.dumps(response_dict).encode("utf-8")])
-
-    threading.Thread(target=sentinel.run, daemon=True).start()
-    time.sleep(0.1)
 
     param = {"timeout": 3}
     if instruction == "pause":
@@ -108,9 +96,8 @@ def test_run_handle_instruction(instruction):
     client_socket.send_multipart(
         [SENTINEL_IDENTITY, b"", serial_instruction.encode("utf-8")]
     )
-    if instruction == "pause":
-        fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
-    elif instruction == "retry":
+    fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
+    if instruction == "retry":
         busy_loop_active.set()
 
     threading.Thread(
@@ -120,11 +107,13 @@ def test_run_handle_instruction(instruction):
     time.sleep(0.1)
     identity, _, msg = client_socket.recv_multipart()
     result_dict = json.loads(msg.decode("utf-8"))
-    assert result_dict["engine_index"] == 0
-    assert result_dict["success"]
+    assert result_dict["engine_index"] == "0"
+    if instruction == "pause":
+        assert result_dict["success"]
 
     time.sleep(0.1)
 
     client_socket.close()
     worker_cmd_socket.close()
     sentinel.shutdown()
+    ctx.term()

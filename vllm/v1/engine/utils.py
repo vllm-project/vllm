@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import contextlib
 import json
 import multiprocessing
 import os
-import queue
 import time
 import uuid
 import weakref
@@ -26,9 +24,7 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
-    get_open_port,
     get_open_zmq_ipc_path,
     make_zmq_socket,
     recv_router_dealer_message,
@@ -38,7 +34,7 @@ from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
-from vllm.v1.serial_utils import run_method, serialize_method_call
+from vllm.v1.serial_utils import serialize_method_call
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -1357,163 +1353,3 @@ def wait_for_instruction_result(
             return responses
 
     return responses
-
-
-class FaultHandler:
-    def __init__(
-        self,
-        cmd_socket: zmq.Socket,
-        client_cmd_registry: dict[int, bytes],
-        engine_exception_q: queue.Queue[FaultInfo],
-        engine_status_dict: ThreadSafeDict[int, str],
-    ) -> None:
-        self.cmd_socket = cmd_socket
-        self.engine_exception_q = engine_exception_q
-        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
-        self.engine_identity_to_index: dict[bytes, int] = {
-            identity: i for i, identity in client_cmd_registry.items()
-        }
-        # ensure handle_fault is executed sequentially
-        self._task_queue: asyncio.Queue = asyncio.Queue()
-        self._loop = asyncio.get_event_loop()
-        self._dispatcher_task = self._loop.create_task(self._dispatcher())
-
-        self.logger = self._make_fault_handler_logger()
-
-    def _make_fault_handler_logger(self):
-        prefix = "[FaultHandler] "
-
-        def log(msg, *args, level="info", **kwargs):
-            """
-            level: "info", "warning", "error", "debug"
-            msg: log message
-            """
-            getattr(logger, level)(prefix + msg, *args, **kwargs)
-
-        return log
-
-    async def _dispatcher(self):
-        while True:
-            # each elements in the queue contains:
-            # (instruction, timeout, kwargs, future)
-            instruction, timeout, kwargs, fut = await self._task_queue.get()
-            try:
-                result = await self._handle_fault_internal(
-                    instruction, timeout, **kwargs
-                )
-                if fut:
-                    fut.set_result(result)
-            except Exception as e:
-                if fut:
-                    fut.set_exception(e)
-
-    def retry(self, **kwargs):
-        if "Dead" in self.engine_status_dict.values():
-            self.logger(
-                "Engine core is dead; retry won't work.",
-                level="warning",
-            )
-            return False, set(), kwargs
-
-        target_engines = set(self.engine_identity_to_index.keys())
-        kwargs["new_stateless_dp_group_port"] = get_open_port()
-        return True, target_engines, kwargs
-
-    def pause(self, **kwargs):
-        self.logger(
-            "Pause operation is best-effort only. Due to the complexity of "
-            "collective communications (e.g., timing dependencies and "
-            "synchronization barriers), pausing may not always succeed. If "
-            "the process remains unresponsive or collective operations "
-            "cannot be interrupted, consider shutting down and restarting "
-            "the instance.",
-            level="warning",
-        )
-
-        alive_engines = {
-            identity
-            for identity, index in self.engine_identity_to_index.items()
-            if self.engine_status_dict.get(index) != "Dead"
-        }
-        return True, alive_engines, kwargs
-
-    async def _handle_fault_internal(
-        self, instruction: str, timeout: int, **kwargs
-    ) -> bool:
-        success, target_engines, kwargs = run_method(self, instruction, (), kwargs)
-
-        if not success:
-            return False
-
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-
-        method_uuid = broadcast_instruction(
-            self.cmd_socket,
-            target_engines,
-            instruction,
-            **kwargs,
-        )
-
-        engine_responses = wait_for_instruction_result(
-            self.cmd_socket, target_engines, instruction, timeout, method_uuid
-        )
-
-        # check the execution results
-        all_success = True
-        for engine_id in target_engines:
-            engine_index = self.engine_identity_to_index.get(engine_id, "?")
-            response = engine_responses.get(engine_id)
-
-            if response is None:
-                self.logger(
-                    "EngineCoreSentinel[%s] did not respond"
-                    ' to command "%s" within timeout.',
-                    engine_index,
-                    instruction,
-                    level="info",
-                )
-                all_success = False
-            elif not response.get("success", False):
-                self.logger(
-                    "EngineCoreSentinel[%s] failed to execute "
-                    'command "%s" (reason: %s)',
-                    engine_index,
-                    instruction,
-                    response.get("reason", "unknown"),
-                    level="error",
-                )
-                all_success = False
-
-        if instruction == "retry" and all_success:
-            for engine_index, _ in self.engine_status_dict.items():
-                self.engine_status_dict[engine_index] = "Healthy"
-            while not self.engine_exception_q.empty():
-                try:
-                    self.engine_exception_q.get_nowait()
-                except queue.Empty:
-                    break
-
-        return all_success
-
-    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
-        """
-        Async interface for run_method, returns a Future that can be awaited.
-        This method **must be called from the event loop thread** where this
-        FaultHandler was created.
-        """
-        fut = self._loop.create_future()
-        await self._task_queue.put((instruction, timeout, kwargs, fut))
-        return await fut
-
-    def submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
-        """
-        thread-safe fire-and-forget submission of a fault handling task.
-        This method can be called from **any thread**
-        """
-
-        def _enqueue():
-            fut = self._loop.create_future()
-            self._task_queue.put_nowait((instruction, timeout, kwargs, fut))
-
-        self._loop.call_soon_threadsafe(_enqueue)

@@ -3,10 +3,8 @@
 """A GPU worker class."""
 
 import gc
-import json
 import os
 import threading
-import traceback
 from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
@@ -59,16 +57,15 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
-from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.engine.BaseSentinel import BaseSentinel
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.serial_utils import deserialize_method_call, run_method
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
@@ -113,7 +110,7 @@ class AsyncIntermediateTensors(IntermediateTensors):
             object.__getattribute__(self, "wait_for_comm")()
         return object.__getattribute__(self, name)
 
-class WorkerSentinel:
+class WorkerSentinel(BaseSentinel):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -122,84 +119,47 @@ class WorkerSentinel:
         clear_input_batch_callback: Callable,
         device: torch.cuda.device,
     ):
-        self.vllm_config = vllm_config
-        self.zmq_ctx = zmq.Context()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
+        identity = f"{self.pp_rank}_{self.tp_rank}"
+        super().__init__(
+            vllm_config.fault_tolerance_config.worker_cmd_addr,
+            None,
+            identity.encode(),
+            f"{self.dp_rank}_{identity}",
+        )
+        self.vllm_config = vllm_config
+        self.zmq_ctx = zmq.Context()
         self.init_distributed_env_callback = init_distributed_env_callback
         self.clear_input_batch_callback = clear_input_batch_callback
         self.device = device
-        identity = f"{self.pp_rank}_{self.tp_rank}".encode()
-        worker_cmd_addr = vllm_config.fault_tolerance_config.worker_cmd_addr
-        self.cmd_socket = make_zmq_socket(
-            ctx=self.zmq_ctx,
-            path=worker_cmd_addr,
-            socket_type=zmq.DEALER,
-            bind=False,
-            identity=identity,
-        )
+
         self.worker_sentinel_dead = False
         self.pause_event = pause_event
         self.communicator_aborted = False
-        self.logger = self._make_worker_logger()
+        torch.cuda.set_device(self.device)
         threading.Thread(
-            target=self.run, daemon=True, name="WorkerSentinelCmdReceiver"
+            target=self.run, daemon=True, name="WorkerSentinelMonitorThread"
         ).start()
 
-    def _make_worker_logger(self):
-        prefix = f"[WorkerSentinel_dp{self.dp_rank}_pp{self.pp_rank}_tp{self.tp_rank}] "
-
-        def log(msg, *args, level="info", **kwargs):
-            """
-            level: "info", "warning", "error", "debug"
-            msg: log message
-            """
-            getattr(logger, level)(prefix + msg, *args, **kwargs)
-
-        return log
-
     def run(self):
-        """Run the message receiving loop and handle control commands"""
-        torch.cuda.set_device(self.device)
-        while not self.worker_sentinel_dead:
-            try:
-                # Use blocking receive - will wait until a message arrives
-                has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
-                if has_msg:
-                    assert cmd_str is not None
-                    method, method_uuid, params = deserialize_method_call(cmd_str)
-                    self.logger("Executing command: %s, %s", method, params)
+        # Wait for fault tolerance instructions from EngineCoreSentinel
+        while not self.sentinel_dead:
+            has_msg, cmd_str = self.receive_upstream_cmd()
+            if has_msg:
+                assert cmd_str is not None
+                success, method_uuid, reason = self._execute_cmd(cmd_str)
+                self._send_execution_result(success, method_uuid, reason)
 
-                    try:
-                        success = run_method(self, method, args=(), kwargs=params)
-                    except Exception as e:
-                        self.logger(
-                            "Error executing method %s: %s %s\n Call Stack:\n %s",
-                            method,
-                            type(e).__name__,
-                            e,
-                            "".join(traceback.format_tb(e.__traceback__)),
-                            level="error",
-                        )
-                        success = False
-                    self._send_execution_result(success, method_uuid)
-            except zmq.ZMQError:
-                # Socket was closed, exit loop.
-                self.logger("Command socket closed, stopping thread.", level="info")
-                break
-        self.logger("Worker sentinel thread has stopped.")
-
-    def pause_by_signal(self):
-        self._set_device_communicator_status(False)
-        self.pause_event.set()
-        self.logger("Pause signal sent.")
-        return True
-
-    def pause_by_abort_communicators(self, worker_timeout=5):
-        """
-        Abort all NCCL communicators and process groups in parallel using a thread pool.
-        """
+    def pause(self, timeout: int = 1, soft_pause: bool = True):
+        if soft_pause:
+            self._set_device_communicator_status(False)
+            self.pause_event.set()
+            self.logger("Pause signal sent.")
+            return True
+        # Abort all NCCL communicators and
+        # process groups in parallel using a thread pool.
         if self.communicator_aborted:
             return True
         self.pause_event.set()
@@ -226,14 +186,12 @@ class WorkerSentinel:
                 futures.append(executor.submit(_abort_nccl_comm, group))
                 futures.append(executor.submit(_abort_process_group, group))
 
-            done, not_done = wait(
-                futures, timeout=worker_timeout, return_when=FIRST_EXCEPTION
-            )
+            done, not_done = wait(futures, timeout=timeout, return_when=FIRST_EXCEPTION)
             if not_done:
                 self.logger(
                     "%d abort calls did not finish in total %s seconds",
                     len(not_done),
-                    worker_timeout,
+                    timeout,
                     level="warning",
                 )
         finally:
@@ -266,7 +224,8 @@ class WorkerSentinel:
                 nccl_comm.available = active
                 nccl_comm.disabled = not active
 
-    def restore_worker(self):
+    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
+        # In practice, the actual operation performed is restarting the worker
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
             with set_current_vllm_config(self.vllm_config):
@@ -277,18 +236,6 @@ class WorkerSentinel:
         self.pause_event.clear()
         return True
 
-    def _send_execution_result(self, success: bool, method_uuid: str):
-        msg = {
-            "success": success,
-            "method_uuid": method_uuid,
-        }
-        msg_bytes = json.dumps(msg).encode("utf-8")
-        self.cmd_socket.send_multipart([b"", msg_bytes])
-
-    def shutdown(self):
-        self.worker_sentinel_dead = True
-        self.cmd_socket.close()
-        self.zmq_ctx.term()
 
 class Worker(WorkerBase):
     def __init__(

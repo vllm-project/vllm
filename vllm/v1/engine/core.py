@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import os
 import queue
 import signal
@@ -34,7 +33,7 @@ from vllm.utils.gc_utils import (
     maybe_attach_gc_debug_callback,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -57,13 +56,12 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.BaseSentinel import BaseSentinel
 from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
-    broadcast_instruction,
     get_device_indices,
-    wait_for_instruction_result,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -83,13 +81,12 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
-class EngineCoreSentinel(threading.Thread):
+class EngineCoreSentinel(BaseSentinel):
     """
     EngineCoreSentinel monitors a single EngineCore instance, responsible for:
       1. Receiving fault signals (exceptions raised in EngineCore busy loop)
@@ -107,13 +104,19 @@ class EngineCoreSentinel(threading.Thread):
         client_cmd_addr: str,
         worker_cmd_addr: str,
         fault_report_addr: str,
-        sentinel_identity: bytes,
+        dealer_identity: bytes,
         tp_size: int,
         pp_size: int,
         dp_size: int,
     ):
-        super().__init__(daemon=True)
         self.engine_index = engine_index
+        super().__init__(
+            client_cmd_addr,
+            worker_cmd_addr,
+            dealer_identity,
+            f"{self.engine_index}",
+        )
+
         self.fault_signal_q = fault_signal_q
         self.cmd_q = cmd_q
         self.busy_loop_active = busy_loop_active
@@ -122,147 +125,65 @@ class EngineCoreSentinel(threading.Thread):
         self.pp_size = pp_size
         self.dp_size = dp_size
 
-        self.ctx = zmq.Context()
         # Client <-> EngineCoreSentinel sockets
         self.fault_report_socket = make_zmq_socket(
             self.ctx,
             fault_report_addr,
             zmq.DEALER,
             bind=False,
-            identity=sentinel_identity,
+            identity=dealer_identity,
         )
 
-        self.client_cmd_socket = make_zmq_socket(
-            self.ctx,
-            client_cmd_addr,
-            zmq.DEALER,
-            bind=False,
-            identity=sentinel_identity,
-        )
-        # EngineCoreSentinel <-> WorkerSentinel sockets
-        self.worker_cmd_socket = make_zmq_socket(
-            self.ctx, worker_cmd_addr, zmq.ROUTER, bind=True
-        )
         self.poller = zmq.Poller()
         self.communicator_aborted = False
         self.engine_running = True
-        self.engine_core_sentinel_dead = False
-        self.logger = self._make_engine_core_sentinel_logger()
+        threading.Thread(
+            target=self.run, daemon=True, name="EngineCoreSentinelMonitorThread"
+        ).start()
 
-    def _make_engine_core_sentinel_logger(self):
-        prefix = f"[EngineCoreSentinel_{self.engine_index}] "
-
-        def log(msg, *args, level="info", **kwargs):
-            """
-            level: "info", "warning", "error", "debug"
-            msg: log message
-            """
-            getattr(logger, level)(prefix + msg, *args, **kwargs)
-
-        return log
-
-    def run(self) -> None:
+    def run(self):
         """
-        Run the main monitoring loop for EngineCoreSentinel.
+        Loop to fetch exception information from the fault_signal_q queue.
+        Keep retrieving exception data continuously until an exception is detected or
+        a command from ClientSentinel is dispatched; after that, switch to the command
+        listening state.
         """
-        poll_timeout_ms = 100
-        while not self.engine_core_sentinel_dead:
+        while not self.sentinel_dead:
             # Check for engine fault signals
-            try:
-                engine_exception = self.fault_signal_q.get_nowait()
-                if isinstance(engine_exception, EngineLoopPausedError):
-                    # The busy loop stopped due to another critical exception,
-                    # put it back
-                    self.logger("Engine paused", level="info")
-                else:
-                    self.logger(
-                        "Detected exception %s: %s\n Call Stack:\n%s",
-                        type(engine_exception).__name__,
-                        engine_exception,
-                        "".join(traceback.format_tb(engine_exception.__traceback__)),
-                        level="error",
-                    )
-                    self._report_client_exception(engine_exception)
-                self.engine_running = False
-            except queue.Empty:
+            # listen exception info
+            if not self.fault_listener():
                 pass
-            try:
-                has_msg, _, cmd_str = recv_router_dealer_message(
-                    self.client_cmd_socket,
-                    use_poller=True,
-                    poll_timeout=poll_timeout_ms,
-                )
-            except zmq.ZMQError:
-                self.logger(
-                    "Socket closed, terminating EngineCoreSentinel", level="info"
-                )
-                break
-
+            has_msg, cmd_str = self.receive_upstream_cmd()
             if has_msg:
-                self.logger("Received cmd: %s", cmd_str, level="info")
-                self._execute_cmd(cmd_str)
+                assert cmd_str is not None
+                success, method_uuid, reason = self._execute_cmd(cmd_str)
+                self._send_execution_result(success, method_uuid, reason)
 
-    def _stop_worker_execution(self, soft_pause: bool, timeout: int = 2) -> bool:
-        if soft_pause:
-            pause_method = "pause_by_signal"
-        else:
-            pause_method = "pause_by_abort_communicators"
-            self.communicator_aborted = True
-
-        success = self._execute_worker_method(
-            pause_method, timeout=timeout, worker_timeout=timeout
-        )
-        return success
-
-    def _execute_worker_method(self, method_name, timeout: int = 5, **kwargs) -> bool:
-        identities = set()
-        for tp_rank in range(self.tp_size):
-            for pp_rank in range(self.pp_size):
-                identity = f"{pp_rank}_{tp_rank}".encode()
-                identities.add(identity)
-
-        method_uuid = broadcast_instruction(
-            self.worker_cmd_socket, identities, method_name, **kwargs
-        )
-
-        all_success = True
-        worker_responses = wait_for_instruction_result(
-            self.worker_cmd_socket, identities, method_name, timeout, method_uuid
-        )
-        for identity in identities:
-            response = worker_responses.get(identity)
-            if response is None or not response.get("success", False):
-                all_success = False
-
-        return all_success
+    def fault_listener(self):
+        try:
+            engine_exception = self.fault_signal_q.get_nowait()
+            if isinstance(engine_exception, EngineLoopPausedError):
+                # The busy loop stopped due to another critical exception,
+                # put it back
+                self.logger("Engine paused", level="info")
+            else:
+                self.logger(
+                    "Detected exception %s: %s\n Call Stack:\n%s",
+                    type(engine_exception).__name__,
+                    engine_exception,
+                    "".join(traceback.format_tb(engine_exception.__traceback__)),
+                    level="error",
+                )
+                self._report_client_exception(engine_exception)
+            self.engine_running = False
+            return True
+        except queue.Empty:
+            return False
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
         msg_bytes = msg.encode("utf-8")
         self.fault_report_socket.send_multipart([b"", msg_bytes])
-
-    def _execute_cmd(self, cmd_str):
-        """
-        Execute a command received from ClientSentinel.
-        """
-        method, method_uuid, method_params = deserialize_method_call(cmd_str)
-        self.logger("Executing command: %s", method, level="info")
-        try:
-            success = run_method(self, method, args=(), kwargs=method_params)
-            self.logger("Command (%s) succeeded: %s", method, success, level="info")
-            reason = None
-        except Exception as e:
-            self.logger(
-                "Error executing method %s: %s, %s",
-                method,
-                type(e).__name__,
-                e,
-                level="error",
-            )
-            success = False
-            reason = f"{type(e).__name__}: {e}"
-
-        self._send_execution_result(success, method_uuid, reason)
 
     def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
         """
@@ -280,9 +201,12 @@ class EngineCoreSentinel(threading.Thread):
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            success = self._stop_worker_execution(
-                soft_pause=soft_pause,
+            success, _ = self._broadcast_command_to_downstream(
+                "pause",
+                self._get_target_worker_identity(),
+                response_timeout=timeout,
                 timeout=timeout,
+                soft_pause=soft_pause,
             )
             elapsed = time.monotonic() - start_time
             if success:
@@ -301,10 +225,16 @@ class EngineCoreSentinel(threading.Thread):
             success = True
             if not soft_pause:
                 # abort the communicators
-                success = self._stop_worker_execution(soft_pause=False, timeout=timeout)
+                success, _ = self._broadcast_command_to_downstream(
+                    "pause",
+                    self._get_target_worker_identity(),
+                    response_timeout=timeout,
+                    timeout=timeout,
+                    soft_pause=False,
+                )
         return success
 
-    def retry(self, new_stateless_dp_group_port: int, timeout: int = 1):
+    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
         """
         Handle the retry instruction from the ClientSentinel.
         This instruction tells the EngineCore to continue its busy loop
@@ -314,8 +244,10 @@ class EngineCoreSentinel(threading.Thread):
             return True
 
         start_time = time.monotonic()
-
-        success = self._execute_worker_method("restore_worker", timeout=timeout)
+        identities = self._get_target_worker_identity()
+        success, _ = self._broadcast_command_to_downstream(
+            "retry", identities, timeout=timeout
+        )
         if not success:
             return success
 
@@ -339,29 +271,18 @@ class EngineCoreSentinel(threading.Thread):
         assert self.cmd_q.empty(), "cmd_q must be empty after execution"
         return success
 
-    def _send_execution_result(
-        self, success: bool, method_uuid: str, reason: str | None
-    ):
-        msg = {
-            "engine_index": self.engine_index,
-            "success": success,
-            "method_uuid": method_uuid,
-        }
-        if not success and reason is not None:
-            msg["reason"] = reason
-        msg_bytes = json.dumps(msg).encode("utf-8")
-        self.client_cmd_socket.send_multipart([b"", msg_bytes])
+    def _get_target_worker_identity(self):
+        identities = set()
+        for tp_rank in range(self.tp_size):
+            for pp_rank in range(self.pp_size):
+                identity = f"{pp_rank}_{tp_rank}".encode()
+                identities.add(identity)
+        return identities
 
     def shutdown(self):
         if self.fault_report_socket is not None:
             self.fault_report_socket.close()
-        if self.client_cmd_socket is not None:
-            self.client_cmd_socket.close()
-        if self.worker_cmd_socket is not None:
-            self.worker_cmd_socket.close()
-        if self.ctx is not None:
-            self.ctx.term()
-        self.engine_core_sentinel_dead = True
+        super().shutdown()
 
 
 def busy_loop_wrapper(busy_loop_func):
@@ -1179,12 +1100,11 @@ class EngineCoreProc(EngineCore):
                     fault_report_addr=addresses.fault_report_addr,
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=worker_cmd_addr,
-                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                    dealer_identity=engine_core_sentinel_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                     dp_size=vllm_config.parallel_config.data_parallel_size,
                 )
-                self.engine_core_sentinel.start()
                 vllm_config.fault_tolerance_config.worker_cmd_addr = worker_cmd_addr
                 # Do not shut down the engine immediately upon failure.
                 executor_fail_callback = lambda: self.fault_signal_q.put(

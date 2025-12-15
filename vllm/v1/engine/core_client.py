@@ -46,17 +46,18 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
 )
+from vllm.v1.engine.BaseSentinel import BaseSentinel
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    FaultHandler,
     launch_core_engines,
+    serialize_method_call,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr, run_method
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
 
@@ -371,7 +372,7 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-class ClientSentinel:
+class ClientSentinel(BaseSentinel):
     def __init__(
         self,
         fault_receiver_addr: str,
@@ -381,118 +382,172 @@ class ClientSentinel:
         fault_pub_addr: str,
         engine_status_dict: ThreadSafeDict[int, str],
     ):
+        super().__init__(None, cmd_addr, None, None)
         self.is_faulted = threading.Event()
         self.engine_registry = engine_registry
-        self.zmq_ctx = zmq.Context()
         self.fault_receiver_socket = make_zmq_socket(
-            ctx=self.zmq_ctx,
+            ctx=self.ctx,
             path=fault_receiver_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )
-        self.cmd_socket = make_zmq_socket(
-            ctx=self.zmq_ctx, path=cmd_addr, socket_type=zmq.ROUTER, bind=True
-        )
 
         self.fault_pub_socket = make_zmq_socket(
-            ctx=self.zmq_ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
+            ctx=self.ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
         )
 
         self.engine_exception_q: queue.Queue[FaultInfo] = engine_exception_q
 
         self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
 
-        self.fault_handler = FaultHandler(
-            self.cmd_socket,
-            self.engine_registry,
-            self.engine_exception_q,
-            self.engine_status_dict,
-        )
+        # ensure handle_fault is executed sequentially
+        self._task_queue: asyncio.Queue = asyncio.Queue()
+        self._loop = asyncio.get_event_loop()
+        self._dispatcher_task = self._loop.create_task(self._dispatcher())
+        self.engine_identity_to_index: dict[bytes, int] = {
+            identity: i for i, identity in self.engine_registry.items()
+        }
 
-        self.logger = self._make_client_sentinel_logger()
-
-        self.client_sentinel_dead = False
-        Thread(
-            target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
+        threading.Thread(
+            target=self.run, daemon=True, name="ClientSentinelMonitorThread"
         ).start()
 
-    def _make_client_sentinel_logger(self):
-        prefix = "[client_sentinel] "
+    def run(self) -> None:
+        """
+        Block the current execution flow and listen for fault information:
+        1. Block the thread on the error message queue
+        2. Unblock only when fault is received
+        3. Execute the pause command immediately upon detecting an fault message
+        """
+        while not self.sentinel_dead:
+            if not self.fault_listener():
+                break
+            # Pause healthy engines on fault.
+            # Pause can be invoked again during fault-tolerance handling,
+            # so it's unnecessary to track whether all engines are currently
+            # paused.
+            self._submit_fault("pause", 5, soft_pause=False)
 
-        def log(msg, *args, level="info", **kwargs):
-            """
-            level: "info", "warning", "error", "debug"
-            msg: log message
-            """
-            getattr(logger, level)(prefix + msg, *args, **kwargs)
+    def _submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
+        """
+        thread-safe fire-and-forget submission of a fault handling task.
+        This method can be called from **any thread**
+        """
 
-        return log
+        def _enqueue():
+            fut = self._loop.create_future()
+            self._task_queue.put_nowait((instruction, timeout, kwargs, fut))
+
+        self._loop.call_soon_threadsafe(_enqueue)
+
+    async def _dispatcher(self):
+        while True:
+            # each elements in the queue contains:
+            # (instruction, timeout, kwargs, future)
+            instruction, timeout, kwargs, fut = await self._task_queue.get()
+            try:
+                kwargs["timeout"] = timeout
+                cmd_str = serialize_method_call(instruction, None, **kwargs)
+                success, _, _ = self._execute_cmd(cmd_str)
+                if fut:
+                    fut.set_result(success)
+            except Exception as e:
+                if fut:
+                    fut.set_exception(e)
+
+    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
+        if "Dead" in self.engine_status_dict.values():
+            self.logger(
+                "Engine core is dead; retry won't work.",
+                level="warning",
+            )
+            return False
+
+        target_engines = set(self.engine_identity_to_index.keys())
+        new_stateless_dp_group_port = get_open_port()
+        success, _ = self._broadcast_command_to_downstream(
+            "retry",
+            target_engines,
+            response_timeout=timeout,
+            new_stateless_dp_group_port=new_stateless_dp_group_port,
+            timeout=timeout,
+        )
+
+        for engine_index, _ in self.engine_status_dict.items():
+            self.engine_status_dict[engine_index] = "Healthy"
+        while not self.engine_exception_q.empty():
+            try:
+                self.engine_exception_q.get_nowait()
+            except queue.Empty:
+                break
+
+        return success
+
+    def pause(self, timeout: int = 1, soft_pause: bool = True):
+        self.logger(
+            "Pause operation is best-effort only. Due to the complexity of "
+            "collective communications (e.g., timing dependencies and "
+            "synchronization barriers), pausing may not always succeed. If "
+            "the process remains unresponsive or collective operations "
+            "cannot be interrupted, consider shutting down and restarting "
+            "the instance.",
+            level="warning",
+        )
+
+        alive_engines = {
+            identity
+            for identity, index in self.engine_identity_to_index.items()
+            if self.engine_status_dict.get(index) != "Dead"
+        }
+        success, _ = self._broadcast_command_to_downstream(
+            "pause",
+            alive_engines,
+            response_timeout=timeout,
+            timeout=timeout,
+            soft_pause=soft_pause,
+        )
+        return success
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """
-        Executes fault tolerance measures based on the fault tolerance instructions
-         received from the api_server.
-
-        This method processes the fault tolerance commands/instructions passed by the
-        api_server, then implements corresponding fault tolerance strategies or actions
-        to handle system anomalies, ensuring stable operation or graceful degradation
-        of the relevant components.
+        Async interface for run_method, returns a Future that can be awaited.
+        This method **must be called from the event loop thread** where this
+        FaultHandler was created.
         """
-        result = await run_method(
-            self.fault_handler,
-            "handle_fault",
-            args=(instruction, timeout),
-            kwargs=kwargs,
-        )
+        fut = self._loop.create_future()
+        await self._task_queue.put((instruction, timeout, kwargs, fut))
+        result = await fut
         if result:
             self.is_faulted.clear()
         return result
 
-    def fault_receiver(self):
-        """
-        Continuously listens for exception/error information sent from the engine_core.
+    def fault_listener(self) -> bool:
+        try:
+            _, sender_identity, message = recv_router_dealer_message(
+                self.fault_receiver_socket
+            )
+            assert message is not None, (
+                "message should not be None at fault tolerance scenario"
+            )
 
-        This method maintains a persistent listening state to capture and process
-        fault-related data, exceptions, or error notifications emitted by the
-        engine_core component. It is designed to run continuously to ensure no critical
-        error information from the engine core is missed.
-        """
-        while not self.client_sentinel_dead:
-            try:
-                _, sender_identity, message = recv_router_dealer_message(
-                    self.fault_receiver_socket
-                )
-                assert message is not None, (
-                    "message should not be None at fault tolerance scenario"
-                )
+            fault_info = FaultInfo.from_json(message)
+            self.engine_exception_q.put_nowait(fault_info)
+            engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
+            self.engine_status_dict[int(fault_info.engine_id)] = engine_status
+            self.fault_pub_socket.send_string(
+                f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
+            )
+            self.is_faulted.set()
+        except zmq.ZMQError:
+            # Socket was closed during polling, exit loop.
+            self.logger("Fault receiver socket closed, stopping thread.", level="info")
+            return False
+        return True
 
-                fault_info = FaultInfo.from_json(message)
-                self.engine_exception_q.put_nowait(fault_info)
-                engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
-                self.engine_status_dict[int(fault_info.engine_id)] = engine_status
-                self.fault_pub_socket.send_string(
-                    f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
-                )
-                self.is_faulted.set()
-                # Pause healthy engines on fault.
-                # Pause can be invoked again during fault-tolerance handling,
-                # so it's unnecessary to track whether all engines are currently
-                # paused.
-                self.fault_handler.submit_fault("pause", 5, soft_pause=False)
-            except zmq.ZMQError:
-                # Socket was closed during polling, exit loop.
-                self.logger(
-                    "Fault receiver socket closed, stopping thread.", level="info"
-                )
-                break
-        self.logger("Fault receiver thread has stopped.")
-
-    def shutdown_sentinel(self):
-        self.client_sentinel_dead = True
+    def shutdown(self):
         self.fault_receiver_socket.close()
-        self.cmd_socket.close()
         self.fault_pub_socket.close()
-        self.zmq_ctx.term()
+        super().shutdown()
         self.logger("ClientSentinel is closed.", level="info")
 
 
@@ -529,7 +584,7 @@ class BackgroundResources:
         if self.coordinator is not None:
             self.coordinator.close()
         if self.client_sentinel is not None:
-            self.client_sentinel.shutdown_sentinel()
+            self.client_sentinel.shutdown()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
