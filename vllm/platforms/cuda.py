@@ -295,6 +295,7 @@ class CudaPlatformBase(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
+        attn_selector_config = attn_selector_config._replace(block_size=None)
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
