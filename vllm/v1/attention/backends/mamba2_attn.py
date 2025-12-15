@@ -357,9 +357,19 @@ class Mamba2AttentionMetadataBuilder(
         slot_mapping: torch.Tensor,
     ) -> Mamba2AttentionMetadata:
         new_metadata = copy.copy(metadata)
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            state_indices_t = blk_table
-        else:
-            state_indices_t = blk_table[:, 0]
+        prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
+        state_indices_t = blk_table if prefix_caching else blk_table[:, 0]
+        num_reqs = blk_table.shape[0]
+
+        # For CUDA graphs, copy to persistent buffer (graphs capture memory addresses)
+        if (
+            metadata.num_prefills == 0
+            and num_reqs <= self.decode_cudagraph_max_bs
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            persistent_state_indices_t = self.state_indices_tensor[:num_reqs]
+            persistent_state_indices_t.copy_(state_indices_t, non_blocking=True)
+            state_indices_t = persistent_state_indices_t
+
         new_metadata.state_indices_tensor = state_indices_t
         return new_metadata
