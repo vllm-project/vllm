@@ -344,7 +344,7 @@ def supports_pdl(device: torch.device | None = None) -> bool:
 
 
 @triton.jit
-def _accumulate_dot(
+def _update_accumulator(
     accumulator,
     tiled_a,
     tiled_b,
@@ -492,7 +492,7 @@ def mm_k(
                 tiled_a = tl.load(a_ptr, mask=token_mask[:, None], other=0.0)
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
-                accumulator = _accumulate_dot(
+                accumulator = _update_accumulator(
                     accumulator,
                     tiled_a,
                     tiled_b,
@@ -521,7 +521,7 @@ def mm_k(
                 )
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
-                accumulator = _accumulate_dot(
+                accumulator = _update_accumulator(
                     accumulator,
                     tiled_a,
                     tiled_b,
