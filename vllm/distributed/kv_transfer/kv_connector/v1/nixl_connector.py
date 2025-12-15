@@ -696,31 +696,25 @@ class NixlConnectorScheduler:
                 continue
             if preempted:
                 self._reqs_need_save.pop(req_id)
-            if new_block_id_groups:
-                req, block_ids = self._reqs_need_save[req_id]
-                # NOTE: Requests are implicitly added to `_reqs_need_save` via
-                # `update_state_after_alloc`. We only intervene if `block_ids`
-                # differ from `scheduler_output`, which signals the next partial
-                # of a chunked request.
-                if block_ids != new_block_id_groups[0]:
-                    block_ids += new_block_id_groups[0]
-                    self._reqs_need_save[req_id] = (req, block_ids)
-        for req_id in list(self._reqs_need_save.keys()):
-            req, block_ids = self._reqs_need_save[req_id]
-            assert req.kv_transfer_params is not None
-            # don't use the block_ids from _reqs_need_save since it may be
-            # incomplete for partial prefill.
-            is_partial = req.num_tokens > (len(block_ids) * self.block_size)
-            # NOTE: for partial prefill, we do not save until the full
-            # prefill is done. Clear once transfer on full prefill is started.
-            if is_partial:
+            if new_block_id_groups is None:
                 continue
+
+            req, _ = self._reqs_need_save[req_id]
+            assert req.kv_transfer_params is not None
             meta.add_new_req_to_save(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=new_block_id_groups[0],
                 kv_transfer_params=req.kv_transfer_params,
             )
-            self._reqs_need_save.pop(req_id)
+            # NOTE: for partial prefill, we will keep the req_id until the full
+            # prefill is done. Clear once transfer on full prefill is started.
+            assert scheduler_output.num_scheduled_tokens is not None
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            is_partial = (
+                req.num_computed_tokens + num_scheduled_tokens
+            ) < req.num_prompt_tokens
+            if not is_partial:
+                self._reqs_need_save.pop(req_id)
 
         meta.reqs_to_send = self._reqs_need_send
         meta.reqs_in_batch = self._reqs_in_batch
