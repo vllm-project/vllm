@@ -917,7 +917,7 @@ def unified_attention(
         # Batch contains decodes that are not processed in unified fashion
 
         # Launch the 2D kernel if
-        # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
+        # 1. No intermediate tiled softmax buffers have been allocated, or
         # 2. The number of sequences exceeds the configured threshold
         if (
             seq_threshold_3D is None
