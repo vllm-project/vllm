@@ -124,6 +124,21 @@ the detected format, which can be one of:
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
 
+## Service Tier
+
+vLLM supports OpenAI-compatible service tiers to control request prioritization. The `service_tier` parameter maps to scheduler priority values, where lower numbers indicate higher priority.
+
+| Service Tier | Priority Value | Description |
+|--------------|----------------|-------------|
+| `auto` (default) | 0 | Default priority |
+| `default` | 0 | Default priority |
+| `flex` | 2 | Lower priority |
+| `scale` | -1 | Higher priority |
+| `priority` | -2 | Highest priority |
+
+!!! important
+    Service tiers with non-zero priority (`flex`, `scale`, `priority`) require starting the server with `--scheduler-policy=priority`.
+
 ## Extra Parameters
 
 vLLM supports a set of parameters that are not part of the OpenAI API.
