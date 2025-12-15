@@ -79,7 +79,7 @@ class MemorySnapshot:
         # rather than `torch.cuda.memory_reserved()` .
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
-        # when we call `torch.cuda.empty_cache()` or OOM happens.
+        # when we call `torch.accelerator.empty_cache()` or OOM happens.
         self.torch_peak = torch.cuda.memory_stats().get("allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
@@ -201,7 +201,7 @@ def memory_profiling(
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
     """  # noqa
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
@@ -215,7 +215,7 @@ def memory_profiling(
     yield result
 
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     result.after_profile.measure()
 

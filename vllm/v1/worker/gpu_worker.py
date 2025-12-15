@@ -234,7 +234,7 @@ class Worker(WorkerBase):
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
             # take current memory snapshot
             self.init_snapshot = MemorySnapshot()
@@ -328,7 +328,7 @@ class Worker(WorkerBase):
             logger.info(msg)
             return kv_cache_memory_bytes
 
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -519,7 +519,7 @@ class Worker(WorkerBase):
         # sampling related tensors of max possible shape to avoid memory
         # fragmentation issue.
         # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
+        # memory buffers from being cleared by `torch.accelerator.empty_cache`.
         if get_pp_group().is_last_rank:
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
