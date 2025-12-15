@@ -154,13 +154,6 @@ class Base(
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
 
-        # Attrs for torch compile (see support_torch_compile)
-        self._dynamic_arg_dims: dict[str, int] = {
-            "input_ids": 1,
-            "inputs_embeds": 1,
-            "position_ids": 1,
-        }
-
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
         """Target class for Eagle3 aux hidden state recording."""
@@ -189,23 +182,8 @@ class Base(
             trust_remote_code=self.model_config.trust_remote_code,
         )
 
-        # Globally patch the language model class to support torch compile
-        with torch.device("meta"):
-            # Extract the language model class
-            model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
-            language_model_cls = type(model.get_decoder())
-            del model
-
-            # Decorate the language_model_cls for torch compile
-            @support_torch_compile(
-                dynamic_arg_dims=self._dynamic_arg_dims,
-                enable_if=can_enable_torch_compile,
-            )
-            class SupportTorchCompileWrapper(language_model_cls): ...
-
-            # Patch the class in its module
-            module = sys.modules[language_model_cls.__module__]
-            setattr(module, language_model_cls.__name__, SupportTorchCompileWrapper)
+        # Decorate the language model class to support torch compile
+        self._torch_compile(**from_config_kwargs)
 
         # init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
@@ -242,6 +220,42 @@ class Base(
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.text_config.hidden_size
         )
+
+    def _torch_compile(self, dynamic_arg_dims: dict[str, int] | None = None, **kwargs):
+        """
+        Decorate the model's language model class to support torch compile.
+
+        Args:
+            dynamic_arg_dims: A mapping from argument name to the dunamic dimensions
+                of the argument. If None, default dynamic arg dims will be used. See
+                [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
+                for more details.
+            kwargs: The kwargs to create the language model class.
+        """
+        if dynamic_arg_dims is None:
+            # Applied to a PreTrainedModel so the batch dimension will exist
+            dynamic_arg_dims: dict[str, int] = {
+                "input_ids": 1,  # shape: [1, seq_len]
+                "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
+                "position_ids": 1,  # shape: [1, seq_len]
+            }
+        # Globally patch the language model class to support torch compile
+        with torch.device("meta"):
+            # Extract the language model class
+            model: PreTrainedModel = AutoModel.from_config(**kwargs)
+            language_model_cls = type(model.get_decoder())
+            del model
+
+            # Decorate the language_model_cls for torch compile
+            @support_torch_compile(
+                dynamic_arg_dims=dynamic_arg_dims,
+                enable_if=can_enable_torch_compile,
+            )
+            class SupportTorchCompileWrapper(language_model_cls): ...
+
+            # Patch the class in its module
+            module = sys.modules[language_model_cls.__module__]
+            setattr(module, language_model_cls.__name__, SupportTorchCompileWrapper)
 
     def pipeline_parallel(self):
         """

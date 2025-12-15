@@ -282,16 +282,21 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
     )
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        # Set dynamic arg dims for MRoPE models.
-        if vllm_config.model_config.uses_mrope:
-            # Applied to a PreTrainedModel so the batch dimension will exist
-            self._dynamic_arg_dims = {
+        # Skip SupportsMRoPE.__init__ and call the next class in MRO
+        super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def _torch_compile(self, dynamic_arg_dims: dict[str, int] | None = None, **kwargs):
+        """
+        See
+        [`_torch_compile`][vllm.model_executor.models.transformers.base.Base._torch_compile]
+        """
+        if self.model_config.uses_mrope:
+            dynamic_arg_dims = {
                 "input_ids": 1,  # shape: [1, seq_len]
                 "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
                 "position_ids": 2,  # shape: [3, 1, seq_len]
             }
-        # Skip SupportsMRoPE.__init__ and call the next class in MRO
-        super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
+        super()._torch_compile(dynamic_arg_dims=dynamic_arg_dims, **kwargs)
 
     def forward(
         self,
