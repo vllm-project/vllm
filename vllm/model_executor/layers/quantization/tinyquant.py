@@ -37,9 +37,15 @@ class TinyQuantConfig(QuantizationConfig):
     def __init__(self, original_config: dict[str, Any] | None = None) -> None:
         super().__init__()
         self.original_config = original_config or {}
+        # Extract quantized_tensors mapping: layer_name -> list of param names
+        self.quantized_tensors = original_config.get("quantized_tensors", {})
 
     def __repr__(self) -> str:
         return "TinyQuantConfig()"
+    
+    def get_quantized_params(self, layer_prefix: str) -> list[str]:
+        """Get list of quantized parameter names for a specific layer."""
+        return self.quantized_tensors.get(layer_prefix, [])
 
     @classmethod
     def get_name(cls) -> str:
@@ -95,23 +101,30 @@ class TinyQuantLinearMethod(LinearMethodBase):
         tq_tensors = nn.ParameterDict()
         layer.register_module("tq_tensors", tq_tensors)
         
+        # Get layer prefix (set in LinearBase.__init__)
+        prefix = getattr(layer, "prefix", "")
+        
+        # Get quantized parameter names for this specific layer from config
+        param_names = self.quant_config.get_quantized_params(prefix)
+
+        if not param_names:
+            raise ValueError(f"Layer {prefix} not found in quantized_tensors config")
+        
         # Weight loader writes directly to tinyquant_layers[shard_idx].tq_tensors
         def make_weight_loader(param_name: str):
             def weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor, shard_id=None):
                 shard_idx = get_shard_index(shard_id)
                 # Write directly to the shard's tq_tensors
-                # Must wrap in Parameter with requires_grad=False (uint8 doesn't support grads)
                 layer.tinyquant_layers[shard_idx].tq_tensors[param_name] = nn.Parameter(
                     loaded_weight.cuda(), requires_grad=False
                 )
             return weight_loader
-        
-        # Register placeholder parameters
-        for name, dtype in [("meta", torch.uint8), ("absmax", torch.float32), ("quantized_weight", torch.uint8)]:
-            param = nn.Parameter(torch.empty(0, dtype=dtype), requires_grad=False)
+
+        for name in param_names:
+            param = nn.Parameter(torch.empty(0), requires_grad=False)
             set_weight_attrs(param, {"ignore_warning": True, "weight_loader": make_weight_loader(name)})
             tq_tensors[name] = param
-    
+
     def apply(
         self,
         layer: torch.nn.Module,
