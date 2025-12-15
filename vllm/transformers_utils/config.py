@@ -519,10 +519,15 @@ def maybe_override_with_speculators(
             **kwargs,
         )
         speculators_config = config_dict.get("speculators_config")
-    except OSError:
+    except OSError as e:
         # GGUF models without config.json cannot have speculators config
-        # (speculators is defined in config.json), so skip gracefully
-        if gguf_model_repo is not None:
+        # (speculators is defined in config.json), so skip gracefully.
+        # We only suppress "file not found" errors, not other OS errors like
+        # permission denied.
+        is_file_not_found = isinstance(
+            e, FileNotFoundError
+        ) or "does not appear to have a file named" in str(e)
+        if gguf_model_repo is not None and is_file_not_found:
             return model, tokenizer, vllm_speculative_config
         raise
 
