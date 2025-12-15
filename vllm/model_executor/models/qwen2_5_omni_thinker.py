@@ -773,8 +773,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     Qwen2_5OmniConditionalGenerationMixin,
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -847,6 +845,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
+                multimodal_config=multimodal_config,
             )
         else:
             self.visual = None
