@@ -208,6 +208,10 @@ class EplbState:
     """
     EplbState of each expert parallel model. Key is the model config hash.
     """
+    policy : Optional[EplbPolicy] = None
+    """
+    Selected instance of the EPLB algorithm class
+    """
 
     def __init__(self, parallel_config: ParallelConfig, device: torch.device):
         self.parallel_config = parallel_config
@@ -785,6 +789,7 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        assert self.policy is not None, "EplbPolicy must be initialized"
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
