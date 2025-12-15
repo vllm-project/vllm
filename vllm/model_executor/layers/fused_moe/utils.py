@@ -344,6 +344,48 @@ def supports_pdl(device: torch.device | None = None) -> bool:
 
 
 @triton.jit
+def _accumulate_dot(
+    accumulator,
+    tiled_a,
+    tiled_b,
+    token_mask,
+    iter_k,
+    a_scale_ptrs,
+    b_scale_ptrs,
+    stride_ask,
+    stride_bsk,
+    group_k,
+    group_n,
+    use_int8_w8a16: tl.constexpr = False,
+    use_fp8_w8a8: tl.constexpr = False,
+    use_int8_w8a8: tl.constexpr = False,
+    compute_type: tl.constexpr = tl.float16,
+):
+    if use_int8_w8a16:
+        accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
+    elif use_fp8_w8a8 or use_int8_w8a8:
+        if group_k > 0 and group_n > 0:
+            offs_ks = iter_k // group_k
+            a_scale = tl.load(
+                a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+            )
+            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+
+            accumulator += (
+                tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+            )
+        else:
+            if use_fp8_w8a8:
+                # acc used to enable fp8_fast_accum
+                accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
+            else:
+                accumulator += tl.dot(tiled_a, tiled_b)
+    else:
+        accumulator += tl.dot(tiled_a, tiled_b)
+    return accumulator
+
+
+@triton.jit
 def mm_k(
     a_ptr,
     b_ptr,
@@ -420,27 +462,23 @@ def mm_k(
             tiled_a = tl.load(a_ptr, mask=token_mask[:, None], other=0.0)
             if CAST_TYPE:
                 tiled_a = tiled_a.to(b_dtype)
-            if use_int8_w8a16:
-                accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
-            elif use_fp8_w8a8 or use_int8_w8a8:
-                if group_k > 0 and group_n > 0:
-                    offs_ks = iter_k // group_k
-                    a_scale = tl.load(
-                        a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                    )
-                    b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                    accumulator += (
-                        tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
-                    )
-                else:
-                    if use_fp8_w8a8:
-                        # acc used to enable fp8_fast_accum
-                        accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                    else:
-                        accumulator += tl.dot(tiled_a, tiled_b)
-            else:
-                accumulator += tl.dot(tiled_a, tiled_b)
+            accumulator = _accumulate_dot(
+                accumulator,
+                tiled_a,
+                tiled_b,
+                token_mask,
+                iter_k,
+                a_scale_ptrs,
+                b_scale_ptrs,
+                stride_ask,
+                stride_bsk,
+                group_k,
+                group_n,
+                use_int8_w8a16,
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                compute_type,
+            )
         else:
             # Check if we need element-wise masking
             if iter_k >= K:
@@ -454,33 +492,23 @@ def mm_k(
                 tiled_a = tl.load(a_ptr, mask=token_mask[:, None], other=0.0)
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
-                if use_int8_w8a16:
-                    accumulator = tl.dot(
-                        tiled_a, tiled_b.to(compute_type), acc=accumulator
-                    )
-                elif use_fp8_w8a8 or use_int8_w8a8:
-                    if group_k > 0 and group_n > 0:
-                        offs_ks = iter_k // group_k
-                        a_scale = tl.load(
-                            a_scale_ptrs + offs_ks * stride_ask,
-                            mask=token_mask,
-                            other=0.0,
-                        )
-                        b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                        accumulator += (
-                            tl.dot(tiled_a, tiled_b)
-                            * a_scale[:, None]
-                            * b_scale[None, :]
-                        )
-                    else:
-                        if use_fp8_w8a8:
-                            # acc used to enable fp8_fast_accum
-                            accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                        else:
-                            accumulator += tl.dot(tiled_a, tiled_b)
-                else:
-                    accumulator += tl.dot(tiled_a, tiled_b)
+                accumulator = _accumulate_dot(
+                    accumulator,
+                    tiled_a,
+                    tiled_b,
+                    token_mask,
+                    iter_k,
+                    a_scale_ptrs,
+                    b_scale_ptrs,
+                    stride_ask,
+                    stride_bsk,
+                    group_k,
+                    group_n,
+                    use_int8_w8a16,
+                    use_fp8_w8a8,
+                    use_int8_w8a8,
+                    compute_type,
+                )
             else:
                 # Partial block, need masking (only last iteration)
                 k_offsets = tl.arange(0, BLOCK_K)
@@ -493,33 +521,23 @@ def mm_k(
                 )
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
-                if use_int8_w8a16:
-                    accumulator = tl.dot(
-                        tiled_a, tiled_b.to(compute_type), acc=accumulator
-                    )
-                elif use_fp8_w8a8 or use_int8_w8a8:
-                    if group_k > 0 and group_n > 0:
-                        offs_ks = iter_k // group_k
-                        a_scale = tl.load(
-                            a_scale_ptrs + offs_ks * stride_ask,
-                            mask=token_mask,
-                            other=0.0,
-                        )
-                        b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-
-                        accumulator += (
-                            tl.dot(tiled_a, tiled_b)
-                            * a_scale[:, None]
-                            * b_scale[None, :]
-                        )
-                    else:
-                        if use_fp8_w8a8:
-                            # acc used to enable fp8_fast_accum
-                            accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-                        else:
-                            accumulator += tl.dot(tiled_a, tiled_b)
-                else:
-                    accumulator += tl.dot(tiled_a, tiled_b)
+                accumulator = _accumulate_dot(
+                    accumulator,
+                    tiled_a,
+                    tiled_b,
+                    token_mask,
+                    iter_k,
+                    a_scale_ptrs,
+                    b_scale_ptrs,
+                    stride_ask,
+                    stride_bsk,
+                    group_k,
+                    group_n,
+                    use_int8_w8a16,
+                    use_fp8_w8a8,
+                    use_int8_w8a8,
+                    compute_type,
+                )
 
         a_ptr += STEP_K * ak_stride
         b_ptr += STEP_K * bk_stride
