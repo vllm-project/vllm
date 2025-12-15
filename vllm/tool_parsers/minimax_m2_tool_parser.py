@@ -423,7 +423,7 @@ class MinimaxM2ToolParser(ToolParser):
                         self.prev_tool_call_arr.append(
                             {
                                 "name": self.current_function_name,
-                                "arguments": "{}",  # Placeholder, will be updated later
+                                "arguments": {},  # Placeholder, will be updated later
                             }
                         )
                         # Initialize streamed_args_for_tool for this tool call
@@ -501,7 +501,7 @@ class MinimaxM2ToolParser(ToolParser):
                                 args = parsed_tool.function.arguments
                                 self.prev_tool_call_arr[self.current_tool_index][
                                     "arguments"
-                                ] = args
+                                ] = json.loads(args)
                         except Exception:
                             pass  # Ignore parsing errors during streaming
 

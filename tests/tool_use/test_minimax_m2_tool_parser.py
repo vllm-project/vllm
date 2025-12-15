@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from vllm.entrypoints.openai.tool_parsers.minimax_m2_tool_parser import (
@@ -60,10 +62,9 @@ def test_extract_tool_calls_streaming_incremental(minimax_m2_tool_parser):
 
     assert len(parser.prev_tool_call_arr) == 1
     entry = parser.prev_tool_call_arr[0]
-    import json
 
     assert entry["name"] == "get_weather"
-    args = json.loads(entry["arguments"])
+    args = entry["arguments"]
     assert args["city"] == "Seattle"
 
 
@@ -106,6 +107,13 @@ def test_streaming_minimax_m2_multiple_invokes(minimax_m2_tool_parser):
 
     for entry, expect_model in zip(parser.prev_tool_call_arr, ["OpenAI", "Gemini"]):
         assert entry["name"] == "search_web"
-        args = entry["arguments"]
+        args = json.dumps(entry["arguments"])
         assert "technology" in args and "events" in args
         assert expect_model in args
+
+    # check streamed_args_for_tool for serving_chat.py
+    for index in range(2):
+        expected_call = parser.prev_tool_call_arr[index].get("arguments", {})
+        expected_call = json.dumps(expected_call)
+        actual_call = parser.streamed_args_for_tool[index]
+        assert expected_call == actual_call
