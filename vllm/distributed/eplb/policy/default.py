@@ -59,15 +59,16 @@ class DefaultEplbPolicy(AbstractEplbPolicy):
             items_row = pack_items[layer_idx]
 
             for group in indices[layer_idx]:
-                # Select the lightest pack that still has capacity.
-                available = items_row < groups_per_pack
-                assert np.any(available)
-                pack = int(np.argmin(np.where(available, weights_row, np.inf)))
+                # Pick the lightest pack; full packs are masked out by inf.
+                pack = int(np.argmin(weights_row))
 
                 pack_index[layer_idx, group] = pack
                 rank_in_pack[layer_idx, group] = items_row[pack]
                 weights_row[pack] += weight[layer_idx, group]
                 items_row[pack] += 1
+                if items_row[pack] == groups_per_pack:
+                    # Mark as unavailable for future selections.
+                    weights_row[pack] = np.inf
 
         return pack_index, rank_in_pack
 
