@@ -72,9 +72,11 @@ class ExternalLBServerManager:
         """Start all server instances for external LB mode."""
 
         allocated_ports = []
-        for rank in range(self.dp_size):
-            port = get_unique_port(start_port=8000 + rank * 10)
+        last_port = 7999
+        for _ in range(self.dp_size):
+            port = get_unique_port(start_port=last_port + 1)
             allocated_ports.append(port)
+            last_port = port
 
         for rank in range(self.dp_size):
             # Create server args for this specific rank
