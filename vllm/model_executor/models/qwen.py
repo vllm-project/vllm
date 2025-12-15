@@ -281,6 +281,9 @@ class QWenBaseModel(nn.Module):
             self.transformer.make_empty_intermediate_tensors
         )
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.wte(input_ids)
+
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
@@ -348,9 +351,6 @@ class QWenLMHeadModel(QWenBaseModel, SupportsPP, SupportsLoRA):
             )
 
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.wte(input_ids)
 
     def forward(
         self,
