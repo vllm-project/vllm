@@ -299,6 +299,9 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
         def is_reasoning_end(self, input_ids: list[int]) -> bool:
             return self.end_token_id in input_ids
+
+        def is_reasoning_end_streaming(self, input_ids: list[int], delta_ids: list[int]) -> bool:
+            return self.end_token_id in delta_token_ids
         ...
     ```
 

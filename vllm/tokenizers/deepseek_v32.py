@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
+from typing import Any
 
 from transformers import BatchEncoding
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
 from .deepseek_v32_encoding import encode_messages
-from .hf import HfTokenizer, TokenizerLike
-from .registry import TokenizerRegistry
+from .hf import CachedHfTokenizer
+from .protocol import TokenizerLike
 
 
-@TokenizerRegistry.register("deepseek_v32")
-class DeepseekV32Tokenizer(HfTokenizer):
-    def __init__(self, tokenizer: TokenizerLike):
-        self.tokenizer = tokenizer
-        self.name_or_path = (
-            tokenizer.name_or_path if hasattr(tokenizer, "name_or_path") else ""
-        )
-
+class DeepseekV32Tokenizer(CachedHfTokenizer):
     @classmethod
     def from_pretrained(
         cls,
@@ -38,20 +34,47 @@ class DeepseekV32Tokenizer(HfTokenizer):
         )
         return DeepseekV32Tokenizer(tokenizer)
 
-    def apply_chat_template(self, messages, tools=None, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike) -> None:
+        super().__init__()
+
+        self.tokenizer = tokenizer
+        self.name_or_path = getattr(tokenizer, "name_or_path", "")
+
+        self._added_vocab = self.tokenizer.get_added_vocab()
+        self._added_vocab_size = len(self._added_vocab)
+
+    def apply_chat_template(
+        self,
+        messages: list["ChatCompletionMessageParam"],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> str | list[int]:
         thinking = kwargs.get("thinking", False)
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"
         conversation = kwargs.get("conversation", messages)
         messages = conversation.copy()
-        drop_thinking = True
         if tools is not None and len(tools) > 0:
             messages.insert(0, {"role": "system"})
-            messages[0]["tools"] = tools
-            drop_thinking = False
+            messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+
+        # Historical reasoning content is dropped when a new user message is introduced
+        drop_thinking = messages[-1]["role"] == "user"
+
         encode_config = dict(thinking_mode=thinking_mode, drop_thinking=drop_thinking)
         prompt_str = encode_messages(messages, **encode_config)  # type: ignore
+
+        if kwargs.get("tokenize", True):
+            tokenizer_kwargs = {
+                k: kwargs[k] for k in ("truncation", "max_length") if k in kwargs
+            }
+            return self.encode(
+                prompt_str,
+                add_special_tokens=False,
+                **tokenizer_kwargs,
+            )
+
         return prompt_str
 
     def num_special_tokens_to_add(self) -> int:
@@ -98,7 +121,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
 
     def __len__(self) -> int:
         # </think> is an added token in DeepseekV32 tokenizer
-        return self.vocab_size + len(self.get_added_vocab())
+        return self.vocab_size + self._added_vocab_size
 
     def __call__(
         self,
@@ -120,7 +143,7 @@ class DeepseekV32Tokenizer(HfTokenizer):
         return self.tokenizer.get_vocab()
 
     def get_added_vocab(self) -> dict[str, int]:
-        return self.tokenizer.get_added_vocab()
+        return self._added_vocab.copy()
 
     def encode(
         self,

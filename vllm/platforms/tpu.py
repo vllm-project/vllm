@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import torch
 from tpu_info import device
@@ -74,6 +74,32 @@ class TpuPlatform(Platform):
 
         logger.info("Using Pallas V1 backend.")
         return AttentionBackendEnum.PALLAS.get_path()
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.PALLAS,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention"
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}."
+            )
+            logger.info_once(f"Using backend {backend} for vit attention.")
+            return backend
+
+        logger.info_once(
+            f"Using default backend {AttentionBackendEnum.PALLAS} for vit attention."
+        )
+        return AttentionBackendEnum.PALLAS
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

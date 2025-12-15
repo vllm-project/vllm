@@ -39,6 +39,7 @@ logger = init_logger(__name__)
 
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
+NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
 
 @dataclass
@@ -63,6 +64,12 @@ class TritonAttentionMetadata:
     num_q_blocks: int
     block_q_seq_boundaries_tensor: torch.Tensor
     seq_threshold_3D: int
+
+    seq_threshold_3D: int
+    num_par_softmax_segments: int
+    softmax_segm_output: torch.Tensor
+    softmax_segm_max: torch.Tensor
+    softmax_segm_expsum: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -133,6 +140,29 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 capture_sizes,
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
+
+        self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        headdim_padded = next_power_of_2(self.headdim)
+        self.softmax_segm_output = torch.empty(
+            (
+                self.seq_threshold_3D,
+                self.num_heads_q,
+                self.num_par_softmax_segments,
+                headdim_padded,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_max = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_expsum = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -222,6 +252,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             num_q_blocks=self.num_q_blocks,
             block_q_seq_boundaries_tensor=self.block_q_seq_boundaries_tensor,
             seq_threshold_3D=self.seq_threshold_3D,
+            num_par_softmax_segments=self.num_par_softmax_segments,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
         )
         return attn_metadata
 
@@ -434,6 +468,10 @@ class TritonAttentionImpl(AttentionImpl):
         block_q_seq_boundaries_tensor = attn_metadata.block_q_seq_boundaries_tensor
 
         seq_threshold_3D = attn_metadata.seq_threshold_3D
+        num_par_softmax_segments = attn_metadata.num_par_softmax_segments
+        softmax_segm_output = attn_metadata.softmax_segm_output
+        softmax_segm_max = attn_metadata.softmax_segm_max
+        softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key_cache.shape[2])
 
@@ -460,6 +498,10 @@ class TritonAttentionImpl(AttentionImpl):
             num_q_blocks=num_q_blocks,
             block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
             seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
         )

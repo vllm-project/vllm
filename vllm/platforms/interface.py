@@ -7,7 +7,7 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
@@ -223,12 +223,6 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> "AttentionBackendEnum":
-        return AttentionBackendEnum.TORCH_SDPA
-
-    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
@@ -244,6 +238,43 @@ class Platform:
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        """
+        Get the vision attention backend class of a device.
+
+        NOTE: ViT Attention should be checked and override in the platform-specific
+        implementation. we should not override this in any other places, like
+        the model_executor/models/<model_name>.py.
+
+        We check if the backend is None or not:
+            1. If not, check if the backend is supported by the platform.
+            2. If None, continue to the default selection logic.
+        """
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention"
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using default backend {AttentionBackendEnum.TORCH_SDPA} for vit attention"
+        )
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_device_capability(
@@ -300,6 +331,21 @@ class Platform:
             return current_capability == capability
 
         return current_capability.to_int() == capability
+
+    @classmethod
+    def is_device_capability_family(
+        cls,
+        capability: int,
+        device_id: int = 0,
+    ) -> bool:
+        """
+        Returns True if the device capability is any <major>.x.
+        Mirrors CUDA 13 'family' architecture semantics (e.g. 10.x, 11.x, 12.x).
+        """
+        current_capability = cls.get_device_capability(device_id=device_id)
+        if current_capability is None:
+            return False
+        return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

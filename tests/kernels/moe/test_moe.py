@@ -231,6 +231,7 @@ def test_fused_moe(
     padding: bool,
     chunk_size: int,
     monkeypatch,
+    workspace_init,
 ):
     current_platform.seed_everything(7)
 
