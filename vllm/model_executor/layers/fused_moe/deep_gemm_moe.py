@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections import OrderedDict
+from threading import Lock
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -34,6 +37,45 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.import_utils import has_deep_gemm
 
 logger = init_logger(__name__)
+
+# cache one kernel per (w1_scale, w2_scale)
+# pair so we reuse the same module across forward calls for a given layer.
+_DEEPGEMM_MOE_KERNEL_CACHE_MAXSIZE = 256
+_DEEPGEMM_MOE_KERNEL_CACHE: "OrderedDict[tuple[int, int], mk.FusedMoEModularKernel]" = (
+    OrderedDict()
+)
+_DEEPGEMM_MOE_KERNEL_CACHE_LOCK = Lock()
+
+
+def _get_deepgemm_modular_kernel(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> mk.FusedMoEModularKernel:
+    key = (id(w1_scale), id(w2_scale))
+    with _DEEPGEMM_MOE_KERNEL_CACHE_LOCK:
+        kernel = _DEEPGEMM_MOE_KERNEL_CACHE.get(key)
+        if kernel is not None:
+            _DEEPGEMM_MOE_KERNEL_CACHE.move_to_end(key)
+            return kernel
+
+    # create outside the lock to avoid holding the lock while importing/allocating.
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        block_shape=get_mk_alignment_for_contiguous_layout(),
+    )
+    kernel = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        DeepGemmExperts(quant_config),
+    )
+
+    with _DEEPGEMM_MOE_KERNEL_CACHE_LOCK:
+        _DEEPGEMM_MOE_KERNEL_CACHE[key] = kernel
+        _DEEPGEMM_MOE_KERNEL_CACHE.move_to_end(key)
+        while len(_DEEPGEMM_MOE_KERNEL_CACHE) > _DEEPGEMM_MOE_KERNEL_CACHE_MAXSIZE:
+            _DEEPGEMM_MOE_KERNEL_CACHE.popitem(last=False)
+
+    return kernel
 
 
 def _valid_deep_gemm_shape(M: int, N: int, K: int) -> bool:
@@ -332,18 +374,8 @@ def deep_gemm_moe_fp8(
     Returns:
     - torch.Tensor: The bfloat16 output tensor after applying the MoE layer.
     """
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        a1_scale=a1_scale,
-        a2_scale=a2_scale,
-        block_shape=get_mk_alignment_for_contiguous_layout(),
-    )
-
-    fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
-        DeepGemmExperts(quant_config),
-    )
+    assert a2_scale is None
+    fn = _get_deepgemm_modular_kernel(w1_scale=w1_scale, w2_scale=w2_scale)
     return fn(
         hidden_states,
         w1,
