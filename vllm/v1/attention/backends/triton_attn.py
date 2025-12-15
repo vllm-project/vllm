@@ -64,8 +64,6 @@ class TritonAttentionMetadata:
     num_q_blocks: int
     block_q_seq_boundaries_tensor: torch.Tensor
     seq_threshold_3D: int
-
-    seq_threshold_3D: int
     num_par_softmax_segments: int
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
