@@ -258,65 +258,28 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        if compilation_config is not None:
-            if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    mode=CompilationMode(compilation_config)
-                )
-            elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
-            else:
-                compilation_config_instance = compilation_config
-        else:
-            compilation_config_instance = CompilationConfig()
+        def _make_config(value: Any, cls: type[_R]) -> _R:
+            """Convert dict/None/instance to a config instance."""
+            if value is None:
+                return cls()
+            if isinstance(value, dict):
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})
+            return value
 
-        if structured_outputs_config is not None:
-            if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
-            else:
-                structured_outputs_instance = structured_outputs_config
+        if isinstance(compilation_config, int):
+            compilation_config_instance = CompilationConfig(
+                mode=CompilationMode(compilation_config)
+            )
         else:
-            structured_outputs_instance = StructuredOutputsConfig()
+            compilation_config_instance = _make_config(
+                compilation_config, CompilationConfig
+            )
 
-        if profiler_config is not None:
-            if isinstance(profiler_config, dict):
-                profiler_config_instance = ProfilerConfig(
-                    **{
-                        k: v
-                        for k, v in profiler_config.items()
-                        if is_init_field(ProfilerConfig, k)
-                    }
-                )
-            else:
-                profiler_config_instance = profiler_config
-        else:
-            profiler_config_instance = ProfilerConfig()
-
-        if attention_config is not None:
-            if isinstance(attention_config, dict):
-                attention_config_instance = AttentionConfig(
-                    **{
-                        k: v
-                        for k, v in attention_config.items()
-                        if is_init_field(AttentionConfig, k)
-                    }
-                )
-            else:
-                attention_config_instance = attention_config
-        else:
-            attention_config_instance = AttentionConfig()
+        structured_outputs_instance = _make_config(
+            structured_outputs_config, StructuredOutputsConfig
+        )
+        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
+        attention_config_instance = _make_config(attention_config, AttentionConfig)
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
