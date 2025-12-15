@@ -122,10 +122,11 @@ direct_register_custom_op(
 class ApplyRotaryEmb(CustomOp):
     def __init__(
         self,
+        enforce_enable: bool = False,
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
 

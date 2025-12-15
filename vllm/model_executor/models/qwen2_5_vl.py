@@ -355,7 +355,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             multimodal_config=multimodal_config,
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb()
+        self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
     def forward(
         self,

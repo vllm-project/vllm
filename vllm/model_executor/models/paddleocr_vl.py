@@ -22,7 +22,6 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
@@ -569,7 +568,10 @@ class SiglipAttention(nn.Module):
             multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
-        self.apply_rotary_emb = ApplyRotaryEmb(enable_fp32_compute=True)
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
+        )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         seq_len, bs, _ = qkv.shape
