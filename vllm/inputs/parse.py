@@ -45,6 +45,10 @@ def parse_raw_prompts(
 
         # case 4: array of token arrays
         if is_list_of(prompt, list):
+            if len(prompt) == 0 or (
+                len(prompt) == 1 and isinstance(prompt[0], list) and len(prompt[0]) == 0
+            ):
+                raise ValueError("please provide at least one prompt")
             for elem in prompt:
                 if not isinstance(elem, list):
                     raise TypeError(
