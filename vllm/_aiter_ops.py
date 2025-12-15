@@ -420,15 +420,15 @@ def _rocm_aiter_rms_norm_fake(
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
-    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter import rmsnorm2d_fwd_with_add
 
+    residual_out = torch.empty_like(residual)
+    out = torch.empty_like(x)
     rmsnorm2d_fwd_with_add(
         out,  # output
         x,  # input
@@ -437,29 +437,34 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
         weight,
         variance_epsilon,
     )
+    return out, residual_out
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
-    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> None:
-    pass
+) -> tuple[torch.Tensor, torch.Tensor]:
+    residual_out = torch.empty_like(residual)
+    out = torch.empty_like(x)
+    return out, residual_out
 
 
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
-    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
-    residual_out: torch.Tensor,
     weight: torch.Tensor,
-    y_scale: torch.Tensor,
     epsilon: float,
-) -> None:
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    residual_out = torch.empty_like(x)
 
     rocm_aiter.rmsnorm2d_fwd_with_add_dynamicquant(
         out,
@@ -472,41 +477,53 @@ def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
         use_model_sensitive_rmsnorm=0,
     )
 
+    return out, residual_out, y_scale
+
 
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
-    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
-    residual_out: torch.Tensor,
     weight: torch.Tensor,
-    y_scale: torch.Tensor,
     epsilon: float,
-) -> None:
-    pass
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    residual_out = torch.empty_like(x)
+
+    return out, residual_out, y_scale
 
 
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
-    out: torch.Tensor,
     x: torch.Tensor,
     weight: torch.Tensor,
-    y_scale: torch.Tensor,
     epsilon: float,
-) -> None:
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
     import aiter as rocm_aiter
+
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
 
     rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
         out, x, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
     )
 
+    return out, y_scale
+
 
 def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
-    out: torch.Tensor,
-    input: torch.Tensor,
+    x: torch.Tensor,
     weight: torch.Tensor,
-    y_scale: torch.Tensor,
     epsilon: float,
-) -> None:
-    pass
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    y_scale = torch.empty(x.shape[0], 1, dtype=torch.float32, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+
+    return out, y_scale
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -530,10 +547,16 @@ def _rocm_aiter_per_tensor_quant_fake(
 
 
 def _rocm_aiter_per_token_quant_impl(
-    x: torch.Tensor, out: torch.Tensor, scale: torch.Tensor
-) -> None:
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.quant import dynamic_per_token_scaled_quant
 
+    assert quant_dtype in [torch.int8, _FP8_DTYPE]
+
+    out_shape = x.shape
+    out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
+    if scale is None:
+        scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
         out,
         x,
@@ -543,12 +566,17 @@ def _rocm_aiter_per_token_quant_impl(
         num_rows=None,
         num_rows_factor=1,
     )
+    return out, scale
 
 
 def _rocm_aiter_per_token_quant_fake(
-    x: torch.Tensor, out: torch.Tensor, scale: torch.Tensor
-) -> None:
-    pass
+    x: torch.Tensor, quant_dtype: torch.dtype, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out_shape = x.shape
+    return (
+        torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device),
+        torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
+    )
 
 
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
@@ -571,7 +599,11 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         dtype_quant=AITER_FP8_DTYPE,
         res1=residual,
     )
-    return (x_quant, x_quant_scales, res)
+    return (
+        x_quant,
+        res,
+        x_quant_scales,
+    )
 
 
 def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
@@ -585,8 +617,8 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
         torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
-        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
         torch.empty_like(residual, device=residual.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
 
 
@@ -889,7 +921,6 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                mutates_args=["out", "residual_out"],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -897,7 +928,6 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
-                mutates_args=["out", "y_scale"],
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -905,7 +935,6 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
-                mutates_args=["out", "residual_out", "y_scale"],
                 fake_impl=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -945,7 +974,6 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_per_token_quant",
                 op_func=_rocm_aiter_per_token_quant_impl,
-                mutates_args=["out", "scale"],
                 fake_impl=_rocm_aiter_per_token_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -1001,12 +1029,9 @@ class rocm_aiter_ops:
         weight: torch.Tensor,
         variance_epsilon: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual_out = torch.empty_like(residual)
-        out = torch.empty_like(x)
-        torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            out, x, residual, residual_out, weight, variance_epsilon
+        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
+            x, residual, weight, variance_epsilon
         )
-        return out, residual_out
 
     @staticmethod
     def gemm_a8w8(
@@ -1197,17 +1222,7 @@ class rocm_aiter_ops:
         quant_dtype: torch.dtype,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert quant_dtype in [torch.int8, _FP8_DTYPE]
-
-        out_shape = x.shape
-        out = torch.empty(x.shape, dtype=_FP8_DTYPE, device=x.device)
-        if scale is None:
-            scale = torch.empty(
-                (*out_shape[:-1], 1), dtype=torch.float32, device=x.device
-            )
-
-        torch.ops.vllm.rocm_aiter_per_token_quant(x, out, scale)
-        return out, scale
+        return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
 
     @staticmethod
     def triton_fp4_gemm_dynamic_qaunt(

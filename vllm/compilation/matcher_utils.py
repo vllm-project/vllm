@@ -244,20 +244,10 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         input: torch.Tensor,
         weight: torch.Tensor,
         residual: torch.Tensor,
-    ) -> torch.Tensor:
-        rms_result = self.empty(*input.shape)
-        residual_out = self.empty(*residual.shape)
-        _, result, residual = auto_functionalized(
-            self._rmsnorm_op,
-            out=rms_result,
-            x=input,
-            residual=residual,
-            residual_out=residual_out,
-            weight=weight,
-            variance_epsilon=self.epsilon,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._rmsnorm_op(
+            x=input, residual=residual, weight=weight, variance_epsilon=self.epsilon
         )
-
-        return result, residual
 
     def forward_custom(
         self,
@@ -346,18 +336,11 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
         if quant_key_group_shape == GroupShape.PER_TOKEN:
-            out = torch.empty(
-                input.shape, device=input.device, dtype=self.quant_key.dtype
-            )
-            if scale is None:
-                scale = self.make_scale(input)
-            _, result, scale = auto_functionalized(
-                self.QUANT_OP,
+            return self.QUANT_OP(
                 x=input,
-                out=out,
+                quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
-            return result, scale
         else:
             return self.QUANT_OP(input, quant_key_group_shape.col)
 

@@ -5,7 +5,6 @@ from typing import Any
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
-from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
@@ -82,24 +81,21 @@ class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
         ):
             result_rms = self.rmsnorm_matcher(input, weight)
-            return self.quant_matcher(result_rms)
+            result, scale = self.quant_matcher(result_rms)
+            return result, scale
 
         def replacement(
             input: torch.Tensor,
             weight: torch.Tensor,
         ):
-            result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = self.quant_matcher.make_scale(input)
-            at = auto_functionalized(
-                self.FUSED_OP,
-                out=result,
+            result = self.FUSED_OP(
                 x=input,
                 weight=weight,
-                y_scale=scale,
                 epsilon=self.epsilon,
+                quant_dtype=self.quant_dtype,
             )
 
-            return at[1], at[2]
+            return result[0], result[1]
 
         pm.register_replacement(
             pattern,
@@ -137,29 +133,23 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ):
-            result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
             result, scale = self.quant_matcher(result_rms)
 
-            return result, residual, scale
+            return result, residual_out, scale
 
         def replacement(
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ):
-            result = torch.empty_like(input, dtype=self.quant_dtype)
-            residual_out = torch.empty_like(residual)
-            scale = self.quant_matcher.make_scale(input)
-            at = auto_functionalized(
-                self.FUSED_OP,
-                out=result,
+            result = self.FUSED_OP(
                 x=input,
                 residual=residual,
-                residual_out=residual_out,
                 weight=weight,
-                y_scale=scale,
                 epsilon=self.epsilon,
+                quant_dtype=self.quant_dtype,
             )
-            # result, residual, scale
-            return at[1], at[2], at[3]
+
+            return result[0], result[1], result[2]
 
         pm.register_replacement(
             pattern,
@@ -176,7 +166,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     ops into an aiter rms_norm_group_fp8_quant op.
     """
 
-    RMS_GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
 
     def __init__(
         self,
@@ -200,13 +190,14 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
         ):
             result_rms = self.rmsnorm_matcher(input, weight)
-            return self.quant_matcher(result_rms)
+            result, scale = self.quant_matcher(result_rms)
+            return result, scale
 
         def replacement(
             input: torch.Tensor,
             weight: torch.Tensor,
         ):
-            at = self.RMS_GROUP_QUANT_OP(
+            at = self.FUSED_OP(
                 x=input,
                 weight=weight,
                 variance_epsilon=self.epsilon,
@@ -226,7 +217,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     into a aiter rms_norm_with_add_group_fp8_quant op.
     """
 
-    RMS_ADD_GROUP_QUANT_OP = rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
 
     def __init__(
         self,
@@ -250,17 +241,17 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ):
-            result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
             result, scale = self.quant_matcher(result_rms)
 
-            return result, residual, scale
+            return result, residual_out, scale
 
         def replacement(
             input: torch.Tensor,
             weight: torch.Tensor,
             residual: torch.Tensor,
         ):
-            at = self.RMS_ADD_GROUP_QUANT_OP(
+            at = self.FUSED_OP(
                 x=input,
                 residual=residual,
                 weight=weight,
