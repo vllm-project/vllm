@@ -33,12 +33,13 @@ pip install vllm
 If you want to connect to AI Badgr's hosted service instead, you can use any OpenAI-compatible client:
 
 ```python
+import os
 from openai import OpenAI
 
-# AI Badgr configuration
+# AI Badgr configuration using environment variables
 client = OpenAI(
-    base_url="https://aibadgr.com/api/v1",
-    api_key="your-aibadgr-api-key"  # Set your AIBADGR_API_KEY
+    base_url=os.getenv("AIBADGR_BASE_URL", "https://aibadgr.com/api/v1"),
+    api_key=os.getenv("AIBADGR_API_KEY")
 )
 
 # AI Badgr uses tier-based model names
@@ -73,10 +74,10 @@ AI Badgr offers tier-based model access:
 - **normal**: Balanced performance and cost
 - **premium**: Recommended default for most applications
 
-Advanced users can also use specific model names:
+Advanced users can also use specific model names for reproducibility or when they need to target exact model versions:
 
 - `phi-3-mini` (maps to basic tier)
 - `mistral-7b` (maps to normal tier)
 - `llama3-8b-instruct` (maps to premium tier)
 
-OpenAI model names are also accepted and mapped automatically by AI Badgr.
+OpenAI model names (e.g., `gpt-3.5-turbo`) are also accepted and mapped automatically by AI Badgr to equivalent tier models.
