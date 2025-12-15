@@ -180,6 +180,7 @@ def shuffle_layer(
                     torch.distributed.isend,
                     weight[src],
                     dst_global,
+                    group=ep_group,  # Use EP group, not default WORLD group
                 )
                 for weight in expert_weights
             ]
@@ -220,6 +221,7 @@ def shuffle_layer(
                 torch.distributed.irecv,
                 weight[dst],
                 src_global,
+                group=ep_group,  # Use EP group, not default WORLD group
             )
             for weight in expert_weights_buffer
         ]

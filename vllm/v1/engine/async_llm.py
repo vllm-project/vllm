@@ -273,6 +273,7 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         if self.errored:
+            logger.error("[AsyncLLM] Engine is dead. Raising EngineDeadError.")
             raise EngineDeadError()
         
         # Ensure output handler is running (restart if needed after full restart)
@@ -371,6 +372,26 @@ class AsyncLLM(EngineClient):
             logger.info("[AsyncLLM] Restarting output_handler")
             self.output_handler = None  # Reset to allow _run_output_handler to proceed
             self._run_output_handler()
+            
+            # If this restart was due to full_restart, clear the flag now
+            if hasattr(self.engine_core.resources, 'full_restart_in_progress') and self.engine_core.resources.full_restart_in_progress:
+                self.engine_core.resources.full_restart_in_progress = False
+                logger.info("[AsyncLLM] Cleared full_restart_in_progress flag after successful restart")
+                
+                # Abort all in-flight requests since they were lost during restart
+                # This allows clients to retry instead of waiting forever
+                logger.warning(
+                    "[AsyncLLM] Full restart completed - aborting all in-flight requests "
+                    "to allow clients to retry"
+                )
+                all_request_ids = list(self.output_processor.request_states.keys())
+                if all_request_ids:
+                    logger.info(
+                        "[AsyncLLM] Aborting %d in-flight requests after restart: %s",
+                        len(all_request_ids), all_request_ids[:10]  # Log first 10
+                    )
+                    # Schedule abort in background to not block restart completion
+                    asyncio.create_task(self.abort(all_request_ids))
     
     async def generate(
         self,
@@ -441,6 +462,7 @@ class AsyncLLM(EngineClient):
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
+            token_count = 0
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
@@ -450,6 +472,18 @@ class AsyncLLM(EngineClient):
                 # own request cleanup based on finished.
                 finished = out.finished
                 assert isinstance(out, RequestOutput)
+                
+                # Track tokens for logging
+                if out.outputs and out.outputs[0].token_ids:
+                    token_count = len(out.outputs[0].token_ids)
+                
+                # Log that vLLM is yielding output to Dynamo
+                logger.debug(
+                    "[generate] Yielding output to client (Dynamo) for request %s. "
+                    "Finished: %s, Tokens: %d, Finish reason: %s",
+                    request_id, finished, token_count,
+                    out.outputs[0].finish_reason if (finished and out.outputs) else None
+                )
                 yield out
 
         # If the request is disconnected by the client, generate()
@@ -500,8 +534,15 @@ class AsyncLLM(EngineClient):
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
+                    logger.debug("[output_handler] Calling engine_core.get_output_async()")
                     outputs = await engine_core.get_output_async()
-                    num_outputs = len(outputs.outputs)
+                    num_outputs = len(outputs.outputs) if outputs.outputs else 0
+                    logger.debug(
+                        "[output_handler] Received %d outputs from engine. "
+                        "Request IDs: %s",
+                        num_outputs,
+                        [o.request_id for o in outputs.outputs[:5]] if outputs.outputs else []  # First 5
+                    )
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None
@@ -525,6 +566,15 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+                        
+                        # Log that outputs were successfully pushed to client queues
+                        if outputs_slice:
+                            logger.debug(
+                                "[output_handler] Processed %d outputs, pushed to client queues. "
+                                "Requests to abort: %d",
+                                len(outputs_slice),
+                                len(processed_outputs.reqs_to_abort)
+                            )
 
                         # Allow other asyncio tasks to run between chunks
                         if i + 1 < len(slices):
@@ -547,6 +597,20 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=processor.stat_mm_cache(),
                         )
+            except EngineDeadError as e:
+                # Check if this is due to full restart (poison pill from cancelled task)
+                if hasattr(engine_core.resources, 'full_restart_in_progress') and engine_core.resources.full_restart_in_progress:
+                    logger.info(
+                        "[AsyncLLM] output_handler got EngineDeadError during full_restart_in_progress. "
+                        "This is expected (poison pill from cancelled task). "
+                        "Exiting gracefully - will be restarted on next operation."
+                    )
+                    # Exit gracefully, don't propagate error
+                    return
+                else:
+                    # Real engine death, propagate error
+                    logger.exception("AsyncLLM output_handler failed - engine actually dead.")
+                    output_processor.propagate_error(e)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
@@ -685,6 +749,28 @@ class AsyncLLM(EngineClient):
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
+        
+        # If full restart is in progress, wait for it to complete
+        if hasattr(self.engine_core.resources, 'full_restart_in_progress') and self.engine_core.resources.full_restart_in_progress:
+            logger.info(
+                "[AsyncLLM] check_health: Full restart in progress, waiting for completion..."
+            )
+            # Wait briefly for restart to complete (flag will be cleared by _ensure_output_handler)
+            import asyncio
+            import time
+            max_wait = 5.0  # seconds
+            start = time.time()
+            while self.engine_core.resources.full_restart_in_progress:
+                if time.time() - start > max_wait:
+                    logger.warning("[AsyncLLM] check_health: Timeout waiting for restart")
+                    break
+                await asyncio.sleep(0.1)  # Yield control to other async tasks
+            
+            # After restart completes, ensure output handler is restarted
+            self._ensure_output_handler()
+            logger.info("[AsyncLLM] check_health: Restart complete, health OK")
+            return  # Success!
+        
         if self.errored:
             raise self.dead_error
 
@@ -828,4 +914,5 @@ class AsyncLLM(EngineClient):
 
     @property
     def dead_error(self) -> BaseException:
+        logger.error("[AsyncLLM] Engine is dead. Raising EngineDeadError.")
         return EngineDeadError()

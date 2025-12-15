@@ -1008,14 +1008,25 @@ class EngineCoreProc(EngineCore):
         Args:
             error_info: Optional error details to help debug the root cause
         """
+        logger.error(
+            "[ENGINE_DEAD] Sending ENGINE_CORE_DEAD signal to client. "
+            "Process will shut down."
+        )
+        
         if error_info:
             logger.error(
-                "[ENGINE_DEAD] Sending death signal with error: %s", 
+                "[ENGINE_DEAD] Error details:\n%s", 
                 error_info
             )
+        
+        # Force flush to ensure message is visible
+        import sys
+        sys.stderr.flush()
 
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
+        
+        logger.error("[ENGINE_DEAD] Signal sent to queue successfully")
 
         # Wait until msg sent by the daemon before shutdown.
         self.output_thread.join(timeout=5.0)

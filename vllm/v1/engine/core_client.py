@@ -356,6 +356,9 @@ class BackgroundResources:
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
+    
+    # Set during full restart to signal output handlers to restart
+    full_restart_in_progress: bool = False
 
     def __call__(self):
         """Clean up background resources."""
@@ -419,9 +422,16 @@ class BackgroundResources:
             self.engine_dead = True
             logger.error(
                 "[EngineDeadError] Detected ENGINE_CORE_DEAD message from engine. "
-                "One or more engine core processes have crashed."
+                "One or more engine core processes sent explicit death signal. "
+                "Check engine process logs for '[EngineCore FATAL]' or '====' markers."
             )
             raise EngineDeadError()
+        # If not ENGINE_CORE_DEAD, log what we actually received for debugging
+        elif len(frames) == 1:
+            logger.debug(
+                "[validate_alive] Received single frame (len=%d, first 100 bytes: %s)",
+                len(frames[0].buffer), frames[0].buffer[:100]
+            )
 
 
 class MPClient(EngineCoreClient):
@@ -629,6 +639,17 @@ class MPClient(EngineCoreClient):
         # Reset state for new engines (important for full restart)
         self.utility_results: dict[int, AnyFuture] = {}
         self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
+        
+        # CRITICAL: Update lb_engines if it exists (for DPLBAsyncMPClient after restart)
+        # If not updated, load balancer will use old size and cause IndexError
+        if hasattr(self, 'lb_engines'):
+            old_size = len(self.lb_engines)
+            new_size = len(self.core_engines)
+            self.lb_engines = [[0, 0] for _ in self.core_engines]
+            logger.info(
+                "[FT Full Restart] Updated lb_engines size: %d → %d",
+                old_size, new_size
+            )
 
         logger.info(
             f"Initialized {len(self.core_engines)} engines: "
@@ -1035,7 +1056,12 @@ class MPClient(EngineCoreClient):
             explicit_local_dp_ranks=surviving_gpus,  # [0, 1, 3] - Skip GPU 2!
         )
         
-        # Step 6: Reset engine_dead flag since new engines are healthy
+        # Step 6: Signal full restart to output handlers
+        # This will cause them to gracefully exit and restart
+        self.resources.full_restart_in_progress = True
+        logger.info("[FT Full Restart] Set full_restart_in_progress flag")
+        
+        # Reset engine_dead flag since new engines are healthy
         self.resources.engine_dead = False
         logger.info("[FT Full Restart] Reset engine_dead flag - new engines are operational")
         
@@ -1048,13 +1074,20 @@ class MPClient(EngineCoreClient):
         # Instead, set to None and the task will be recreated lazily on next get_output_async() call.
         # AsyncLLM.output_handler doesn't need restarting - it will automatically use the new task.
         if self.resources.output_queue_task is not None:
+            # Simply cancel the old task
+            # It will put EngineDeadError in the queue as poison pill (line 1425)
+            # AsyncLLM.output_handler will catch it, see full_restart_in_progress=True, and exit gracefully
             logger.info("[FT Full Restart] Cancelling stale output_queue_task (has old socket refs)")
             self.resources.output_queue_task.cancel()
             self.resources.output_queue_task = None
             logger.info(
                 "[FT Full Restart] output_queue_task cancelled. "
-                "Will be recreated with new sockets on next get_output_async() call"
+                "Poison pill will be ignored by output_handler. "
+                "Task will be recreated with new sockets on next call."
             )
+        
+        # Note: full_restart_in_progress flag will be cleared by AsyncLLM
+        # after it successfully restarts its output_handler
         
         # Step 8: Start new monitor thread for new processes
         self.start_engine_core_monitor()
@@ -1213,6 +1246,12 @@ class SyncMPClient(MPClient):
                 "Exception type: %s, message: %s",
                 type(outputs).__name__, str(outputs)
             )
+            # If it's EngineDeadError with creation_stack, log it
+            if isinstance(outputs, EngineDeadError) and hasattr(outputs, 'creation_stack'):
+                logger.error(
+                    "[EngineDeadError] Creation stack trace:\n%s",
+                    outputs.creation_stack
+                )
             raise self._format_exception(outputs) from None
         if outputs.wave_complete is not None:
             self.engines_running = False
@@ -1336,7 +1375,10 @@ class AsyncMPClient(MPClient):
     def _ensure_output_queue_task(self):
         resources = self.resources
         if resources.output_queue_task is not None:
+            logger.debug("[_ensure_output_queue_task] Task already exists, returning")
             return
+
+        logger.info("[_ensure_output_queue_task] Creating NEW output_queue_task with current sockets")
 
         # Perform IO in separate task to parallelize as much as possible.
         # Avoid task having direct reference back to the client.
@@ -1349,6 +1391,12 @@ class AsyncMPClient(MPClient):
         _self_ref = weakref.ref(self) if output_handler else None
         output_socket = resources.output_socket
         assert output_socket is not None
+        
+        logger.info(
+            "[_ensure_output_queue_task] Captured references: "
+            "output_socket=%s, outputs_queue=%s",
+            id(output_socket), id(outputs_queue)
+        )
 
         async def process_outputs_socket():
             try:
@@ -1371,13 +1419,23 @@ class AsyncMPClient(MPClient):
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+                logger.error(
+                    "[output_queue_task] Exception in process_outputs_socket: %s: %s",
+                    type(e).__name__, str(e)
+                )
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
+                logger.warning(
+                    "[output_queue_task] Task cancelled (likely due to full restart). "
+                    "Putting EngineDeadError in queue as poison pill."
+                )
                 outputs_queue.put_nowait(EngineDeadError())
 
         resources.output_queue_task = asyncio.create_task(
             process_outputs_socket(), name="EngineCoreOutputQueueTask"
         )
+        
+        logger.info("[_ensure_output_queue_task] NEW output_queue_task created successfully")
 
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
@@ -1389,10 +1447,27 @@ class AsyncMPClient(MPClient):
         if isinstance(outputs, Exception):
             logger.error(
                 "[EngineDeadError] Exception received from output queue (async). "
-                "Exception type: %s, message: %s",
-                type(outputs).__name__, str(outputs)
+                "Exception type: %s, message: %s. "
+                "Current output_queue_task status: %s",
+                type(outputs).__name__, str(outputs),
+                "None" if self.resources.output_queue_task is None 
+                else ("running" if not self.resources.output_queue_task.done() else "done")
             )
+            # If it's EngineDeadError with creation_stack, log it
+            if isinstance(outputs, EngineDeadError) and hasattr(outputs, 'creation_stack'):
+                logger.error(
+                    "[EngineDeadError] Creation stack trace:\n%s",
+                    outputs.creation_stack
+                )
             raise self._format_exception(outputs) from None
+        
+        # Log successful output retrieval
+        logger.debug(
+            "[get_output_async] Successfully retrieved EngineCoreOutputs: "
+            "num_outputs=%d, engine_index=%d",
+            len(outputs.outputs) if outputs.outputs else 0,
+            outputs.engine_index if hasattr(outputs, 'engine_index') else -1
+        )
         return outputs
 
     def _send_input(
