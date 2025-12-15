@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from vllm import TokensPrompt
+from vllm import SamplingParams, TokensPrompt
 
 
 @pytest.mark.parametrize(
@@ -19,7 +19,7 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         model,
         max_model_len=128,
         enforce_eager=True,
-        runner="pooling",
+        runner="generate",
         enable_prefix_caching=True,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(
@@ -53,5 +53,14 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         )
 
         for n, output in zip(n_prompt_tokens, pooling_outputs):
+            assert len(output.prompt_token_ids) == n
+            assert output.num_cached_tokens > 0
+
+        # Support generate text and returning Prompt Hidden States
+        generate_outputs = vllm_model.generate(
+            prompts=[TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        for n, output in zip(n_prompt_tokens, generate_outputs):
             assert len(output.prompt_token_ids) == n
             assert output.num_cached_tokens > 0
