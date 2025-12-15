@@ -4,6 +4,7 @@ from copy import deepcopy
 from math import lcm
 from typing import TYPE_CHECKING
 
+from vllm import envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
@@ -389,7 +390,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=model_config.max_model_len,
+            block_size=model_config.max_model_len
+            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+            else cache_config.block_size,
+            enable_caching=cache_config.enable_prefix_caching,
         ).page_size_bytes
 
         # Model may be marked as is_hybrid

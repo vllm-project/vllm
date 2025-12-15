@@ -109,6 +109,7 @@ from vllm.v1.attention.backends.utils import (
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1524,6 +1525,7 @@ class GPUModelRunner(
         num_tokens: int,
         num_reqs: int,
         max_query_len: int,
+        scheduler_output: SchedulerOutput | None = None,
         num_tokens_padded: int | None = None,
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
@@ -1691,6 +1693,16 @@ class GPUModelRunner(
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = (
                     _get_block_table_and_slot_mapping(kv_cache_gid)
+                )
+            if (
+                envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                and self.cache_config.enable_prefix_caching
+                and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
+            ):
+                cm.block_table_tensor = cm.block_table_tensor[:, 1:]
+                assert scheduler_output is not None
+                self._preprocess_mamba_prefix(
+                    scheduler_output, kv_cache_gid, kv_cache_group
                 )
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
@@ -2904,6 +2916,98 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
+    def _mamba_copy_block(
+        self,
+        kv_cache_group_spec: KVCacheGroupSpec,
+        src_block_id: int,
+        dest_block_id: int,
+    ):
+        forward_context = self.compilation_config.static_forward_context
+        for layer_name in kv_cache_group_spec.layer_names:
+            kv_caches: list[list[torch.Tensor]] = forward_context[layer_name].kv_cache
+            for kv_cache in kv_caches:
+                if isinstance(kv_cache, torch.Tensor):
+                    kv_cache[dest_block_id].copy_(kv_cache[src_block_id])
+                elif isinstance(kv_cache, list):
+                    for kv_cache_part in kv_cache:
+                        kv_cache_part[dest_block_id].copy_(kv_cache_part[src_block_id])
+
+    def _preprocess_mamba_prefix(
+        self,
+        scheduler_output: "SchedulerOutput",
+        kv_cache_group_id: int,
+        kv_cache_group_spec: KVCacheGroupSpec,
+    ):
+        assert isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec)
+        assert self.cache_config.enable_prefix_caching
+        new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
+        for new_req in new_reqs:
+            if new_req.num_computed_tokens == 0:
+                continue
+            block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
+            assert block_ids[0] != 0, f"{block_ids=}"
+            prefix_block_id, dest_block_id = block_ids[0], block_ids[1]
+            self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)
+        cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
+        for i, resumed in enumerate(cached_reqs.resumed_from_preemption):
+            if not resumed:
+                continue
+            group_block_ids: tuple[list[int], ...] | None = cached_reqs.new_block_ids[i]
+            assert group_block_ids is not None
+            new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
+            assert (
+                len(new_block_ids)
+                >= 2 + kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
+            )
+            if cached_reqs.num_computed_tokens[i] == 0:
+                continue
+            assert new_block_ids[0] != 0, f"{new_block_ids=}"
+            prefix_block_id, dest_block_id = new_block_ids[0], new_block_ids[1]
+            self._mamba_copy_block(kv_cache_group_spec, prefix_block_id, dest_block_id)
+
+    def _postprocess_mamba_cache(self, scheduler_output: "SchedulerOutput"):
+        assert self.cache_config.enable_prefix_caching
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            self.kv_cache_config.kv_cache_groups
+        ):
+            if not isinstance(kv_cache_group_spec.kv_cache_spec, MambaSpec):
+                continue
+            new_reqs: list[NewRequestData] = scheduler_output.scheduled_new_reqs
+            num_speculative_blocks = (
+                kv_cache_group_spec.kv_cache_spec.num_speculative_blocks
+            )
+            for new_req in new_reqs:
+                block_ids: list[int] = new_req.block_ids[kv_cache_group_id]
+                if len(block_ids) <= 2 + num_speculative_blocks:
+                    continue
+                assert len(block_ids) == 3 + num_speculative_blocks
+                src_block_id, dest_block_id = block_ids[1], block_ids[-1]
+                self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
+            cached_reqs: CachedRequestData = scheduler_output.scheduled_cached_reqs
+            for i, req_id in enumerate(cached_reqs.req_ids):
+                group_block_ids: tuple[list[int], ...] | None = (
+                    cached_reqs.new_block_ids[i]
+                )
+                if group_block_ids is None:
+                    assert not cached_reqs.resumed_from_preemption[i]
+                    continue
+                new_block_ids: list[int] = group_block_ids[kv_cache_group_id]
+                if not new_block_ids:
+                    assert not cached_reqs.resumed_from_preemption[i]
+                    continue
+                if not cached_reqs.resumed_from_preemption[i]:
+                    assert len(new_block_ids) == 1
+                    block_ids_new: list[int] = self.requests[req_id].block_ids[
+                        kv_cache_group_id
+                    ]
+                    src_block_id, dest_block_id = block_ids_new[1], new_block_ids[0]
+                else:
+                    if len(new_block_ids) == 2 + num_speculative_blocks:
+                        continue
+                    assert len(new_block_ids) == 3 + num_speculative_blocks
+                    src_block_id, dest_block_id = new_block_ids[1], new_block_ids[-1]
+                self._mamba_copy_block(kv_cache_group_spec, src_block_id, dest_block_id)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -3040,6 +3144,7 @@ class GPUModelRunner(
                         num_tokens=num_tokens_unpadded,
                         num_tokens_padded=num_tokens_padded if pad_attn else None,
                         num_reqs=num_reqs,
+                        scheduler_output=scheduler_output,
                         num_reqs_padded=num_reqs_padded if pad_attn else None,
                         max_query_len=max_num_scheduled_tokens,
                         ubatch_slices=ubatch_slices_attn,
@@ -3205,6 +3310,11 @@ class GPUModelRunner(
             apply_grammar_bitmask(
                 scheduler_output, grammar_output, self.input_batch, logits
             )
+            if (
+                envs.VLLM_USE_LIGHTER_MAMBA_CACHE
+                and self.cache_config.enable_prefix_caching
+            ):
+                self._postprocess_mamba_cache(scheduler_output)
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
