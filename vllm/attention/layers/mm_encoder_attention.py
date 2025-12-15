@@ -111,6 +111,10 @@ class MMEncoderAttention(CustomOp):
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Input shape:
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
         is_reshaped = query.dim() != 4
@@ -137,6 +141,10 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
+        """Input shape:
+        (batch_size x seq_len x hidden_size) or
+        (batch_size x seq_len x num_heads x head_size)
+        """
         assert (cu_seqlens is not None and max_seqlen is not None) or (
             cu_seqlens is None and max_seqlen is None
         ), "cu_seqlens and max_seqlen should be both set or both None."
