@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 
 
 _VLLM_TOKENIZERS = {
-    "deepseekv32": ("deepseekv32", "DeepseekV32Tokenizer"),
+    "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
 }
