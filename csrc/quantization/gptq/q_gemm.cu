@@ -233,10 +233,10 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   // Zero output
   if (n >= size_n) return;
 
-  if (blockIdx.z == 0) {
-    for (int m = 0; m < m_count; m++)
-      *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
-  }
+  // if (blockIdx.z == 0) {
+  //   for (int m = 0; m < m_count; m++)
+  //     *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
+  // }
 
   __syncthreads();
 
@@ -1857,7 +1857,7 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         bool use_exllama, bool use_v2_format, int64_t bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
+  at::Tensor c = torch::zeros({a.size(0), b_q_weight.size(1)}, options);
   at::Tensor temp_dq = torch::empty(
       {b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 
