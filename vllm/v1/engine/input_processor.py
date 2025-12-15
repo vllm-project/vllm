@@ -68,9 +68,9 @@ class InputProcessor:
                 logger.warning(
                     "Tokenizer vocab size (%d) > model vocab size (%d). "
                     "Out-of-bound token embeddings will be zeros.",
-                    tokenizer_vocab_size, model_vocab_size
+                    tokenizer_vocab_size,
+                    model_vocab_size,
                 )
-
 
     @property
     def tokenizer(self) -> TokenizerLike | None:
