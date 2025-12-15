@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -56,6 +56,83 @@ def mamba_copy_block_for_qwen_next(
             dest_gdn_state = gdn_state[dest_block_id]
             dest_gdn_state.copy_(src_gdn_state)
 
+from dataclasses import dataclass
+
+@dataclass
+class CopySpec:
+    block_idx_offset_func: Callable[[int], int]
+    data_offset_func: Callable[[torch.Tensor, int], int]
+    num_elements_func: Callable[[torch.Tensor, int], int]
+
+
+conv_copy = CopySpec(
+    block_idx_offset_func=lambda bias: 0,
+    data_offset_func=lambda state, bias: bias * state.stride(0),
+    num_elements_func=lambda state, bias: state.numel() - bias * state.stride(0),
+)
+
+full_copy = CopySpec(
+    block_idx_offset_func=lambda bias: bias,
+    data_offset_func=lambda state, bias: 0,
+    num_elements_func=lambda state, bias: state.numel(),
+)
+
+def mamba_copy_block_for_qwen_next_v1(
+    kv_cache_config: KVCacheConfig,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state: CachedRequestState,
+    forward_context: dict[str, Any],
+):
+    # TODO: general impl for all models
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        for layer_name in layer_names:
+            attention = forward_context[layer_name]
+            kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
+            conv_state, gdn_state = kv_caches
+
+            # conv state
+            conv_state_block_id_ref = block_ids[src_block_idx]
+            conv_state_block_id = block_ids[src_block_idx + conv_copy.block_idx_offset_func(accept_token_bias)]
+            assert conv_state_block_id_ref == conv_state_block_id, f"{conv_state_block_id_ref} != {conv_state_block_id}"
+
+            conv_state_block = conv_state[conv_state_block_id]
+            data_offset = conv_copy.data_offset_func(conv_state_block, accept_token_bias)
+            num_elements = conv_copy.num_elements_func(conv_state_block, accept_token_bias)
+            src_conv_state_blk = conv_state_block.flatten()[data_offset:data_offset + num_elements]
+            dest_conv_state_blk = conv_state[dest_block_id].flatten()[:num_elements]
+            dest_conv_state_blk.copy_(src_conv_state_blk)
+
+            src_conv_state = conv_state[conv_state_block_id][accept_token_bias:]
+            dest_conv_state = conv_state[dest_block_id]
+            # dest_conv_state[: len(src_conv_state)].copy_(src_conv_state.clone())
+            dest_conv_state_ref = dest_conv_state[: len(src_conv_state)]
+            src_conv_state_ref = conv_state[conv_state_block_id][accept_token_bias:]
+            assert dest_conv_state_ref == src_conv_state_ref
+
+            # gdn state
+            gdn_state_block_id_ref = block_ids[src_block_idx + accept_token_bias]
+            gdn_state_block_id = block_ids[src_block_idx + full_copy.block_idx_offset_func(accept_token_bias)]
+            assert gdn_state_block_id_ref == gdn_state_block_id, f"{gdn_state_block_id_ref} != {gdn_state_block_id}"
+
+            gdn_state_block = gdn_state[gdn_state_block_id]
+            data_offset = full_copy.data_offset_func(gdn_state_block, accept_token_bias)
+            num_elements = full_copy.num_elements_func(gdn_state_block, accept_token_bias)
+            src_gdn_state_blk = gdn_state_block.flatten()[data_offset:data_offset + num_elements]
+            dest_gdn_state_blk = gdn_state[dest_block_id].flatten()[:num_elements]
+            dest_gdn_state_blk.copy_(src_gdn_state_blk)
+
+            src_gdn_state_ref = gdn_state[gdn_state_block_id]
+            dest_gdn_state_ref = gdn_state[dest_block_id]
+            # dest_gdn_state.copy_(src_gdn_state)
+            assert dest_gdn_state_ref == src_gdn_state_ref
 
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
