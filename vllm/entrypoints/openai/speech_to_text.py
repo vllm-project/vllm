@@ -135,13 +135,16 @@ class OpenAISpeechToText(OpenAIServing):
             # This initializes FFTW, numba JIT, and other audio processing libraries
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
-            # Warm up mel-spectrogram computation (used in feature extraction)
+            # Warm up mel-spectrogram computation with model-specific parameters
+            feature_extractor = (
+                self.input_processor.info.get_hf_processor().feature_extractor
+            )
             _ = librosa.feature.melspectrogram(
                 y=dummy_audio,
                 sr=self.asr_config.sample_rate,
-                n_mels=128,  # Whisper uses 128 mel bins
-                n_fft=400,  # Whisper uses 400 FFT bins
-                hop_length=160,  # Whisper uses 160 hop length
+                n_mels=getattr(feature_extractor, "n_mels", 128),
+                n_fft=getattr(feature_extractor, "n_fft", 400),
+                hop_length=getattr(feature_extractor, "hop_length", 160),
             )
 
             warmup_elapsed = time.perf_counter() - warmup_start
