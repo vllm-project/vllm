@@ -51,7 +51,14 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("activation", ["silu_and_mul", "relu2"])
 @torch.inference_mode()
 def test_flashinfer_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, activation: str
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    activation: str,
+    workspace_init,
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(

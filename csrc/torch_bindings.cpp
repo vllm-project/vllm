@@ -350,6 +350,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_encode_and_reorder_int4b(Tensor B) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
+  // CUTLASS w4a8 grouped GEMM
+  ops.def(
+      "cutlass_w4a8_moe_mm("
+      "   Tensor! out_tensors,"
+      "   Tensor a_tensors,"
+      "   Tensor b_tensors,"
+      "   Tensor a_scales,"
+      "   Tensor b_scales,"
+      "   Tensor b_group_scales,"
+      "   int b_group_size,"
+      "   Tensor expert_offsets,"
+      "   Tensor problem_sizes,"
+      "   Tensor a_strides,"
+      "   Tensor b_strides,"
+      "   Tensor c_strides,"
+      "   Tensor group_scale_strides,"
+      "   str? maybe_schedule"
+      ") -> ()");
+  ops.def(
+      "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
+      "Tensor)");
+  // conditionally compiled so impl registration is in source file
+
 #endif
 
   // Dequantization for GGML.
@@ -466,7 +489,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                                 Tensor! problem_sizes1, "
       "                                 Tensor! problem_sizes2, "
       "                                 int num_experts, int n, int k, "
-      "                                 Tensor? blockscale_offsets) -> ()");
+      "                                 Tensor? blockscale_offsets, "
+      "                                 bool? force_swap_ab) -> ()");
   ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
            &get_cutlass_moe_mm_problem_sizes);
 
@@ -729,6 +753,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
+
+  cache_ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
+      "batch_size) -> ()");
+  cache_ops.impl("cp_gather_and_upconvert_fp8_kv_cache", torch::kCUDA,
+                 &cp_gather_and_upconvert_fp8_kv_cache);
 
   cache_ops.def(
       "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "

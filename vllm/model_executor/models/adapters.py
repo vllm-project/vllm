@@ -175,9 +175,14 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             self.vllm_config = vllm_config
 
             # These are not used in pooling models
-            for attr in ("lm_head", "logits_processor"):
-                if hasattr(self, attr):
-                    delattr(self, attr)
+            objects_to_clean = [self]
+            if language_model := getattr(self, "language_model", None):
+                objects_to_clean.append(language_model)
+
+            for obj in objects_to_clean:
+                for attr in ("lm_head", "logits_processor"):
+                    if hasattr(obj, attr):
+                        delattr(obj, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "pooler", None):
@@ -332,6 +337,18 @@ def as_seq_cls_model(cls: _T) -> _T:
             tokens = getattr(text_config, "classifier_from_token", None)
             method = getattr(text_config, "method", None)
 
+            def auto_set_score_bias(weights):
+                for name, weight in weights:
+                    if name == "score.bias":
+                        device = self.score.weight.device
+                        dtype = self.score.weight.dtype
+                        bias = weight.to(device).to(dtype)
+                        self.score.bias = torch.nn.Parameter(bias)
+                        self.score.skip_bias_add = False
+                    else:
+                        yield name, weight
+
+            weights = auto_set_score_bias(weights)
             if tokens is None and method is None:
                 return super().load_weights(weights)
             else:

@@ -32,12 +32,11 @@ def benchmark_propose(args):
 
         model_config = ModelConfig(
             model="facebook/opt-125m",
-            task="generate",
             max_model_len=args.num_token + args.num_spec_token,
             tokenizer="facebook/opt-125m",
             tokenizer_mode="auto",
             dtype="auto",
-            seed=None,
+            seed=0,
             trust_remote_code=False,
         )
         proposer = NgramProposer(

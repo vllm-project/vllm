@@ -40,7 +40,7 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_cutlass_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype
+    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, workspace_init
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
