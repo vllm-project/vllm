@@ -74,6 +74,7 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -84,6 +85,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
+  - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -761,19 +763,7 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
-
-- label: OpenAI-Compatible Tool Use (CPU) # 5 mins
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  timeout_in_minutes: 10
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  no_gpu: true
-  commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - pytest -v -s tool_use
 
 #####  models test  #####
 
