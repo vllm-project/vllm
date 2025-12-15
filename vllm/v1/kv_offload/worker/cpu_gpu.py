@@ -93,9 +93,17 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.src_tensors: list[torch.Tensor] = src_tensors
         self.dst_tensors: list[torch.Tensor] = dst_tensors
         self.kv_dim_before_num_blocks: list[bool] = kv_dim_before_num_blocks
-        self.src_block_size_factor: int = src_block_size_factor
-        self.dst_block_size_factor: int = dst_block_size_factor
+        min_block_size_factor = min(src_block_size_factor, dst_block_size_factor)
+        self.src_block_size_factor: int = src_block_size_factor // min_block_size_factor
+        self.dst_block_size_factor: int = dst_block_size_factor // min_block_size_factor
         self.priority = priority
+
+        self.block_size_in_bytes = [
+            tensor.element_size()
+            * tensor.stride(1 if kv_dim else 0)
+            * min_block_size_factor
+            for tensor, kv_dim in zip(src_tensors, kv_dim_before_num_blocks)
+        ]
 
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[tuple[int, torch.cuda.Stream, torch.Event]] = deque()
@@ -141,16 +149,34 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
         with torch.cuda.stream(stream):
-            for src_tensor, dst_tensor, kv_dim in zip(
-                self.src_tensors, self.dst_tensors, self.kv_dim_before_num_blocks
+            for src_tensor, dst_tensor, kv_dim, block_size_in_bytes in zip(
+                self.src_tensors,
+                self.dst_tensors,
+                self.kv_dim_before_num_blocks,
+                self.block_size_in_bytes,
             ):
                 if kv_dim:
                     src_key_cache, src_value_cache = src_tensor
                     dst_key_cache, dst_value_cache = dst_tensor
-                    ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst_tensor)
-                    ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst_tensor)
+                    ops.swap_blocks(
+                        src_key_cache,
+                        dst_key_cache,
+                        block_size_in_bytes,
+                        src_to_dst_tensor,
+                    )
+                    ops.swap_blocks(
+                        src_value_cache,
+                        dst_value_cache,
+                        block_size_in_bytes,
+                        src_to_dst_tensor,
+                    )
                 else:
-                    ops.swap_blocks(src_tensor, dst_tensor, src_to_dst_tensor)
+                    ops.swap_blocks(
+                        src_tensor,
+                        dst_tensor,
+                        block_size_in_bytes,
+                        src_to_dst_tensor,
+                    )
             event.record(stream)
 
         self._transfers.append((job_id, stream, event))
@@ -179,7 +205,6 @@ class CpuGpuOffloadingHandlers:
     ):
         assert gpu_caches
         assert cpu_block_size % gpu_block_size == 0
-        block_size_factor = cpu_block_size // gpu_block_size
 
         pin_memory = is_pin_memory_available()
 
@@ -242,7 +267,8 @@ class CpuGpuOffloadingHandlers:
                 assert gpu_block_size % kernel_block_size == 0
 
             cpu_shape = list(gpu_shape)
-            cpu_shape[num_blocks_idx] = num_cpu_blocks * block_size_factor
+            cpu_block_size_factor = cpu_block_size // kernel_block_size
+            cpu_shape[num_blocks_idx] = num_cpu_blocks * cpu_block_size_factor
 
             logger.debug("Allocating CPU tensor of shape %r", cpu_shape)
             cpu_tensors.append(
@@ -257,9 +283,6 @@ class CpuGpuOffloadingHandlers:
         assert kernel_block_size is not None
         gpu_block_size_factor = gpu_block_size // kernel_block_size
         cpu_block_size_factor = cpu_block_size // kernel_block_size
-
-        # TODO (orozery): adapt swap_blocks to support gpu_block_size_factor
-        assert gpu_block_size_factor == 1
 
         self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
             src_tensors=gpu_tensors,
