@@ -49,7 +49,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import random_uuid
@@ -59,6 +59,8 @@ from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.tokenizers.mistral import MistralTokenizer
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -1627,12 +1629,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
     # so, for messages that have tool_calls, parse the string (which we get
     # from openAI format) to dict
     for message in messages:
-        if (
-            message["role"] == "assistant"
-            and "tool_calls" in message
-            and isinstance(message["tool_calls"], list)
-        ):
-            for item in message["tool_calls"]:
+        if message["role"] == "assistant" and "tool_calls" in message:
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+
+            if len(tool_calls) == 0:
+                # Drop empty tool_calls to keep templates on the normal assistant path.
+                message.pop("tool_calls", None)
+                continue
+
+            for item in tool_calls:
                 # if arguments is None or empty string, set to {}
                 if content := item["function"].get("arguments"):
                     if not isinstance(content, (dict, list)):
@@ -1831,7 +1838,7 @@ def apply_hf_chat_template(
 
 
 def apply_mistral_chat_template(
-    tokenizer: MistralTokenizer,
+    tokenizer: "MistralTokenizer",
     messages: list[ChatCompletionMessageParam],
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
