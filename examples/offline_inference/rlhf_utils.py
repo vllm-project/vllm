@@ -150,7 +150,7 @@ class ColocateWorkerExtension:
         socket.close()
         del buffer
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def report_device_id(self) -> str:
         from vllm.platforms import current_platform
