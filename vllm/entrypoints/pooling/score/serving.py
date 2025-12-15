@@ -502,5 +502,7 @@ class ServingScores(OpenAIServing):
             id=request_id,
             model=model_name,
             results=results,
-            usage=RerankUsage(total_tokens=num_prompt_tokens),
+            usage=RerankUsage(
+                total_tokens=num_prompt_tokens, prompt_tokens=num_prompt_tokens
+            ),
         )

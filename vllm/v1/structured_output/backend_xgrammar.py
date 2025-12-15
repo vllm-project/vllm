@@ -10,7 +10,7 @@ import torch
 import vllm.envs
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers.deepseekv32 import DeepseekV32Tokenizer
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (
@@ -268,13 +268,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # Unsupported keywords for objects
         if obj.get("type") == "object" and any(
-            key in obj
-            for key in (
-                "minProperties",
-                "maxProperties",
-                "propertyNames",
-                "patternProperties",
-            )
+            key in obj for key in ("patternProperties", "propertyNames")
         ):
             return True
 
