@@ -20,6 +20,32 @@ MODEL_NAME = "ibm-research/PowerMoE-3b"
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
+# Make sure CCL worker count is set for data parallelism
+os.environ["CCL_WORKER_COUNT"] = "2"
+
+import socket
+from contextlib import closing
+
+def is_port_available(port: int, host: str = '127.0.0.1') -> bool:
+    try:
+        # Use context manager to ensure the socket is properly closed
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+            sock.settimeout(1)  # Set 1 second timeout
+            result = sock.connect_ex((host, port))
+            # If connection is successful (returns 0), the port is already in use
+            return result != 0
+    except socket.error:
+        # When a socket error occurs, conservatively assume the port is unavailable
+        return False
+
+def get_unique_port(start_port=8000):
+    """Find an available port"""
+    port = start_port
+    while not is_port_available(port):
+        port += 1  # Increment until an available port is found
+        if port > start_port + 100:  # Limit the search range
+            raise RuntimeError("No available ports")
+    return port
 
 
 class ExternalLBServerManager:
@@ -44,6 +70,12 @@ class ExternalLBServerManager:
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:
         """Start all server instances for external LB mode."""
+
+        allocated_ports = []
+        for rank in range(self.dp_size):
+            port = get_unique_port(start_port=8000 + rank * 10)
+            allocated_ports.append(port)
+
         for rank in range(self.dp_size):
             # Create server args for this specific rank
             server_args = self.base_server_args.copy()
@@ -60,7 +92,7 @@ class ExternalLBServerManager:
                     "--tensor-parallel-size",
                     str(self.tp_size),
                     "--port",
-                    str(8000 + rank),  # Different port for each rank
+                    str(allocated_ports[rank]),  # Different port for each rank
                     "--api-server-count",
                     str(self.api_server_count),
                 ]
