@@ -15,6 +15,10 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
 )
 from vllm.logger import init_logger
+from vllm.forward_context import (
+    DPMetadata,
+    get_forward_context,
+)
 
 from .base import AFDConnectorBase
 from .metadata import AFDConnectorMetadata
@@ -53,6 +57,7 @@ class P2PAFDConnector(AFDConnectorBase):
         )
         self.recv_attn_output_counter: int = 0
         self.recv_ffn_output_counter: int = 0
+        self.dp_metadata_list: dict[int, DPMetadata] = {}
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -169,6 +174,17 @@ class P2PAFDConnector(AFDConnectorBase):
         self._tensor_metadata_list = self._build_tensor_metadata_list(
             tensor_metadata, self._current_afd_connector_metadata
         )
+        if self.config.parallel_config.data_parallel_size > 1:
+            logger.info("jcz recv_metadata num_of_stages:{}".format(self._current_afd_connector_metadata.num_of_stages))
+            for stage_idx in range(self._current_afd_connector_metadata.num_of_stages):
+                num_tokens_per_ubatch = self._tensor_metadata_list[stage_idx].size[0]
+                self.dp_metadata_list[stage_idx] = DPMetadata.make(
+                    self.config.parallel_config,
+                    num_tokens_per_ubatch,
+                    torch.tensor([num_tokens_per_ubatch] * self.config.parallel_config.data_parallel_size,
+                                device="cpu", dtype=torch.int32),
+                )
+            logger.info("jcz recv_metadata self.dp_metadata_list:{}".format(self.dp_metadata_list))
 
     def _send_hidden_states(
         self,
