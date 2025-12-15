@@ -52,7 +52,7 @@ def kernel_warmup(worker: "Worker"):
     if (
         not worker.model_runner.is_pooling_model
         and worker.model_runner.attn_groups
-        # NOTE: This should be `any` instead of `all`` but other hybrid attention
+        # NOTE: This should be `any` instead of `all` but other hybrid attention
         # backends don't support this dummy run. Once we remove
         # `build_for_cudagraph_capture`, we can change it to `any`.
         and all(
