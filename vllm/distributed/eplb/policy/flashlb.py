@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-from collections import defaultdict, deque
+from collections import deque
 
 import numpy as np
 import torch
+from typing import Optional
 from numba import njit
 
 from .abstract import AbstractEplbPolicy
@@ -522,8 +523,13 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         return result / counts
 
     def rebalance_experts(
-        self, weight: torch.Tensor, num_replicas: int, num_groups: int,
-        num_nodes: int, num_ranks: int, old_global_expert_indices: torch.Tensor
+        self,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
