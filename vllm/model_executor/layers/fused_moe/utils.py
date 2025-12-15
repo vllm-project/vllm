@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from math import prod
-from vllm.platforms import current_platform
-import torch
 from functools import lru_cache
+from math import prod
+
+import torch
+
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
@@ -341,7 +343,6 @@ def supports_pdl(device: torch.device | None = None) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
 
 
-
 @triton.jit
 def mm_k(
     a_ptr,
@@ -359,12 +360,12 @@ def mm_k(
     b_dtype: tl.constexpr,
     USE_GDC: tl.constexpr,
     base_k,
-    a_scale_ptrs = None,
-    b_scale_ptrs = None,
-    stride_ask = 0,
-    stride_bsk = 0,
-    group_k = 0,
-    group_n = 0,
+    a_scale_ptrs=None,
+    b_scale_ptrs=None,
+    stride_ask=0,
+    stride_bsk=0,
+    group_k=0,
+    group_n=0,
     use_int8_w8a16: tl.constexpr = False,
     use_fp8_w8a8: tl.constexpr = False,
     use_int8_w8a8: tl.constexpr = False,
@@ -429,7 +430,9 @@ def mm_k(
                     )
                     b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
-                    accumulator += tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+                    accumulator += (
+                        tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+                    )
                 else:
                     if use_fp8_w8a8:
                         # acc used to enable fp8_fast_accum
@@ -452,16 +455,24 @@ def mm_k(
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
                 if use_int8_w8a16:
-                    accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
+                    accumulator = tl.dot(
+                        tiled_a, tiled_b.to(compute_type), acc=accumulator
+                    )
                 elif use_fp8_w8a8 or use_int8_w8a8:
                     if group_k > 0 and group_n > 0:
                         offs_ks = iter_k // group_k
                         a_scale = tl.load(
-                            a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+                            a_scale_ptrs + offs_ks * stride_ask,
+                            mask=token_mask,
+                            other=0.0,
                         )
                         b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
-                        accumulator += tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+                        accumulator += (
+                            tl.dot(tiled_a, tiled_b)
+                            * a_scale[:, None]
+                            * b_scale[None, :]
+                        )
                     else:
                         if use_fp8_w8a8:
                             # acc used to enable fp8_fast_accum
@@ -477,20 +488,30 @@ def mm_k(
                 tiled_b = tl.load(b_ptr, mask=mask[:, None], other=0.0)
                 if USE_GDC and not IS_PRIMARY:
                     tl.extra.cuda.gdc_wait()
-                tiled_a = tl.load(a_ptr, mask=token_mask[:, None] & mask[None, :], other=0.0)
+                tiled_a = tl.load(
+                    a_ptr, mask=token_mask[:, None] & mask[None, :], other=0.0
+                )
                 if CAST_TYPE:
                     tiled_a = tiled_a.to(b_dtype)
                 if use_int8_w8a16:
-                    accumulator = tl.dot(tiled_a, tiled_b.to(compute_type), acc=accumulator)
+                    accumulator = tl.dot(
+                        tiled_a, tiled_b.to(compute_type), acc=accumulator
+                    )
                 elif use_fp8_w8a8 or use_int8_w8a8:
                     if group_k > 0 and group_n > 0:
                         offs_ks = iter_k // group_k
                         a_scale = tl.load(
-                            a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+                            a_scale_ptrs + offs_ks * stride_ask,
+                            mask=token_mask,
+                            other=0.0,
                         )
                         b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
-                        accumulator += tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
+                        accumulator += (
+                            tl.dot(tiled_a, tiled_b)
+                            * a_scale[:, None]
+                            * b_scale[None, :]
+                        )
                     else:
                         if use_fp8_w8a8:
                             # acc used to enable fp8_fast_accum

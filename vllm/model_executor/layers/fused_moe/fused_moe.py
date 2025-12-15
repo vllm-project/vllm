@@ -45,8 +45,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     activation_without_mul,
     disable_inplace,
-    moe_kernel_quantize_input,
     mm_k,
+    moe_kernel_quantize_input,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
@@ -56,8 +56,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
-from .utils import supports_pdl
 
+from .utils import supports_pdl
 
 logger = init_logger(__name__)
 
@@ -1971,7 +1971,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w1_bias,
-            IS_PRIMARY= True,
+            IS_PRIMARY=True,
         )
 
         # Activation function with multiplication
@@ -2031,7 +2031,7 @@ def fused_experts_impl(
             per_channel_quant=per_channel_quant,
             block_shape=block_shape,
             B_bias=w2_bias,
-            IS_PRIMARY= False,
+            IS_PRIMARY=False,
         )
 
         ops.moe_sum(

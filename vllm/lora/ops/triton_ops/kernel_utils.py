@@ -4,8 +4,9 @@
 Utilities for Punica kernel construction.
 """
 
-from vllm.triton_utils import tl, triton
 from vllm.model_executor.layers.fused_moe.utils import mm_k
+from vllm.triton_utils import tl, triton
+
 
 @triton.jit
 def do_expand_kernel(

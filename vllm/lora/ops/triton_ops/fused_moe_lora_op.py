@@ -7,9 +7,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe.utils import mm_k
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.model_executor.layers.fused_moe.utils import mm_k
 
 from .utils import supports_pdl
 
@@ -166,7 +166,7 @@ def _fused_moe_lora_kernel(
         BLOCK_SIZE_M,
         BLOCK_SIZE_N,
         BLOCK_SIZE_K,
-        EVEN_K = False,
+        EVEN_K=False,
         SPLIT_K=SPLIT_K,
         CAST_TYPE=None,
         b_dtype=b_ptr.dtype.element_ty,
