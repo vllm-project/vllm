@@ -284,17 +284,17 @@ class MatcherQuantFP8(MatcherCustomOp):
         self,
         quant_key: QuantKey,
         enabled: bool | None = None,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
-        use_col_major_scales: bool = False,
-        use_e8m0: bool = False,
     ):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
         super().__init__(enabled)
         self.quant_key = quant_key
-        self.use_col_major_scales = use_col_major_scales
-        self.use_e8m0 = use_e8m0
+        self.has_col_major_scales = has_col_major_scales
+        self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
 
         if match_rocm_aiter:
@@ -358,7 +358,7 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.group_shape.is_per_group():
             assert scale is None
-            scale = self.make_scale(input, transposed=self.use_col_major_scales)
+            scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -373,7 +373,7 @@ class MatcherQuantFP8(MatcherCustomOp):
                 eps=1e-10,
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
-                scale_ue8m0=self.use_e8m0,
+                scale_ue8m0=self.is_e8m0,
             )
             return result, scale
 
@@ -390,13 +390,6 @@ class MatcherQuantFP8(MatcherCustomOp):
                 self.QUANT_OP, result=result, input=input, scale=scale, scale_ub=None
             )
             return result, scale
-
-    def forward_native(
-        self,
-        input: torch.Tensor,
-        scale: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.quant_fp8(input, scale)
 
     def make_scale(self, input: torch.Tensor, transposed: bool = False):
         normalized_group_shape = _normalize_quant_group_shape(
