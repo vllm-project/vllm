@@ -573,6 +573,7 @@ _AUTOMATIC_CONVERTED_MODELS = {
     "Qwen3ForSequenceClassification": _HfExamplesInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     ),
+    "Qwen3ForTokenClassification": _HfExamplesInfo("bd2lcco/Qwen3-0.6B-finetuned"),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -582,6 +583,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0.dev"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
+    "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
