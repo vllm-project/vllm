@@ -107,9 +107,8 @@ def test_run_handle_instruction(instruction):
     time.sleep(0.1)
     identity, _, msg = client_socket.recv_multipart()
     result_dict = json.loads(msg.decode("utf-8"))
-    assert result_dict["engine_index"] == "0"
-    if instruction == "pause":
-        assert result_dict["success"]
+    assert result_dict["sentinel_index"] == "0"
+    assert result_dict["success"]
 
     time.sleep(0.1)
 

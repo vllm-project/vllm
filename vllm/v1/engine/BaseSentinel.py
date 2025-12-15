@@ -126,10 +126,10 @@ class BaseSentinel:
         Execute a command received from upstream_cmd_socket.
 
         Args:
-        json_str (str): JSON string representing a serialized method call.
+        cmd_str (str): JSON string representing a serialized method call.
 
         Returns:
-            tuple[str, dict[str, Any]]:
+            tuple[str, str, str | None]:
             - success (bool): execution status of method call.
             - method_uuid (str): The UUID identifying the method call.
             - reason (str | None): reason for executing method call when failed.
