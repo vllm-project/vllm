@@ -11,7 +11,6 @@ import torch
 
 from vllm import SamplingParams
 from vllm.config import (
-    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     KVTransferConfig,
@@ -95,7 +94,6 @@ def create_vllm_config(
     dtype: str = "float16",
     cache_dtype: str = "auto",
     hf_overrides: dict[str, Any] | None = None,
-    attention_config: AttentionConfig | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -132,7 +130,6 @@ def create_vllm_config(
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
-        attention_config=attention_config,
     )
 
 
