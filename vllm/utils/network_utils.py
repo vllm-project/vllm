@@ -177,14 +177,15 @@ def _get_open_ports(ports_to_try: Iterable[int] = (0,), max_count: int = 1) -> s
     return open_ports
 
 
-def get_open_ports_list(max_count: int = 5) -> list[int]:
+def get_open_ports_list(count: int = 5) -> list[int]:
     """
-    Find a maximum of `max_count` open ports. The range of acceptable port numbers
-    if inferred from environment variables: VLLM_DP_MASTER_PORT and VLLM_PORT.
+    Finds `count` open ports.
 
-    Otherwise try random valid port numbers.
+    If user specifies port through VLLM_DP_MASTER_PORT or VLLM_PORT,
+    start port search for that value.
+    Otherwise, try any random port numbers.
 
-    If no ports could be opened, raise OSError.
+    Raises OSError if less than `count` open ports have been found.
     """
     starting_port = 0
     if "VLLM_DP_MASTER_PORT" in os.environ:
@@ -194,34 +195,34 @@ def get_open_ports_list(max_count: int = 5) -> list[int]:
         starting_port = envs.VLLM_PORT
 
     # give ourselves some room for failure / already taken ports
-    num_tries = max(2 * max_count, 10)
+    candidate_ports = max(2 * count, 10)
 
     ports_to_try: Iterable
     if starting_port != 0:
-        ports_to_try = range(starting_port, starting_port + num_tries)
+        ports_to_try = range(starting_port, starting_port + candidate_ports)
     else:
         # "0" meaning let the os choose a random available port
-        ports_to_try = (0 for _ in range(num_tries))
+        ports_to_try = (0 for _ in range(candidate_ports))
 
-    open_port = _get_open_ports(ports_to_try, max_count)
-    if len(open_port) != max_count:
+    open_ports = _get_open_ports(ports_to_try, count)
+    if len(open_ports) != count:
         if starting_port == 0:
-            err = f"Could not get {max_count} random ports after {num_tries} tries."
+            err = f"Could not get {count} random ports after {candidate_ports} tries."
         else:
             err = (
-                f"Could not get {max_count} ports in the range "
-                f"[{starting_port}, {starting_port + num_tries})"
+                f"Could not get {count} ports in the range "
+                f"[{starting_port}, {starting_port + candidate_ports})"
             )
         raise OSError(err)
 
-    return list(open_port)
+    return list(open_ports)
 
 
 def get_open_port() -> int:
     """
     Special case of get_open_port_list with a single port
     """
-    return get_open_ports_list(max_count=1)[0]
+    return get_open_ports_list(count=1)[0]
 
 
 def find_process_using_port(port: int) -> psutil.Process | None:
