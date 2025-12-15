@@ -519,7 +519,6 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
-    print("response: ", response, flush=True)
     assert response.usage.output_tokens_details.tool_output_tokens > 0
     for item in response.output:
         if item.type == "message":
