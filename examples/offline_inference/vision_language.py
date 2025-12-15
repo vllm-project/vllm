@@ -118,6 +118,32 @@ def run_bee(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "ByteDance-Seed/BAGEL-7B-MoT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|image_pad|>\n{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # BLIP-2
 def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1832,6 +1858,7 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
+    "bagel": run_bagel,
     "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
