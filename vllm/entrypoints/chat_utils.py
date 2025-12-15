@@ -45,6 +45,7 @@ from typing_extensions import Required, TypedDict
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.encoding_dsv32 import encode_messages
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
@@ -269,6 +270,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     reasoning: str | None
     """The reasoning content for interleaved thinking."""
 
+    tools: Optional[str]
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -299,6 +302,8 @@ class ConversationMessage(TypedDict, total=False):
 
     reasoning_content: str | None
     """Deprecated: The reasoning content for interleaved thinking."""
+
+    tools: str | None
 
 
 # Passed in by user
@@ -1618,7 +1623,8 @@ def _parse_chat_message_content(
 
         if "name" in message and isinstance(message["name"], str):
             result_msg["name"] = message["name"]
-
+        if "tools" in message:
+            result_msg["tools"] = message["tools"]
     return result
 
 
@@ -1804,6 +1810,15 @@ def apply_hf_chat_template(
         model_config=model_config,
     )
 
+    if hf_chat_template is None and model_config.hf_config.model_type == "deepseek_v32":
+        request_prompt = encode_dsv32_chat_messages(
+            tokenizer,
+            conversation=conversation,
+            model_config=model_config,
+            **kwargs,
+        )
+        return request_prompt
+
     if hf_chat_template is None:
         raise ValueError(
             "As of transformers v4.44, default chat template is no longer "
@@ -1835,6 +1850,25 @@ def apply_hf_chat_template(
             "An error occurred in `transformers` while applying chat template"
         )
         raise ValueError(str(e)) from e
+
+
+def encode_dsv32_chat_messages(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    conversation: list[ConversationMessage],
+    **kwargs: Any,
+) -> str:
+    drop_thinking = kwargs.get("thinking", False)
+    if drop_thinking:
+        encode_config = dict(
+            thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True
+        )
+    else:
+        encode_config = dict(
+            thinking_mode="chat", drop_thinking=True, add_default_bos_token=True
+        )
+    prompt = encode_messages(conversation, **encode_config)
+
+    return prompt
 
 
 def apply_mistral_chat_template(
