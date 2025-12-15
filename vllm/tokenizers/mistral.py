@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
@@ -14,12 +15,15 @@ if TYPE_CHECKING:
     )
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
     from transformers import BatchEncoding
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as TransformersMistralTokenizer,
-    )
 
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-    from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+    try:
+        # Transformers v5
+        from transformers.tokenization_mistral_common import MistralCommonBackend
+    except ImportError:
+        # Transformers v4
+        from transformers.tokenization_mistral_common import (
+            MistralCommonTokenizer as MistralCommonBackend,
+        )
 
 logger = init_logger(__name__)
 
@@ -195,7 +199,6 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-@TokenizerRegistry.register("mistral")
 class MistralTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
@@ -208,11 +211,17 @@ class MistralTokenizer(TokenizerLike):
         **kwargs,
     ) -> "MistralTokenizer":
         from mistral_common.protocol.instruct.validator import ValidationMode
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as TransformersMistralTokenizer,
-        )
 
-        tokenizer = TransformersMistralTokenizer.from_pretrained(
+        try:
+            # Transformers v5
+            from transformers.tokenization_mistral_common import MistralCommonBackend
+        except ImportError:
+            # Transformers v4
+            from transformers.tokenization_mistral_common import (
+                MistralCommonTokenizer as MistralCommonBackend,
+            )
+
+        tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
             mode=ValidationMode.test,
@@ -223,7 +232,7 @@ class MistralTokenizer(TokenizerLike):
 
         return cls(tokenizer)
 
-    def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
+    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
         super().__init__()
 
         from mistral_common.protocol.instruct.validator import ValidationMode
@@ -296,6 +305,9 @@ class MistralTokenizer(TokenizerLike):
             self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
             for i in all_special_ids
         ]
+
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
 
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
@@ -409,6 +421,7 @@ class MistralTokenizer(TokenizerLike):
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
         continue_final_message = kwargs.get("continue_final_message", False)
+        tokenize = kwargs.get("tokenize", True)
         padding = kwargs.get("padding", False)
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
@@ -421,7 +434,7 @@ class MistralTokenizer(TokenizerLike):
             conversation=messages,
             tools=tools,
             continue_final_message=continue_final_message,
-            tokenize=True,
+            tokenize=tokenize,
             padding=padding,
             truncation=truncation,
             max_length=max_length,

@@ -72,7 +72,7 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
 # Aya Vision
 def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -111,6 +111,32 @@ def run_bee(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
         trust_remote_code=True,
     )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_bagel(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "ByteDance-Seed/BAGEL-7B-MoT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|image_pad|>\n{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1801,7 +1827,10 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=4096,
-        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        hf_overrides={
+            "architectures": ["Tarsier2ForConditionalGeneration"],
+            "model_type": "tarsier2",
+        },
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1829,6 +1858,7 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
+    "bagel": run_bagel,
     "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
@@ -2028,7 +2058,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
 
