@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import pytest
 import torch
 import logging
-import re
 from typing import Any
+
+import pytest
+import regex as re
+import torch
 
 from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_QUANT_RMS_NORM,
@@ -14,10 +16,9 @@ from tests.compile.fusion_test_utils import (
     Matches,
     run_model,
 )
-
-import vllm.plugins
+from tests.utils import flat_product
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
-from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.compilation.fusion import FUSED_OPS, FusedRMSQuantKey, RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
@@ -26,6 +27,7 @@ from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     VllmConfig,
@@ -45,10 +47,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     maybe_create_device_identity,
 )
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.platforms import current_platform
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.utils.deep_gemm import is_deep_gemm_supported
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import override_cutlass_fp8_supported
 from .backend import TestBackend
@@ -411,6 +412,7 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
 
 @pytest.mark.parametrize(
     "model_name, model_kwargs, backend, matches, custom_ops",
