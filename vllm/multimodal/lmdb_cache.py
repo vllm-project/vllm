@@ -7,13 +7,13 @@ import signal
 import threading
 import time
 from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import filelock
 import lmdb
-from typing_extensions import Buffer, Self
+from typing_extensions import Self
 
 from vllm import envs
 from vllm.distributed.device_communicators.shm_object_storage import MsgpackSerde
@@ -147,6 +147,19 @@ class LmdbMultiModalCache:
         )
 
         self._serde = MsgpackSerde()
+        self._scratch_buffers: list[bytearray] = []
+
+    @contextmanager
+    def scratch_buffer(self):
+        if self._scratch_buffers:
+            buffer = self._scratch_buffers.pop()
+        else:
+            buffer = bytearray(self._max_object_size)
+        try:
+            with memoryview(buffer) as mv:
+                yield mv
+        finally:
+            self._scratch_buffers.append(buffer)
 
     @classmethod
     def ensure_cache_id(cls):
@@ -196,7 +209,7 @@ class LmdbMultiModalCache:
     def serialize(self, item: object) -> bytearray:
         value, value_size, metadata, md_size = self._serde.serialize(item)
 
-        if value_size > self._max_object_size:
+        if value_size + md_size > self._max_object_size:
             raise ValueError(
                 f"Object size {value_size} exceeds maximum allowed "
                 f"size of {self._max_object_size} bytes."
@@ -215,21 +228,27 @@ class LmdbMultiModalCache:
         return self._serde.deserialize(item)
 
     def get_chunked_object(
-        self, db: lmdb._Database, txn: lmdb.Transaction, key: bytes
-    ) -> Buffer:
+        self,
+        db: lmdb._Database,
+        txn: lmdb.Transaction,
+        key: bytes,
+        buffer: memoryview,
+    ) -> memoryview:
         with txn.cursor(db=db) as cursor:
             if not cursor.set_key(key + self.int2bytes(0)):
                 raise ValueError(f"Key {key!r} not found in LMDB cache.")
 
             chunk_index = 0
-            result = bytearray()
+            offset = 0
             while cursor.key()[-self.INT_SIZE :] == self.int2bytes(chunk_index):
-                result.extend(cursor.value())
+                chunk_value = cursor.value()
+                buffer[offset : offset + len(chunk_value)] = chunk_value
+                offset += len(chunk_value)
                 chunk_index += 1
                 if not cursor.next():
                     break
 
-            return result
+            return buffer[0:offset]
 
     def put_chunked_object(
         self, db: lmdb._Database, txn: lmdb.Transaction, key: bytes, value: memoryview
@@ -500,6 +519,7 @@ class LmdbWriteTransaction(AbstractContextManager):
         self._read_txn = self._cache.lmdb_env.begin(write=False, buffers=True)
         self._inserts_enabled: bool | None = None
         self._write_queue = list[tuple[bytes, tuple[bytes, bytes] | None]]()
+        self._scratch_buffer: bytearray | None = None
 
     def __enter__(self):
         return self
@@ -539,14 +559,16 @@ class LmdbWriteTransaction(AbstractContextManager):
             # Item is cached, so just update the timestamps for the hash.
             self._write_queue.append((mm_hash_key, None))
 
-            cached_prompt_updates = self._cache.get_chunked_object(
-                self._cache.hash_to_prompt_updates, self._read_txn, mm_hash_key
-            )
-
-            with memoryview(cached_prompt_updates) as mv:
+            with self._cache.scratch_buffer() as buffer:
+                cached_prompt_updates = self._cache.get_chunked_object(
+                    self._cache.hash_to_prompt_updates,
+                    self._read_txn,
+                    mm_hash_key,
+                    buffer,
+                )
                 return None, cast(
                     Sequence[ResolvedPromptUpdate],
-                    self._cache.deserialize(mv),
+                    self._cache.deserialize(cached_prompt_updates),
                 )
         if not self.inserts_enabled:
             # Cache is too full, do not cache new items.
@@ -588,38 +610,41 @@ class LmdbWriteTransaction(AbstractContextManager):
                 elif serialized_pair is None:
                     # The item was evicted in the meantime, so we need to retrieve the
                     # serialized values from the read transaction.
-                    serialized_mm_item = self._cache.get_chunked_object(
-                        self._cache.hash_to_object, self._read_txn, mm_hash_key
-                    )
-                    assert serialized_mm_item is not None
-
-                    with memoryview(serialized_mm_item) as mv:
-                        self._cache.put_chunked_object(
-                            self._cache.hash_to_object, write_txn, mm_hash_key, mv
+                    with self._cache.scratch_buffer() as buffer:
+                        serialized_mm_item = self._cache.get_chunked_object(
+                            self._cache.hash_to_object,
+                            self._read_txn,
+                            mm_hash_key,
+                            buffer,
                         )
 
-                    serialized_prompt_updates = self._cache.get_chunked_object(
-                        self._cache.hash_to_prompt_updates,
-                        self._read_txn,
-                        mm_hash_key,
-                    )
-                    assert serialized_prompt_updates is not None
+                        self._cache.put_chunked_object(
+                            self._cache.hash_to_object,
+                            write_txn,
+                            mm_hash_key,
+                            serialized_mm_item,
+                        )
 
-                    with memoryview(serialized_prompt_updates) as mv:
+                        serialized_prompt_updates = self._cache.get_chunked_object(
+                            self._cache.hash_to_prompt_updates,
+                            self._read_txn,
+                            mm_hash_key,
+                            buffer,
+                        )
+
                         self._cache.put_chunked_object(
                             self._cache.hash_to_prompt_updates,
                             write_txn,
                             mm_hash_key,
-                            mv,
+                            serialized_prompt_updates,
                         )
                 else:
-                    serialized_object, serialized_prompt_updates = serialized_pair
-                    with memoryview(serialized_object) as mv:
+                    with memoryview(serialized_pair[0]) as mv:
                         self._cache.put_chunked_object(
                             self._cache.hash_to_object, write_txn, mm_hash_key, mv
                         )
 
-                    with memoryview(serialized_prompt_updates) as mv:
+                    with memoryview(serialized_pair[1]) as mv:
                         self._cache.put_chunked_object(
                             self._cache.hash_to_prompt_updates,
                             write_txn,
@@ -643,12 +668,24 @@ class LmdbReadTransaction(AbstractContextManager):
     ) -> None:
         self._cache = cache
         self._txn = self._cache.lmdb_env.begin(write=False, buffers=True)
+        self._scratch_buffer: memoryview | None = None
+        self._scratch_buffer_ctx: AbstractContextManager[memoryview] | None = None
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._txn.abort()
+        if self._scratch_buffer_ctx is not None:
+            self._scratch_buffer_ctx.__exit__(exc_type, exc_value, traceback)
+            self._scratch_buffer = None
+
+    @property
+    def scratch_buffer(self) -> memoryview:
+        if self._scratch_buffer is None:
+            self._scratch_buffer_ctx = self._cache.scratch_buffer()
+            self._scratch_buffer = self._scratch_buffer_ctx.__enter__()
+        return self._scratch_buffer
 
     def is_cached_item(self, mm_hash: str) -> bool:
         mm_hash_bytes = mm_hash.encode("utf-8")
@@ -660,7 +697,6 @@ class LmdbReadTransaction(AbstractContextManager):
     def get_item(self, mm_hash: str) -> MultiModalKwargsItem:
         mm_hash_bytes = mm_hash.encode("utf-8")
         item = self._cache.get_chunked_object(
-            self._cache.hash_to_object, self._txn, mm_hash_bytes
+            self._cache.hash_to_object, self._txn, mm_hash_bytes, self.scratch_buffer
         )
-        with memoryview(item) as item_view:
-            return cast(MultiModalKwargsItem, self._cache.deserialize(item_view))
+        return cast(MultiModalKwargsItem, self._cache.deserialize(item))
