@@ -697,7 +697,7 @@ class NixlConnectorScheduler:
             if preempted:
                 self._reqs_need_save.pop(req_id)
             if new_block_id_groups:
-                req, block_ids = self._reqs_need_save.get(req_id, (None, []))
+                req, block_ids = self._reqs_need_save[req_id]
                 # NOTE: Requests are implicitly added to `_reqs_need_save` via
                 # `update_state_after_alloc`. We only intervene if `block_ids`
                 # differ from `scheduler_output`, which signals the next partial
@@ -706,7 +706,7 @@ class NixlConnectorScheduler:
                     block_ids += new_block_id_groups[0]
                     self._reqs_need_save[req_id] = (req, block_ids)
         for req_id in list(self._reqs_need_save.keys()):
-            req, block_ids = self._reqs_need_save.get(req_id, (None, []))
+            req, block_ids = self._reqs_need_save[req_id]
             assert req.kv_transfer_params is not None
             # don't use the block_ids from _reqs_need_save since it may be
             # incomplete for partial prefill.
