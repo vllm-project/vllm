@@ -34,13 +34,13 @@ from vllm.entrypoints.openai.protocol import (
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.entrypoints.responses_utils import construct_tool_dicts
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers.protocol import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
