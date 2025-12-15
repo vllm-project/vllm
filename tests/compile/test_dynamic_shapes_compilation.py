@@ -40,7 +40,7 @@ def get_test_models():
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
 @pytest.mark.parametrize("evaluate_guards", [False, True])
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_dynamic_shapes_compilation(
     monkeypatch,
