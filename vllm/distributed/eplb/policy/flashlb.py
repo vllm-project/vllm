@@ -17,20 +17,17 @@ numba_logger.setLevel(logging.WARNING)
 
 @njit
 def compute_piece_counts(X, P, stage_weights):
-    '''
-    Greedy iterative expert partitioning strategy to calculate the optimal
-    number of replicas (pieces) for each expert.
+    """
+    Greedy iterative partitioning to calculate optimal replica 
+    count for each expert.
 
     Parameters:
-        X (np.ndarray): Multi-stage expert hotness matrix with shape
-            (n_stage, num_expert),
-        P (int): Total number of replicas
-        stage_weights (np.ndarray): Multi-stage hotness weight array with
-            shape (n_stage,).
+        X: [n_stage, num_expert] multi-stage expert hotness matrix
+        P: total number of replicas
+        stage_weights: [n_stage] weights for multi-stage hotness
     Returns:
-        pieces (np.ndarray): Optimal expert partitioning scheme with shape
-            (num_expert,).
-    '''
+        pieces: [num_expert] optimal replica count per expert
+    """
     n_stage, N = X.shape
     S = P - N
     pieces = np.ones(N, dtype=np.int32)
@@ -71,23 +68,18 @@ def compute_piece_counts(X, P, stage_weights):
 
 @njit
 def lpt_placement(X, pieces, M, stage_weights):
-    '''
+    """
     A LPT (Longest Process Time First)-based expert deployment strategy
     function, designed to map expert replicas to target devices optimally.
 
     Parameters:
-        X (np.ndarray): Multi-stage expert hotness matrix with shape
-            (n_stage, num_expert),
-        pieces (np.ndarray): Optimal expert partitioning scheme with shape
-            (num_expert,).
-        M (int): Number of devices
-        stage_weights (np.ndarray): Multi-stage hotness weight array with
-            shape (n_stage,).
+        X: [n_stage, num_expert] multi-stage expert hotness matrix
+        pieces: [num_expert] replica count per expert
+        M: number of devices
+        stage_weights: [n_stage] weights for multi-stage hotness
     Returns:
-        deployment (np.ndarray): Optimal expert deployment matrix with shape
-            (M, num_group)
-    '''
-
+        deployment: [M, num_group] expert deployment matrix
+    """
     n_stage, N = X.shape
     total_piece = pieces.sum()
     num_per_group = total_piece // M
@@ -176,6 +168,9 @@ def lpt_placement(X, pieces, M, stage_weights):
 
 @njit
 def slice_values(X, pieces):
+    """
+    Slice expert hotness values by replica count
+    """
     total_len = 0
     for i in range(X.shape[0]):
         total_len += pieces[i]
@@ -197,22 +192,15 @@ def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces,
     expert partitioning strategy.
 
     Parameters:
-        X (np.ndarray): Multi-stage expert hotness matrix with shape
-            (n_stage, num_expert),
-        P (int): Number of expert replicas
-        M (int): Number of devices
-        simulated_pieces (np.ndarray): Historically predicted optimal expert
-            partitioning scheme with shape (num_expert,).
-        simulated_deployment (np.ndarray): Historically predicted optimal
-            expert deployment scheme, typically with shape (M, num_group)
-            (where num_group = P//M).
-        stage_weights (np.ndarray): Multi-stage hotness weight array with
-            shape (n_stage,).
+        X: [n_stage, num_expert] multi-stage expert hotness matrix
+        P: number of expert replicas
+        M: number of devices
+        simulated_pieces: [num_expert] historical optimal replica counts
+        simulated_deployment: [M, num_group] historical deployment scheme
+        stage_weights: [n_stage] weights for multi-stage hotness
     Returns:
-        pieces (np.ndarray): Optimal expert partitioning scheme with shape
-            (num_expert,).
+        pieces: [num_expert] optimal replica count per expert
     """
-
     n_stage, N = X.shape
     num_group = P // M
 
@@ -304,20 +292,14 @@ def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces,
 @njit
 def auto_fix_new_placement(old_placement, new_placement):
     """
-    Adjust the new_placement matrix to ensure elements (including duplicates)
-    that exist in both old_placement and new_placement remain in their original
-    positions from old_placement. New elements (unique to new_placement) will
-    fill the remaining empty positions.
+    Adjust new deployment to retain old positions for overlapping experts.
 
     Parameters:
-        old_placement: Old deployment matrix with shape
-            (num_ranks, num_experts)
-        new_placement: New deployment matrix to be fixed, must have the same
-            shape as old_placement
+        old_placement: [num_ranks, num_experts] old deployment matrix
+        new_placement: [num_ranks, num_experts] new deployment matrix
     Returns:
-        fixed_new: adjusted version of the new_placement matrix
+        fixed_new: adjusted new deployment matrix
     """
-
     num_ranks, num_experts = old_placement.shape
     fixed_new = np.empty_like(new_placement)
     max_expert_old = old_placement.max() if num_experts > 0 else 0
@@ -379,6 +361,10 @@ def auto_fix_new_placement(old_placement, new_placement):
 
 @njit
 def compute_objective(deployment, X, pieces):
+    """
+    Calculate load balance objective (max load/mean load) 
+    for deployment
+    """
     M, P = deployment.shape
     loads = np.zeros(M)
     for i in range(M):
@@ -397,6 +383,18 @@ def compute_objective(deployment, X, pieces):
 @njit
 def compute_logical_to_physical_map(phy2log, num_layers, num_expert,
                                     num_replicas, maxlogcnt):
+    """
+    Compute logical-to-physical expert replica mapping.
+
+    Parameters:
+        phy2log: [num_layers, num_replicas] physical-to-logical mapping
+        num_layers: number of MoE layers
+        num_expert: number of logical experts
+        num_replicas: number of physical replicas
+        maxlogcnt: max replicas per logical expert
+    Returns:
+        log2phy: [num_layers, num_expert, maxlogcnt] logical-to-physical mapping
+    """
     log2phy = -1 * np.ones((num_layers, num_expert, maxlogcnt), dtype=np.int64)
     for layer in range(num_layers):
         filled_counts = np.zeros(num_expert, dtype=np.int64)
@@ -419,13 +417,19 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
 
     def compute_expert_hotness(self, num_of_expert: int,
                                deployment: np.ndarray, rank_load: np.ndarray):
+        """
+        Compute total hotness for logical experts from rank load
+        """
         hotness = np.zeros(num_of_expert, dtype=rank_load.dtype)
         deployment_flat = deployment.ravel()
         rank_load_flat = rank_load.ravel()
         np.add.at(hotness, deployment_flat, rank_load_flat)
         return hotness
 
-    def compute_rank_load(self, deployment: np.ndarray, hotness: np.ndarray):
+    def compute_rank_par(self, deployment: np.ndarray, hotness: np.ndarray):
+        """
+        Calculate average load imbalance ratio across stages
+        """
         n_stage, N = hotness.shape
         unit_hotness = hotness / np.bincount(deployment.reshape(-1))
         stage_par = np.zeros(n_stage)
@@ -440,6 +444,19 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
                                        M,
                                        stage_weights=None,
                                        recorsive=False):
+        """
+        Group-based adaptive search for optimal expert partitioning/deployment.
+
+        Parameters:
+            X: [n_stage, num_expert] multi-stage expert hotness matrix
+            P: total replicas
+            M: number of devices
+            stage_weights: [n_stage] multi-stage hotness weights
+            recorsive: whether to use recursive search
+        Returns:
+            deployment: [M, num_group] expert deployment matrix
+            pieces: [num_expert] replica count per expert
+        """
         n_stage, N = X.shape
         if stage_weights is None:
             stage_weights = np.ones(n_stage, dtype=np.float32)
@@ -475,10 +492,16 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         return deployment, pieces
 
     def need_update(self, current_par, layer_id=0):
+        """
+        Check if deployment update is needed (imbalance exceeds threshold)
+        """
         threshold = self.par_history.get(layer_id, 0.0)
         return current_par >= self.threshold_ratio * threshold
 
     def compute_stage_weight(self, hotness):
+        """
+        Compute normalized weights for multi-stage hotness
+        """
         n_stage = hotness.shape[0]
         stage_weights = np.zeros(n_stage)
         for i in range(n_stage):
@@ -492,7 +515,23 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
                         deployment,
                         hotness,
                         layer_id=0):
-        current_par = self.compute_rank_load(deployment, hotness)
+        """
+        Rebalance expert deployment for a single layer 
+        if load imbalance exceeds threshold.
+
+        Parameters:
+            num_replicas: total physical experts
+            num_rank: number of ranks
+            deployment: [num_rank, num_replicas/num_rank] current deployment
+            hotness: [n_stage, num_expert] expert hotness matrix
+            layer_id: target layer index
+        Returns:
+            new_deployment: updated deployment matrix
+            pieces: replica count per expert
+            new_par: new load imbalance ratio
+            current_par: original load imbalance ratio
+        """
+        current_par = self.compute_rank_par(deployment, hotness)
         if not self.need_update(current_par, layer_id):
             pieces = np.bincount(deployment.ravel())
             return deployment, pieces, current_par, current_par
@@ -503,10 +542,13 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         assert not np.any(new_deployment < 0), (
             f"Deployment contains {np.sum(new_deployment < 0)} negative "
             "values (invalid empty places)")
-        new_par = self.compute_rank_load(new_deployment, hotness)
+        new_par = self.compute_rank_par(new_deployment, hotness)
         return new_deployment, pieces, new_par, current_par
 
     def register_hotness(self, num_layer, hotness):
+        """
+        Register expert hotness to sliding window buffer
+        """
         for layer in range(num_layer):
             if layer not in self.hotness_window:
                 self.hotness_window[layer] = deque(
@@ -514,6 +556,9 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
             self.hotness_window[layer].append(hotness[layer])
 
     def compress_by_avg_pooling_fast_nd(self, arr, m):
+        """
+        Compress hotness window via average pooling to fixed size
+        """
         n, d = arr.shape
         idx = (np.arange(n) * m // n)
         result = np.zeros((m, d))
@@ -532,24 +577,23 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         old_global_expert_indices: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Entry point for expert-parallelism load balancer.
+        Entry point for expert-parallelism load balancing.
+
         Parameters:
-            old_global_expert_indices: [num_moe_layers, num_physical_experts],
-                mapping from physical experts to logical experts.
-            weight: [layers, num_logical_experts], the load statistics
-                for all logical experts
-            num_replicas: number of physical experts, must be a multiple of
-                `num_ranks`
+            weight: [layers, num_logical_experts] expert load statistics
+            num_replicas: total physical experts (multiple of num_ranks)
             num_groups: number of expert groups
             num_nodes: number of server nodes
-            num_ranks: number of ranks, must be a multiple of `num_nodes`
+            num_ranks: number of ranks (multiple of num_nodes)
+            old_global_expert_indices: [num_moe_layers, num_physical_experts] 
+                old physical-logical mapping
         Returns:
-            physical_to_logical_map: [layers, num_replicas], the expert
-                index of each replica
-            logical_to_physical_map: [layers, num_logical_experts, X],
-                the replica indices for each expert
-            expert_count: [layers, num_logical_experts], number of
-                physical replicas for each logical expert
+            physical_to_logical_map: [layers, num_replicas] 
+                physical-to-logical mapping
+            logical_to_physical_map: [layers, num_logical_experts, X] 
+                logical-to-physical mapping
+            expert_count: [layers, num_logical_experts] 
+                replica count per logical expert
         """
         assert num_ranks % num_nodes == 0
         assert num_replicas % num_ranks == 0
@@ -649,36 +693,40 @@ class FlashlbEplbPolicy(AbstractEplbPolicy):
         return (physical_to_logical_map, logical_to_physical_map,
                 expert_count_tensor)
 
+def generate_layered_experts(num_layers=58,
+                                layer_shape=(32, 9),
+                                expert_min=0,
+                                expert_max=255):
+    """
+    Generate test expert deployment matrix (internal to warmup)
+    """
+    expert_num = expert_max - expert_min + 1
+    layer_total = layer_shape[0] * layer_shape[1]
+    extra_slots = layer_total - expert_num
+
+    assert layer_total >= expert_num, (
+        f"Layer elements {layer_total} < experts {expert_num}")
+
+    layers = []
+    for _ in range(num_layers):
+        full_experts = torch.arange(expert_min,
+                                    expert_max + 1,
+                                    dtype=torch.int64)
+        extra_experts = torch.randint(expert_min,
+                                        expert_max + 1,
+                                        size=(extra_slots, ),
+                                        dtype=torch.int64)
+        layer_flat = torch.cat([full_experts, extra_experts], dim=0)
+        shuffle_idx = torch.randperm(layer_flat.shape[0])
+        layer_shuffled = layer_flat[shuffle_idx]
+        layers.append(layer_shuffled.reshape(layer_shape))
+    return torch.stack(layers, dim=0)
 
 def warmup_flashlb():
+    """
+    Warm up Numba JIT-compiled FlashLB functions with test data
+    """
     algo = FlashlbEplbPolicy()
-
-    def generate_layered_experts(num_layers=58,
-                                 layer_shape=(32, 9),
-                                 expert_min=0,
-                                 expert_max=255):
-        expert_num = expert_max - expert_min + 1
-        layer_total = layer_shape[0] * layer_shape[1]
-        extra_slots = layer_total - expert_num
-
-        assert layer_total >= expert_num, (
-            f"Layer elements {layer_total} < experts {expert_num}")
-
-        layers = []
-        for _ in range(num_layers):
-            full_experts = torch.arange(expert_min,
-                                        expert_max + 1,
-                                        dtype=torch.int64)
-            extra_experts = torch.randint(expert_min,
-                                          expert_max + 1,
-                                          size=(extra_slots, ),
-                                          dtype=torch.int64)
-            layer_flat = torch.cat([full_experts, extra_experts], dim=0)
-            shuffle_idx = torch.randperm(layer_flat.shape[0])
-            layer_shuffled = layer_flat[shuffle_idx]
-            layers.append(layer_shuffled.reshape(layer_shape))
-        return torch.stack(layers, dim=0)
-
     expert_tensor = generate_layered_experts(num_layers=58,
                                              layer_shape=(32, 9))
     hotness = torch.randint(1, 100, (58, 256))
