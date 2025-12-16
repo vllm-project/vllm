@@ -280,6 +280,8 @@ class LoRAModelManager:
             # TODO: Remove this restriction
             # peft error when generating LoRA adapter with "gate" module:
             # "Target module NemotronHTopkRouter() is not supported."
+            # Working LoRA adapter was created using peft with:
+            # LoraConfig(target_modules="all-linear", ...)
             if self._is_non_gated_moe and module_name.endswith("mixer.gate"):
                 logger.debug(
                     "LoRA is not supported for non-gated MoE gate module."
