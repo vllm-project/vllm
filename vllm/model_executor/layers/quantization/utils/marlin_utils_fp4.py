@@ -59,9 +59,6 @@ def nvfp4_marlin_process_scales(marlin_scales):
 
 def mxfp4_marlin_process_scales(marlin_scales, input_dtype=None):
     # fit the layout of fp8 dequantization
-    if input_dtype is None and torch.get_default_dtype().itemsize == 2:
-        input_dtype = torch.get_default_dtype()
-
     if input_dtype is None or input_dtype.itemsize == 2:
         marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
             marlin_scales.size(0), -1
@@ -73,19 +70,6 @@ def mxfp4_marlin_process_scales(marlin_scales, input_dtype=None):
         assert marlin_scales.max() <= 249
         # exponent_bias (fp4->fp8) = 2 ** 3 - 2 ** 1 = 6
         marlin_scales = marlin_scales + 6
-        marlin_scales = marlin_scales.view(torch.float8_e8m0fnu)
-    elif input_dtype == torch.float16:
-        marlin_scales = marlin_scales.view(torch.uint8)
-        assert marlin_scales.max() <= 143 and marlin_scales.min() >= 112, (
-            "For MXFP4 x FP16, the value of the UE8M0 scale is required to "
-            "be between 2 ** -15 and 2 ** 16. "
-            "Howerver, the actual value range is "
-            f"[2 ** {marlin_scales.min().item() - 127}, "
-            f"2 ** {marlin_scales.max().item() - 127}]"
-        )
-
-        # convert to UE5M0
-        marlin_scales = (marlin_scales - 112) & 0x1F
         marlin_scales = marlin_scales.view(torch.float8_e8m0fnu)
     return marlin_scales
 
@@ -419,8 +403,8 @@ def rand_marlin_weight_mxfp4_like(weight, group_size, input_dtype=None):
     device = weight.device
 
     scales = torch.randint(
-        116,
-        125,
+        110,
+        120,
         (size_n, size_k // group_size),
         dtype=torch.uint8,
         device=weight.device,

@@ -101,6 +101,7 @@ QUANT_CONFIGS = [
     },
     # MXFP4
     {
+        "a_type": ["kBFloat16"],
         "b_type": "kFE2M1f",
         "s_type": "kFE8M0fnu",
         "thread_configs": THREAD_CONFIGS,
@@ -143,6 +144,7 @@ QUANT_CONFIGS = [
     {
         "a_type": ["kFE4M3fn"],
         "b_type": "kFE2M1f",
+        "c_type": ["kBFloat16"],
         "s_type": "kFE8M0fnu",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": [1, 2, 3, 4],

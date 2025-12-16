@@ -548,19 +548,6 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
 }
 
 template <>
-__device__ inline void dequant_fp8_scales<half2, vllm::kFE8M0fnu.id()>(
-    int q, half2* frag_b) {
-  // The scales is actual UE5M0 now
-  int Out1 = (q & 0x1F001F00) << 2;
-  q <<= 10;
-  int Out2 = q & 0x7C007C00;
-
-  // Note: reverse indexing is intentional because weights are permuted
-  frag_b[1] = *reinterpret_cast<const half2*>(&Out1);
-  frag_b[0] = *reinterpret_cast<const half2*>(&Out2);
-};
-
-template <>
 __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(
     int q, nv_bfloat162* frag_b) {
   // In this conversion, 2 ** -127 in FP8E8M0 would become 0 in BF16,
