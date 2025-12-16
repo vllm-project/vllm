@@ -482,7 +482,7 @@ class NixlConnectorScheduler:
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
-        self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
+        self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
@@ -628,16 +628,7 @@ class NixlConnectorScheduler:
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
-
-            # save all blocks
-            block_ids = blocks.get_block_ids()[0]
-            # TODO: skip the blocks that are already in the host xfer buffer.
-            # Currently, the host xfer buffer block is 1-to-1 mapped to device
-            # kv blocks, so host blocks won't be flushed as long as its device
-            # block is not overwritten; and it will be safe to skip saving them
-            # to host xfer buffer.
-            if block_ids:
-                self._reqs_need_save[request.request_id] = (request, block_ids)
+            self._reqs_need_save[request.request_id] = request
         elif params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(
@@ -691,12 +682,11 @@ class NixlConnectorScheduler:
 
         # NOTE: For the prefill side, there might be a chance that an early added
         # request is a chunked prefill, so we need to check if new blocks are added
-        for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
-            req_tuple = self._reqs_need_save.get(req_id)
-            if req_tuple is None or new_block_id_groups is None:
+        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
+            req = self._reqs_need_save.get(req_id)
+            if req is None or new_block_id_groups is None:
                 continue
 
-            req = req_tuple[0]
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_save(
                 request_id=req_id,
