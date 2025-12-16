@@ -122,12 +122,13 @@ class WorkerSentinel(BaseSentinel):
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
-        identity = f"{self.pp_rank}_{self.tp_rank}"
+        identity = f"PP{self.pp_rank}_TP{self.tp_rank}"
         super().__init__(
-            vllm_config.fault_tolerance_config.worker_cmd_addr,
-            None,
-            identity.encode(),
-            f"{self.dp_rank}_{identity}",
+            upstream_cmd_addr=vllm_config.fault_tolerance_config.worker_cmd_addr,
+            downstream_cmd_addr=None,
+            dealer_socket_identity=identity.encode(),
+            sentinel_tag=f"{self.dp_rank}_{identity}",
+            fault_tolerance_config=vllm_config.fault_tolerance_config,
         )
         self.vllm_config = vllm_config
         self.zmq_ctx = zmq.Context()
@@ -152,7 +153,7 @@ class WorkerSentinel(BaseSentinel):
                 success, method_uuid, reason = self._execute_cmd(cmd_str)
                 self._send_execution_result(success, method_uuid, reason)
 
-    def pause(self, timeout: int = 1, soft_pause: bool = True):
+    def pause(self, timeout: int = 1, soft_pause: bool = False):
         if soft_pause:
             self._set_device_communicator_status(False)
             self.pause_event.set()
@@ -224,8 +225,7 @@ class WorkerSentinel(BaseSentinel):
                 nccl_comm.available = active
                 nccl_comm.disabled = not active
 
-    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
-        # In practice, the actual operation performed is restarting the worker
+    def retry(self, timeout: int = 1, **kwargs) -> bool:
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
             with set_current_vllm_config(self.vllm_config):

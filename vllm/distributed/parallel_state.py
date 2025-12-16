@@ -332,6 +332,7 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        options = None
         if torch_distributed_backend == "nccl":
             options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
             if enable_fault_tolerance:
@@ -340,23 +341,15 @@ class GroupCoordinator:
                 os.environ["NCCL_COMM_BLOCKING"] = "0"
 
         for ranks in group_ranks:
-            if torch_distributed_backend == "nccl":
-                device_group = torch.distributed.new_group(
-                    ranks, backend=torch_distributed_backend, pg_options=options
-                )
-            else:
-                device_group = torch.distributed.new_group(
-                    ranks, backend=torch_distributed_backend
-                )
+            device_group = torch.distributed.new_group(
+                ranks, backend=torch_distributed_backend, pg_options=options
+            )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                if not enable_fault_tolerance:
-                    cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-                else:
-                    cpu_group = torch.distributed.new_group(
-                        ranks, backend="gloo", timeout=gloo_comm_timeout
-                    )
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=gloo_comm_timeout
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)

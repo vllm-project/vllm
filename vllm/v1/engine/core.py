@@ -18,7 +18,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -103,18 +103,20 @@ class EngineCoreSentinel(BaseSentinel):
         engine_input_q: queue.Queue,
         client_cmd_addr: str,
         worker_cmd_addr: str,
-        fault_report_addr: str,
-        dealer_identity: bytes,
+        engine_fault_socket_addr: str,
+        dealer_socket_identity: bytes,
         tp_size: int,
         pp_size: int,
         dp_size: int,
+        fault_tolerance_config: FaultToleranceConfig,
     ):
         self.engine_index = engine_index
         super().__init__(
-            client_cmd_addr,
-            worker_cmd_addr,
-            dealer_identity,
-            f"{self.engine_index}",
+            upstream_cmd_addr=client_cmd_addr,
+            downstream_cmd_addr=worker_cmd_addr,
+            dealer_socket_identity=dealer_socket_identity,
+            sentinel_tag=f"DP_{engine_index}",
+            fault_tolerance_config=fault_tolerance_config,
         )
 
         self.fault_signal_q = fault_signal_q
@@ -126,12 +128,12 @@ class EngineCoreSentinel(BaseSentinel):
         self.dp_size = dp_size
 
         # Client <-> EngineCoreSentinel sockets
-        self.fault_report_socket = make_zmq_socket(
+        self.engine_fault_socket = make_zmq_socket(
             self.ctx,
-            fault_report_addr,
+            engine_fault_socket_addr,
             zmq.DEALER,
             bind=False,
-            identity=dealer_identity,
+            identity=dealer_socket_identity,
         )
 
         self.poller = zmq.Poller()
@@ -150,16 +152,15 @@ class EngineCoreSentinel(BaseSentinel):
         """
         while not self.sentinel_dead:
             # Check for engine fault signals
-            # listen exception info
-            if not self.fault_listener():
-                pass
+            self.poll_and_report_fault_events()
+            # Check for commands from ClientSentinel
             has_msg, cmd_str = self.receive_upstream_cmd()
             if has_msg:
                 assert cmd_str is not None
                 success, method_uuid, reason = self._execute_cmd(cmd_str)
                 self._send_execution_result(success, method_uuid, reason)
 
-    def fault_listener(self):
+    def poll_and_report_fault_events(self):
         try:
             engine_exception = self.fault_signal_q.get_nowait()
             if isinstance(engine_exception, EngineLoopPausedError):
@@ -174,16 +175,15 @@ class EngineCoreSentinel(BaseSentinel):
                     "".join(traceback.format_tb(engine_exception.__traceback__)),
                     level="error",
                 )
-                self._report_client_exception(engine_exception)
+                self._report_exception_to_client_sentinel(engine_exception)
             self.engine_running = False
-            return True
         except queue.Empty:
-            return False
+            pass
 
-    def _report_client_exception(self, exception: Exception) -> None:
+    def _report_exception_to_client_sentinel(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
         msg_bytes = msg.encode("utf-8")
-        self.fault_report_socket.send_multipart([b"", msg_bytes])
+        self.engine_fault_socket.send_multipart([b"", msg_bytes])
 
     def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
         """
@@ -234,7 +234,9 @@ class EngineCoreSentinel(BaseSentinel):
                 )
         return success
 
-    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
+    def retry(
+        self, timeout: int = 1, new_stateless_dp_group_port: int = 8000, **kwargs
+    ) -> bool:
         """
         Handle the retry instruction from the ClientSentinel.
         This instruction tells the EngineCore to continue its busy loop
@@ -275,13 +277,13 @@ class EngineCoreSentinel(BaseSentinel):
         identities = set()
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
-                identity = f"{pp_rank}_{tp_rank}".encode()
+                identity = f"PP{pp_rank}_TP{tp_rank}".encode()
                 identities.add(identity)
         return identities
 
     def shutdown(self):
-        if self.fault_report_socket is not None:
-            self.fault_report_socket.close()
+        if self.engine_fault_socket is not None:
+            self.engine_fault_socket.close()
         super().shutdown()
 
 
@@ -1087,7 +1089,7 @@ class EngineCoreProc(EngineCore):
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
                 engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
                 assert engine_core_sentinel_ids is not None
-                assert addresses.fault_report_addr is not None
+                assert addresses.engine_fault_socket_addr is not None
                 assert addresses.client_cmd_addr is not None
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
@@ -1097,13 +1099,14 @@ class EngineCoreProc(EngineCore):
                     cmd_q=self.cmd_q,
                     busy_loop_active=self.busy_loop_active,
                     engine_input_q=self.input_queue,
-                    fault_report_addr=addresses.fault_report_addr,
+                    engine_fault_socket_addr=addresses.engine_fault_socket_addr,
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=worker_cmd_addr,
-                    dealer_identity=engine_core_sentinel_ids[self.engine_index],
+                    dealer_socket_identity=engine_core_sentinel_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                     dp_size=vllm_config.parallel_config.data_parallel_size,
+                    fault_tolerance_config=vllm_config.fault_tolerance_config,
                 )
                 vllm_config.fault_tolerance_config.worker_cmd_addr = worker_cmd_addr
                 # Do not shut down the engine immediately upon failure.

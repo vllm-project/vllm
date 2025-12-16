@@ -22,7 +22,7 @@ import zmq
 import zmq.asyncio
 from ray.util.state import get_actor
 
-from vllm.config import VllmConfig
+from vllm.config import FaultToleranceConfig, VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -381,32 +381,42 @@ class ClientSentinel(BaseSentinel):
         engine_exception_q: queue.Queue[FaultInfo],
         fault_pub_addr: str,
         engine_status_dict: ThreadSafeDict[int, str],
+        fault_tolerance_config: FaultToleranceConfig,
     ):
-        super().__init__(None, cmd_addr, None, None)
+        super().__init__(
+            upstream_cmd_addr=None,
+            downstream_cmd_addr=cmd_addr,
+            dealer_socket_identity=None,
+            sentinel_tag=None,
+            fault_tolerance_config=fault_tolerance_config,
+        )
         self.is_faulted = threading.Event()
         self.engine_registry = engine_registry
+        self.engine_exception_q: queue.Queue[FaultInfo] = engine_exception_q
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
+        self.engine_identity_to_index: dict[bytes, int] = {
+            identity: i for i, identity in self.engine_registry.items()
+        }
+
         self.fault_receiver_socket = make_zmq_socket(
             ctx=self.ctx,
             path=fault_receiver_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )
-
         self.fault_pub_socket = make_zmq_socket(
             ctx=self.ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
         )
 
-        self.engine_exception_q: queue.Queue[FaultInfo] = engine_exception_q
-
-        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
-
-        # ensure handle_fault is executed sequentially
+        # All fault-tolerance related instructions (e.g. pause / retry) MUST be
+        # executed strictly sequentially.
+        # All instructions, regardless of which thread they originate from, are
+        # enqueued into this queue.
         self._task_queue: asyncio.Queue = asyncio.Queue()
         self._loop = asyncio.get_event_loop()
+        # The dispatcher runs in the event loop and dequeues tasks one by one,
+        # executing them in FIFO order
         self._dispatcher_task = self._loop.create_task(self._dispatcher())
-        self.engine_identity_to_index: dict[bytes, int] = {
-            identity: i for i, identity in self.engine_registry.items()
-        }
 
         threading.Thread(
             target=self.run, daemon=True, name="ClientSentinelMonitorThread"
@@ -420,13 +430,18 @@ class ClientSentinel(BaseSentinel):
         3. Execute the pause command immediately upon detecting an fault message
         """
         while not self.sentinel_dead:
-            if not self.fault_listener():
+            try:
+                self.listen_and_publish_fault_status()
+                # Pause healthy engines on fault.
+                # Pause can be invoked again during fault-tolerance handling,
+                # so it's unnecessary to track whether all engines are currently
+                # paused.
+                self._submit_fault(
+                    "pause", self.ft_config.gloo_comm_timeout, soft_pause=False
+                )
+            except zmq.ZMQError:
+                # Socket is closed.
                 break
-            # Pause healthy engines on fault.
-            # Pause can be invoked again during fault-tolerance handling,
-            # so it's unnecessary to track whether all engines are currently
-            # paused.
-            self._submit_fault("pause", 5, soft_pause=False)
 
     def _submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
         """
@@ -455,7 +470,9 @@ class ClientSentinel(BaseSentinel):
                 if fut:
                     fut.set_exception(e)
 
-    def retry(self, timeout: int = 1, new_stateless_dp_group_port: int = 8000) -> bool:
+    def retry(
+        self, timeout: int = 1, new_stateless_dp_group_port: int = 8000, **kwargs
+    ) -> bool:
         if "Dead" in self.engine_status_dict.values():
             self.logger(
                 "Engine core is dead; retry won't work.",
@@ -521,7 +538,7 @@ class ClientSentinel(BaseSentinel):
             self.is_faulted.clear()
         return result
 
-    def fault_listener(self) -> bool:
+    def listen_and_publish_fault_status(self):
         try:
             _, sender_identity, message = recv_router_dealer_message(
                 self.fault_receiver_socket
@@ -541,8 +558,7 @@ class ClientSentinel(BaseSentinel):
         except zmq.ZMQError:
             # Socket was closed during polling, exit loop.
             self.logger("Fault receiver socket closed, stopping thread.", level="info")
-            return False
-        return True
+            raise
 
     def shutdown(self):
         self.fault_receiver_socket.close()
@@ -763,13 +779,12 @@ class MPClient(EngineCoreClient):
 
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
                 self.engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
-                assert addresses.fault_report_addr is not None, (
-                    "addresses.fault_report_addr should not be None at fault tolerance"
-                    " scenario"
+                assert addresses.engine_fault_socket_addr is not None, (
+                    "engine_fault_socket_addr should not be None at "
+                    "fault tolerance scenario"
                 )
                 assert addresses.client_cmd_addr is not None, (
-                    "addresses.client_cmd_addr should not be None at fault tolerance"
-                    " scenario"
+                    "client_cmd_addr should not be None at fault tolerance scenario"
                 )
                 self.engine_registry = addresses.engine_core_sentinel_identities
                 assert self.engine_registry is not None
@@ -781,12 +796,13 @@ class MPClient(EngineCoreClient):
                 for engine_id in range(vllm_config.parallel_config.data_parallel_size):
                     self.engine_status_dict[engine_id] = "Healthy"
                 self.client_sentinel = ClientSentinel(
-                    addresses.fault_report_addr,
-                    addresses.client_cmd_addr,
-                    self.engine_registry,
-                    self.engine_exception_q,
-                    addresses.fault_pub_socket_addr,
-                    self.engine_status_dict,
+                    fault_receiver_addr=addresses.engine_fault_socket_addr,
+                    cmd_addr=addresses.client_cmd_addr,
+                    engine_registry=self.engine_registry,
+                    engine_exception_q=self.engine_exception_q,
+                    fault_pub_addr=addresses.fault_pub_socket_addr,
+                    engine_status_dict=self.engine_status_dict,
+                    fault_tolerance_config=vllm_config.fault_tolerance_config,
                 )
                 self.resources.client_sentinel = self.client_sentinel
             success = True

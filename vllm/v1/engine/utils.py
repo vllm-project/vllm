@@ -76,14 +76,17 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
-    #
-    fault_report_addr: str | None = None
-    # ZMQ client_cmd socket address of client sentinel
-    client_cmd_addr: str | None = None
-    # identities of engine_core_sentinel
-    engine_core_sentinel_identities: dict[int, bytes] | None = None
+
     # ZMQ fault_pub_socket address of client sentinel
     fault_pub_socket_addr: str | None = None
+    # ZMQ client_cmd socket address of client sentinel
+    client_cmd_addr: str | None = None
+    # ZMQ engine_fault socket address of EngineCoreSentinel
+    engine_fault_socket_addr: str | None = None
+    # Identities of engine core DEALER sockets, keyed by engine index.
+    # These identities are used by the ClientSentinel (ROUTER) to route
+    # messages to the corresponding engine core.
+    engine_core_sentinel_identities: dict[int, bytes] | None = None
 
 
 @dataclass
@@ -923,7 +926,7 @@ def launch_core_engines(
     )
 
     if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
-        addresses.fault_report_addr = get_engine_client_zmq_addr(
+        addresses.engine_fault_socket_addr = get_engine_client_zmq_addr(
             local_only=False,
             host=vllm_config.parallel_config.data_parallel_master_ip,
             port=vllm_config.fault_tolerance_config.internal_fault_report_port,

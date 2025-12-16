@@ -9,6 +9,7 @@ import time
 import pytest
 import zmq
 
+from vllm.config import FaultToleranceConfig
 from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.v1.engine.core_client import ClientSentinel
 from vllm.v1.engine.utils import FaultInfo
@@ -40,6 +41,7 @@ def create_client_sentinel(
         engine_exception_q=engine_exception_q,
         fault_pub_addr=FAULT_PUB_ADDR,
         engine_status_dict=engine_status_dict,
+        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
     )
 
 
@@ -193,7 +195,7 @@ async def test_handle_fault_async(instruction):
         nonlocal uuid
         while uuid is None:
             time.sleep(0.1)
-        execute_result = {"sentinel_index": 0, "success": True, "method_uuid": uuid}
+        execute_result = {"sentinel_tag": 0, "success": True, "method_uuid": uuid}
         cmd_socket.send_multipart([b"", json.dumps(execute_result).encode("utf-8")])
 
     threading.Thread(target=receive_cmd, args=(cmd_socket,), daemon=True).start()

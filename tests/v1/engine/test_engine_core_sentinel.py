@@ -9,6 +9,7 @@ import time
 import pytest
 import zmq
 
+from vllm.config import FaultToleranceConfig
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine.core import (
     EngineCoreSentinel,
@@ -18,8 +19,8 @@ from vllm.v1.serial_utils import serialize_method_call
 
 CLIENT_CMD_ADDR = "tcp://127.0.0.1:8844"
 WORKER_CMD_ADDR = "tcp://127.0.0.1:8845"
-FAULT_REPORT_ADDR = "tcp://127.0.0.1:8846"
-SENTINEL_IDENTITY = b"engine_sentinel_0"
+ENGINE_FAULT_SOCKET_ADDR = "tcp://127.0.0.1:8846"
+DEALER_SOCKET_IDENTITY = b"engine_sentinel_0"
 
 
 def create_engine_core_sentinel(
@@ -33,11 +34,12 @@ def create_engine_core_sentinel(
         engine_input_q=queue.Queue(),
         client_cmd_addr=CLIENT_CMD_ADDR,
         worker_cmd_addr=WORKER_CMD_ADDR,
-        fault_report_addr=FAULT_REPORT_ADDR,
-        dealer_identity=SENTINEL_IDENTITY,
+        engine_fault_socket_addr=ENGINE_FAULT_SOCKET_ADDR,
+        dealer_socket_identity=DEALER_SOCKET_IDENTITY,
         tp_size=1,
         pp_size=1,
         dp_size=1,
+        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
     )
 
 
@@ -53,7 +55,7 @@ def test_engine_core_sentinel_initialization():
     assert not sentinel.communicator_aborted
     assert sentinel.engine_running is True
 
-    assert sentinel.fault_report_socket.type == zmq.DEALER
+    assert sentinel.engine_fault_socket.type == zmq.DEALER
     assert sentinel.upstream_cmd_socket.type == zmq.DEALER
     assert sentinel.downstream_cmd_socket.type == zmq.ROUTER
 
@@ -76,7 +78,7 @@ def test_run_handle_instruction(instruction):
 
     ctx = zmq.Context()
     worker_cmd_socket = ctx.socket(zmq.DEALER)
-    worker_cmd_socket.setsockopt(zmq.IDENTITY, b"0_0")
+    worker_cmd_socket.setsockopt(zmq.IDENTITY, b"PP0_TP0")
     worker_cmd_socket.connect(WORKER_CMD_ADDR)
 
     def mock_worker_receiver(cmd_socket):
@@ -94,7 +96,7 @@ def test_run_handle_instruction(instruction):
         param["new_stateless_dp_group_port"] = 23456
     serial_instruction = serialize_method_call(instruction, **param)
     client_socket.send_multipart(
-        [SENTINEL_IDENTITY, b"", serial_instruction.encode("utf-8")]
+        [DEALER_SOCKET_IDENTITY, b"", serial_instruction.encode("utf-8")]
     )
     fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
     if instruction == "retry":
@@ -107,7 +109,7 @@ def test_run_handle_instruction(instruction):
     time.sleep(0.1)
     identity, _, msg = client_socket.recv_multipart()
     result_dict = json.loads(msg.decode("utf-8"))
-    assert result_dict["sentinel_index"] == "0"
+    assert result_dict["sentinel_tag"] == "DP_0"
     assert result_dict["success"]
 
     time.sleep(0.1)
