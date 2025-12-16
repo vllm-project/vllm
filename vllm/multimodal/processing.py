@@ -1186,6 +1186,32 @@ class BaseProcessingInfo:
         return self.ctx.get_hf_processor(**kwargs)
 
     @abstractmethod
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        """
+        Implement this function to enable LoRA support 
+        for the tower module of the multi-modal model
+
+        Given the number of image tokens, output the number of multi-modal encoder tokens
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model
+
+        Given the number of vision tokens, output the number of multi-modal connector tokens
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """
         Return the maximum supported number of items for each modality.
@@ -1394,7 +1420,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         num_image_tokens: int,
     ) -> int:
-        """Given the number of image tokens, output the number of multi-modal encoder tokens"""
+        """
+        Implement this function to enable LoRA support 
+        for the tower module of the multi-modal model
+
+        Given the number of image tokens, output the number of multi-modal encoder tokens
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -1402,7 +1433,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         num_vision_tokens: int,
     ) -> int:
-        """Given the number of vision tokens, output the number of multi-modal connector tokens"""
+        """
+        Implement this function to enable LoRA support
+        for the connector module of the multi-modal model
+
+        Given the number of vision tokens, output the number of multi-modal connector tokens
+        """
         raise NotImplementedError
 
     @abstractmethod
