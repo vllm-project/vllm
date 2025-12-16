@@ -1108,10 +1108,6 @@ def test_eplb_num_redundant_experts_default():
     eplb_config_explicit = EPLBConfig(num_redundant_experts=4)
     assert eplb_config_explicit.num_redundant_experts == 4
 
-    # Test validation for negative value
-    with pytest.raises(ValueError, match="non-negative"):
-        EPLBConfig(num_redundant_experts=-1)
-
     # Test ParallelConfig validation - EPLB disabled with None is OK
     parallel_config = ParallelConfig(
         enable_eplb=False,
@@ -1121,43 +1117,44 @@ def test_eplb_num_redundant_experts_default():
     assert parallel_config.eplb_config.num_redundant_experts is None
 
     # Test ParallelConfig validation - EPLB disabled with non-zero value
-    with pytest.raises(ValueError, match="EPLB is not enabled"):
+    with pytest.raises(ValidationError, match="EPLB is not enabled"):
         ParallelConfig(
             enable_eplb=False,
             enable_expert_parallel=False,
             eplb_config=EPLBConfig(num_redundant_experts=4),
         )
 
+    # Test validation for negative value (validated in ParallelConfig)
+    with pytest.raises(ValidationError, match="non-negative"):
+        ParallelConfig(
+            enable_eplb=False,
+            enable_expert_parallel=False,
+            eplb_config=EPLBConfig(num_redundant_experts=-1),
+        )
 
-def test_eplb_num_redundant_experts_auto_computation():
-    """Test the automatic computation formula for num_redundant_experts.
 
-    The minimum valid value formula is:
-        min_redundant = max(0, ep_size - num_logical_experts)
+@pytest.mark.parametrize("num_experts,ep_size,expected", [
+    (8, 8, 0),    # Divisible: 8 % 8 = 0
+    (8, 16, 8),   # ep_size > experts: (16 - 8%16) % 16 = 8
+    (8, 6, 4),    # Non-divisible: (6 - 8%6) % 6 = (6-2)%6 = 4
+    (16, 8, 0),   # Divisible: 16 % 8 = 0
+    (10, 8, 6),   # Non-divisible: (8 - 10%8) % 8 = (8-2)%8 = 6
+    (7, 4, 1),    # Non-divisible: (4 - 7%4) % 4 = (4-3)%4 = 1
+    (1, 4, 3),    # Single expert: (4 - 1%4) % 4 = 3
+])
+def test_eplb_num_redundant_experts_auto_computation(num_experts, ep_size, expected):
+    """Test the formula: (ep_size - num_experts % ep_size) % ep_size.
 
-    This ensures at least 1 local physical expert per EP rank:
-        (num_logical_experts + num_redundant_experts) / ep_size >= 1
+    This ensures (num_logical_experts + num_redundant_experts) is divisible
+    by ep_size, supporting non-standard ep_size values.
     """
-
-    # Test the formula logic directly
-    def compute_min_redundant(num_logical_experts: int, ep_size: int) -> int:
-        return max(0, ep_size - num_logical_experts)
-
-    # Case 1: num_logical_experts >= ep_size -> min_redundant = 0
-    assert compute_min_redundant(num_logical_experts=8, ep_size=4) == 0
-    assert compute_min_redundant(num_logical_experts=8, ep_size=8) == 0
-
-    # Case 2: num_logical_experts < ep_size -> need redundant experts
-    assert compute_min_redundant(num_logical_experts=4, ep_size=8) == 4
-    assert compute_min_redundant(num_logical_experts=2, ep_size=8) == 6
-
-    # Verify the formula ensures at least 1 expert per rank
-    for num_experts in [2, 4, 8, 16]:
-        for ep_size in [2, 4, 8, 16]:
-            min_redundant = compute_min_redundant(num_experts, ep_size)
-            num_physical = num_experts + min_redundant
-            local_experts = num_physical // ep_size
-            assert local_experts >= 1, (
-                f"Failed: {num_experts=}, {ep_size=}, {min_redundant=}, "
-                f"{local_experts=}"
-            )
+    # Compute using the actual formula from model.py
+    result = (ep_size - num_experts % ep_size) % ep_size
+    assert result == expected, (
+        f"Formula failed for experts={num_experts}, ep_size={ep_size}: "
+        f"got {result}, expected {expected}"
+    )
+    # Verify divisibility constraint
+    assert (num_experts + result) % ep_size == 0, (
+        f"Divisibility check failed: ({num_experts} + {result}) % {ep_size} != 0"
+    )

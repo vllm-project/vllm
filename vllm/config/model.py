@@ -1044,9 +1044,9 @@ class ModelConfig:
                     parallel_config.tensor_parallel_size
                     * parallel_config.data_parallel_size
                 )
-                # Minimum value ensures at least 1 local physical expert per rank:
-                # (num_logical_experts + num_redundant_experts) / ep_size >= 1
-                min_redundant = max(0, ep_size - num_logical_experts)
+                # Ensure (num_logical_experts + num_redundant_experts) is
+                # divisible by ep_size, supporting non-standard ep_size values
+                min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
                 parallel_config.eplb_config.num_redundant_experts = min_redundant
                 logger.info(
                     "EPLB num_redundant_experts not specified, "

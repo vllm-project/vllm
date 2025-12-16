@@ -66,15 +66,6 @@ class EPLBConfig:
     If None (default), the minimum valid value will be computed automatically
     based on the number of logical experts and the expert parallel size."""
 
-    @model_validator(mode="after")
-    def _validate_num_redundant_experts(self) -> Self:
-        if self.num_redundant_experts is not None and self.num_redundant_experts < 0:
-            raise ValueError(
-                f"num_redundant_experts must be non-negative, "
-                f"got {self.num_redundant_experts}"
-            )
-        return self
-
     log_balancedness: bool = False
     """
     Log the balancedness each step of expert parallelism.
@@ -325,7 +316,17 @@ class ParallelConfig:
                     f"to be greater than 1, but got "
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
-        else:
+        # Validate num_redundant_experts is non-negative if explicitly set
+        if (
+            self.eplb_config.num_redundant_experts is not None
+            and self.eplb_config.num_redundant_experts < 0
+        ):
+            raise ValueError(
+                f"num_redundant_experts must be non-negative, "
+                f"got {self.eplb_config.num_redundant_experts}"
+            )
+
+        if not self.enable_eplb:
             # When EPLB is disabled, num_redundant_experts must be None or 0
             if (
                 self.eplb_config.num_redundant_experts is not None
