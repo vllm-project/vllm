@@ -81,8 +81,8 @@ def _reload_core_client_module():
 
 
 def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
-    timeout_value = 654321
-    monkeypatch.setenv("VLLM_ENGINE_CORE_TIMEOUT_MS", str(timeout_value))
+    timeout_value = 654
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", str(timeout_value))
 
     # Ensure that the environment variable is loaded if caching is enabled
     _reload_envs_module()
@@ -92,6 +92,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
 
     class ShadowSocket:
         def poll(self, timeout: int) -> int:
+            # Capture the timeout value for each poll call
             poll_timeouts.append(timeout)
             return 1
 
@@ -144,7 +145,8 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         },
     )
     try:
-        assert poll_timeouts == [timeout_value]
+        # timeout_value is in seconds, but poll receives milliseconds
+        assert poll_timeouts == [timeout_value * 1000]
     finally:
         client.shutdown()
 
