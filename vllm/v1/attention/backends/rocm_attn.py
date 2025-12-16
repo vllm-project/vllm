@@ -64,6 +64,7 @@ class RocmAttentionMetadata:
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _supports_async_sps_zero_bubble = True
 
     def __init__(
         self,
