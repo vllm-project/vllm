@@ -145,12 +145,20 @@ class WorkspaceManager:
 
             for ubatch_id in range(self._num_ubatches):
                 current_workspace = self._current_workspaces[ubatch_id]
-                if current_workspace is None:
+                if (
+                    current_workspace is None
+                    or self._workspace_size_bytes(current_workspace) < required_bytes
+                ):
+                    # Delete old tensor before allocating new one to avoid
+                    # memory spike from resize_(). resize_() allocates new
+                    # memory before freeing old, which can cause OOM.
+                    # Must clear the list reference first since local var
+                    # is just a copy of the reference.
+                    self._current_workspaces[ubatch_id] = None
+                    del current_workspace
                     self._current_workspaces[ubatch_id] = torch.empty(
                         (required_bytes,), dtype=torch.uint8, device=self._device
                     )
-                elif self._workspace_size_bytes(current_workspace) < required_bytes:
-                    current_workspace.resize_(required_bytes)
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(

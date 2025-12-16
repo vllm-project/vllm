@@ -5,6 +5,7 @@
 """PyTorch Ultravox model."""
 
 import copy
+import inspect
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypeAlias
@@ -380,11 +381,17 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
         )
         hidden_states = hidden_states + positions
 
+        # Backward compatibility for Transformers v4 where layer_head_mask
+        # was a required argument for WhisperEncoderLayer.forward
+        kwargs = {}
+        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
+            kwargs["layer_head_mask"] = None
+
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
-                layer_head_mask=None,
+                **kwargs,
             )
             hidden_states = layer_outputs[0]
 
@@ -479,11 +486,17 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
         attention_mask = self.get_attention_mask_by_audio_len(audio_lens, hidden_states)
 
+        # Backward compatibility for Transformers v4 where layer_head_mask
+        # was a required argument for WhisperEncoderLayer.forward
+        kwargs = {}
+        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
+            kwargs["layer_head_mask"] = None
+
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
-                layer_head_mask=None,
+                **kwargs,
             )
 
             hidden_states = layer_outputs[0]

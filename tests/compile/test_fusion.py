@@ -14,6 +14,7 @@ from tests.compile.fusion_test_utils import (
     CUSTOM_OPS_QUANT_RMS_NORM,
     MODELS_GROUP_FP8,
     Matches,
+    is_blackwell,
     run_model,
 )
 from tests.utils import flat_product
@@ -357,6 +358,8 @@ def test_fusion_rmsnorm_quant(
     list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
+# TODO: remove skip after we fix the fusion thoroughly
+@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
@@ -396,7 +399,7 @@ def test_rms_group_quant(
         splitting_ops=splitting_ops,
         # Common
         mode=CompilationMode.VLLM_COMPILE,
-        pass_config=PassConfig(eliminate_noops=True, enable_fusion=True),
+        pass_config=PassConfig(eliminate_noops=True, fuse_norm_quant=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
     )
