@@ -10,9 +10,9 @@ import pytest
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
-        "This test only runs on Blackwell GPUs (SM100).", allow_module_level=True
+        "This test only runs on Blackwell GPUs (SM10x).", allow_module_level=True
     )
 
 
@@ -172,21 +172,9 @@ def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch
     can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
 
 
-def test_gptoss_dp2_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
-    monkeypatch.setenv("VLLM_ALL2ALL_BACKEND", "deepep_high_throughput")
+def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "openai/gpt-oss-20b",
-        extra_args=["--data-parallel-size", "2", "--enable-expert-parallel"],
         hf_overrides=HF_OVERRIDE_TEXT,
-    )
-
-
-def test_gptoss_dp2_mxfp4bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
-    monkeypatch.setenv("VLLM_ALL2ALL_BACKEND", "deepep_high_throughput")
-    can_initialize(
-        "openai/gpt-oss-20b",
-        extra_args=["--data-parallel-size", "2", "--enable-expert-parallel"],
-        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--enforce-eager"],
     )

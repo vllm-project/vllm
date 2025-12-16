@@ -27,8 +27,8 @@ from vllm.entrypoints.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
+from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -176,7 +176,7 @@ class FrontendArgs:
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
-    """Enable the /get_tokenizer_info endpoint. May expose chat
+    """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If True, log model outputs (generations).
@@ -189,6 +189,11 @@ class FrontendArgs:
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    tokens_only: bool = False
+    """
+    If set to True, only enable the Tokens In<>Out endpoint. 
+    This is intended for use in a Disaggregated Everything setup.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -219,7 +224,7 @@ class FrontendArgs:
         frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        valid_tool_parsers = list(ToolParserManager.list_registered())
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"

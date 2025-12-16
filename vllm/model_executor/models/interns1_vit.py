@@ -16,6 +16,7 @@ from transformers.utils import torch_int
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -43,7 +44,7 @@ class InternS1VisionPatchEmbeddings(nn.Module):
         self.num_patches = num_patches
         self.patch_shape = patch_shape
 
-        self.projection = nn.Conv2d(
+        self.projection = Conv2dLayer(
             num_channels, hidden_size, kernel_size=patch_size, stride=patch_size
         )
 

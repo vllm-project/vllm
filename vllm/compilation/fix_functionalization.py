@@ -103,6 +103,19 @@ class FixFunctionalizationPass(VllmInductorPass):
             ]:
                 mutated_args = {1: "result"}
                 self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "flashinfer_trtllm_fused_allreduce_norm")
+                and at_target
+                == torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            ):
+                mutated_args = {
+                    1: "allreduce_in",
+                    2: "residual",
+                    3: "norm_out",
+                    4: "quant_out",
+                    5: "scale_out",
+                }
+                self.defunctionalize(graph, node, mutated_args)
             # For some reason we need to specify the args for both
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.
@@ -132,6 +145,23 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
+            # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
+            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+                mutated_args = {1: "qkv"}
+                args = (
+                    "qkv",
+                    "num_heads_q",
+                    "num_heads_k",
+                    "num_heads_v",
+                    "head_dim",
+                    "eps",
+                    "q_weight",
+                    "k_weight",
+                    "cos_sin_cache",
+                    "is_neox",
+                    "position_ids",
+                )
+                self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             else:
                 continue  # skip the count
 

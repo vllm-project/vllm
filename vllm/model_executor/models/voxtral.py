@@ -51,10 +51,8 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import (
-    MistralTokenizer,
-    cached_tokenizer_from_config,
-)
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix
@@ -333,8 +331,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 class VoxtralForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsTranscription
 ):
-    merge_by_field_config = True
-
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     packed_modules_mapping = {
@@ -399,7 +395,7 @@ class VoxtralForConditionalGeneration(
 
         return hidden_states
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self, **kwargs
     ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
