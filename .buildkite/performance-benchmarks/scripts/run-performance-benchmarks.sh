@@ -49,7 +49,11 @@ check_cpus() {
     echo "Need at least 1 NUMA to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type="cpu"
+  if [[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]]; then
+    declare -g gpu_type="arm64-cpu"
+  else
+    declare -g gpu_type="cpu"
+  fi
   echo "GPU type is $gpu_type"
 }
 
@@ -221,7 +225,7 @@ run_latency_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
+    if [ "$ON_CPU" == "1" ] || [ "$ON_ARM64_CPU" == "1" ]; then
       pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
@@ -298,7 +302,7 @@ run_throughput_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
+    if [ "$ON_CPU" == "1" ] || [ "$ON_ARM64_CPU" == "1" ]; then
       pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
@@ -423,7 +427,7 @@ run_serving_tests() {
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
+    if [ "$ON_CPU" == "1" ] || [ "$ON_ARM64_CPU" == "1" ]; then
       pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
@@ -539,7 +543,7 @@ main() {
      ARCH='-cpu'
   else
     if [ "$ON_ARM64_CPU" == "1" ];then
-     check_arm64_cpus
+     check_cpus
      ARCH='-arm64-cpu'
   else
      check_gpus
