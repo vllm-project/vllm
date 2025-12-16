@@ -522,11 +522,18 @@ async def test_check_health():
 @pytest.mark.asyncio
 async def test_abort_final_output(output_kind: RequestOutputKind):
     """Test that abort() returns a final output with correct information."""
+    from vllm.v1.engine import FinishReason
+    from vllm.v1.metrics.stats import IterationStats
 
     with ExitStack() as after:
         with set_default_torch_num_threads(1):
             engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
         after.callback(engine.shutdown)
+
+        # Mock logger_manager.record to verify it's called
+        if engine.logger_manager:
+            original_record = engine.logger_manager.record
+            engine.logger_manager.record = MagicMock(side_effect=original_record)
 
         request_id = "test-abort-final-output"
 
@@ -579,6 +586,42 @@ async def test_abort_final_output(output_kind: RequestOutputKind):
             assert len(final_output.outputs[0].token_ids) > 0
 
         assert not engine.output_processor.has_unfinished_requests()
+
+        # Verify that logger_manager.record was called for the aborted request
+        if engine.logger_manager and isinstance(
+            engine.logger_manager.record, MagicMock
+        ):
+            # Wait a bit more to ensure abort operations complete
+            await asyncio.sleep(0.2)
+
+            assert engine.logger_manager.record.called, (
+                "logger_manager.record should be called when aborting requests"
+            )
+
+            # Find a call that has a finished request with finish_reason=ABORT
+            found_abort_record = False
+            for call in engine.logger_manager.record.call_args_list:
+                call_kwargs = call.kwargs
+                iteration_stats = call_kwargs.get("iteration_stats")
+                if iteration_stats is not None and isinstance(
+                    iteration_stats, IterationStats
+                ):
+                    # Check if any finished request has finish_reason=ABORT
+                    for finished_request in iteration_stats.finished_requests:
+                        if finished_request.finish_reason == FinishReason.ABORT:
+                            found_abort_record = True
+                            # Verify scheduler_stats is None for abort records
+                            assert call_kwargs["scheduler_stats"] is None, (
+                                "scheduler_stats should be None for aborted requests"
+                            )
+                            break
+                    if found_abort_record:
+                        break
+
+            assert found_abort_record, (
+                "Expected to find a logger_manager.record call with a finished "
+                "request having finish_reason=FinishReason.ABORT"
+            )
 
 
 async def collect_outputs(
