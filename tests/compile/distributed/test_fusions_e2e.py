@@ -562,7 +562,7 @@ def test_rms_group_quant(
         splitting_ops=splitting_ops,
         # Common
         mode=CompilationMode.VLLM_COMPILE,
-        pass_config=PassConfig(eliminate_noops=True, enable_fusion=True),
+        pass_config=PassConfig(eliminate_noops=True, fuse_norm_quant=True),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
     )
