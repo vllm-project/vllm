@@ -124,6 +124,14 @@ class OpenAISpeechToText(OpenAIServing):
         triggers JIT compilation and library initialization which can take ~7s.
         This method warms up these operations during server initialization.
         """
+        # Skip warmup if librosa is not installed (optional dependency)
+        if isinstance(librosa, PlaceholderModule):
+            return
+
+        # Skip warmup if model doesn't support multimodal/audio inputs
+        if not self.model_config.is_multimodal_model:
+            return
+
         try:
             warmup_start = time.perf_counter()
             logger.info("Warming up audio preprocessing libraries...")
@@ -178,6 +186,14 @@ class OpenAISpeechToText(OpenAIServing):
         triggers multimodal processing initialization which can take ~2.5s.
         This method processes a dummy audio request to warm up the pipeline.
         """
+        # Skip warmup if model doesn't support multimodal/audio inputs
+        if not self.model_config.is_multimodal_model:
+            return
+
+        # Only warm up if model supports transcription methods
+        if not hasattr(self.model_cls, "get_generation_prompt"):
+            return
+
         try:
             from vllm.sampling_params import SamplingParams
 
