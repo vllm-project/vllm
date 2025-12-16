@@ -65,6 +65,8 @@ def run_rebalance_experts(
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
     # Move the global expert load window to CPU for computation.
+    # It has to be done in the main stream to avoid race condition
+    # with the main thread.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
     # Compute new expert mappings for the model
     (
