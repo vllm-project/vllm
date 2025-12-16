@@ -6,8 +6,8 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 from ....utils import RemoteOpenAIServer
 
@@ -271,7 +271,7 @@ async def test_streaming_product_tool_call():
 
 @pytest.fixture
 def qwen_tokenizer() -> TokenizerLike:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 
     return get_tokenizer("Qwen/Qwen3-32B")
 

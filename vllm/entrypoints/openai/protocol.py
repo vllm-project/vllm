@@ -25,6 +25,10 @@ from openai.types.responses import (
     ResponseContentPartDoneEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
+    ResponseMcpCallArgumentsDeltaEvent,
+    ResponseMcpCallArgumentsDoneEvent,
+    ResponseMcpCallCompletedEvent,
+    ResponseMcpCallInProgressEvent,
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -316,6 +320,7 @@ class ResponsesRequest(OpenAIBaseModel):
     max_tool_calls: int | None = None
     metadata: Metadata | None = None
     model: str | None = None
+    logit_bias: dict[str, float] | None = None
     parallel_tool_calls: bool | None = True
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
@@ -329,6 +334,7 @@ class ResponsesRequest(OpenAIBaseModel):
     tools: list[Tool] = Field(default_factory=list)
     top_logprobs: int | None = 0
     top_p: float | None = None
+    top_k: int | None = None
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
 
@@ -383,6 +389,7 @@ class ResponsesRequest(OpenAIBaseModel):
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
         "top_p": 1.0,
+        "top_k": 0,
     }
 
     def to_sampling_params(
@@ -404,6 +411,10 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
             )
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -424,6 +435,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
+            top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
@@ -431,6 +443,7 @@ class ResponsesRequest(OpenAIBaseModel):
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
             structured_outputs=structured_outputs,
+            logit_bias=self.logit_bias,
         )
 
     def is_include_output_logprobs(self) -> bool:
@@ -1598,6 +1611,20 @@ def serialize_messages(msgs):
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
+class ResponseRawMessageAndToken(OpenAIBaseModel):
+    """Class to show the raw message.
+    If message / tokens diverge, tokens is the source of truth"""
+
+    message: str
+    tokens: list[int]
+    type: Literal["raw_message_tokens"] = "raw_message_tokens"
+
+
+ResponseInputOutputMessage: TypeAlias = (
+    list[ChatCompletionMessageParam] | list[ResponseRawMessageAndToken]
+)
+
+
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
@@ -1631,8 +1658,8 @@ class ResponsesResponse(OpenAIBaseModel):
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
     # see serialize_input_messages and serialize_output_messages
-    input_messages: list[ChatCompletionMessageParam] | None = None
-    output_messages: list[ChatCompletionMessageParam] | None = None
+    input_messages: ResponseInputOutputMessage | None = None
+    output_messages: ResponseInputOutputMessage | None = None
     # --8<-- [end:responses-extra-params]
 
     # NOTE: openAI harmony doesn't serialize TextContent properly,
@@ -1658,8 +1685,8 @@ class ResponsesResponse(OpenAIBaseModel):
         output: list[ResponseOutputItem],
         status: ResponseStatus,
         usage: ResponseUsage | None = None,
-        input_messages: list[ChatCompletionMessageParam] | None = None,
-        output_messages: list[ChatCompletionMessageParam] | None = None,
+        input_messages: ResponseInputOutputMessage | None = None,
+        output_messages: ResponseInputOutputMessage | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -1776,6 +1803,10 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseCodeInterpreterCallCodeDoneEvent
     | ResponseCodeInterpreterCallInterpretingEvent
     | ResponseCodeInterpreterCallCompletedEvent
+    | ResponseMcpCallArgumentsDeltaEvent
+    | ResponseMcpCallArgumentsDoneEvent
+    | ResponseMcpCallInProgressEvent
+    | ResponseMcpCallCompletedEvent
 )
 
 
@@ -2126,13 +2157,13 @@ class TranscriptionSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float
+    avg_logprob: float | None = None
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float
+    compression_ratio: float | None = None
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
@@ -2141,7 +2172,7 @@ class TranscriptionSegment(OpenAIBaseModel):
     end: float
     """End time of the segment in seconds."""
 
-    no_speech_prob: float
+    no_speech_prob: float | None = None
     """Probability of no speech in the segment.
 
     If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
@@ -2179,6 +2210,11 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
 
     words: list[TranscriptionWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+TranscriptionResponseVariant: TypeAlias = (
+    TranscriptionResponse | TranscriptionResponseVerbose
+)
 
 
 class TranslationResponseStreamChoice(OpenAIBaseModel):
@@ -2325,13 +2361,13 @@ class TranslationSegment(OpenAIBaseModel):
     id: int
     """Unique identifier of the segment."""
 
-    avg_logprob: float
+    avg_logprob: float | None = None
     """Average logprob of the segment.
 
     If the value is lower than -1, consider the logprobs failed.
     """
 
-    compression_ratio: float
+    compression_ratio: float | None = None
     """Compression ratio of the segment.
 
     If the value is greater than 2.4, consider the compression failed.
@@ -2340,7 +2376,7 @@ class TranslationSegment(OpenAIBaseModel):
     end: float
     """End time of the segment in seconds."""
 
-    no_speech_prob: float
+    no_speech_prob: float | None = None
     """Probability of no speech in the segment.
 
     If the value is higher than 1.0 and the `avg_logprob` is below -1, consider
@@ -2378,6 +2414,9 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+TranslationResponseVariant: TypeAlias = TranslationResponse | TranslationResponseVerbose
 
 
 ####### Tokens IN <> Tokens OUT #######
