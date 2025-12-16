@@ -524,7 +524,7 @@ class MultiModalDataParser:
         if isinstance(video, np.ndarray):
             return video, None
         if isinstance(video, torch.Tensor):
-            return video.numpy(), None
+            return video.cpu().numpy(), None
 
         assert_never(video)
 
