@@ -415,13 +415,18 @@ class CudaPlatformBase(Platform):
         dtype: torch.dtype,
         backend: Optional["AttentionBackendEnum"] = None,
     ) -> "AttentionBackendEnum":
-        if backend is not None:
-            assert backend in cls.get_supported_vit_attn_backends(), (
-                f"Backend {backend} is not supported for vit attention. "
-                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
-            )
+        supported_backends = cls.get_supported_vit_attn_backends()
+        if backend is not None and backend in supported_backends:
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
+        else:
+            logger.error(
+                "Backend %s is not supported for vit attention. "
+                "Supported backends are: %s."
+                "Falling back to automatic backend selection.",
+                backend,
+                supported_backends,
+            )
 
         # Try FlashAttention first
         if (cc := cls.get_device_capability()) and cc.major >= 8:
