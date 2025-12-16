@@ -301,18 +301,14 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
         ).flatten(),
-        gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
-        gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm1_weights=layer.w13_weight.data,
+        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
         gemm1_alpha=None,
         gemm1_beta=None,
         gemm1_clamp_limit=None,
-        gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
-        gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm2_weights=layer.w2_weight.data,
+        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
         gemm2_bias=None,
         output1_scale_scalar=layer.g1_scale_c.data,
         output1_scale_gate_scalar=layer.g1_alphas.data,
@@ -380,18 +376,14 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
         ).flatten(),
-        gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
-        gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm1_weights=layer.w13_weight.data,
+        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
         gemm1_alpha=None,
         gemm1_beta=None,
         gemm1_clamp_limit=None,
-        gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
-        gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(
-            torch.float8_e4m3fn
-        ),
+        gemm2_weights=layer.w2_weight.data,
+        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
         gemm2_bias=None,
         output1_scale_scalar=layer.g1_scale_c.data,
         output1_scale_gate_scalar=layer.g1_alphas.data,
