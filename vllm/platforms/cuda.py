@@ -375,7 +375,7 @@ class CudaPlatformBase(Platform):
         if backend is not None and backend in supported_backends:
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
-        else:
+        elif backend is not None:
             logger.error(
                 "Backend %s is not supported for vit attention. "
                 "Supported backends are: %s."
