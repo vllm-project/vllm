@@ -392,10 +392,6 @@ def _support_torch_compile(
             compile artifact from scratch.
             """
 
-            from .caching import compilation_config_hash_factors
-
-            factors: list[str] = compilation_config_hash_factors(self.vllm_config)
-
             # Keep AOT cache key in sync with JIT: env factors + config hash + model.
             env_hash, config_hash, *_ = compute_env_and_config_hashes(self.vllm_config)
             factors: list[str] = [env_hash, config_hash]
