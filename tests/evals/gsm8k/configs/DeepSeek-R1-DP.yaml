@@ -8,5 +8,3 @@ server_args: >-
   --data-parallel-size 8
   --enable-expert-parallel
   --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
-env:
-  VLLM_USE_DEEP_GEMM: "1"
