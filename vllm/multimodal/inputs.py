@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from itertools import accumulate
 from typing import (
     TYPE_CHECKING,
@@ -174,6 +174,48 @@ class PlaceholderRange:
             return self.length
 
         return int(self.is_embed.sum().item())
+
+    @cached_property
+    def embeds_cumsum(self) -> Optional["torch.Tensor"]:
+        """Cumulative sum of is_embed mask for efficient range queries.
+
+        Returns:
+            Cumulative sum tensor if is_embed mask exists, None otherwise.
+        """
+        if self.is_embed is None:
+            return None
+
+        return self.is_embed.cumsum(dim=0)
+
+    def get_embeds_indices_in_range(
+        self, start_idx: int, end_idx: int
+    ) -> tuple[int, int]:
+        """Map token range [start_idx, end_idx) to embedding indices.
+
+        Uses the cumulative sum of the is_embed mask to efficiently determine
+        which embeddings from the encoder output correspond to a given token
+        range within this placeholder.
+
+        Args:
+            start_idx: Start of token range (relative to placeholder offset).
+            end_idx: End of token range (exclusive, relative to placeholder offset).
+
+        Returns:
+            Tuple of (embeds_start_idx, embeds_end_idx) representing the
+            range of embeddings needed from encoder output.
+        """
+        assert start_idx <= end_idx
+
+        if self.embeds_cumsum is None:
+            # No sparse mask - all tokens are embeddings
+            return start_idx, end_idx
+
+        embeds_start_idx = (
+            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
+        )
+        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+
+        return embeds_start_idx, embeds_end_idx
 
     def extract_embeds_range(self) -> list[tuple[int, int]]:
         """Extract the start and end indices of the embedded region in prompt.

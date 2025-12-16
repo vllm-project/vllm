@@ -446,6 +446,78 @@ def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
     assert pr.extract_embeds_range() == expected
 
 
+@pytest.mark.parametrize(
+    "is_embed,expected_cumsum",
+    [
+        (None, None),
+        (torch.tensor([True, True, True, True, True]), [1, 2, 3, 4, 5]),
+        (torch.tensor([False, False, False, False, False]), [0, 0, 0, 0, 0]),
+        (torch.tensor([False, True, False, True, True]), [0, 1, 1, 2, 3]),
+        (torch.tensor([True, False, False, False]), [1, 1, 1, 1]),
+        (torch.tensor([False, False, False, True]), [0, 0, 0, 1]),
+        (torch.tensor([True]), [1]),
+    ],
+)
+def test_placeholder_range_embeds_cumsum(is_embed, expected_cumsum):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+
+    if expected_cumsum is None:
+        assert pr.embeds_cumsum is None
+    else:
+        assert pr.embeds_cumsum is not None
+        assert pr.embeds_cumsum.tolist() == expected_cumsum
+
+        # Verify it's cached (calling twice should return same object)
+        assert pr.embeds_cumsum is pr.embeds_cumsum
+
+
+@pytest.mark.parametrize(
+    "is_embed,start_idx,end_idx,expected",
+    [
+        (None, 0, 5, (0, 5)),
+        (None, 1, 4, (1, 4)),
+        (None, 0, 0, (0, 0)),
+        (torch.tensor([True, True, True, True, True]), 0, 5, (0, 5)),
+        (torch.tensor([True, True, True, True, True]), 1, 4, (1, 4)),
+        (torch.tensor([False, False, False, False, False]), 0, 5, (0, 0)),
+        (torch.tensor([False, False, False, False, False]), 1, 4, (0, 0)),
+        (torch.tensor([False, True, False, True, True]), 0, 5, (0, 3)),
+        (torch.tensor([False, True, False, True, True]), 1, 4, (0, 2)),
+        (torch.tensor([False, True, False, True, True]), 0, 1, (0, 0)),
+        (torch.tensor([False, True, False, True, True]), 1, 2, (0, 1)),
+        (torch.tensor([False, True, False, True, True]), 3, 5, (1, 3)),
+        (torch.tensor([False, True, False, True, True]), 2, 2, (1, 1)),
+        (torch.tensor([True]), 0, 1, (0, 1)),
+        (torch.tensor([False]), 0, 1, (0, 0)),
+        (torch.tensor([True, False, True, False, False, True, True]), 0, 7, (0, 4)),
+        (torch.tensor([True, False, True, False, False, True, True]), 2, 5, (1, 2)),
+        (torch.tensor([True, False, True, False, False, True, True]), 5, 7, (2, 4)),
+    ],
+)
+def test_placeholder_range_get_embeds_indices_in_range(
+    is_embed, start_idx, end_idx, expected
+):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+
+    result = pr.get_embeds_indices_in_range(start_idx, end_idx)
+    assert result == expected, (
+        f"For is_embed={is_embed.tolist() if is_embed is not None else None}, "
+        f"range [{start_idx}, {end_idx}): expected {expected}, got {result}"
+    )
+
+
+def test_placeholder_range_get_embeds_indices_assertion():
+    pr = PlaceholderRange(
+        offset=0, length=5, is_embed=torch.tensor([False, True, False, True, True])
+    )
+
+    # Should raise assertion error when start_idx > end_idx
+    with pytest.raises(AssertionError):
+        pr.get_embeds_indices_in_range(4, 2)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
