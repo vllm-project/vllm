@@ -9,6 +9,8 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
     --config-list-file=configs/models-small.txt
 """
 
+import shlex
+
 import yaml
 
 from tests.utils import RemoteOpenAIServer
@@ -51,9 +53,9 @@ def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
-    # Parse server arguments from config
+    # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
-    server_args = server_args_str.split() if server_args_str else []
+    server_args = shlex.split(server_args_str) if server_args_str else []
 
     # Add standard server arguments
     server_args.extend(
