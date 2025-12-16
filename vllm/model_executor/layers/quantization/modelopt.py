@@ -188,7 +188,24 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if len(self.exclude_modules) > 0:
-            self.exclude_modules = hf_to_vllm_mapper.apply_list(self.exclude_modules)
+            # This is a workaround for the weights remapping issue:
+            # https://github.com/vllm-project/vllm/issues/28072
+            # Right now, the Nvidia ModelOpt library use just one wildcard pattern:
+            #        module_path*
+            # It gets applied if the whole tree of modules rooted at module_path
+            # is not quantized. Here we replace such pattern by 2 patterns that are
+            # collectively equivalent to the original pattern:
+            #        module_path
+            #        module_path.*
+            new_exclude_modules = []
+            for exclude in self.exclude_modules:
+                if len(exclude) >= 2 and exclude[-1] == "*" and exclude[-2] != ".":
+                    new_exclude_modules.append(exclude[:-1])
+                    new_exclude_modules.append(exclude[:-1] + ".*")
+                else:
+                    new_exclude_modules.append(exclude)
+
+            self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -1441,16 +1458,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
-            layer.gemm1_weights_fp4_shuffled = Parameter(
+            layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
+            layer.w2_weight_scale = Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
 
@@ -1459,12 +1474,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
-
-            # Clean up weights that won't be used by TRT-LLM
-            del layer.w2_weight
-            del layer.w2_weight_scale
-            del layer.w13_weight
-            del layer.w13_weight_scale
         elif self.use_marlin:
             # Marlin processing
             prepare_moe_fp4_layer_for_marlin(layer)

@@ -16,15 +16,15 @@ vLLM offers basic model inferencing and serving on Arm CPU platform, with suppor
 # --8<-- [start:pre-built-wheels]
 
 Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels contain pre-compiled C++ binaries.
-Please replace `<version>` in the commands below with a specific version string (e.g., `0.11.2`).
 
 ```bash
-uv pip install --pre vllm==<version>+cpu --extra-index-url https://wheels.vllm.ai/<version>%2Bcpu/
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
 ```
 
 ??? console "pip"
     ```bash
-    pip install --pre vllm==<version>+cpu --extra-index-url https://wheels.vllm.ai/<version>%2Bcpu/
+    pip install vllm==${VLLM_VERSION}+cpu --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
     ```
 
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
@@ -35,20 +35,28 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 
 * `https://wheels.vllm.ai/nightly/cpu/vllm`
 
-To install from nightly index, copy the link address of the `*.whl` under this index to run, for example:
-
+To install from nightly index, run:
 ```bash
-uv pip install -U https://wheels.vllm.ai/c756fb678184b867ed94e5613a529198f1aee423/vllm-0.13.0rc2.dev11%2Bgc756fb678.cpu-cp38-abi3-manylinux_2_31_aarch64.whl # current nightly build (the filename will change!)
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu
 ```
+
+??? console "pip (there's a caveat)"
+
+    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+
+    If you insist on using `pip`, you have to specify the full URL (link address) of the wheel file (which can be obtained from https://wheels.vllm.ai/nightly/cpu/vllm).
+
+    ```bash
+    pip install https://wheels.vllm.ai/4fa7ce46f31cbd97b4651694caf9991cc395a259/vllm-0.13.0rc2.dev104%2Bg4fa7ce46f.cpu-cp38-abi3-manylinux_2_35_aarch64.whl # current nightly build (the filename will change!)
+    ```
 
 **Install specific revisions**
 
-If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), specify the full commit hash in the index:
-https://wheels.vllm.ai/${VLLM_COMMIT}/cpu/vllm .
-Then, copy the link address of the `*.whl` under this index to run:
+If you want to access the wheels for previous commits (e.g. to bisect the behavior change, performance regression), you can specify the commit hash in the URL:
 
 ```bash
-uv pip install -U <wheel-url>
+export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu
 ```
 
 # --8<-- [end:pre-built-wheels]
@@ -103,10 +111,10 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image.
 
 Stable vLLM Docker images are being pre-built for Arm from version 0.12.0. Available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
-Please replace `<version>` in the command below with a specific version string (e.g., `0.12.0`).
 
 ```bash
-docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v<version>
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${VLLM_VERSION}
 ```
 
 You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.
