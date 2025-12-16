@@ -74,7 +74,6 @@ def llm_pair(request):
         # Force native sampler to avoid potential nondeterminism in FlashInfer
         # when per-request generators are not used in V1.
         "VLLM_USE_FLASHINFER_SAMPLER": "0",
-        **backend_config.env_vars,
     }
     with temporary_environ(env_vars):
         full = LLM(
