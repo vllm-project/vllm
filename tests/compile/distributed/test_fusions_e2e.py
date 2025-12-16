@@ -524,9 +524,7 @@ CUSTOM_OPS_QUANT_RMS_NORM = ["+quant_fp8,+rms_norm"]
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
 # TODO: remove skip after we fix the fusion thoroughly
-@pytest.mark.skipif(
-    is_blackwell(),
-)
+@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
