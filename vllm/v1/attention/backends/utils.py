@@ -201,10 +201,11 @@ def _make_metadata_with_slice(
     )
     # NOTE: last token can be outside of the last request if we have CG padding.
 
-    # If the "middle" request has tokens in both ubatches, we have to split it.
-    # If ubatch_slice is the first ubatch then we will be splitting the last
-    # request. If it's the second microbatch, then we will be splitting the
-    # first request
+    # If the request is split across ubatches, we have to adjust the metadata.
+    # splits_first_request: The first request in this slice is the continuation of
+    #                       a request that started in a previous slice.
+    # splits_last_request:  The last request in this slice continues into the
+    #                       next slice.
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
@@ -225,7 +226,10 @@ def _make_metadata_with_slice(
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
+        # the tokens skipped because query_start_loc_cpu might have been modified
+        # if splits_first_request is True.
+        tokens_skipped = start_locs[last_req + 1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 
@@ -935,6 +939,33 @@ def split_decodes_and_prefills(
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
+
+def split_prefill_chunks(
+    seq_lens_cpu: torch.Tensor, workspace_size: int, request_offset: int = 0
+) -> list[tuple[int, int]]:
+    """
+    Split the prefill requests into chunks such that the total sequence length
+    of each chunk is less than or equal to the workspace size.
+
+    Args:
+        seq_lens_cpu: The sequence lengths of the prefill requests on CPU.
+        workspace_size: The maximum workspace size (in tokens) per chunk.
+        request_offset: The offset to add to the request indices.
+    Returns:
+        A list of tuples of (reqs_start, reqs_end) representing chunk boundaries.
+    """
+    chunk_bounds = []
+    i, n = 0, len(seq_lens_cpu)
+    assert torch.all(seq_lens_cpu <= workspace_size).item()
+
+    while i < n:
+        start, chunk_total = i, 0
+        while i < n and (chunk_total + (s := seq_lens_cpu[i].item())) <= workspace_size:
+            chunk_total += s
+            i += 1
+        chunk_bounds.append((start + request_offset, i + request_offset))
+    return chunk_bounds
 
 
 def reorder_batch_to_split_decodes_and_prefills(
