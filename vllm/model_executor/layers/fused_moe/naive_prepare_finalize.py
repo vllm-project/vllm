@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 
 
 class FusedMoENaivePrepareAndFinalize(MoEPrepareAndFinalizeNoEP):
-    """Mirror the legacy dispatch/combine path via prepare/finalize hooks."""
+    """Dispatch/combine via prepare/finalize hooks for DP+EP without all2all."""
 
     def preprocess_inputs(
         self,
