@@ -190,10 +190,8 @@ class Scheduler(SchedulerInterface):
         # For encoder-decoder models, allocate the maximum number of tokens for Cross
         # Attn blocks, as for Whisper its input is always padded to the maximum length.
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
-        self._num_encoder_input_tokens = (
+        self._num_encoder_max_input_tokens = (
             MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(vllm_config.model_config)
-            if self.is_encoder_decoder
-            else 0
         )
 
         speculative_config = vllm_config.speculative_config
@@ -577,7 +575,7 @@ class Scheduler(SchedulerInterface):
                 )
 
                 num_encoder_tokens = (
-                    self._num_encoder_input_tokens
+                    self._num_encoder_max_input_tokens
                     if self.is_encoder_decoder and request.has_encoder_inputs
                     else 0
                 )
