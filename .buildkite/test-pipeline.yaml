@@ -1332,7 +1332,6 @@ steps:
   gpu: h200
   optional: true
   num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
 
