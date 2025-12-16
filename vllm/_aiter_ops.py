@@ -666,16 +666,25 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
+    Note:
+        The environment variables are assigned when the module is imported,
+        so you can't change the environment variables after the module is imported.
+        This is done out of performance consideration. Accessing environment variables
+        is expensive as described in issue https://github.com/vllm-project/vllm/issues/17067
+        so we don't want to do it repeatedly, especially in the hot path (the forward pass).
+        You can call the refresh_env_variables() function to reload the env variables
+        after monkey patching the env variables in the unit test.
+
     Check Functions:
         All check functions (is_*_enabled) are decorated with @if_aiter_supported,
         which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
         (3) aiter library is installed. The check function then also verifies
         the corresponding environment variable is enabled.
-        i.e.
-        is_enabled() == current_platform.is_rocm() and
-                        current_platform.is_on_gfx9() and
-                        IS_AITER_FOUND and
-                        cls._AITER_ENABLED
+        i.e.                                             ___
+        is_enabled() == current_platform.is_rocm() and      |     checked by
+                        current_platform.is_on_gfx9() and   | @if_aiter_supported
+                        IS_AITER_FOUND and   _______________|
+                        cls._AITER_ENABLED   -----> Check by the logic in `is_enabled()`
 
     Example:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -737,31 +746,26 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_enabled(cls) -> bool:
-        """Verifies device specs and availability of aiter main env variable."""
         return cls._AITER_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_linear_fp8_enaled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls.is_linear_enabled()
 
     @classmethod
     @if_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
     @classmethod
@@ -772,19 +776,16 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
     @classmethod
     @if_aiter_supported
     def is_triton_unified_attn_enabled(cls) -> bool:
-        """ "Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
 
     @classmethod
