@@ -6,7 +6,7 @@ set -ex
 #   --mode <mode>        "install" (default) or "wheel"
 #   --pplx-ref <commit>  pplx-kernels commit hash
 #   --deepep-ref <commit> DeepEP commit hash
-#   --nvshmem-ver <ver>  NVSHMEM version (default: 3.3.24)
+#   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
 PPLX_COMMIT_HASH=${PPLX_COMMIT_HASH:-"12cecfd"}
