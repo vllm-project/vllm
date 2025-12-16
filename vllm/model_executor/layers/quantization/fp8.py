@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
-from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -50,7 +49,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     apply_flashinfer_per_tensor_scale_fp8,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-    flashinfer_cutlass_moe_fp8,
     get_flashinfer_moe_backend,
     register_moe_scaling_factors,
     rotate_flashinfer_fp8_moe_weights,
@@ -698,13 +696,17 @@ def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute:
         TritonOrDeepGemmExperts,
     )
 
+    if (
+        backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        or backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
+    ):
+        assert False
+
     _BACKEND_TO_KERNEL = {
-        FlashinferMoeBackend.FLASHINFER_TRTLLM: FlashInferExperts,
-        FlashinferMoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
-        FlashinferMoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
-        # FlashinferMoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM: # does not support mk yet
-        FlashinferMoeBackend.MARLIN: MarlinExperts,
-        FlashinferMoeBackend.TRITON: TritonExperts,
+        Fp8MoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
+        Fp8MoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
+        Fp8MoeBackend.MARLIN: MarlinExperts,
+        Fp8MoeBackend.TRITON: TritonExperts,
     }
     return _BACKEND_TO_KERNEL[backend]
 
@@ -731,11 +733,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.fp8_backend = get_fp8_moe_backend(
             self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
-
-        self.marlin_input_dtype = None
         self.kernel = get_kernel(self.fp8_backend)
 
+        self.marlin_input_dtype = None
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
+        if self.use_marlin and layer.activation != "silu":
+            raise NotImplementedError(
+                "MARLIN FP8 MoE only supports SiLU activation currently."
+            )
+
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
@@ -746,16 +752,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"Only support weight_block_size == [128, 128], "
                     f"got {self.weight_block_size}"
                 )
-            self.flashinfer_moe_fn = partial(
-                flashinfer_cutlass_moe_fp8,
-                moe=self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-
-        self.allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
-        self.allow_cutlass_block_scaled_grouped_gemm = (
-            self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
-        )
+            # self.flashinfer_moe_fn = partial(
+            #     flashinfer_cutlass_moe_fp8,
+            #     moe=self.moe,
+            #     use_deepseek_fp8_block_scale=self.block_quant,
+            # )
 
     def create_weights(
         self,
@@ -944,7 +945,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm:
+            if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
                 dg_w13_weight, dg_w13_weight_scale_inv = (
                     deepgemm_post_process_fp8_weight_block(
                         wq=layer.w13_weight.data,
@@ -1107,7 +1108,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert max_num_tokens_per_rank is not None
 
             experts_impl = (
-                BatchedDeepGemmExperts if self.allow_deep_gemm else BatchedTritonExperts
+                BatchedDeepGemmExperts
+                if self.fp8_backend == Fp8MoeBackend.DEEPGEMM
+                else BatchedTritonExperts
             )
             logger.debug(
                 "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
@@ -1142,7 +1145,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             return TritonOrDeepGemmExperts(
                 quant_config=self.moe_quant_config,
-                allow_deep_gemm=self.allow_deep_gemm,
+                allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
             )
 
     def get_fused_moe_quant_config(
@@ -1302,6 +1305,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
+            self.kernel()
             from vllm.model_executor.layers.fused_moe import fused_experts
 
             result = fused_experts(
@@ -1316,9 +1320,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
-                allow_deep_gemm=self.allow_deep_gemm,
+                allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
                 allow_cutlass_block_scaled_grouped_gemm=(
-                    self.allow_cutlass_block_scaled_grouped_gemm
+                    self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
                 ),
             )
 
