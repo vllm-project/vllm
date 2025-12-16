@@ -1190,8 +1190,6 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if stopped:
                 if self.vllm_config.model_config.enable_return_routed_experts:
-                    assert len(self.kv_cache_config.kv_cache_groups) == 1
-
                     kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
                     block_ids = kv_blocks.get_block_ids()[0]
                     num_tokens = request.num_tokens - 1

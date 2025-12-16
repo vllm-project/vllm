@@ -1629,8 +1629,7 @@ class GPUModelRunner(
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
                 slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
-                if self.model_config.enable_return_routed_experts:
-                    assert len(self.kv_cache_config.kv_cache_groups) == 1
+                if self.model_config.enable_return_routed_experts and kv_cache_gid == 0:
                     self.slot_mapping = slot_mapping.cpu().numpy()
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
