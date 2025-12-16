@@ -122,21 +122,21 @@ class KVConnectorPromMetrics:
         vllm_config: VllmConfig,
         backend: MetricBackend,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ):
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self._backend = backend
         self._labelnames = labelnames
         self.per_engine_labelvalues = per_engine_labelvalues
 
-    def make_per_engine(self, metric: PromMetric) -> dict[int, PromMetric]:
+    def make_per_engine(self, metric: PromMetricT) -> dict[int, PromMetricT]:
         """
         Create a per-engine child of a prometheus_client.Metric with
         the appropriate labels set. The parent metric must be created
         using the labelnames list.
         """
         return {
-            idx: metric.labels(*labelvalues)
+            idx: metric.labels(*labelvalues)  # type: ignore[return-value,misc]
             for idx, labelvalues in self.per_engine_labelvalues.items()
         }
 

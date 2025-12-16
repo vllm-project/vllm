@@ -60,7 +60,11 @@ from vllm.v1.worker.block_table import BlockTable
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.metrics.backends import MetricBackend
+    from vllm.v1.metrics.backends import (
+        AbstractCounter,
+        AbstractHistogram,
+        MetricBackend,
+    )
     from vllm.v1.request import Request
 
 TransferHandle = int
@@ -460,7 +464,7 @@ class NixlConnector(KVConnectorBase_V1):
         vllm_config: VllmConfig,
         backend: "MetricBackend",
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ) -> KVConnectorPromMetrics:
         return NixlPromMetrics(vllm_config, backend, labelnames, per_engine_labelvalues)
 
@@ -2660,7 +2664,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         vllm_config: VllmConfig,
         backend: "MetricBackend",
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ):
         super().__init__(vllm_config, backend, labelnames, per_engine_labelvalues)
 
@@ -2685,7 +2689,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets[1:],
             labelnames=labelnames,
         )
-        self.nixl_histogram_xfer_time = self.make_per_engine(nixl_histogram_xfer_time)
+        self.nixl_histogram_xfer_time: dict[int, AbstractHistogram] = (
+            self.make_per_engine(nixl_histogram_xfer_time)
+        )  # type: ignore[assignment]
         nixl_histogram_post_time = self._backend.create_histogram(
             name="vllm:nixl_post_time_seconds",
             documentation="Histogram of transfer post time for NIXL KV"
@@ -2693,7 +2699,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_post_time = self.make_per_engine(nixl_histogram_post_time)
+        self.nixl_histogram_post_time: dict[int, AbstractHistogram] = (
+            self.make_per_engine(nixl_histogram_post_time)
+        )  # type: ignore[assignment]
         # uniform 2kb to 16gb range
         buckets = [float(2 ** (10 + i)) for i in range(1, 25, 2)]
         nixl_histogram_bytes_transferred = self._backend.create_histogram(
@@ -2702,9 +2710,9 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_bytes_transferred = self.make_per_engine(
-            nixl_histogram_bytes_transferred
-        )
+        self.nixl_histogram_bytes_transferred: dict[int, AbstractHistogram] = (
+            self.make_per_engine(nixl_histogram_bytes_transferred)
+        )  # type: ignore[assignment]
         buckets = [
             10.0,
             20.0,
@@ -2728,25 +2736,25 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             buckets=buckets,
             labelnames=labelnames,
         )
-        self.nixl_histogram_num_descriptors = self.make_per_engine(
-            nixl_histogram_num_descriptors
-        )
+        self.nixl_histogram_num_descriptors: dict[int, AbstractHistogram] = (
+            self.make_per_engine(nixl_histogram_num_descriptors)
+        )  # type: ignore[assignment]
         counter_nixl_num_failed_transfers = self._backend.create_counter(
             name="vllm:nixl_num_failed_transfers",
             documentation="Number of failed NIXL KV Cache transfers.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_transfers = self.make_per_engine(
-            counter_nixl_num_failed_transfers
-        )
+        self.counter_nixl_num_failed_transfers: dict[int, AbstractCounter] = (
+            self.make_per_engine(counter_nixl_num_failed_transfers)
+        )  # type: ignore[assignment]
         counter_nixl_num_failed_notifications = self._backend.create_counter(
             name="vllm:nixl_num_failed_notifications",
             documentation="Number of failed NIXL KV Cache notifications.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_failed_notifications = self.make_per_engine(
-            counter_nixl_num_failed_notifications
-        )
+        self.counter_nixl_num_failed_notifications: dict[int, AbstractCounter] = (
+            self.make_per_engine(counter_nixl_num_failed_notifications)
+        )  # type: ignore[assignment]
 
         counter_nixl_num_kv_expired_reqs = self._counter_cls(
             name="vllm:nixl_num_kv_expired_reqs",
