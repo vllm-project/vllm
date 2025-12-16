@@ -608,7 +608,7 @@ class ModelConfig:
         )
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
         return convertor.convert(self.model, self.revision)
-    
+
     @field_validator("tokenizer", "max_model_len", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
