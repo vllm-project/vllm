@@ -581,8 +581,10 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
     const auto blockSize = rowEnd / gridDim.y;  // 16384 / 2 = 8192
     rowStart = blockSize * blockIdx.y;          // 8192 * 1 = 8192
     rowEnd = gridDim.y == blockIdx.y + 1 ? rowEnd : rowStart + blockSize;
-    outIndices += static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
-    outLogits += static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
+    outIndices +=
+        static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
+    outLogits +=
+        static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
   } else if constexpr (mergeBlocks) {
     rowEnd = numBlocksToMerge * topK;
     indices += static_cast<int64_t>(rowIdx) * numBlocksToMerge * topK;
