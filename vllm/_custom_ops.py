@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -495,18 +496,44 @@ def awq_dequantize(
     return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy)
 
 
-def awq_gemm(
+def _awq_gemm(
     input: torch.Tensor,
     qweight: torch.Tensor,
     scales: torch.Tensor,
     qzeros: torch.Tensor,
     split_k_iters: int,
 ) -> torch.Tensor:
+    # num_tokens >= threshold
+    FP16_MATMUL_HEURISTIC_CONDITION = input.shape[0] >= 256
+
+    if FP16_MATMUL_HEURISTIC_CONDITION:
+        out = awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+        return torch.matmul(input, out)
+
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import awq_gemm_triton
 
         return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters)
+
+
+def _awq_gemm_fake_impl(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    qzeros: torch.Tensor,
+    split_k_iters: int,
+) -> torch.Tensor:
+    M, N = input.shape[0], qweight.shape[1] * 8
+    return torch.empty((M, N), dtype=scales.dtype, device=input.device)
+
+
+direct_register_custom_op(
+    op_name="awq_gemm",
+    op_func=_awq_gemm,
+    fake_impl=_awq_gemm_fake_impl,
+)
+awq_gemm = torch.ops.vllm.awq_gemm
 
 
 # gptq
