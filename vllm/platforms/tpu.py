@@ -16,7 +16,6 @@ from .interface import Platform, PlatformEnum
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
@@ -58,9 +57,17 @@ class TpuPlatform(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        attn_selector_config: "AttentionSelectorConfig",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: str | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        attn_type: str | None = None,
     ) -> str:
-        if attn_selector_config.use_sparse:
+        if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on TPU.")
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)

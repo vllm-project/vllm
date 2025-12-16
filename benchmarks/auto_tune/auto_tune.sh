@@ -18,11 +18,6 @@ MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
 MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
 NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
 NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
-HOSTNAME=$(hostname)
-if [[ -z "$HOSTNAME" ]]; then
-    echo "Error: Failed to determine hostname." >&2
-    exit 1
-fi
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
@@ -87,7 +82,6 @@ start_server() {
         "$MODEL"
         "--disable-log-requests"
         "--port" "8004"
-        "--host" "$HOSTNAME"
         "--gpu-memory-utilization" "$gpu_memory_utilization"
         "--max-num-seqs" "$max_num_seqs"
         "--max-num-batched-tokens" "$max_num_batched_tokens"
@@ -119,7 +113,7 @@ start_server() {
         # since that we should always have permission to send signal to the server process.
         kill -0 $server_pid 2> /dev/null || break
 
-        RESPONSE=$(curl -s -X GET "http://${HOSTNAME}:8004/health" -w "%{http_code}" -o /dev/stdout)
+        RESPONSE=$(curl -s -X GET "http://0.0.0.0:8004/health" -w "%{http_code}" -o /dev/stdout)
         STATUS_CODE=$(echo "$RESPONSE" | tail -n 1)
         if [[ "$STATUS_CODE" -eq 200 ]]; then
             server_started=1
@@ -179,7 +173,6 @@ run_benchmark() {
         --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
         --num-prompts 1000 \
         --random-prefix-len $prefix_len \
-        --host "$HOSTNAME" \
         --port 8004 &> "$bm_log"
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
@@ -195,7 +188,7 @@ run_benchmark() {
         request_rate=$((${throughput%.*} + 1))
         while ((request_rate > 0)); do
             # clear prefix cache
-            curl -X POST http://${HOSTNAME}:8004/reset_prefix_cache
+            curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
             vllm bench serve \
@@ -211,7 +204,6 @@ run_benchmark() {
                 --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
                 --num-prompts 100 \
                 --random-prefix-len $prefix_len \
-                --host "$HOSTNAME" \
                 --port 8004 &> "$bm_log"
             throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
             e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
@@ -312,7 +304,6 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
         --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
         --num-prompts 100 \
         --random-prefix-len $prefix_len \
-        --host "$HOSTNAME" \
         --port 8004 \
         --profile &> "$bm_log"
 else

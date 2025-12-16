@@ -323,7 +323,6 @@ def test_prefill_split_across_ubatches(
         num_tokens,
         batch_spec.batch_size,
         split_point=split_point,
-        num_ubatches=2,
     )
     assert ubatch_slices is not None and len(ubatch_slices) == 2
 

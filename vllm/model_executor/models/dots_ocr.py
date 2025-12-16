@@ -29,9 +29,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -161,6 +158,32 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         return processor
 
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb_vision(
+    tensor: torch.Tensor, freqs: torch.Tensor
+) -> torch.Tensor:
+    orig_dtype = tensor.dtype
+    tensor = tensor.float()
+
+    cos = freqs.cos()
+    sin = freqs.sin()
+
+    cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+    sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+
+    output = (tensor * cos) + (rotate_half(tensor) * sin)
+
+    output = output.to(orig_dtype)
+
+    return output
+
+
 class VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
@@ -275,11 +298,6 @@ class DotsVisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        self.apply_rotary_emb = ApplyRotaryEmb(
-            enforce_enable=True,
-            enable_fp32_compute=True,
-        )
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -300,11 +318,7 @@ class DotsVisionAttention(nn.Module):
 
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = self.apply_rotary_emb(
-                qk_concat,
-                rotary_pos_emb.cos(),
-                rotary_pos_emb.sin(),
-            )
+            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         context_layer = self.attn(

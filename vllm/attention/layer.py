@@ -464,10 +464,7 @@ class MultiHeadAttention(nn.Module):
         }
 
         self.fa_version = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            and current_platform.is_cuda()
-        ):
+        if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
             self.fa_version = get_flash_attn_version()
             assert self._flash_attn_varlen_func is not None
             self._flash_attn_varlen_func = functools.partial(

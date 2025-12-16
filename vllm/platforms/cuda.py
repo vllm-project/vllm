@@ -14,6 +14,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
@@ -22,7 +23,6 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
 else:
@@ -258,8 +258,16 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_valid_backends(
         cls,
-        device_capability: DeviceCapability,
-        attn_selector_config: "AttentionSelectorConfig",
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_mla,
+        has_sink,
+        use_sparse,
+        use_mm_prefix,
+        device_capability,
+        attn_type,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -267,15 +275,21 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities = []
         invalid_reasons = {}
 
-        backend_priorities = _get_backend_priorities(
-            attn_selector_config.use_mla, device_capability
-        )
+        backend_priorities = _get_backend_priorities(use_mla, device_capability)
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
                 invalid_reasons_i = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    block_size,
+                    use_mla,
+                    has_sink,
+                    use_sparse,
+                    use_mm_prefix,
+                    device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -290,19 +304,37 @@ class CudaPlatformBase(Platform):
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
-        attn_selector_config: "AttentionSelectorConfig",
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        attn_type: str | None = None,
     ) -> str:
+        if attn_type is None:
+            attn_type = AttentionType.DECODER
+
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
-        attn_selector_config = attn_selector_config._replace(block_size=None)
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
                 invalid_reasons = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    None,
+                    use_mla,
+                    has_sink,
+                    use_sparse,
+                    use_mm_prefix,
+                    device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
@@ -318,8 +350,16 @@ class CudaPlatformBase(Platform):
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-            device_capability=device_capability,
-            attn_selector_config=attn_selector_config,
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            None,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            device_capability,
+            attn_type,
         )
         reasons_str = (
             "{"
@@ -329,7 +369,11 @@ class CudaPlatformBase(Platform):
             )
             + "}"
         )
-        config_str = attn_selector_config.__repr__()
+        config_str = (
+            f"head_size: {head_size}, dtype: {dtype}, "
+            f"kv_cache_dtype: {kv_cache_dtype}, block_size: {block_size}, "
+            f"use_mla: {use_mla}, has_sink: {has_sink}, use_sparse: {use_sparse}"
+        )
         logger.debug_once(
             f"Some attention backends are not valid for {cls.device_name} with "
             f"{config_str}. Reasons: {reasons_str}."

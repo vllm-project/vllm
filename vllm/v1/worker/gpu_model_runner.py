@@ -2987,7 +2987,7 @@ class GPUModelRunner(
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
+                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
                     # Pre-compute cascade attention prefix lengths
                     cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
@@ -3028,13 +3028,6 @@ class GPUModelRunner(
                     num_scheduled_tokens_np,
                     num_tokens_padded,
                     num_reqs_padded,
-                    self.parallel_config.num_ubatches,
-                )
-
-                logger.debug(
-                    "ubatch_slices: %s, ubatch_slices_padded: %s",
-                    ubatch_slices,
-                    ubatch_slices_padded,
                 )
 
                 pad_attn = cudagraph_mode == CUDAGraphMode.FULL
@@ -3717,14 +3710,11 @@ class GPUModelRunner(
         # wrap the model with full cudagraph wrapper if needed.
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
-        if (
-            cudagraph_mode.has_full_cudagraphs()
-            and not self.parallel_config.use_ubatching
-        ):
+        if cudagraph_mode.has_full_cudagraphs() and not self.parallel_config.enable_dbo:
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
-        elif self.parallel_config.use_ubatching:
+        elif self.parallel_config.enable_dbo:
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.FULL, self.device
@@ -4105,16 +4095,7 @@ class GPUModelRunner(
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-            should_ubatch,
-            num_scheduled_tokens,
-            num_tokens_padded,
-            num_reqs_padded,
-            self.vllm_config.parallel_config.num_ubatches,
-        )
-        logger.debug(
-            "ubatch_slices: %s, ubatch_slices_padded: %s",
-            ubatch_slices,
-            ubatch_slices_padded,
+            should_ubatch, num_scheduled_tokens, num_tokens_padded, num_reqs_padded
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -4663,7 +4644,7 @@ class GPUModelRunner(
             # is above the threshold. Otherwise we just capture a non-ubatched
             # version of the graph
             allow_microbatching = (
-                self.parallel_config.use_ubatching
+                self.parallel_config.enable_dbo
                 and cudagraph_runtime_mode == CUDAGraphMode.FULL
                 and uniform_decode
                 and check_ubatch_thresholds(
@@ -4798,8 +4779,8 @@ class GPUModelRunner(
                     if kv_cache_group_id < len(kernel_block_sizes)
                     else None,
                     num_metadata_builders=1
-                    if not self.parallel_config.use_ubatching
-                    else self.parallel_config.num_ubatches,
+                    if not self.parallel_config.enable_dbo
+                    else 2,
                 )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
