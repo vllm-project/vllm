@@ -43,7 +43,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
     IOMP_PATH=...
 
     # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:IOMP_PATH:$LD_PRELOAD"
+    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
     ```
 
 **Install the latest code**
