@@ -1390,6 +1390,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         raise NotImplementedError
 
     @abstractmethod
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        """Given the number of image tokens, output the number of multi-modal encoder tokens"""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        """Given the number of vision tokens, output the number of multi-modal connector tokens"""
+        raise NotImplementedError
+
+    @abstractmethod
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
