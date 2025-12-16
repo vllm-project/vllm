@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -107,6 +108,19 @@ class TestData:
         layer.w2_input_scale = a2_scale
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
+        # Setup dummy config.
+        layer.moe_parallel_config = mk.FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=1,
+            ep_size=1,
+            tp_rank=1,
+            pcp_rank=1,
+            dp_rank=1,
+            ep_rank=1,
+            use_ep=False,
+            all2all_backend="naive",
+        )
 
         register_moe_scaling_factors(layer)
 
@@ -206,6 +220,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
     topk: int,
     activation: str,
     monkeypatch,
+    workspace_init,
 ):
     current_platform.seed_everything(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")

@@ -59,8 +59,8 @@ async def create_embedding(
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
         return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
+            content=generator.content,
+            headers=generator.headers,
             media_type=generator.media_type,
         )
 

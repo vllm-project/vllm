@@ -3,22 +3,18 @@
 import contextlib
 import copy
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TypeAlias
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
 
-if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
-def get_cached_tokenizer(
-    tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast",
-) -> TokenizerLike:
+def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
@@ -65,11 +61,10 @@ def get_cached_tokenizer(
     CachedTokenizer.__name__ = f"Cached{tokenizer.__class__.__name__}"
 
     cached_tokenizer.__class__ = CachedTokenizer
-    return cached_tokenizer  # type: ignore
+    return cached_tokenizer
 
 
-@TokenizerRegistry.register("hf")
-class HfTokenizer(TokenizerLike):
+class CachedHfTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
         cls,
@@ -79,7 +74,7 @@ class HfTokenizer(TokenizerLike):
         revision: str | None = None,
         download_dir: str | None = None,
         **kwargs,
-    ) -> "TokenizerLike":
+    ) -> HfTokenizer:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,

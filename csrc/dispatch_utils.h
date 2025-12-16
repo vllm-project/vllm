@@ -118,6 +118,24 @@
     }                                         \
   }
 
+#define VLLM_DISPATCH_BOOL(expr, const_expr, ...) \
+  if (expr) {                                     \
+    constexpr bool const_expr = true;             \
+    __VA_ARGS__();                                \
+  } else {                                        \
+    constexpr bool const_expr = false;            \
+    __VA_ARGS__();                                \
+  }
+
+#define VLLM_DISPATCH_GROUP_SIZE(group_size, const_group_size, ...) \
+  if (group_size == 128) {                                          \
+    constexpr int const_group_size = 128;                           \
+    __VA_ARGS__();                                                  \
+  } else if (group_size == 64) {                                    \
+    constexpr int const_group_size = 64;                            \
+    __VA_ARGS__();                                                  \
+  }
+
 #define VLLM_DISPATCH_RANK234(NUM_DIMS, ...)                                   \
   switch (NUM_DIMS) {                                                          \
     case 2: {                                                                  \
