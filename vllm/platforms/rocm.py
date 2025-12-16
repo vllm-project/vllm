@@ -124,8 +124,6 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    from vllm._aiter_ops import rocm_aiter_ops
-
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
@@ -141,7 +139,6 @@ def use_rocm_custom_paged_attention(
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-            and not (rocm_aiter_ops.is_pa_attn_enabled())
             and sinks is None
         )
 
