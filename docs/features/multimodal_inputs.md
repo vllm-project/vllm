@@ -365,6 +365,8 @@ You must enable this feature via `enable_mm_embeds=True`.
     The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!
 
+#### Image Embeddings
+
 ??? code
 
     ```python
@@ -434,6 +436,38 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     outputs = llm.generate({
         "prompt": prompt,
         "multi_modal_data": mm_data,
+    })
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
+For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
+
+#### Audio Embedding Inputs
+
+You can pass pre-computed audio embeddings similar to image embeddings:
+
+??? code
+
+    ```python
+    from vllm import LLM
+    import torch
+
+    # Enable audio embeddings support
+    llm = LLM(model="fixie-ai/ultravox-v0_5-llama-3_2-1b", enable_mm_embeds=True)
+
+    # Refer to the HuggingFace repo for the correct format to use
+    prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
+
+    # Load pre-computed audio embeddings
+    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    audio_embeds = torch.load(...)
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"audio": audio_embeds},
     })
 
     for o in outputs:
@@ -763,14 +797,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    from vllm.utils.serial_utils import tensor2base64
+
     image_embedding = torch.load(...)
     grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
 
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode('utf-8')
+    base64_image_embedding = tensor2base64(image_embedding)
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
@@ -860,5 +892,11 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
     ```
 
 !!! note
-    Only one message can contain `{"type": "image_embeds"}`.
+    Multiple messages can now contain `{"type": "image_embeds"}`, enabling you to pass multiple image embeddings in a single request (similar to regular images). The number of embeddings is limited by `--limit-mm-per-prompt`.
+
+    **Important**: The embedding shape format differs based on the number of embeddings:
+
+    - **Single embedding**: 3D tensor of shape `(1, feature_size, hidden_size)`
+    - **Multiple embeddings**: List of 2D tensors, each of shape `(feature_size, hidden_size)`
+
     If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.

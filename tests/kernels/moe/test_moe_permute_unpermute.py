@@ -23,6 +23,12 @@ TOP_KS = [2, 6, 8]
 EP_SIZE = [1, 4, 16]
 current_platform.seed_everything(0)
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "moe_permute_unpermute_supported is not defined for ROCm",
+        allow_module_level=True,
+    )
+
 
 def torch_permute(
     hidden_states: torch.Tensor,

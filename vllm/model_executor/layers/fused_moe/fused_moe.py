@@ -872,8 +872,10 @@ def get_moe_configs(
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info(
-                    "Using configuration from %s for MoE layer.", config_file_path
+                logger.info_once(
+                    "Using configuration from %s for MoE layer.",
+                    config_file_path,
+                    scope="global",
                 )
                 # If a configuration has been found, return it
                 tuned_config = json.load(f)
@@ -883,14 +885,55 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default
     # configuration
-    logger.warning(
-        (
-            "Using default MoE config. Performance might be sub-optimal! "
-            "Config file not found at %s"
-        ),
-        config_file_paths,
+    logger.warning_once(
+        "Using default MoE config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+        scope="local",
     )
     return None
+
+
+def _ensure_block_size_k_divisible(
+    size_k: int, block_size_k: int, group_size: int
+) -> int:
+    """Ensure block_size_k is a divisor of size_k and divisible by group_size.
+
+    This ensures BLOCK_SIZE_K compatibility with MoeWNA16 CUDA kernel which
+    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K % group_size == 0.
+
+    Args:
+        size_k: The size_k dimension that must be divisible by result.
+        block_size_k: Preferred block size (will be adjusted if needed).
+        group_size: The result must be divisible by this.
+
+    Returns:
+        A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
+    """
+    # Fast path: already valid
+    if size_k % block_size_k == 0 and block_size_k % group_size == 0:
+        return block_size_k
+
+    # Find the largest value that:
+    # 1. Divides size_k (size_k % candidate == 0)
+    # 2. Is divisible by group_size (candidate % group_size == 0)
+    # 3. Is <= block_size_k (prefer smaller values close to block_size_k)
+    #
+    # Strategy: Search from min(block_size_k, size_k) down to group_size,
+    # stepping by group_size to ensure divisibility by group_size
+    max_search = min(block_size_k, size_k)
+    start = (max_search // group_size) * group_size
+    for candidate in range(start, group_size - 1, -group_size):
+        if size_k % candidate == 0:
+            return candidate
+
+    # Fallback: if group_size divides size_k, use it
+    # This should always be true with correct group_size configuration
+    if size_k % group_size == 0:
+        return group_size
+
+    # This should not happen with correct group_size, but ensure divisibility
+    return size_k
 
 
 def get_moe_wna16_block_config(
@@ -957,6 +1000,9 @@ def get_moe_wna16_block_config(
             # Not sure why, maybe it force the CUDA SM process only one block
             # at the same time.
             block_size_n = 1024
+
+        # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
+        block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
 
@@ -1246,7 +1292,6 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1260,7 +1305,6 @@ def eplb_map_to_physical_and_record(
         expert_load_view: The expert load view.
         logical_to_physical_map: The logical to physical map.
         logical_replica_count: The logical replica count.
-        indices_type: The indices type.
 
     Returns:
         The physical expert ids.
@@ -1310,9 +1354,6 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-
-    if indices_type is not None:
-        topk_ids = topk_ids.to(dtype=indices_type)
     return topk_ids
 
 
@@ -1890,7 +1931,11 @@ def fused_experts_impl(
         )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            curr_topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
+            curr_topk_ids,
+            config["BLOCK_SIZE_M"],
+            global_num_experts,
+            expert_map,
+            ignore_invalid_experts=True,
         )
 
         invoke_fused_moe_kernel(
@@ -1948,6 +1993,9 @@ def fused_experts_impl(
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )
+
+        if expert_map is not None:
+            intermediate_cache3.zero_()
 
         invoke_fused_moe_kernel(
             qintermediate_cache2,

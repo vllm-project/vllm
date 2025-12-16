@@ -114,7 +114,17 @@ flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cutlass_fused_moe"
 )
+flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
+silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
+    "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
+)
+scaled_fp4_grouped_quantize = _lazy_import_wrapper(
+    "flashinfer", "scaled_fp4_grouped_quantize"
+)
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer", "nvfp4_block_scale_interleave"
 )
@@ -167,6 +177,14 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl() -> bool:
+    """Return ``True`` if FlashInfer cutedsl module is available."""
+    return (
+        has_flashinfer() and importlib.util.find_spec("flashinfer.cute_dsl") is not None
+    )
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -178,6 +196,26 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         ("flashinfer", "fp4_quantize"),
         ("flashinfer", "nvfp4_block_scale_interleave"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
+def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
+    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
+        ("flashinfer", "scaled_fp4_grouped_quantize"),
+        ("flashinfer", "silu_and_scaled_nvfp4_experts_quantize"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -226,24 +264,23 @@ def supports_trtllm_attention() -> bool:
         return False
 
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
-
-
-@functools.cache
-def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
-    """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
-    if env_value is not None:
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
-    return env_value
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
     """
-    Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
+    This function should only be called during initialization stage when vllm config
+    is set.
+    Return `None` if --attention-config.use_trtllm_attention is not set,
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
-    return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    return vllm_config.attention_config.use_trtllm_attention
 
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
@@ -263,13 +300,14 @@ def use_trtllm_attention(
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
+    # None means auto-detection, True means force on, False means force off
+    force_use_trtllm: bool | None = None,
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
-    force_use_trtllm = force_use_trtllm_attention()
 
-    # Environment variable is set to 0 - respect it
+    # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
@@ -286,7 +324,7 @@ def use_trtllm_attention(
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported on this platform, "
-                "but VLLM_USE_TRTLLM_ATTENTION is set to 1"
+                "but --attention-config.use_trtllm_attention is set to 1"
             )
         return False
 
@@ -295,7 +333,8 @@ def use_trtllm_attention(
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported for this combination of "
-                "query and key heads, but VLLM_USE_TRTLLM_ATTENTION is set to 1"
+                "query and key heads, but --attention-config.use_trtllm_attention is "
+                "set to 1"
             )
         return False
 
@@ -316,7 +355,7 @@ def use_trtllm_attention(
         return True
 
     if force_use_trtllm is None:
-        # Environment variable not set - use auto-detection
+        # CLI argument not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
@@ -329,8 +368,10 @@ def use_trtllm_attention(
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
-    # Environment variable is set to 1 - respect it
-    logger.info_once("Using TRTLLM attention (VLLM_USE_TRTLLM_ATTENTION is set to 1)")
+    # CLI argument is set to 1 - respect it
+    logger.info_once(
+        "Using TRTLLM attention (--attention-config.use_trtllm_attention is set to 1)"
+    )
     return True
 
 
@@ -462,17 +503,14 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
-@functools.cache
-def flashinfer_disable_q_quantization() -> bool:
-    """Cache result which only depends on the environment"""
-    return envs.VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION
-
-
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
+    "flashinfer_cutedsl_grouped_gemm_nt_masked",
     "flashinfer_fp4_quantize",
+    "silu_and_mul_scaled_nvfp4_experts_quantize",
+    "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",
@@ -480,11 +518,11 @@ __all__ = [
     "has_flashinfer_comm",
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
-    "flashinfer_disable_q_quantization",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
 ]
