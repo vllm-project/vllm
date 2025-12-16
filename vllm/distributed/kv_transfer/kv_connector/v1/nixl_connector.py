@@ -693,9 +693,7 @@ class NixlConnectorScheduler:
         # request is a chunked prefill, so we need to check if new blocks are added
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_tuple = self._reqs_need_save.get(req_id)
-            if req_tuple is None:
-                continue
-            if new_block_id_groups is None:
+            if req_tuple is None or new_block_id_groups is None:
                 continue
 
             req = req_tuple[0]
@@ -705,8 +703,6 @@ class NixlConnectorScheduler:
                 local_block_ids=new_block_id_groups[0],
                 kv_transfer_params=req.kv_transfer_params,
             )
-            # NOTE: for partial prefill, we will keep the req_id until the full
-            # prefill is done. Clear once transfer on full prefill is started.
             assert scheduler_output.num_scheduled_tokens is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             is_partial = (
