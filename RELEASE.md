@@ -12,7 +12,12 @@ Our version numbers are expressed in the form `vX.Y.Z`, where `X` is the major v
 * _Minor_ releases correspond to regular releases, which include new features, bug fixes and other backwards-compatible changes.
 * _Patch_ releases correspond to special releases for new models, as well as emergency patches for critical performance, functionality and security issues.
 
+<<<<<<< HEAD
 This versioning scheme is similar to [SemVer](https://semver.org/) for compatibility purposes, except that backwards compatibility is only guaranteed for a limited number of minor releases (see our [deprecation policy](https://docs.vllm.ai/en/latest/contributing/deprecation_policy) for details).
+=======
+Patch release is released on bi-weekly basis. Post release 1-2 days after patch release and uses same branch as patch release.
+Following is the release cadence for year 2025. All future release dates below are tentative. Please note: Post releases are optional.
+>>>>>>> ea8bbee26 (release_210_testing)
 
 ## Release Branch
 
