@@ -11,7 +11,7 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -88,16 +88,10 @@ def get_vit_attn_backend(
     """
     Get the available attention backend for Vision Transformer.
     """
-    attn_backend = attn_backend_override
-
-    selected_backend = get_current_vllm_config().attention_config.backend
-    if attn_backend is None:
-        attn_backend = selected_backend
-
     return current_platform.get_vit_attn_backend(
         head_size,
         dtype,
-        backend=attn_backend,
+        backend=attn_backend_override,
     )
 
 
