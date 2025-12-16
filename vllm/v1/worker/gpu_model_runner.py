@@ -3119,7 +3119,11 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        RoutedExpertsCapturer.get_instance().clear_buffer()
+        capturer = RoutedExpertsCapturer.get_instance()
+        if capturer is not None:
+            capturer.clear_buffer()  # noqa
+        else:
+            logger.error("RoutedExpertsCapturer not initialized.")
 
         if scheduler_output.preempted_req_ids and has_kv_transfer_group():
             get_kv_transfer_group().handle_preemptions(
@@ -3498,9 +3502,11 @@ class GPUModelRunner(
                 self.model_config.enable_return_routed_experts
                 and get_tensor_model_parallel_rank() == 0
             ):
-                RoutedExpertsCapturer.get_instance().save_captured_experts(
-                    indices=self.slot_mapping
-                )
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
+                else:
+                    logger.error("RoutedExpertsCapturer not initialized.")
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
