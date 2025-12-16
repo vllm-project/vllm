@@ -147,15 +147,6 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
-                `(encoder_attention_heads,)`.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-        """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(
@@ -401,12 +392,6 @@ class Qwen3OmniMoeAudioEncoder(PreTrainedModel):
         max_seqlen: torch.Tensor,
         hidden_states: torch.Tensor,
     ):
-        r"""
-        feature_lens (`torch.LongTensor` of shape `(batch_size,)`):
-            mel length
-        aftercnn_lens (`torch.LongTensor` of shape `(batch_size,)`):
-            mel length after cnn
-        """
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states, cu_seqlens, max_seqlen=max_seqlen
