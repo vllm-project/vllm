@@ -177,7 +177,7 @@ class MistralToolParser(ToolParser):
         # < v11: content[BOT] [{tool_call1},{tool_call2}]
         else:
             if len(raw_tool_calls) != 1:
-                raise ValueError("Only one BOT token should have been outputted for ")
+                raise ValueError("Only one BOT token should have been outputted.")
             stringified_tool_calls = raw_tool_calls[0].strip()
             try:
                 tool_calls = json.loads(stringified_tool_calls)
