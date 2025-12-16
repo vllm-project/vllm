@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import itertools
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
 import numpy as np
@@ -74,272 +71,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.hf import get_cached_tokenizer
-
-# ===== TensorStream Compatibility Layer for Isaac MRoPE =====
-# Minimal implementation of TensorStream classes needed for Isaac's 3D positional
-# encoding
-
-
-class ModalityType(Enum):
-    """
-    Base class for modality-type enumerations.
-    Each derived class (VisionType, TextType) holds
-    an integer value that identifies a specific modality.
-
-    Example usage:
-        If you have an object `my_event` of class `Event`,
-        you might write:
-            if my_event.type == VisionType.image:
-                # process an image frame
-
-    The methods below implement ordering and hashing
-    based on the integer `.value` of each enum member.
-    """
-
-    @property
-    def modality(self):
-        return self.__class__
-
-    def __lt__(self, other):
-        if isinstance(other, ModalityType):
-            return self.value < other.value
-        raise NotImplementedError()
-
-    def __eq__(self, other):
-        if isinstance(other, ModalityType):
-            return self.value == other.value
-        raise NotImplementedError()
-
-    def __hash__(self):
-        return hash(self.value)
-
-
-# NOTE: modality types need to be unique
-class VisionType(ModalityType):
-    """
-    Enum for vision modalities such as key video frames.
-    Typically used in video processing or image sequences.
-
-    Members:
-        image: A single image frame.
-    """
-
-    image = 0
-
-
-class TextType(ModalityType):
-    """
-    Enum for text tokens and padding.
-
-    Members:
-        text: Actual textual tokens.
-        padding: Padding tokens used in sequence batching.
-    """
-
-    text = 1
-    padding = 2
-
-
-@dataclass
-class Event:
-    """Represents a single modality event with spatial/temporal dimensions."""
-
-    """
-    Represents a single data occurrence (with a specific type, time interval, and
-    data payload).
-
-    Attributes:
-        data (Any): The actual data payload (e.g. a torch.Tensor, a string,
-            etc.).
-        type (ModalityType): The modality type of the data (e.g.,
-            VisionType.image).
-        time (Tuple[float, float]): (start_time, end_time) indicating when this
-            Event occurs.
-        role (Optional[str]): The role associated with this event (e.g., "user",
-            "agent", "system"). If None, the event is always included in loss
-            calculation.
-
-    Example usage:
-        evt = Event(data=torch.zeros((1, 224, 224, 3)),  # e.g. a single image frame
-                    type=VisionType.image,
-                    time=(0.0, 0.04),
-                    role="user")
-    """
-    # Descriptors
-    modality_type: ModalityType
-
-    # Structure
-    dims_virtual: list[int] | None = (
-        None  # virtual/processed dimensions (e.g., pixel-shuffled)
-    )
-    dims_real: list[int] | None = None  # real/actual tensor dimensions
-    idx_range: tuple[int, int] | None = None
-
-    def dims(self, virtual: bool = True) -> list[int] | None:
-        """
-        Get the dimensions of this event.
-
-        Args:
-            virtual: If True (default), return virtual/processed dimensions
-                (e.g., pixel-shuffled). If False, return real/actual tensor
-                dimensions.
-
-        Returns:
-            Dimensions list or None if not measured.
-        """
-        if virtual:
-            return self.dims_virtual
-        else:
-            return self.dims_real
-
-    def num_tokens(self, partial=True, virtual=True) -> int:
-        if not virtual:
-            assert partial is False and isinstance(self.data, torch.Tensor)
-            return math.prod(self.dims(virtual=False))
-        return (
-            self.idx_range[1] - self.idx_range[0] if partial else math.prod(self.dims())
-        )
-
-
-@dataclass
-class Stream:
-    """
-    Represents an ordered sequence of Event objects, each with
-    a specific ModalityType and a time range.
-
-    Attributes:
-        events (List[Event]): The list of Event objects in the stream.
-        priority (List[ModalityType]): A list of modality types that define
-            how we might want to reorder or prioritize events if scheduling is needed.
-
-    Example usage:
-        # Create two events of different types
-        evt1 = Event(torch.zeros((1, 224, 224, 3)), VisionType.image, (0.0, 0.04))
-        evt2 = Event(torch.randint(0, 1000, (16, 1)), TextType.text, (0.0, 0.32))
-
-        # Make a stream with a given priority
-        s = Stream(events=[evt1, evt2],
-                   priority=[VisionType.image, TextType.text])
-
-        print(s)
-    """
-
-    events: list[Event]
-
-    def __len__(self):
-        """Returns the number of Event objects in this Stream."""
-        return len(self.events)
-
-    def __getitem__(self, key: int) -> Stream | Event:
-        return self.events[key]
-
-    def __iter__(self):
-        """
-        Yields each Event in the Stream, enabling iteration like:
-            for event in my_stream:
-                ...
-        """
-        yield from self.events
-
-
-# TODO: implement all types of cool indexing which can happen since TensorStream
-# assumes Event.data = Tensor
-@dataclass
-class TensorStream:
-    streams: list[Stream]
-    _device: torch.device | None = None
-
-    @property
-    def device(self):
-        return self._device
-
-    @property
-    def shape(self):
-        seq_lens = [sum([ev.num_tokens() for ev in stream]) for stream in self.streams]
-        assert all([sl == seq_lens[0] for sl in seq_lens]), (
-            f"each stream must have same token count to have a shape: {seq_lens}"
-        )
-        return (len(seq_lens), seq_lens[0])
-
-
-def compute_mrope_pos_tensor(ts: TensorStream, n_pos_dims: int = 3) -> torch.Tensor:
-    """
-    Create a (batch, T, n_pos_dims) position tensor in one sweep.
-    The first dim is the running “time” index, the rest are spatial (or 1-fillers).
-
-    Args:
-        ts         : TensorStream
-        n_pos_dims : total coordinate dimensions (default 3)
-
-    Returns:
-        torch.LongTensor  - shape (batch_size, seq_len, n_pos_dims)
-    """
-
-    # Manually iterate through streams and events like map_compact does,
-    # but maintain cumulative time offset for each stream
-    all_coords = []
-    for stream in ts.streams:  # one Stream == one batch sample
-        cumulative_offset = 0  # running time index for this stream
-
-        for event in stream:
-            # --- build coordinate grid for THIS event using itertools
-            # (no tensor ops) ---
-            dims = (event.dims() or [1]) + [1] * (n_pos_dims - len(event.dims() or []))
-
-            # Create ranges for each dimension (similar to old _finalize implementation)
-            first_dim = list(range(cumulative_offset, cumulative_offset + dims[0]))
-            cumulative_offset += dims[0]  # advance time for the next event
-
-            if event.modality_type != VisionType.image:
-                full_coords = [(t, t, t) for t in first_dim]
-            else:
-                other_dims = [range(d) for d in dims[1:]]
-                full_coords = list(itertools.product(first_dim, *other_dims))
-
-            # Slice if the event is partial
-            s, e = event.idx_range
-            coords = full_coords[s:e]
-
-            # Extend the flattened coordinate list
-            all_coords.extend(coords)
-
-    # Convert to tensor and reshape to (B, T, n_pos_dims)
-    B, T = ts.shape
-    return torch.tensor(all_coords, dtype=torch.long, device=ts.device).reshape(
-        B, T, n_pos_dims
-    )
-
-
-def _resolve_vision_token_id(model_config: ModelConfig, vision_token: str) -> int:
-    tokenizer_name = model_config.tokenizer or model_config.model
-    tokenizer = get_cached_tokenizer(
-        get_tokenizer(
-            tokenizer_name,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code,
-            revision=model_config.tokenizer_revision or model_config.revision,
-        )
-    )
-    return tokenizer.encode(vision_token, add_special_tokens=False)[0]
-
-
-def modality_mask(ts: TensorStream, modality_type: ModalityType) -> torch.Tensor:
-    """Create boolean mask for specific modality type in the tensor stream."""
-    B, T = ts.shape
-    mask = torch.zeros((B, T), dtype=torch.bool, device=ts.device)
-
-    for batch_idx, stream in enumerate(ts.streams):
-        seq_idx = 0
-        for event in stream:
-            if event.modality_type == modality_type:
-                start, end = event.idx_range
-                mask[batch_idx, seq_idx : seq_idx + (end - start)] = True
-            seq_idx += event.idx_range[1] - event.idx_range[0]
-
-    return mask
-
-
-# ===== End TensorStream Compatibility Layer =====
 
 
 class PixelShuffleSiglip2VisionConfig(Siglip2VisionConfig):
@@ -736,6 +467,19 @@ def get_image_size_for_max_num_patches(
 
 _MEAN_TENSOR = torch.tensor(VISION_MEAN, dtype=torch.float32).view(1, 1, 1, -1)
 _STD_TENSOR = torch.tensor(VISION_STD, dtype=torch.float32).view(1, 1, 1, -1)
+
+
+def _resolve_vision_token_id(model_config: ModelConfig, vision_token: str) -> int:
+    tokenizer_name = model_config.tokenizer or model_config.model
+    tokenizer = get_cached_tokenizer(
+        get_tokenizer(
+            tokenizer_name,
+            tokenizer_mode=model_config.tokenizer_mode,
+            trust_remote_code=model_config.trust_remote_code,
+            revision=model_config.tokenizer_revision or model_config.revision,
+        )
+    )
+    return tokenizer.encode(vision_token, add_special_tokens=False)[0]
 
 
 def prepare_image_tensor(
