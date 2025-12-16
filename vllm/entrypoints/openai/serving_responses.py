@@ -675,7 +675,8 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
-            final_res = context.last_output
+            # Use final_output which has accumulated text/token_ids/logprobs
+            final_res = context.final_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
