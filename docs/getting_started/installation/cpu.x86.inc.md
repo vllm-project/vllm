@@ -70,7 +70,7 @@ Install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the def
 
 ```bash
 sudo apt-get update -y
-sudo apt-get install -y gcc-12 g++-12 libnuma-dev python3-dev
+sudo apt-get install -y gcc-12 g++-12 libnuma-dev
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
