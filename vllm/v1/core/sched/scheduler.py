@@ -187,6 +187,12 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
+        # For encoder-decoder models, allocate the maximum number of tokens for Cross
+        # Attn blocks, as for Whisper its input is always padded to the maximum length.
+        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
+        self._num_encoder_max_input_tokens = (
+            MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(vllm_config.model_config)
+        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -568,17 +574,11 @@ class Scheduler(SchedulerInterface):
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
-                # Determine if we need to allocate cross-attention blocks.
-                if self.is_encoder_decoder and request.has_encoder_inputs:
-                    # TODO(russellb): For Whisper, we know that the input is
-                    # always padded to the maximum length. If we support other
-                    # encoder-decoder models, this will need to be updated if we
-                    # want to only allocate what is needed.
-                    num_encoder_tokens = (
-                        self.scheduler_config.max_num_encoder_input_tokens
-                    )
-                else:
-                    num_encoder_tokens = 0
+                num_encoder_tokens = (
+                    self._num_encoder_max_input_tokens
+                    if self.is_encoder_decoder and request.has_encoder_inputs
+                    else 0
+                )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -1117,6 +1117,7 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
+            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
 
@@ -1125,12 +1126,10 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-
-            # Stop checking for pooler models.
-            pooler_output = None
-            if pooler_outputs:
-                pooler_output = pooler_outputs[req_index]
-                stopped = check_stop(request, self.max_model_len, pooler_output)
+            elif request.pooling_params and pooler_output is not None:
+                # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
 
             if stopped:
                 kv_transfer_params = self._free_request(request)

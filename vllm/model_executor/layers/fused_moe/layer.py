@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     is_flashinfer_supporting_global_sf,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -369,7 +370,9 @@ class FusedMoE(CustomOp):
             # aux_stream() returns None on non-cuda-alike platforms.
             self.shared_experts_stream = aux_stream()
             if self.shared_experts_stream is not None:
-                logger.info_once("Enabled separate cuda stream for MoE shared_experts")
+                logger.info_once(
+                    "Enabled separate cuda stream for MoE shared_experts", scope="local"
+                )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -1200,10 +1203,14 @@ class FusedMoE(CustomOp):
         if full_load:
             shard_dim += 1
 
-        # Materialize GGUF UninitializedParameter
+        # Materialize GGUF UninitializedParameter accounting merged weights
         if is_gguf_weight and isinstance(param, UninitializedParameter):
+            # To materialize a tensor, we must have full shape including
+            # number of experts, making this portion to require `full_load`.
+            assert full_load
             final_shape = list(loaded_weight.shape)
-            if shard_id in ["w1", "w3"]:
+            # w1 and w3 are merged per expert.
+            if shard_id in {"w1", "w3"}:
                 final_shape[1] *= 2
             final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
@@ -1927,10 +1934,46 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
+            extra_tensors = None
             if do_naive_dispatch_combine:
-                hidden_states_combined, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits, self.is_sequence_parallel
+                # Avoid circular import
+                from vllm.model_executor.layers.quantization.modelopt import (
+                    ModelOptNvFp4FusedMoE,
                 )
+
+                post_quant_allgather = (
+                    has_flashinfer_trtllm_fused_moe()
+                    and self.quant_method is not None
+                    and self.dp_size > 1
+                    and self.use_ep
+                    and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
+                )
+                if post_quant_allgather:
+                    hidden_states_to_dispatch, extra_tensors = (
+                        self.quant_method.prepare_dp_allgather_tensor(
+                            self, hidden_states, router_logits
+                        )
+                    )
+                else:
+                    hidden_states_to_dispatch = hidden_states
+
+                dispatch_res = get_ep_group().dispatch(
+                    hidden_states_to_dispatch,
+                    router_logits,
+                    self.is_sequence_parallel,
+                    extra_tensors=extra_tensors,
+                )
+                if extra_tensors is not None:
+                    hidden_states_combined, router_logits, extra_tensors_combined = (
+                        dispatch_res
+                    )
+                    hidden_states_combined = (
+                        hidden_states_combined,
+                        extra_tensors_combined[0],
+                    )
+                else:
+                    hidden_states_combined, router_logits = dispatch_res
+
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:

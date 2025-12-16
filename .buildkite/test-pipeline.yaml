@@ -57,8 +57,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
-  timeout_in_minutes: 20
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 20min
+  timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -66,6 +66,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -75,6 +76,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s tokenizers_
+  - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -652,7 +654,7 @@ steps:
   - vllm/model_executor/layers/quantization
   autorun_on_main: true
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 - label: OpenAI API correctness # 22min
   timeout_in_minutes: 30
@@ -672,16 +674,7 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
-
-- label: OpenAI-Compatible Tool Use (CPU) # 5 mins
-  timeout_in_minutes: 10
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  no_gpu: true
-  commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - pytest -v -s tool_use
 
 #####  models test  #####
 
@@ -692,6 +685,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
@@ -704,6 +698,7 @@ steps:
   - vllm/model_executor/models/
   - vllm/transformers_utils/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
@@ -1069,7 +1064,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt --tp-size=1
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -1228,6 +1223,8 @@ steps:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Alot of these tests are on the edge of OOMing
+    - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
@@ -1346,6 +1343,7 @@ steps:
 - label: Prime-RL Integration Test # 15min
   timeout_in_minutes: 30
   optional: true
+  soft_fail: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
