@@ -455,10 +455,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
-            event.record()
-
         request_ids = []
         ops = []
 
@@ -468,10 +464,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
 
-        if len(request_ids) > 0:
-            self.worker_adapter.batched_submit_retrieve_requests(
-                request_ids, ops, event
-            )
+        if len(request_ids) == 0:
+            return
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
+
+        self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -518,10 +518,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
-            event.record()
-
         request_ids = []
         ops = []
         for meta in metadata.requests:
@@ -530,8 +526,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
 
-        if len(request_ids) > 0:
-            self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
+        if len(request_ids) == 0:
+            return
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
+
+        self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
 
     def get_finished(
         self, finished_req_ids: set[str]
