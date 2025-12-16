@@ -489,14 +489,14 @@ class ModelConfig:
         )
         self.model_arch_config = self.get_model_arch_config()
 
-        architectures = self.architectures
+        architecture = self.model_arch_config.architectures[0]
         registry = self.registry
-        is_generative_model = registry.is_text_generation_model(architectures, self)
-        is_pooling_model = registry.is_pooling_model(architectures, self)
+        is_generative_model = registry.is_text_generation_model([architecture], self)
+        is_pooling_model = registry.is_pooling_model(architecture, self)
 
-        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.runner_type = self._get_runner_type(architecture, self.runner)
         self.convert_type = self._get_convert_type(
-            architectures, self.runner_type, self.convert
+            architecture, self.runner_type, self.convert
         )
 
         if self.runner_type == "generate" and not is_generative_model:
@@ -516,7 +516,7 @@ class ModelConfig:
 
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
-        model_info, arch = registry.inspect_model_cls(architectures, self)
+        model_info, arch = registry.inspect_model_cls(architecture, self)
         self._model_info = model_info
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
@@ -748,7 +748,7 @@ class ModelConfig:
 
     def _get_default_runner_type(
         self,
-        architectures: list[str],
+        architecture: str,
     ) -> RunnerType:
         registry = self.registry
 
@@ -756,29 +756,28 @@ class ModelConfig:
         if get_pooling_config(self.model, self.revision):
             return "pooling"
 
-        for arch in architectures:
-            if arch in registry.get_supported_archs():
-                if registry.is_pooling_model(architectures, self):
-                    return "pooling"
-                if registry.is_text_generation_model(architectures, self):
-                    return "generate"
+        if architecture in registry.get_supported_archs():
+            if registry.is_pooling_model(architecture, self):
+                return "pooling"
+            if registry.is_text_generation_model(architecture, self):
+                return "generate"
 
-            match = try_match_architecture_defaults(arch)
-            if match:
-                _, (runner_type, _) = match
-                return runner_type
+        match = try_match_architecture_defaults(architecture)
+        if match:
+            _, (runner_type, _) = match
+            return runner_type
 
         return "generate"
 
     def _get_runner_type(
         self,
-        architectures: list[str],
+        architecture: str,
         runner: RunnerOption,
     ) -> RunnerType:
         if runner != "auto":
             return runner
 
-        runner_type = self._get_default_runner_type(architectures)
+        runner_type = self._get_default_runner_type(architecture)
 
         # Don't log the most common case
         if runner_type != "generate":
