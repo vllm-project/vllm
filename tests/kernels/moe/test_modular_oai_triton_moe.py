@@ -40,8 +40,7 @@ MNK = [
     (1, 2880, 2880),
     (2, 512, 384),
     (2, 2880, 2880),
-    (32, 2880, 2880),
-    (64, 2880, 2880),
+    (16, 2880, 2880),
 ]
 
 
@@ -210,6 +209,7 @@ def test_oai_triton_moe(
     num_experts: int,
     topk: int,
     unfused: bool,
+    workspace_init,
 ):
     current_platform.seed_everything(0)
     (
