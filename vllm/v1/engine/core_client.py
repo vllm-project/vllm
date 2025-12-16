@@ -529,7 +529,7 @@ class MPClient(EngineCoreClient):
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
                 if not sync_input_socket.poll(
-                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000 # convert to ms
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
                         "Timed out waiting for engines to send"
@@ -1343,7 +1343,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
             if not sync_input_socket.poll(
-                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000 # convert to ms
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
             ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
