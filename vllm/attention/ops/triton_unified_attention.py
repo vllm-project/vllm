@@ -277,7 +277,6 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-
         # Apply sliding window to base mask BEFORE mm_prefix OR.
         # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
         if SLIDING_WINDOW > 0:
@@ -593,7 +592,6 @@ def kernel_unified_attention_3d(
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
-
 
         # Apply sliding window to base mask BEFORE mm_prefix OR.
         # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
