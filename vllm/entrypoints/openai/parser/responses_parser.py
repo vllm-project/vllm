@@ -7,7 +7,7 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
-from openai.types.responses.response_input_item import McpCall
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.response_reasoning_item import (
