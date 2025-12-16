@@ -41,9 +41,9 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
-    routed_experts: np.ndarray | None  # [seq_len,layer_num,topk]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
+    routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
