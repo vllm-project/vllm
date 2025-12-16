@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -342,6 +343,10 @@ class InputProcessor:
                 # are not supported in xgrammar.
                 if isinstance(self.tokenizer, MistralTokenizer):
                     # Fall back to outlines if the tokenizer is Mistral
+                    validate_structured_output_request_outlines(params)
+                    params.structured_outputs._backend = "outlines"
+                elif current_platform.is_rocm():
+                    # Fall back to outlines on ROCm due to guidance backend issues
                     validate_structured_output_request_outlines(params)
                     params.structured_outputs._backend = "outlines"
                 else:
