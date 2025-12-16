@@ -76,7 +76,7 @@ def test_gpt_oss_lora(gptoss20b_lora_files):
         enable_lora=True,
         max_loras=4,
         max_lora_rank=8,
-        max_num_seqs=4,
+        max_num_seqs=2,
         max_num_batched_tokens=2048,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
@@ -96,11 +96,13 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=8,
-        max_num_seqs=4,
+        max_num_seqs=2,
         max_num_batched_tokens=2048,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
-        enforce_eager=True,
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
     )
 
     generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
