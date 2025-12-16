@@ -250,10 +250,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
-        logger = init_logger(__name__)
-
-        # logger.info(f"[SLAB_DEBUG] column.set_lora called for index {index}:")
-
         self.reset_lora(index)
 
         if self.tp_size > 1:
