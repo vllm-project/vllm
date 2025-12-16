@@ -103,12 +103,38 @@ class TinyQuantLinearMethod(LinearMethodBase):
         
         # Get layer prefix (set in LinearBase.__init__)
         prefix = getattr(layer, "prefix", "")
+        print("-------------------")
+        print("prefix", getattr(layer, "prefix", ""))
         
-        # Get quantized parameter names for this specific layer from config
+        # Determine param names from config
+        # For merged layers (qkv_proj), check constituent layers (q_proj, k_proj, v_proj)
         param_names = self.quant_config.get_quantized_params(prefix)
-
-        if not param_names:
-            raise ValueError(f"Layer {prefix} not found in quantized_tensors config")
+        print("param_names", param_names)
+        
+        if not param_names and num_shards > 1:
+            # Try merged layer constituents
+            base_prefix = prefix.rsplit(".", 1)[0] if "." in prefix else ""
+            layer_name = prefix.rsplit(".", 1)[-1] if "." in prefix else prefix
+            print("base_prefix", base_prefix)
+            print("layer_name", layer_name)
+            
+            # Map merged layer names to constituent parts
+            merged_layer_map = {
+                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+                "gate_up_proj": ["gate_proj", "up_proj"],
+            }
+            constituent_names = merged_layer_map.get(layer_name, [])
+            print("constituent_names", constituent_names)
+            
+            # Try to find params from first constituent
+            for constituent in constituent_names:
+                constituent_prefix = f"{base_prefix}.{constituent}" if base_prefix else constituent
+                print("constituent_prefix", constituent_prefix)
+                param_names = self.quant_config.get_quantized_params(constituent_prefix)
+                print("param_names", param_names)
+                if param_names:
+                    break
+            print("-------------------")
         
         # Weight loader writes directly to tinyquant_layers[shard_idx].tq_tensors
         def make_weight_loader(param_name: str):
@@ -132,6 +158,8 @@ class TinyQuantLinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Run each shard and concatenate
+        print("Running TinyQuant forward pass")
+        print("layer.tinyquant_layers", layer.tinyquant_layers)
         outputs = [tq_layer(x) for tq_layer in layer.tinyquant_layers]
         
         output = torch.cat(outputs, dim=-1) if len(outputs) > 1 else outputs[0]
