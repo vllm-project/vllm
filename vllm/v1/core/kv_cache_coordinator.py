@@ -109,7 +109,7 @@ class KVCacheCoordinator(ABC):
                 )
         return num_blocks_to_allocate
 
-    def save_new_computed_blocks(
+    def allocate_new_computed_blocks(
         self,
         request_id: str,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
@@ -117,7 +117,8 @@ class KVCacheCoordinator(ABC):
         num_external_computed_tokens: int,
     ) -> None:
         """
-        Add the new computed blocks to the request.
+        Add the new computed blocks to the request. Optionally allocate new
+            blocks for external computed tokens (if any).
 
         Args:
             request_id: The request ID.
@@ -127,7 +128,7 @@ class KVCacheCoordinator(ABC):
             num_external_computed_tokens: The number of external computed tokens.
         """
         for i, manager in enumerate(self.single_type_managers):
-            manager.save_new_computed_blocks(
+            manager.allocate_new_computed_blocks(
                 request_id,
                 new_computed_blocks[i],
                 num_local_computed_tokens,
