@@ -308,6 +308,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         with torch.device("meta"):
             model: PreTrainedModel = AutoModel.from_config(**kwargs)
         encoder_cls = type(model.get_encoder("image"))
+        if type(model) is encoder_cls:
+            raise ValueError(
+                "Unable to infer vision encoder class from the model. "
+                "You must either: update the model so that "
+                "https://huggingface.co/docs/transformers/en/main_classes/model#transformers.PreTrainedModel.get_encoder"
+                " can detect the vision encoder correctly, or remove "
+                "'compile_mm_encoder'."
+            )
         del model
         return encoder_cls
 
@@ -322,6 +330,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         but with different default `dynamic_arg_dims` for MRoPE models.
         """
         if dynamic_arg_dims is None and self.model_config.uses_mrope:
+            # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims = {
                 "input_ids": 1,  # shape: [1, seq_len]
                 "inputs_embeds": 1,  # shape: [1, seq_len, hidden_size]
