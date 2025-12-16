@@ -96,7 +96,8 @@ class TestTwoTokenBadWord:
 
     def test_two_token_bad_word(self, vllm_runner):
         # TODO: Remove once graph mode is fixed for distilbert/distilgpt2 on ROCm.
-        eager_mode = current_platform.is_rocm() 
+
+        eager_mode = current_platform.is_rocm()
 
         with vllm_runner(self.MODEL, dtype="half", enforce_eager=eager_mode) as llm:
             output_token_ids = self._generate(llm)
