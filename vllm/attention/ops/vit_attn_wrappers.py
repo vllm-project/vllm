@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.platforms import current_platform
 
 
 def flash_attn_maxseqlen_wrapper(
@@ -89,6 +90,13 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
+    # Never remove the contiguous logic for ROCm
+    # Without it, hallucinations occur with the backend
+    if current_platform.is_rocm():
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
     outputs = []
 
     lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
