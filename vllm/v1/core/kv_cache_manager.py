@@ -298,16 +298,6 @@ class KVCacheManager:
         else:
             new_computed_block_list = self.empty_kv_cache_blocks.blocks
 
-        # Free the blocks that are skipped during the attention computation
-        # (e.g., tokens outside the sliding window).
-        # We can do this even if we cannot schedule this request due to
-        # insufficient free blocks.
-        # Should call this function before allocating new blocks to reduce
-        # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(
-            request.request_id, request.num_computed_tokens
-        )
-
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_local_computed_tokens = (
@@ -320,6 +310,14 @@ class KVCacheManager:
             + num_lookahead_tokens,
             self.max_model_len,
         )
+
+        # Free the blocks that are skipped during the attention computation
+        # (e.g., tokens outside the sliding window).
+        # We can do this even if we cannot schedule this request due to
+        # insufficient free blocks.
+        # Should call this function before allocating new blocks to reduce
+        # the number of evicted blocks.
+        self.coordinator.remove_skipped_blocks(request.request_id, num_tokens_need_slot)
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,

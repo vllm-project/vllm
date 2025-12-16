@@ -337,7 +337,7 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+    def remove_skipped_blocks(self, request_id: str, num_tokens_need_slot: int) -> None:
         """
         Remove and free the blocks that are no longer needed for attention computation.
         The removed blocks should be replaced by null_block.
@@ -347,18 +347,23 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
+            num_tokens_need_slot: The number of tokens that need a slot, including
+                already computed tokens and to be computed tokens.
         """
         # Remove the blocks that will be skipped during attention computation.
-        num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
+        num_skipped_tokens = self.get_num_skipped_tokens(num_tokens_need_slot)
         if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
             # A typical case is full attention that we never free any token
             # before the request is finished.
             return
-        num_skipped_blocks = num_skipped_tokens // self.block_size
         blocks = self.req_to_blocks[request_id]
+        num_skipped_blocks = num_skipped_tokens // self.block_size
+        # `num_skipped_tokens` may include tokens that haven't been allocated yet
+        # (e.g., the attention window moves into the pending-token range), so we
+        # must cap to the number of blocks that currently exist for this request.
+        num_skipped_blocks = min(num_skipped_blocks, len(blocks))
         removed_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.

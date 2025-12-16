@@ -204,17 +204,18 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         ]
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+    def remove_skipped_blocks(self, request_id: str, num_tokens_need_slot: int) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
 
         Args:
             request_id: The request ID.
-            num_computed_tokens: The number of tokens that have been computed.
+            num_tokens_need_slot: The number of tokens that need a slot, including
+                tokens already computed and tokens to be computed.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, num_computed_tokens)
+            manager.remove_skipped_blocks(request_id, num_tokens_need_slot)
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
