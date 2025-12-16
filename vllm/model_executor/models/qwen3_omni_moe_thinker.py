@@ -2110,10 +2110,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             to_language = "en"
 
         # Get full language names from supported_languages mapping
-        full_lang_name = cls.supported_languages.get(language, "") if language else ""
-        full_lang_name_to = (
-            cls.supported_languages.get(to_language, "") if to_language else ""
-        )
+        full_lang_name = cls.supported_languages.get(language, "")
+        full_lang_name_to = cls.supported_languages.get(to_language, "")
 
         if task_type == "transcribe" and full_lang_name:
             instruction += f" into {full_lang_name}"
