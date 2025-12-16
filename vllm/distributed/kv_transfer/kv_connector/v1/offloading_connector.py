@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 
@@ -43,7 +43,9 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-    prefer_cross_layer_blocks: ClassVar[bool] = True
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
 
     def __init__(
         self,
