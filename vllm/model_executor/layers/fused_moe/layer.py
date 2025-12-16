@@ -2030,9 +2030,7 @@ class FusedMoE(CustomOp):
 
             def reduce_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(
-                        states, self.is_sequence_parallel
-                    )
+                    states = get_ep_group().combine(states, self.is_sequence_parallel)
 
                 if self.pcp_size > 1:
                     states = get_pcp_group().reduce_scatter(
