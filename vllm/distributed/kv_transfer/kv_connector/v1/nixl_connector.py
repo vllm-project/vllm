@@ -700,6 +700,11 @@ class NixlConnectorScheduler:
                 req.num_computed_tokens + num_scheduled_tokens
             ) < req.num_prompt_tokens
             if not is_partial:
+                # For non-partial prefills, once new req_meta is scheduled, it
+                # can be removed from _reqs_need_save.
+                # For partial prefill case, we will retain the request in
+                # _reqs_need_save until all blocks are scheduled with req_meta.
+                # Therefore, only pop if `not is_partial`.
                 self._reqs_need_save.pop(req_id)
 
         meta.reqs_to_send = self._reqs_need_send
