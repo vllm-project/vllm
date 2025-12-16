@@ -176,17 +176,16 @@ class Base(
 
         # Set correct attn
         self.text_config._attn_implementation = "vllm"
+
         from_config_kwargs = dict(
             config=self.config,
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
-
         # Decorate the language model class to support torch compile
         decoder_cls = self._get_decoder_cls(**from_config_kwargs)
         self._torch_compile(cls=decoder_cls)
-
-        # init on "meta" to delay allocating GPU tensors
+        # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
@@ -252,7 +251,6 @@ class Base(
                 of the argument. If None, default dynamic arg dims will be used. See
                 [`support_torch_compile`][vllm.compilation.decorators.support_torch_compile]
                 for more details.
-            kwargs: The kwargs to create the language model class.
         """
         if dynamic_arg_dims is None:
             # Applied to a PreTrainedModel so the batch dimension will exist
