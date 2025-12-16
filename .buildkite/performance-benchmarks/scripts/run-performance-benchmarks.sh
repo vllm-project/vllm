@@ -219,14 +219,6 @@ run_latency_tests() {
         continue
       fi
     else
-      if [ "$ON_ARM64_CPU" == "1" ]; then
-        pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
-        world_size=$(($tp*$pp))
-        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
-          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
-          continue
-        fi
-    else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
         continue
@@ -295,14 +287,6 @@ run_throughput_tests() {
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
-    else
-      if [ "$ON_ARM64_CPU" == "1" ]; then
-        pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
-        world_size=$(($tp*$pp))
-        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
-          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
-          continue
-        fi
     else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
@@ -420,14 +404,6 @@ run_serving_tests() {
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
-    else
-      if [ "$ON_ARM64_CPU" == "1" ]; then
-        pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
-        world_size=$(($tp*$pp))
-        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
-          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
-          continue
-        fi
     else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
