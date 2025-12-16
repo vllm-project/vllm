@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = Literal["default","flashlb","swift_balancer"]
+EPLBPolicyOption = Literal["default", "flashlb", "swift_balancer"]
 
 
 @config

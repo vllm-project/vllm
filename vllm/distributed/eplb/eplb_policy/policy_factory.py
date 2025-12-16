@@ -72,7 +72,6 @@ class EplbPolicyFactory:
 
         policy_cls = cls._POLICY_REGISTRY[policy_type]
         instance = policy_cls()
-
         return instance
 
     @classmethod
