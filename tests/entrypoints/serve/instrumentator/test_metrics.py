@@ -16,8 +16,8 @@ from transformers import AutoTokenizer
 
 from vllm import version
 
-from ...conftest import LocalAssetServer
-from ...utils import RemoteOpenAIServer
+from ....conftest import LocalAssetServer
+from ....utils import RemoteOpenAIServer
 
 MODELS = {
     "text": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
