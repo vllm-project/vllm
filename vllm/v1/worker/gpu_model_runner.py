@@ -2972,7 +2972,11 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
-        RoutedExpertsCapturer.get_instance().clear_buffer()
+        capturer = RoutedExpertsCapturer.get_instance()
+        if capturer is not None:
+            capturer.clear_buffer()  # noqa
+        else:
+            logger.error("RoutedExpertsCapturer not initialized.")
 
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
@@ -3368,9 +3372,11 @@ class GPUModelRunner(
                 self.model_config.enable_return_routed_experts
                 and get_tensor_model_parallel_rank() == 0
             ):
-                RoutedExpertsCapturer.get_instance().save_captured_experts(
-                    indices=self.slot_mapping
-                )
+                capturer = RoutedExpertsCapturer.get_instance()
+                if capturer is not None:
+                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
+                else:
+                    logger.error("RoutedExpertsCapturer not initialized.")
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
