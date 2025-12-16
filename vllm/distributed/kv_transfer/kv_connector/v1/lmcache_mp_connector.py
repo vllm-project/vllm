@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.utils import ConstantList
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -686,11 +685,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # the block ids into the tracker
         tracker.update_block_ids(block_ids)
 
-        # if request is PREEMPTED and self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks:
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
-        if request.status == RequestStatus.PREEMPTED and self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks:
-            condition = True
         if tracker.state == LMCacheMPRequestState.PREFETCHING:
             # If need to retrieve, change to WAITING_FOR_LOAD
             # Otherwise, change to READY
@@ -699,20 +695,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 if condition
                 else LMCacheMPRequestState.READY
             )
-        elif tracker.state == LMCacheMPRequestState.READY and condition:
-            # Handle preemption case: request was previously READY but now
-            # needs to retrieve again because local cache was evicted.
-            # Reset state to WAITING_FOR_LOAD to trigger a new retrieve.
-            logger.debug(
-                "[KVConnector] Request %s: Resetting state from READY to "
-                "WAITING_FOR_LOAD due to preemption (needs_external_blocks=%s, "
-                "num_lmcache_hit=%d, num_vllm_hit=%d)",
-                request.request_id,
-                condition,
-                tracker.num_lmcache_hit_blocks,
-                tracker.num_vllm_hit_blocks,
-            )
-            tracker.state = LMCacheMPRequestState.WAITING_FOR_LOAD
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
