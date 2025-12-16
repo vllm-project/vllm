@@ -1404,10 +1404,8 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    # Only create EP group for MoE models.
-    if config is None or (
-        config.model_config is not None and config.model_config.is_moe
-    ):
+    # Don't create EP group for dense models.
+    if config is None or config.model_config is None or config.model_config.is_moe:
         group_ranks = (
             all_ranks.transpose(1, 2)
             .reshape(
