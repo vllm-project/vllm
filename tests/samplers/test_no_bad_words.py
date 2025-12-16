@@ -9,6 +9,7 @@ Run `pytest tests/samplers/test_no_bad_words.py`.
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 
 def _generate(
@@ -94,7 +95,10 @@ class TestTwoTokenBadWord:
         )[0]
 
     def test_two_token_bad_word(self, vllm_runner):
-        with vllm_runner(self.MODEL, dtype="half", enforce_eager=True) as llm:
+        # TODO: Remove once graph mode is fixed for distilbert/distilgpt2 on ROCm.
+        eager_mode = current_platform.is_rocm() 
+
+        with vllm_runner(self.MODEL, dtype="half", enforce_eager=eager_mode) as llm:
             output_token_ids = self._generate(llm)
             assert output_token_ids[:2] == [
                 self.target_token_id1,

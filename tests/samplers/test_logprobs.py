@@ -5,6 +5,7 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs
+from vllm.platforms import current_platform
 
 MODELS = ["distilbert/distilgpt2"]
 MAX_TOKENS = 5
@@ -25,8 +26,11 @@ def test_ranks(
     flat_logprobs,
     example_prompts,
 ):
+    # TODO: Remove once graph mode is fixed for distilbert/distilgpt2 on ROCm.
+    eager_mode = current_platform.is_rocm()
+
     with vllm_runner(
-        model, dtype=dtype, max_logprobs=MAX_LOGPROBS, enforce_eager=True
+        model, dtype=dtype, max_logprobs=MAX_LOGPROBS, enforce_eager=eager_mode
     ) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
         example_prompt_tokens = [tokenizer.encode(prompt) for prompt in example_prompts]
