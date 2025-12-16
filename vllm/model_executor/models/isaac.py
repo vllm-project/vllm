@@ -1391,7 +1391,6 @@ class IsaacVisionEmbedding(nn.Module):
 class IsaacForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
