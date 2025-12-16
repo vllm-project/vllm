@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
@@ -196,6 +196,9 @@ class FusedMoEQuantConfig:
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
+
+    # this is set at runtime
+    moe_kernel: Any = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
