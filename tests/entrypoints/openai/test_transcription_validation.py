@@ -114,3 +114,28 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
         )
         out = json.loads(transcription)["text"]
         assert "ove il mio corpo fanciulletto giacque" in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["Qwen/Qwen3-Omni-30B-A3B-Instruct"])
+async def test_transcription_endpoint_is_supported(foscolo, model_name):
+    # Some of these models are too heavy to run on CI, so at least check
+    # that the endpoint is correctly registered
+    model_name = "google/gemma-3n-E2B-it"
+    server_args = ["--enforce-eager", "--max-model-len", "1024", "--max-num-seqs", "1"]
+
+    with RemoteOpenAIServer(
+        model_name,
+        server_args,
+        max_wait_seconds=480,
+        override_hf_configs={"num_hidden_layers": 4, "load_format": "dummy"},
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=foscolo,
+            language="it",
+            response_format="text",
+            temperature=0.0,
+        )
+        assert transcription is not None
