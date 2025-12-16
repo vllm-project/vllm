@@ -683,9 +683,10 @@ class NixlConnectorScheduler:
         # NOTE: For the prefill side, there might be a chance that an early added
         # request is a chunked prefill, so we need to check if new blocks are added
         for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
-            req = self._reqs_need_save.get(req_id)
-            if req is None or new_block_id_groups is None:
+            req_to_save = self._reqs_need_save.get(req_id)
+            if req_to_save is None or new_block_id_groups is None:
                 continue
+            req = req_to_save
 
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_save(
