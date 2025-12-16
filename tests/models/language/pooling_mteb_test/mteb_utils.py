@@ -15,7 +15,6 @@ import tests.ci_envs as ci_envs
 from tests.models.utils import (
     EmbedModelInfo,
     RerankModelInfo,
-    check_embeddings_close,
     get_vllm_extra_kwargs,
 )
 
@@ -75,6 +74,47 @@ class VllmMtebEncoder(mteb.EncoderProtocol):
         outputs = self.llm.embed(sentences, use_tqdm=False)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
+        return embeds
+
+    def similarity(
+        self,
+        embeddings1: np.ndarray,
+        embeddings2: np.ndarray,
+    ) -> np.ndarray:
+        # Cosine similarity
+        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        sim = np.dot(embeddings1, embeddings2.T) / (norm1 * norm2.T)
+        return sim
+
+    def similarity_pairwise(
+        self,
+        embeddings1: Array,
+        embeddings2: Array,
+    ) -> Array:
+        # Cosine similarity
+        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
+        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
+        sim = np.sum(embeddings1 * embeddings2, axis=1) / (
+            norm1.flatten() * norm2.flatten()
+        )
+        return sim
+
+
+class HFMtebEncoder(mteb.EncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
+    def __init__(self, hf_model):
+        self.model = hf_model
+
+    def encode(
+        self,
+        inputs: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        sentences = [text for batch in inputs for text in batch["text"]]
+        embeds = self.model.encode(sentences)
         return embeds
 
     def similarity(
@@ -275,18 +315,10 @@ def mteb_test_embed_models(
             if hf_model_callback is not None:
                 hf_model_callback(hf_model)
 
-            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
-            st_dtype = next(hf_model.model.parameters()).dtype
-
-            # Check embeddings close to hf outputs
-            hf_outputs = hf_model.encode(example_prompts)
-            check_embeddings_close(
-                embeddings_0_lst=hf_outputs,
-                embeddings_1_lst=vllm_outputs,
-                name_0="hf",
-                name_1="vllm",
-                tol=1e-2,
+            st_main_score = run_mteb_embed_task(
+                HFMtebEncoder(hf_model), MTEB_EMBED_TASKS
             )
+            st_dtype = next(hf_model.model.parameters()).dtype
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"

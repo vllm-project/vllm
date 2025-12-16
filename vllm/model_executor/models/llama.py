@@ -712,3 +712,8 @@ class LlamaBidirectionalForSequenceClassification(
     LlamaForCausalLM, SupportsCrossEncoding
 ):
     pass
+
+
+@default_pooling_type("CLS")
+class LlamaBidirectionalModel(LlamaForCausalLM):
+    pass

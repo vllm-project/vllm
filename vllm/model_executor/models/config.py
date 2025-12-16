@@ -88,7 +88,7 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             }
 
 
-class LlamaBidirectionalForSequenceClassificationConfig(VerifyAndUpdateConfig):
+class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         from vllm.config.pooler import PoolingTypeStr
@@ -535,7 +535,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewModel": GteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
-    "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalForSequenceClassificationConfig,  # noqa E501
+    "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
+    "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
