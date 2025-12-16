@@ -167,6 +167,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return False
 
@@ -207,6 +211,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -219,6 +224,10 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
+        if use_mm_prefix and not cls.supports_mm_prefix():
+            invalid_reasons.append(
+                "partial multimodal token full attention not supported"
+            )
         if use_mla != cls.is_mla():
             if use_mla:
                 invalid_reasons.append("MLA not supported")
@@ -284,6 +293,12 @@ class AttentionImpl(ABC, Generic[T]):
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
+
+    # Whether the attention impl supports Prefill Context Parallelism.
+    supports_pcp: bool = False
+    # Whether the attention impl(or ops) supports MTP
+    # when cp_kv_cache_interleave_size > 1
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = False
 
     # some attention backends might not always want to return lse
     # even if they can return lse (for efficiency reasons)
