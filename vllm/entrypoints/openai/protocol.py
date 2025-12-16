@@ -2054,6 +2054,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
+
+    max_completion_tokens: int | None = None
+    """The maximum number of tokens to generate."""
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
@@ -2300,6 +2303,9 @@ class TranslationRequest(OpenAIBaseModel):
     # Flattened stream option to simplify form data.
     stream_include_usage: bool | None = False
     stream_continuous_usage_stats: bool | None = False
+
+    max_completion_tokens: int | None = None
+    """The maximum number of tokens to generate."""
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
