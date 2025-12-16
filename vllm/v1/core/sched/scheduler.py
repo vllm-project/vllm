@@ -576,6 +576,12 @@ class Scheduler(SchedulerInterface):
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
+                num_encoder_tokens = (
+                    self._num_encoder_input_tokens
+                    if self.is_encoder_decoder and request.has_encoder_inputs
+                    else 0
+                )
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -583,7 +589,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=self._num_encoder_input_tokens,
+                    num_encoder_tokens=num_encoder_tokens,
                 )
 
                 if new_blocks is None:
