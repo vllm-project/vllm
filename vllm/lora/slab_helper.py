@@ -38,17 +38,14 @@ _RESULT_LOCK = threading.RLock()
 
 
 class UltraFastPinnedPool:
-    """Pre-allocated pinned memory pool to achieve 20x faster pinning."""
+    """Lazy-initialized pinned memory pool - allocates on first use, reuses thereafter."""
     
-    def __init__(self, initial_pool_size: int = 4*1024 * 1024 * 1024):  # 4GB initial pool
-        self.pool_size = initial_pool_size
-        # Pre-allocate large pinned buffer at startup - one-time 1.7s cost
-        self.pinned_pool = torch.empty(initial_pool_size, dtype=torch.uint8).pin_memory()
+    def __init__(self):
+        self.pool_size = 0
+        self.pinned_pool = None  # Lazy - allocated on first use
         self.pool_lock = threading.RLock()
         self.used_ranges = []  # Track used memory ranges
         
-        # OPTION 2 IMPLEMENTATION: Store current slab and metadata as instance variables
-        # This eliminates the 149ms Python function return overhead for large objects
         self.current_slab = None
         self.current_metadata = None
             
