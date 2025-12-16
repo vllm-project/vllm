@@ -28,11 +28,15 @@ def flash_attn_maxseqlen_wrapper(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int,
 ) -> torch.Tensor:
+    kwargs = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+
+        kwargs["fa_version"] = fa_version
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
@@ -44,6 +48,7 @@ def flash_attn_maxseqlen_wrapper(
         max_seqlen_k=max_seqlen.item(),
         dropout_p=0.0,
         causal=False,
+        **kwargs,
     )
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
@@ -57,6 +62,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -76,9 +82,10 @@ def vit_flash_attn_wrapper(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
+    fa_version: int,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter
+        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter, fa_version
     )
 
 
