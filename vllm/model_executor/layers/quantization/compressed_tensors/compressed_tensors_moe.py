@@ -626,17 +626,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
+            # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
+            # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 
-            assert layer.expert_map is None, (
-                "Expert Parallelism / expert_map "
-                "is currently not supported for "
-                "CompressedTensorsW4A4Nvfp4MoEMethod."
-            )
             assert self.moe_quant_config is not None
-
-            # Cutlass moe takes in activations in BF16/Half precision
-            # and fp4 quantized weights loaded from the checkpoint
             return cutlass_moe_fp4(
                 a=x,
                 w1_fp4=layer.w13_weight,
@@ -644,6 +638,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
+                expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 # TODO(bnell): derive these from arguments
                 m=x.shape[0],
