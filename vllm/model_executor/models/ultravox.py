@@ -384,7 +384,6 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
-                layer_head_mask=None,
             )
             hidden_states = layer_outputs[0]
 
@@ -483,7 +482,6 @@ class ModifiedWhisperEncoder(WhisperEncoder):
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
-                layer_head_mask=None,
             )
 
             hidden_states = layer_outputs[0]
