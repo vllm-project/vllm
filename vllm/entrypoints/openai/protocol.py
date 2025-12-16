@@ -2054,6 +2054,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     presence_penalty: float | None = 0.0
     """The presence penalty to use for sampling."""
+
+    max_completion_tokens: int | None = None
+    """The maximum number of tokens to generate."""
     # --8<-- [end:transcription-sampling-params]
 
     # Default sampling parameters for transcription requests.
