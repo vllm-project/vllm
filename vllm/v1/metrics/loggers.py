@@ -1209,7 +1209,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     self.labelname_waiting_lora_adapters: waiting_lora_adapters,
                     self.labelname_max_lora: self.max_lora,
                 }
-                self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()  # type: ignore[attr-defined]
+                self.gauge_lora_info.labels(**lora_info_labels).set(time.time())  # type: ignore[attr-defined]
 
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
