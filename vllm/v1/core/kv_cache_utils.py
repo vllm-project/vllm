@@ -7,7 +7,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
-from typing import Any, NewType, TypeAlias, overload
+from typing import Any, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -15,6 +15,11 @@ from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.core.kv_cache_types import (
+    BlockHash,
+    BlockHashWithGroupId,
+    ExternalBlockHash,
+)
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -27,21 +32,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
-
-# BlockHash represents the hash of a single KV-cache block used for
-# prefix caching.  Treating it as a distinct type from `bytes` helps
-# catch accidental misuse when passing around raw byte strings.
-BlockHash = NewType("BlockHash", bytes)
-
-# `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
-# It is represented as raw bytes for compactness and efficiency. The helper
-# functions below pack/unpack the `BlockHash` and group id into/from the key.
-BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
-
-# ExternalBlockHash is used for reproducible prefix-cache block hashing.
-# It's a union of `bytes` and `int` to keep backward compatibility
-# after we default block hashing to use sha256 bytes.
-ExternalBlockHash: TypeAlias = bytes | int
 
 
 def make_block_hash_with_group_id(

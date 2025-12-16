@@ -14,7 +14,11 @@ from vllm.config import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
+from vllm.v1.core.kv_cache_types import BlockHash
+from vllm.v1.core.kv_cache_utils import (
+    estimate_max_model_len,
+    get_kv_cache_configs,
+)
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.worker.tpu_model_runner import (
     TPUModelRunner,
@@ -23,6 +27,9 @@ from vllm.v1.worker.tpu_model_runner import (
     _get_req_paddings,
     _get_token_paddings,
 )
+
+# Dummy NONE_HASH for testing
+NONE_HASH = BlockHash(b"\x00" * 32)
 
 
 def get_vllm_config():
@@ -72,6 +79,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
+                prompt_block_hashes=[NONE_HASH],
                 mm_features=[],
                 sampling_params=SamplingParams(),
                 pooling_params=PoolingParams(),
@@ -210,6 +218,9 @@ def test_update_states_request_resumed(model_runner):
         resumed_req_ids={req_id},
         new_token_ids=[[]],
         all_token_ids={req_id: scheduler_output.scheduled_new_reqs[0].prompt_token_ids},
+        all_block_hashes={},
+        running_token_ids=[[]],
+        running_block_hashes=[[]],
         new_block_ids=[([],)],
         num_computed_tokens=[0],
         num_output_tokens=[0],

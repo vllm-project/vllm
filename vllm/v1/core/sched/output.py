@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
+from vllm.v1.core.kv_cache_types import BlockHash
 
 if TYPE_CHECKING:
     import numpy as np
@@ -36,6 +37,7 @@ else:
 class NewRequestData:
     req_id: str
     prompt_token_ids: list[int] | None
+    prompt_block_hashes: list[BlockHash] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -57,6 +59,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
+            prompt_block_hashes=request.block_hashes,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -121,6 +124,14 @@ class CachedRequestData:
     # For requests not scheduled in the last step, propagate the token ids to the
     # connector. Won't contain requests that were scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
+    all_block_hashes: dict[str, list[BlockHash]]
+    # For requests scheduled in the last step, propagate the token ids scheduled in this
+    # step to the connector.
+    running_token_ids: list[list[int] | None]
+    running_block_hashes: list[list[BlockHash] | None]
+    # For resumed preemption, new_block_ids contain all the block IDs.
+    # For running requests (e.g., Chunked Prefill), new_block_ids contain block IDs for
+    # this step only.
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -149,6 +160,9 @@ class CachedRequestData:
             resumed_req_ids=set(),
             new_token_ids=[],
             all_token_ids={},
+            all_block_hashes={},
+            running_token_ids=[],
+            running_block_hashes=[],
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
