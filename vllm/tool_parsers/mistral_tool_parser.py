@@ -69,16 +69,6 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     )
 
 
-def _dump_pre_v11_arguments(loaded_pre_v11: list[dict]) -> list[dict]:
-    return [
-        {
-            "name": fn["name"],
-            "arguments": json.dumps(fn["arguments"], ensure_ascii=False),
-        }
-        for fn in loaded_pre_v11
-    ]
-
-
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with
@@ -141,72 +131,99 @@ class MistralToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         """
-        Extract the tool calls from a complete model response
+        Extract the tool calls from a complete model response.
+
+        Content and tool calls formatting depends on the Mistral's tokenizer version
+        used to train the model:
+
+        - < v11: `content[BOT] [{tool_call1},{tool_call2}]`
+        - >= v11: `content[BOT]tool_name1{args_call1}[BOT]tool_name2{args_call2}`
+
+        with [BOT] the tool call token.
+
+        Note:
+            For >= v11, tool calls with arguments wrongly formatted are still returned
+            as tool calls. This is to allow the model to know it tried to make a tool
+            call. It reduces change of another failure and prevents that the context
+            is filled with tool calls wrongly placed in assistant message contents.
         """
 
-        # case -- if a tool call token is not present, return a text response
+        # If the tool call token is not present, return a text response
         if self.bot_token not in model_output:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+        content_and_raw_tool_calls = model_output.split(self.bot_token)
+        content = content_and_raw_tool_calls[0]
+        raw_tool_calls = content_and_raw_tool_calls[1:]
+
+        # >= v11: content[BOT]tool_name1{args_call1}[BOT]tool_name2{args_call2}
         if not self._is_pre_v11:
-            function_call_arr = []
-            for single_tool_content in model_output.split(self.bot_token)[1:]:
-                if "{" not in single_tool_content:
+            tool_calls = []
+            for raw_tool_call in raw_tool_calls:
+                if "{" not in raw_tool_call:
                     continue
 
-                end_name = single_tool_content.find("{")
-                fn_name, args = (
-                    single_tool_content[:end_name],
-                    single_tool_content[end_name:],
+                end_name = raw_tool_call.find("{")
+                tool_name, args = (
+                    raw_tool_call[:end_name],
+                    raw_tool_call[end_name:],
                 )
 
-                # fn_name is encoded outside serialized json dump
-                # only arguments are serialized
-                function_call_arr.append({"name": fn_name, "arguments": args})
+                tool_calls.append({"name": tool_name, "arguments": args})
 
+        # < v11: content[BOT] [{tool_call1},{tool_call2}]
         else:
-            tool_content = model_output.replace(self.bot_token, "").strip()
+            if len(raw_tool_calls) != 1:
+                raise ValueError("Only one BOT token should have been outputted for ")
+            stringified_tool_calls = model_output.replace(self.bot_token, "").strip()
             try:
-                loaded_pre_v11 = json.loads(tool_content)
+                tool_calls = json.loads(stringified_tool_calls)
             except json.JSONDecodeError:
                 # use a regex to find the part corresponding to the tool call.
                 # NOTE: This use case should not happen if the model is trained
                 # correctly. It's an easy possible fix so it's included, but
                 # can be brittle for very complex / highly nested tool calls
                 try:
-                    raw_tool_call = self.tool_call_regex.findall(tool_content)[0]
-                    loaded_pre_v11 = json.loads(raw_tool_call)
+                    raw_tool_call = self.tool_call_regex.findall(
+                        stringified_tool_calls
+                    )[0]
+                    tool_calls = json.loads(raw_tool_call)
                 except (IndexError, json.JSONDecodeError):
                     logger.exception("Error in extracting tool call from response.")
-                    # return information to just treat the tool call as regular JSON
+                    # If raw decoding and decoding post regex rule fails, then just
+                    # return content.
                     return ExtractedToolCallInformation(
                         tools_called=False,
                         tool_calls=[],
-                        content=tool_content,
+                        content=stringified_tool_calls,
                     )
             else:
-                function_call_arr = _dump_pre_v11_arguments(loaded_pre_v11)
+                tool_calls = [
+                    {
+                        "name": tool_call["name"],
+                        "arguments": json.dumps(
+                            tool_call["arguments"], ensure_ascii=False
+                        ),
+                    }
+                    for tool_call in tool_calls
+                ]
 
-        # Tool Call
-        tool_calls: list[MistralToolCall] = [
+        mistral_tool_calls: list[MistralToolCall] = [
             MistralToolCall(
                 type="function",
                 function=FunctionCall(
-                    name=raw_function_call["name"],
-                    # function call args are JSON but as a string
-                    arguments=raw_function_call["arguments"],
+                    name=tool_call["name"],
+                    arguments=tool_call["arguments"],
                 ),
             )
-            for raw_function_call in function_call_arr
+            for tool_call in tool_calls
         ]
 
-        # get any content before  the tool call
-        content = model_output.split(self.bot_token)[0]
         return ExtractedToolCallInformation(
             tools_called=True,
-            tool_calls=tool_calls,
+            tool_calls=mistral_tool_calls,
             content=content if len(content) > 0 else None,
         )
 
