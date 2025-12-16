@@ -22,7 +22,11 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
-from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -120,10 +124,9 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         processor = self.info.get_hf_processor()
         if "gemma3" in processor.__class__.__name__.lower():
             image_token = processor.boi_token
-            video_token = ""
         else:
             image_token = getattr(processor, "image_token", "")
-            video_token = getattr(processor, "video_token", "")
+        video_token = getattr(processor, "video_token", "")
         return image_token * num_images + video_token * num_videos
 
     def get_dummy_mm_data(
@@ -140,6 +143,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         target_num_frames = max_total_frames // max(num_videos, 1)
 
         image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
 
         return {
             "image": self._get_dummy_images(
@@ -153,6 +157,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
                 height=target_height,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
+                overrides=video_overrides,
             ),
         }
 
@@ -424,7 +429,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return LanguageModel(self)
 
-    def embed_multimodal(self, **kwargs):
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         pixel_values_videos: torch.Tensor | None = kwargs.pop(
@@ -436,15 +441,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         if pixel_values is None:
             pixel_values = kwargs.pop("image_patches", None)
 
-        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        multimodal_embeddings: list[torch.Tensor] = []
 
         if image_embeds is not None:
-            multimodal_embeddings += tuple(image_embeds)
+            multimodal_embeddings += image_embeds
 
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+        num_image_patches = kwargs.pop("num_image_patches", None)
+        num_video_patches = kwargs.pop("num_video_patches", None)
 
         if pixel_values is not None:
-            num_image_patches = kwargs.pop("num_image_patches")
             vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
             if isinstance(vision_embeddings, tuple):
@@ -464,13 +470,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                     embed.flatten(start_dim=0, end_dim=-2)
                     for embed in vision_embeddings
                 ]
-            multimodal_embeddings += tuple(vision_embeddings)
+            multimodal_embeddings += vision_embeddings
 
         if video_embeds is not None:
-            multimodal_embeddings += tuple(video_embeds)
+            multimodal_embeddings += video_embeds
 
         if pixel_values_videos is not None:
-            num_video_patches = kwargs.pop("num_video_patches")
             vision_embeddings = self.model.get_video_features(
                 pixel_values_videos, **kwargs
             )
@@ -492,7 +497,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                     embed.flatten(start_dim=0, end_dim=-2)
                     for embed in vision_embeddings
                 ]
-            multimodal_embeddings += tuple(vision_embeddings)
+            multimodal_embeddings += vision_embeddings
 
         return multimodal_embeddings
 
@@ -520,8 +525,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 "Transformers modeling backend only supports images and videos."
             )
 
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
+        image_grid_thw = kwargs.get("image_grid_thw", None)
+        video_grid_thw = kwargs.get("video_grid_thw", None)
 
         image_grid_thw = torch.stack(image_grid_thw) if image_grid_thw else None
         video_grid_thw = torch.stack(video_grid_thw) if video_grid_thw else None
