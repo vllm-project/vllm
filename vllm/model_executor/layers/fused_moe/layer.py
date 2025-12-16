@@ -2051,7 +2051,7 @@ class FusedMoE(CustomOp):
 
             if self.shared_experts is not None:
                 return (
-                    reduce_output(final_hidden_states[0]),
+                    final_hidden_states[0],
                     reduce_output(final_hidden_states[1]),
                 )
             elif self.zero_expert_num is not None and self.zero_expert_num > 0:
