@@ -100,9 +100,7 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files, fully_sharded_loras):
         max_num_batched_tokens=2048,
         tensor_parallel_size=2,
         fully_sharded_loras=fully_sharded_loras,
-        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-            cudagraph_specialize_lora=False,
-        ),
+        enforce_eager=True,
     )
 
     generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
