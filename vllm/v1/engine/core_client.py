@@ -139,7 +139,9 @@ class EngineCoreClient(ABC):
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
-    def reset_prefix_cache(self) -> None:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     def sleep(self, level: int = 1) -> None:
@@ -209,7 +211,9 @@ class EngineCoreClient(ABC):
     async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def reset_prefix_cache_async(self) -> None:
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1) -> None:
@@ -288,8 +292,12 @@ class InprocClient(EngineCoreClient):
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self) -> None:
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -386,10 +394,11 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if in_loop(loop):
-                close_sockets_and_tasks()
-            elif loop and not loop.is_closed():
-                loop.call_soon_threadsafe(close_sockets_and_tasks)
+            if loop is not None:
+                if in_loop(loop):
+                    close_sockets_and_tasks()
+                elif not loop.is_closed():
+                    loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
                 del tasks
@@ -753,8 +762,12 @@ class SyncMPClient(MPClient):
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
-    def reset_prefix_cache(self) -> None:
-        self.call_utility("reset_prefix_cache")
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.call_utility(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
@@ -957,8 +970,12 @@ class AsyncMPClient(MPClient):
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
 
-    async def reset_prefix_cache_async(self) -> None:
-        await self.call_utility_async("reset_prefix_cache")
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.call_utility_async(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
@@ -1047,6 +1064,7 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
+        stats_addr: str = self.stats_update_address
         assert len(self.engine_ranks_managed) > 0
         # NOTE: running and waiting counts are all global from
         # the Coordinator include all global EngineCores. This
@@ -1057,9 +1075,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         async def run_engine_stats_update_task():
             with (
-                make_zmq_socket(
-                    self.ctx, self.stats_update_address, zmq.XSUB, linger=0
-                ) as socket,
+                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
                     self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
                 ) as first_req_rcv_socket,

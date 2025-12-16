@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import pickle
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
 from threading import Event
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import torch
@@ -27,6 +28,7 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
@@ -42,11 +44,48 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 from_bytes_big = functools.partial(int.from_bytes, byteorder="big")
 
 
+# Memory fence for cross-process shared memory visibility.
+# Required for correct producer-consumer synchronization when using
+# shared memory without locks.
+_memory_fence_lock = threading.Lock()
+
+
+def memory_fence():
+    """
+    Full memory barrier for shared memory synchronization.
+
+    Ensures all prior memory writes are visible to other processes before
+    any subsequent reads. This is critical for lock-free producer-consumer
+    patterns using shared memory.
+
+    Implementation acquires and immediately releases a lock. Python's
+    threading.Lock provides sequentially consistent memory barrier semantics
+    across all major platforms (POSIX, Windows). This is a lightweight
+    operation (~20ns) that guarantees:
+    - All stores before the barrier are visible to other threads/processes
+    - All loads after the barrier see the latest values
+    """
+    # Lock acquire/release provides full memory barrier semantics.
+    # Using context manager ensures lock release even on exceptions.
+    with _memory_fence_lock:
+        pass
+
+
 def to_bytes_big(value: int, size: int) -> bytes:
     return value.to_bytes(size, byteorder="big")
 
 
 logger = init_logger(__name__)
+
+
+def long_wait_time_msg(threshold: int) -> str:
+    return (
+        "No available shared memory broadcast block found "
+        f"in {threshold} seconds. This typically happens "
+        "when some processes are hanging or doing some "
+        "time-consuming work (e.g. compilation, "
+        "weight/kv cache quantization)."
+    )
 
 
 class SpinTimer:
@@ -403,6 +442,10 @@ class MessageQueue:
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                # Memory fence ensures we see the latest read flags from readers.
+                # Without this, we may read stale flags from our CPU cache and
+                # spin indefinitely even though readers have completed.
+                memory_fence()
                 read_count = sum(metadata_buffer[1:])
                 written_flag = metadata_buffer[0]
                 if written_flag and read_count != self.buffer.n_reader:
@@ -422,11 +465,7 @@ class MessageQueue:
                     # if we wait for a long time, log a message
                     if elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation)",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
                         n_warning += 1
 
@@ -451,6 +490,10 @@ class MessageQueue:
                     metadata_buffer[i] = 0
                 # mark the block as written
                 metadata_buffer[0] = 1
+                # Memory fence ensures the write is visible to readers on other cores
+                # before we proceed. Without this, readers may spin indefinitely
+                # waiting for a write that's stuck in our CPU's store buffer.
+                memory_fence()
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
@@ -466,6 +509,10 @@ class MessageQueue:
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                # Memory fence ensures we see the latest writes from the writer.
+                # Without this, we may read stale flags from our CPU cache
+                # and spin indefinitely even though writer has updated them.
+                memory_fence()
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
                 written_flag = metadata_buffer[0]
                 if not written_flag or read_flag:
@@ -493,11 +540,7 @@ class MessageQueue:
                         elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
                     ):
                         logger.info(
-                            "No available shared memory broadcast block found"
-                            " in %s seconds. This typically happens when some"
-                            " processes are hanging or doing some"
-                            " time-consuming work (e.g. compilation).",
-                            VLLM_RINGBUFFER_WARNING_INTERVAL,
+                            long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
                         n_warning += 1
 
@@ -510,6 +553,10 @@ class MessageQueue:
                 # caller has read from the buffer
                 # set the read flag
                 metadata_buffer[self.local_reader_rank + 1] = 1
+                # Memory fence ensures the read flag is visible to the writer.
+                # Without this, writer may not see our read completion and
+                # could wait indefinitely for all readers to finish.
+                memory_fence()
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
 
                 self._read_spin_timer.record_activity()
@@ -601,12 +648,86 @@ class MessageQueue:
         return self.dequeue()
 
     @staticmethod
+    def create_from_process_group_single_reader(
+        pg: ProcessGroup,
+        max_chunk_bytes,
+        max_chunks,
+        reader_rank: int = 0,
+        blocking: bool = False,
+    ) -> tuple["MessageQueue", list[Handle]]:
+        """
+        Creates a MessageQueue for a process group with a single reader.
+
+        This method is designed for scenarios where only one process (the reader)
+        will consume messages, and all other processes are writers. It sets up
+        the shared memory buffer and communication handles accordingly, and
+        gathers the handles from all processes to the reader.
+
+        Args:
+            pg (ProcessGroup): The torch distributed process group.
+            max_chunk_bytes (int): Maximum size in bytes for each chunk in the buffer.
+            max_chunks (int): Maximum number of chunks in the buffer.
+            reader_rank (int, optional): The global rank that will act as the reader.
+                Defaults to 0.
+            blocking (bool, optional): If True, blocks until all processes are ready.
+                Defaults to False.
+
+        Returns:
+            tuple[MessageQueue, list[Handle]]:
+            The MessageQueue instance for the calling process,
+            and a list of handles (only non-empty for the reader process).
+        """
+        local_size = current_platform.device_count()
+        rank = dist.get_rank()
+        same_node = rank // local_size == reader_rank // local_size
+        buffer_io = MessageQueue(
+            n_reader=1,
+            n_local_reader=1 if same_node else 0,
+            max_chunk_bytes=max_chunk_bytes,
+            max_chunks=max_chunks,
+        )
+        handle = buffer_io.export_handle()
+        handles = [None] * dist.get_world_size(pg) if rank == reader_rank else None
+        dist.gather_object(handle, handles, dst=reader_rank, group=pg)
+        if blocking:
+            buffer_io.wait_until_ready()
+        return buffer_io, cast(list[Handle], handles or [])
+
+    @staticmethod
     def create_from_process_group(
         pg: ProcessGroup | StatelessProcessGroup,
         max_chunk_bytes,
         max_chunks,
-        writer_rank=0,
+        writer_rank: int = 0,
+        external_writer_handle=None,
+        blocking: bool = True,
     ) -> "MessageQueue":
+        """
+        Creates a MessageQueue for a distributed process group with one writer and
+        multiple readers.
+
+        This method is designed for scenarios where one process (the writer) sends
+        messages, and all other processes (the readers) receive messages. It sets up
+        the shared memory buffer and socket communication handles accordingly, and
+        broadcasts the handle from the writer to all readers.
+
+        Args:
+            pg (ProcessGroup | StatelessProcessGroup): The torch distributed process
+                group.
+            max_chunk_bytes (int): Maximum size in bytes for each chunk in the buffer.
+            max_chunks (int): Maximum number of chunks in the buffer.
+            writer_rank (int, optional): The global rank that will act as the writer.
+                Defaults to 0.
+            external_writer_handle (Handle, optional): Used when there is a handle
+                from an external Message Queue. If provided, use this handle to init
+                PG writer message queue instead of creating a new one. Defaults to None.
+            blocking (bool, optional): If True, blocks until all processes are ready.
+                Defaults to True.
+
+        Returns:
+            MessageQueue: The MessageQueue instance for the calling process.
+
+        """
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
             group_world_size = dist.get_world_size(pg)
@@ -615,23 +736,26 @@ class MessageQueue:
             group_rank = pg.rank
             group_world_size = pg.world_size
             global_ranks = list(range(pg.world_size))
-
         from vllm.distributed.parallel_state import in_the_same_node_as
 
         status = in_the_same_node_as(pg, source_rank=writer_rank)
-        same_node_ranks = [i for i, s in enumerate(status) if s]
-        n_reader = group_world_size - 1
-        n_local_reader = len(same_node_ranks) - 1
-        local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
-        buffer_io: MessageQueue
         if group_rank == writer_rank:
-            buffer_io = MessageQueue(
-                n_reader=n_reader,
-                n_local_reader=n_local_reader,
-                local_reader_ranks=local_reader_ranks,
-                max_chunk_bytes=max_chunk_bytes,
-                max_chunks=max_chunks,
-            )
+            if external_writer_handle is not None:
+                buffer_io = MessageQueue.create_from_handle(
+                    external_writer_handle, group_rank
+                )
+            else:
+                same_node_ranks = [i for i, s in enumerate(status) if s]
+                n_reader = group_world_size - 1
+                n_local_reader = len(same_node_ranks) - 1
+                local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
+                buffer_io = MessageQueue(
+                    n_reader=n_reader,
+                    n_local_reader=n_local_reader,
+                    local_reader_ranks=local_reader_ranks,
+                    max_chunk_bytes=max_chunk_bytes,
+                    max_chunks=max_chunks,
+                )
             handle = buffer_io.export_handle()
             if isinstance(pg, ProcessGroup):
                 dist.broadcast_object_list(
@@ -649,5 +773,6 @@ class MessageQueue:
             else:
                 handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
-        buffer_io.wait_until_ready()
+        if blocking:
+            buffer_io.wait_until_ready()
         return buffer_io

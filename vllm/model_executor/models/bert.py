@@ -32,7 +32,7 @@ from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type, default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -55,7 +55,9 @@ class BertEmbedding(nn.Module):
             "position_ids",
             torch.arange(config.max_position_embeddings).unsqueeze(0),
         )
-        self.position_embedding_type = config.position_embedding_type
+        self.position_embedding_type = getattr(
+            config, "position_embedding_type", "absolute"
+        )
         if self.position_embedding_type != "absolute":
             raise ValueError(
                 "Only 'absolute' position_embedding_type" + " is supported"
@@ -375,7 +377,7 @@ class BertModel(nn.Module, SupportsQuant):
         self.embeddings = embedding_class(self.config)
         self.encoder = BertEncoder(vllm_config=vllm_config, prefix=f"{prefix}.encoder")
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.word_embeddings(input_ids)
 
     def forward(
@@ -432,7 +434,6 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-@default_pooling_type("ALL")
 class BertPoolingModel(BertModel):
     is_pooling_model = True
 
@@ -486,8 +487,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         )
         self.pooler = self._build_pooler(pooler_config)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -835,8 +836,8 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.bert.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -864,6 +865,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
         )
 
 
+@attn_type("encoder_only")
 @default_pooling_type("ALL")
 class BertForTokenClassification(nn.Module):
     is_pooling_model = True
@@ -893,8 +895,8 @@ class BertForTokenClassification(nn.Module):
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.bert.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
