@@ -8,7 +8,6 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
-from datetime import timedelta
 from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
@@ -1284,13 +1283,6 @@ def init_worker_distributed_environment(
     override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-    if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-        timeout = timedelta(
-            seconds=vllm_config.fault_tolerance_config.gloo_comm_timeout
-        )
-    else:
-        timeout = None
-
     init_method = distributed_init_method or "env://"
     init_distributed_environment(
         parallel_config.world_size,
@@ -1298,8 +1290,7 @@ def init_worker_distributed_environment(
         init_method,
         local_rank,
         backend,
-        vllm_config.fault_tolerance_config.enable_fault_tolerance,
-        timeout,
+        fault_tolerance_config=vllm_config.fault_tolerance_config,
     )
 
     ensure_model_parallel_initialized(
@@ -1307,8 +1298,7 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
-        vllm_config.fault_tolerance_config.enable_fault_tolerance,
-        timeout,
+        fault_tolerance_config=vllm_config.fault_tolerance_config,
     )
 
     # Init ec connector here before KV caches caches init

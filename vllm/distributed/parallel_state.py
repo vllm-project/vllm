@@ -44,6 +44,7 @@ import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import FaultToleranceConfig
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
@@ -319,8 +320,7 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
-        enable_fault_tolerance: bool = False,
-        gloo_comm_timeout: timedelta | None = None,
+        fault_tolerance_config: FaultToleranceConfig | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -332,10 +332,17 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        gloo_comm_timeout = None
         options = None
         if torch_distributed_backend == "nccl":
             options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
-            if enable_fault_tolerance:
+            if (
+                fault_tolerance_config is not None
+                and fault_tolerance_config.enable_fault_tolerance
+            ):
+                gloo_comm_timeout = timedelta(
+                    seconds=fault_tolerance_config.gloo_comm_timeout
+                )
                 # need to set communicators as nonblocking to abort safely
                 options.config.blocking = 0
                 os.environ["NCCL_COMM_BLOCKING"] = "0"
@@ -1144,8 +1151,7 @@ def init_world_group(
     ranks: list[int],
     local_rank: int,
     backend: str,
-    enable_fault_tolerance: bool = False,
-    gloo_comm_timeout: timedelta | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1153,8 +1159,7 @@ def init_world_group(
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
-        enable_fault_tolerance=enable_fault_tolerance,
-        gloo_comm_timeout=gloo_comm_timeout,
+        fault_tolerance_config=fault_tolerance_config,
     )
 
 
@@ -1162,11 +1167,10 @@ def init_model_parallel_group(
     group_ranks: list[list[int]],
     local_rank: int,
     backend: str,
-    enable_fault_tolerance: bool = False,
-    gloo_comm_timeout: timedelta | None = None,
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
@@ -1175,8 +1179,7 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
-        enable_fault_tolerance=enable_fault_tolerance,
-        gloo_comm_timeout=gloo_comm_timeout,
+        fault_tolerance_config=fault_tolerance_config,
     )
 
 
@@ -1312,8 +1315,8 @@ def init_distributed_environment(
     distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
-    enable_fault_tolerance: bool = False,
     timeout: timedelta | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1397,7 +1400,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(
-            ranks, local_rank, backend, enable_fault_tolerance, timeout
+            ranks, local_rank, backend, fault_tolerance_config=fault_tolerance_config
         )
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
@@ -1433,8 +1436,7 @@ def initialize_model_parallel(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
-    enable_fault_tolerance: bool = False,
-    gloo_comm_timeout: timedelta | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1500,10 +1502,9 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
-        enable_fault_tolerance,
-        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="tp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     # Build the DCP model-parallel groups.
@@ -1519,10 +1520,9 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
-        enable_fault_tolerance,
-        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="dcp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _PCP
@@ -1548,9 +1548,8 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
-        enable_fault_tolerance,
-        gloo_comm_timeout,
         group_name="pp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _DP
@@ -1561,9 +1560,8 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
-        enable_fault_tolerance,
-        gloo_comm_timeout,
         group_name="dp",
+        fault_tolerance_config=fault_tolerance_config,
     )
 
     global _EP
@@ -1585,9 +1583,8 @@ def initialize_model_parallel(
             group_ranks,
             get_world_group().local_rank,
             backend,
-            enable_fault_tolerance,
-            gloo_comm_timeout,
-            group_name="ep"
+            group_name="ep",
+            fault_tolerance_config=fault_tolerance_config,
         )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -1628,9 +1625,8 @@ def ensure_model_parallel_initialized(
     pipeline_model_parallel_size: int,
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
-    enable_fault_tolerance: bool = False,
-    gloo_comm_timeout: timedelta | None = None,
     backend: str | None = None,
+    fault_tolerance_config: FaultToleranceConfig | None = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
@@ -1644,8 +1640,7 @@ def ensure_model_parallel_initialized(
             prefill_context_model_parallel_size,
             decode_context_model_parallel_size,
             backend,
-            enable_fault_tolerance,
-            gloo_comm_timeout,
+            fault_tolerance_config=fault_tolerance_config,
         )
         return
 

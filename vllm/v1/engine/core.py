@@ -1835,7 +1835,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group(
-            vllm_config.fault_tolerance_config.gloo_comm_timeout,
+            fault_tolerance_config=vllm_config.fault_tolerance_config
         )
 
     def shutdown(self):
@@ -1954,8 +1954,8 @@ class DPEngineCoreProc(EngineCoreProc):
     def reinit_dp_group_on_fault_tolerance(self, new_stateless_dp_group_port: int):
         stateless_destroy_torch_distributed_process_group(self.dp_group)
         self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group(
-            self.vllm_config.fault_tolerance_config.gloo_comm_timeout,
-            new_stateless_dp_group_port,
+            fault_tolerance_config=self.vllm_config.fault_tolerance_config,
+            dp_init_port=new_stateless_dp_group_port,
         )
         self.step_counter = 0
 

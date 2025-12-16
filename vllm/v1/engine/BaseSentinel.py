@@ -220,7 +220,7 @@ class BaseSentinel:
                 break
             elif not response.get("success", False):
                 self.logger(
-                    'Downstream sentinels failed to execute command "%s (reason: %s)"',
+                    'Downstream sentinels failed to execute command "%s" (reason: %s)',
                     method_name,
                     response.get("reason", "unknown"),
                     level="error",

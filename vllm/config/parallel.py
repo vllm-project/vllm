@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
 import vllm.envs as envs
+from vllm.config import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -398,8 +399,8 @@ class ParallelConfig:
 
     def stateless_init_dp_group(
         self,
-        gloo_comm_timeout: int | None = None,
         dp_init_port: int | None = None,
+        fault_tolerance_config: FaultToleranceConfig | None = None,
     ) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -427,7 +428,7 @@ class ParallelConfig:
                     self.data_parallel_rank,
                     self.data_parallel_size,
                     backend=current_platform.dist_backend,
-                    gloo_comm_timeout=gloo_comm_timeout,
+                    fault_tolerance_config=fault_tolerance_config,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
