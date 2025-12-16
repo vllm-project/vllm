@@ -83,7 +83,12 @@ class MemorySnapshot:
         self.torch_peak = torch.cuda.memory_stats().get("allocated_bytes.all.peak", 0)
 
         self.free_memory, self.total_memory = torch.cuda.mem_get_info()
-        shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
+        shared_sysmem_device_mem_sms = (
+            (8, 7),
+            (10, 1),
+            (11, 0),
+            (12, 1),
+        )  # Orin, Thor, Thor, Spark
         if (
             current_platform.is_cuda()
             and current_platform.get_device_capability() in shared_sysmem_device_mem_sms
