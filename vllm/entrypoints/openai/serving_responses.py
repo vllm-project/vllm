@@ -104,7 +104,6 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
@@ -658,24 +657,19 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            response_messages = context.parser.response_messages[
-                context.parser.num_init_messages :
-            ]
-            output = make_response_output_items_from_parsable_context(response_messages)
+            output = context.parser.make_response_output_items_from_parsable_context()
 
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
             if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
-                )
+                input_messages = context.input_messages
+                output_messages = context.output_messages
 
             # TODO: Calculate usage.
             # assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
-            final_res = context.last_output
+            # Use final_output which has accumulated text/token_ids/logprobs
+            final_res = context.final_output
             assert final_res is not None
             assert len(final_res.outputs) == 1
             final_output = final_res.outputs[0]
