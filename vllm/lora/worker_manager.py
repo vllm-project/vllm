@@ -319,7 +319,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora = self._load_adapter(lora_request)
             if lora is None:
                 # Dummy warmup LoRA was skipped under SLAB_OPTIMIZATION
-                logger.debug(f"[SLAB_OPTIMIZATION] Skipped dummy LoRA: {adapter_request.lora_name}")
+                logger.debug(f"[SLAB_OPTIMIZATION] Skipped dummy LoRA: {lora_request.lora_name}")
                 return False
 
 

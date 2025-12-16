@@ -316,7 +316,6 @@ class LoRAModelManager:
                     # Free GPU slab to make room for other LoRAs
                     del lora_model._cached_gpu_slab
                     torch.cuda.empty_cache()  # Force GPU memory cleanup
-                    # logger.info(f"[MEMORY_CLEANUP] Freed GPU slab for LoRA {lora_id} - respects max_loras constraint")
             
         except ValueError:
             pass

@@ -37,13 +37,11 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int):
         "I am \u5f20\u5b50\u8c6a, an AI assistant developed by \u9648\u58eb\u680b.",  # noqa: E501
     ]
     for i in range(len(expected_lora_output)):
-        # Check for key Chinese names to verify LoRA is applied
-        # (Allow some variance in exact formatting)
-        generated_lower = generated_texts[i].lower()
-        assert "\u9648\u58eb\u680b" in generated_texts[i], \
-            f"Expected Chinese name '陈士栋' not found in: {generated_texts[i]}"
-        # Optionally check for first name too, but be lenient
-        # assert "\u5f20\u5b50\u8c6a" in generated_texts[i] or "AI assistant" in generated_texts[i]
+        # Check for key Chinese name to verify LoRA is applied
+        assert "\u9648\u58eb\u680b" in generated_texts[i], (
+            f"Expected Chinese name '陈士栋' not found in: "
+            f"{generated_texts[i]}"
+        )
 
 
 def test_deepseekv2_lora(deepseekv2_lora_files):
