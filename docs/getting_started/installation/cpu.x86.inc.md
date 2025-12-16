@@ -141,7 +141,7 @@ uv pip install dist/*.whl
     IOMP_PATH=...
 
     # add them to LD_PRELOAD
-    export LD_PRELOAD="$TC_PATH:IOMP_PATH:$LD_PRELOAD"
+    export LD_PRELOAD="$TC_PATH:$IOMP_PATH:$LD_PRELOAD"
     ```
 
 !!! example "Troubleshooting"
