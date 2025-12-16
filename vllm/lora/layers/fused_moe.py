@@ -709,16 +709,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
 
-        # # DEBUG: Log received tensor info
-        # logger.info(f"[SLAB_DEBUG] FusedMoE3D.set_lora called for index {index}:")
-        # logger.info(f"  - num_experts: {num_experts}")
-        # logger.info(f"  - w13_lora_a shape (input): {w13_lora_a.shape}, device: {w13_lora_a.device}")
-        # logger.info(f"  - w13_lora_a norm (input): {w13_lora_a.norm().item():.6f}")
-        # logger.info(f"  - w13_lora_a[:10] (input): {w13_lora_a[:10].tolist()}")
-        # logger.info(f"  - w13_lora_b shape (input): {w13_lora_b.shape}, device: {w13_lora_b.device}")
-        # logger.info(f"  - w13_lora_b norm (input): {w13_lora_b.norm().item():.6f}")
-        # logger.info(f"  - w13_lora_b[:10] (input): {w13_lora_b[:10].tolist()}")
-
         # (num_experts,rank,input_size)
         w13_lora_a = w13_lora_a.reshape(num_experts, -1, w13_lora_a.shape[-1])
         w2_lora_a = w2_lora_a.reshape(num_experts, -1, w2_lora_a.shape[-1])
@@ -729,20 +719,11 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_b = w13_lora_b.permute(1, 0, 2)
         w2_lora_b = w2_lora_b.permute(1, 0, 2)
 
-        # logger.info(f"  - w13_lora_a shape (after reshape): {w13_lora_a.shape}")
-        # logger.info(f"  - w13_lora_b shape (after reshape/permute): {w13_lora_b.shape}")
-
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
-
-        # logger.info(f"  - sliced_w13_lora_a shape (after slicing): {sliced_w13_lora_a.shape}")
-        # logger.info(f"  - sliced_w13_lora_b shape (after slicing): {sliced_w13_lora_b.shape}")
-        # logger.info(f"  - sliced_w13_lora_a norm: {sliced_w13_lora_a.norm().item():.6f}")
-        # logger.info(f"  - sliced_w13_lora_b norm: {sliced_w13_lora_b.norm().item():.6f}")
-
         # Device-aware scatter: optimize GPU→GPU case (slab optimization)
         is_gpu_source = w13_lora_a.is_cuda
         
