@@ -419,7 +419,7 @@ class TRTLLMPrefill:
     """
 
     max_seq_len: int
-    """The maximum sequence length (context length) for KV."""
+    """The maximum sequence length for KV Cache."""
 
 
 @dataclass
@@ -439,7 +439,7 @@ class TRTLLMDecode:
     """
 
     max_seq_len: int
-    """The maximum sequence length (context length) for KV."""
+    """The maximum sequence length for KV Cache."""
 
 
 @dataclass
@@ -718,7 +718,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
-    def _compute_paged_kv_indices(
+    def _compute_flashinfer_kv_metadata(
         self,
         num_blocks_np: np.ndarray,
         seq_lens_np: np.ndarray,
@@ -791,7 +791,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         page_size = self.page_size
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
         qo_indptr = common_attn_metadata.query_start_loc
         qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
@@ -852,6 +851,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.q_data_type = self.model_config.dtype
 
         # Step 2: Initialize the output metadata
+        # Leave prefill/decode/cascade_wrapper empty, to be populated
+        # case by case depending on the batch contents and backend selection.
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -860,14 +861,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
+            use_cascade=use_cascade,
             prefill=None,
             decode=None,
-            use_cascade=use_cascade,
             cascade_wrapper=None,
+        )
+
+        # Guard access to seq_lens_cpu, which may not always be needed
+        # and can be expensive to retrieve in async mode.
+        needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
         )
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
+            assert seq_lens_cpu is not None
             if num_prefills > 0:
                 qo_indptr_prefill_cpu = (
                     qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
@@ -886,11 +899,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_kv_cache_interleave_size,
             )
 
-        seq_lens_np = seq_lens_cpu.numpy()
-        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
-
         # Adjust num_block_np for cascade attention
         if use_cascade:
+            assert num_blocks_np is not None
             assert common_prefix_len % page_size == 0
             num_common_kv_blocks = common_prefix_len // page_size
             num_blocks_np -= num_common_kv_blocks
@@ -898,7 +909,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Compute paged_kv_indices if necessary
         needs_paged_kv_indices = use_cascade or not is_only_trtllm_decode
         if needs_paged_kv_indices:
-            paged_kv_indices = self._compute_paged_kv_indices(
+            assert num_blocks_np is not None
+            assert seq_lens_np is not None
+            paged_kv_indices = self._compute_flashinfer_kv_metadata(
                 num_blocks_np,
                 seq_lens_np,
                 block_table_tensor,
@@ -976,8 +989,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
                 attn_metadata.prefill = TRTLLMPrefill(
-                    block_tables=block_table_tensor[prefill_start:],  # todo
-                    seq_lens=seq_lens[prefill_start:],  # todo
+                    block_tables=block_table_tensor[prefill_start:],
+                    seq_lens=seq_lens[prefill_start:],
                     cum_seq_lens_q=qo_indptr_prefill_gpu,
                     cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
                     max_q_len=max_q_len_prefill,
