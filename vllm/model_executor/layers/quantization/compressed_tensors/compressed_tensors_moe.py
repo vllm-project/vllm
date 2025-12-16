@@ -115,6 +115,7 @@ __all__ = [
     "CompressedTensorsWNA16MoEMethod",
     "CompressedTensorsW4A4Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
+    "CompressedTensorsW4A16NVfp4MoeMethod",
 ]
 
 
@@ -196,6 +197,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
+        elif quant_config._is_fp4a16_nvfp4(weight_quant, input_quant):
+            return CompressedTensorsW4A16NVfp4MoeMethod(layer.moe_config, layer_name)
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -659,6 +662,205 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
             ).to(x.dtype)
+
+
+class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
+    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
+        super().__init__(moe)
+        ## TODO: support Flashinfer kernels
+        self.allow_flashinfer = False
+        self.use_marlin = True
+        self.group_size = 16
+        self.layer_name = layer_name
+        self.marlin_input_dtype = (
+            get_marlin_input_dtype(layer_name) if self.use_marlin else None
+        )
+        logger.info_once("Using Marlin for CompressedTensorsW4A16NVfp4MoeMethod.")
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.num_experts = num_experts
+        layer.params_dtype = params_dtype
+
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // 2,
+                requires_grad=False,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_packed", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_packed", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Weight Scales
+        w13_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                # 2 fp4 items are packed in the input dimension
+                hidden_size // self.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                # 2 fp4 items are packed in the input dimension
+                intermediate_size_per_partition // self.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
+        )
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # Weight Global Scales
+        w13_weight_scale_2 = torch.nn.Parameter(
+            torch.empty(num_experts, 2, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w13_weight_global_scale", w13_weight_scale_2)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+
+        w2_weight_scale_2 = torch.nn.Parameter(
+            torch.empty(num_experts, dtype=torch.float32), requires_grad=False
+        )
+        layer.register_parameter("w2_weight_global_scale", w2_weight_scale_2)
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
+        )
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # From packed to weight
+        layer.w13_weight = torch.nn.Parameter(
+            layer.w13_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w13_weight_packed")
+
+        layer.w2_weight = torch.nn.Parameter(
+            layer.w2_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w2_weight_packed")
+
+        if not torch.allclose(
+            layer.w13_weight_global_scale[:, 0], layer.w13_weight_global_scale[:, 1]
+        ):
+            logger.warning_once(
+                "w1_weight_global_scale must match w3_weight_global_scale. "
+                "Accuracy may be affected."
+            )
+
+        # Take inverse of global scale saved to disk
+        layer.w13_weight_scale_2 = torch.nn.Parameter(
+            1 / layer.w13_weight_global_scale[:, 0], requires_grad=False
+        )
+
+        layer.w2_weight_scale_2 = torch.nn.Parameter(
+            1 / layer.w2_weight_global_scale.data, requires_grad=False
+        )
+
+        if self.use_marlin:
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+        else:
+            raise NotImplementedError(
+                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+            )
+
+    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+        if self.use_marlin:
+            return None
+        else:
+            raise NotImplementedError(
+                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+            )
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        if self.use_marlin:
+            return None
+        else:
+            raise NotImplementedError(
+                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+            )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert layer.activation == "silu", "Only SiLU activation is supported."
+
+        topk_weights, topk_ids, _ = layer.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+        )
+
+        if self.use_marlin:
+            return fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                None,
+                None,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                input_dtype=self.marlin_input_dtype,
+                workspace=layer.workspace,
+            )
+        else:
+            raise NotImplementedError(
+                "CompressedTensorsW4A16NVfp4MoeMethod only \
+                supports use_marlin=True"
+            )
 
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
