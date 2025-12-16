@@ -141,7 +141,7 @@ class SingleTypeKVCacheManager(ABC):
             )
         return num_new_blocks + num_evictable_blocks
 
-    def save_new_computed_blocks(
+    def allocate_new_computed_blocks(
         self,
         request_id: str,
         new_computed_blocks: Sequence[KVCacheBlock],
@@ -149,12 +149,19 @@ class SingleTypeKVCacheManager(ABC):
         num_external_computed_tokens: int,
     ) -> None:
         """
-        Add the new computed blocks to the request.
+        Add the new computed blocks to the request. This involves three steps:
+        1. Touch the computed blocks to make sure they won't be evicted.
+        1.5. (Optional) For sliding window, skip blocks are padded with null blocks.
+        2. Add the remaining computed blocks.
+        3. (Optional) For KV connectors, allocate new blocks for external computed
+            tokens (if any).
 
         Args:
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
+            num_local_computed_tokens: The number of local computed tokens.
+            num_external_computed_tokens: The number of external computed tokens.
         """
 
         if request_id in self.num_cached_block:

@@ -338,7 +338,7 @@ class KVCacheManager:
         ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
-            self.coordinator.save_new_computed_blocks(
+            self.coordinator.allocate_new_computed_blocks(
                 request_id=request.request_id,
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
