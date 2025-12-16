@@ -106,8 +106,8 @@ def mamba_copy_block_for_qwen_next_v1(
             conv_state_block = conv_state[conv_state_block_id]
             data_offset = conv_copy.data_offset_func(conv_state_block, accept_token_bias)
             num_elements = conv_copy.num_elements_func(conv_state_block, accept_token_bias)
-            src_conv_state_blk = conv_state_block.flatten()[data_offset:data_offset + num_elements]
-            dest_conv_state_blk = conv_state[dest_block_id].flatten()[:num_elements]
+            src_conv_state_blk = conv_state_block.view(-1)[data_offset:data_offset + num_elements]
+            dest_conv_state_blk = conv_state[dest_block_id].view(-1)[:num_elements]
             dest_conv_state_blk.copy_(src_conv_state_blk)
 
             src_conv_state = conv_state[conv_state_block_id][accept_token_bias:]
@@ -115,7 +115,7 @@ def mamba_copy_block_for_qwen_next_v1(
             # dest_conv_state[: len(src_conv_state)].copy_(src_conv_state.clone())
             dest_conv_state_ref = dest_conv_state[: len(src_conv_state)]
             src_conv_state_ref = conv_state[conv_state_block_id][accept_token_bias:]
-            assert dest_conv_state_ref == src_conv_state_ref
+            assert torch.equal(dest_conv_state_ref, src_conv_state_ref)
 
             # gdn state
             gdn_state_block_id_ref = block_ids[src_block_idx + accept_token_bias]
@@ -125,14 +125,48 @@ def mamba_copy_block_for_qwen_next_v1(
             gdn_state_block = gdn_state[gdn_state_block_id]
             data_offset = full_copy.data_offset_func(gdn_state_block, accept_token_bias)
             num_elements = full_copy.num_elements_func(gdn_state_block, accept_token_bias)
-            src_gdn_state_blk = gdn_state_block.flatten()[data_offset:data_offset + num_elements]
-            dest_gdn_state_blk = gdn_state[dest_block_id].flatten()[:num_elements]
+            src_gdn_state_blk = gdn_state_block.view(-1)[data_offset:data_offset + num_elements]
+            dest_gdn_state_blk = gdn_state[dest_block_id].view(-1)[:num_elements]
             dest_gdn_state_blk.copy_(src_gdn_state_blk)
 
             src_gdn_state_ref = gdn_state[gdn_state_block_id]
             dest_gdn_state_ref = gdn_state[dest_block_id]
             # dest_gdn_state.copy_(src_gdn_state)
-            assert dest_gdn_state_ref == src_gdn_state_ref
+            assert torch.equal(dest_gdn_state_ref, src_gdn_state_ref)
+
+
+def mamba_copy_block_for_qwen_next_v2(
+    kv_cache_config: KVCacheConfig,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state: CachedRequestState,
+    forward_context: dict[str, Any],
+):
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+    print('>>> [BEBUG] mamba_copy_block_for_qwen_next_v2', flush=True)
+    copy_meta = []
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        for layer_name in layer_names:
+            attention = forward_context[layer_name]
+            kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
+            copy_specs = [conv_copy, full_copy]
+            for state, copy_spec in zip(kv_caches, copy_specs):
+                src_block_id = block_ids[src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)]
+                data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
+                num_elements = copy_spec.num_elements_func(state[0], accept_token_bias)
+                copy_meta.append((state[src_block_id], state[dest_block_id], data_offset, num_elements))
+
+    for src_state, dest_state, data_offset, num_elements in copy_meta:
+        src_state_data = src_state.view(-1)[data_offset:data_offset + num_elements]
+        dest_state_data = dest_state.view(-1)[:num_elements]
+        dest_state_data.copy_(src_state_data)
+            
 
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
@@ -179,7 +213,7 @@ def preprocess_mamba(
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            mamba_copy_block_for_qwen_next(
+            mamba_copy_block_for_qwen_next_v2(
                 kv_cache_config,
                 mamba_group_ids,
                 prev_state_idx,
@@ -227,7 +261,7 @@ def postprocess_mamba(
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
-            mamba_copy_block_for_qwen_next(
+            mamba_copy_block_for_qwen_next_v2(
                 kv_cache_config,
                 mamba_group_ids,
                 src_block_idx,
