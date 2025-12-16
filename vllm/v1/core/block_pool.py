@@ -253,7 +253,6 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
-
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null blocks when enabling sparse attention or sliding
             # window attention. We skip null blocks here.
