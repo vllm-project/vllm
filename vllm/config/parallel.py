@@ -473,6 +473,7 @@ class ParallelConfig:
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
             "data_parallel_rank_local",
+            "data_parallel_index",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
