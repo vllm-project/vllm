@@ -129,10 +129,50 @@ class DeepSeekV32ToolParser(ToolParser):
         # Clear previous tool call history to avoid state pollution
         self.prev_tool_call_arr.clear()
 
-    def _parse_invoke_params(self, invoke_str: str) -> dict | None:
+    def _get_param_type(
+        self,
+        tool_name: str | None,
+        param_name: str,
+        request: ChatCompletionRequest | None,
+    ) -> str:
+        """Look up the expected type of a parameter from the request tools."""
+        if not tool_name or not request or not request.tools:
+            return "unknown"
+
+        for tool in request.tools:
+            if (
+                hasattr(tool, "function")
+                and tool.function.name == tool_name
+                and hasattr(tool.function, "parameters")
+            ):
+                params = tool.function.parameters
+                if isinstance(params, dict) and "properties" in params:
+                    param_config = params["properties"]
+                    if (
+                        param_name in param_config
+                        and isinstance(param_config[param_name], dict)
+                        and "type" in param_config[param_name]
+                    ):
+                        return param_config[param_name]["type"]
+        return "unknown"
+
+    def _parse_invoke_params(
+        self,
+        invoke_str: str,
+        tool_name: str | None = None,
+        request: ChatCompletionRequest | None = None,
+    ) -> dict | None:
+        """Parse parameters from invoke string with type conversion."""
         param_dict = dict()
         for param_name, param_val in self.parameter_complete_regex.findall(invoke_str):
-            param_dict[param_name] = param_val
+            # Get expected type from tool definition
+            param_type = self._get_param_type(tool_name, param_name, request)
+            # Strip leading/trailing newlines that DeepSeek may output
+            param_val = param_val.strip("\n")
+            # Convert value to appropriate type
+            converted_val = self._convert_param_value(param_val, param_type)
+            param_dict[param_name] = converted_val
+
         return param_dict
 
     def extract_tool_calls(
@@ -156,7 +196,9 @@ class DeepSeekV32ToolParser(ToolParser):
                 for invoke_name, invoke_content in self.invoke_complete_regex.findall(
                     tool_call_match
                 ):
-                    param_dict = self._parse_invoke_params(invoke_content)
+                    param_dict = self._parse_invoke_params(
+                        invoke_content, invoke_name, request
+                    )
                     tool_calls.append(
                         ToolCall(
                             type="function",
@@ -210,6 +252,14 @@ class DeepSeekV32ToolParser(ToolParser):
             return None
 
         param_type = param_type.lower()
+
+        # Handle object/array types first - these need JSON parsing
+        if param_type in ["object", "array"]:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+
         if param_type in ["string", "str", "text"]:
             return value
         elif param_type in ["integer", "int"]:
@@ -225,13 +275,8 @@ class DeepSeekV32ToolParser(ToolParser):
                 return value
         elif param_type in ["boolean", "bool"]:
             return value.lower() in ["true", "1"]
-        elif param_type in ["object", "array"]:
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
         else:
-            # Try JSON parse first, fallback to string
+            # Unknown type: try JSON parse first, fallback to string
             try:
                 return json.loads(value)
             except json.JSONDecodeError:
@@ -432,9 +477,13 @@ class DeepSeekV32ToolParser(ToolParser):
                     )
                     if invoke_content_end != -1:
                         invoke_content = tool_text[invoke_start:invoke_content_end]
-                        # Parse to get the complete arguments
+                        # Parse to get the complete arguments with type conversion
                         try:
-                            invoke_params = self._parse_invoke_params(invoke_content)
+                            invoke_params = self._parse_invoke_params(
+                                invoke_content,
+                                self.current_function_name,
+                                self.streaming_request,
+                            )
                             if invoke_params and self.current_tool_index < len(
                                 self.prev_tool_call_arr
                             ):
@@ -531,33 +580,12 @@ class DeepSeekV32ToolParser(ToolParser):
                         # Store raw value for later processing
                         self.accumulated_params[self.current_param_name] = param_value
 
-                        # Get parameter configuration for type conversion
-                        param_config = {}
-                        if self.streaming_request and self.streaming_request.tools:
-                            for tool in self.streaming_request.tools:
-                                if (
-                                    hasattr(tool, "function")
-                                    and tool.function.name == self.current_function_name
-                                    and hasattr(tool.function, "parameters")
-                                ):
-                                    params = tool.function.parameters
-                                    if (
-                                        isinstance(params, dict)
-                                        and "properties" in params
-                                    ):
-                                        param_config = params["properties"]
-                                    break
-
-                        # Get parameter type
-                        param_type = "string"
-                        if (
-                            self.current_param_name in param_config
-                            and isinstance(param_config[self.current_param_name], dict)
-                            and "type" in param_config[self.current_param_name]
-                        ):
-                            param_type = param_config[self.current_param_name]["type"]
-
-                        # Convert param value to appropriate type
+                        # Get parameter type and convert value
+                        param_type = self._get_param_type(
+                            self.current_function_name,
+                            self.current_param_name,
+                            self.streaming_request,
+                        )
                         converted_value = self._convert_param_value(
                             param_value, param_type
                         )
