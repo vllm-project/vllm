@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple, Deque, Union
 
 from vllm.v1.request import Request
 
+from typing import Optional, Tuple
+
 from sortedcontainers import SortedDict
 
 
@@ -40,11 +42,88 @@ class WaitingQueue:
             # if not found:
             #     logger.warning(f"Request {req.request_id} not found in any waiting queue.")
 
+    def update_best_queue(self, new_best_queue):
+        with self.lock:
+            self.best_queue = new_best_queue
+
     def __len__(self):
         with self.lock:
             # Sum all requests across all EWSJF queues
             num_waiting = sum(queue.size for queue in self.queues.values())
         return num_waiting
+
+    @property
+    def is_empty_best_queue(self) -> bool:
+        """
+        Check if the best queue is empty.
+
+        Returns:
+            bool: True if best queue is empty.
+        """
+        return self.best_queue.is_empty
+
+    @property
+    def has_best_queue(self) -> bool:
+        """
+        Check if there's best queue.
+
+        Returns:
+            bool: True if best queue exists
+        """
+        return self.best_queue
+
+    def get_all_queues(self) -> List[QueueInfo]:
+        """
+        Get all queues as a list.
+
+        Returns:
+            List[QueueInfo]: All queues in the waiting queue
+        """
+        return list(self.queues.values())
+
+    def get_all_queues(self, max_boundary: Optional[int] = None) -> List[QueueInfo]:
+        """
+        Get all queues as a list, optionally filtered by maximum boundary.
+
+        Args:
+            max_boundary (Optional[int]): If provided, only return queues where
+                                          high_boundary < max_boundary
+
+        Returns:
+            List[QueueInfo]: All queues (or filtered queues) in the waiting queue
+        """
+        all_queues = list(self.queues.values())
+
+        if max_boundary is None:
+            return all_queues
+
+        return [queue for queue in all_queues if queue.high_boundary < max_boundary]
+
+    @property
+    def queues_count(self) -> int:
+        """
+        Get the number of queues.
+
+        Returns:
+            int: Number of queues in the waiting queue
+        """
+        return len(self.queues)
+
+    def delete_queue(self, queue: QueueInfo) -> List[Request]:
+        """
+        Delete a queue from the waiting queue and return its requests.
+
+        Args:
+            queue (QueueInfo): The queue to delete
+
+        Returns:
+            List[Request]: All requests that were in the deleted queue
+        """
+        if queue.low_boundary in self.queues:
+            remaining_requests = queue.get_all_requests()
+            del self.queues[queue.low_boundary]
+            return remaining_requests
+        return []
 
     def add_request(self, request):
         # Determine which queue should handle this request based on prompt length
@@ -244,6 +323,9 @@ class QueueInfo:
             bool: True if queue has no requests, False otherwise
         """
         return len(self.requests) == 0
+
+    def __bool__(self):
+        return bool(self.requests)
 
     @property
     def size(self) -> int:
