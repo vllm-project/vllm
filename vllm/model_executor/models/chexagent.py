@@ -25,7 +25,7 @@ from .blip2 import (
     Blip2MultiModalProcessor,
     Blip2ProcessingInfo,
 )
-from .utils import flatten_bn, maybe_prefix
+from .utils import maybe_prefix
 
 # Hugging Face tokenizer for CheXagent uses this sentinel for image slots.
 _IMAGE_TOKEN_ID = 50265
@@ -95,30 +95,6 @@ class CheXagentForConditionalGeneration(Blip2ForConditionalGeneration):
                 new_bias.copy_(old_bias)
 
     def _parse_and_validate_image_input(
-        self,
-        **kwargs: object,
+        self, **kwargs: object
     ) -> CheXagentImageInputs | None:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-
-        if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-            pixel_values = flatten_bn(pixel_values, concat=True)
-
-        if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-            image_embeds = flatten_bn(image_embeds, concat=True)
-
-        if pixel_values is None and image_embeds is None:
-            return super()._parse_and_validate_image_input(**kwargs)
-
-        kwargs["pixel_values"] = pixel_values
-        kwargs["image_embeds"] = image_embeds
         return super()._parse_and_validate_image_input(**kwargs)
