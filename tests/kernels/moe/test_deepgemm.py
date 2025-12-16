@@ -12,9 +12,14 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -98,6 +103,10 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         w2_scale=w2_s,
         a1_scale=a1_scale,
         block_shape=block_size,
+    )
+    quant_config.moe_kernel = FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        DeepGemmExperts(quant_config),
     )
 
     # triton reference
