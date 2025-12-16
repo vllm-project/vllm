@@ -142,10 +142,11 @@ class MistralToolParser(ToolParser):
         with [BOT] the tool call token.
 
         Note:
-            For >= v11, tool calls with arguments wrongly formatted are still returned
-            as tool calls. This is to allow the model to know it tried to make a tool
-            call. It reduces change of another failure and prevents that the context
-            is filled with tool calls wrongly placed in assistant message contents.
+            For tokenizer versions >= v11, tool calls with arguments wrongly formatted
+            are still returned as tool calls. This is to allow the model to know it
+            tried to make a tool call. It reduces chance of another failure and
+            prevents that the context is filled with tool calls wrongly placed in
+            assistant message contents.
         """
 
         # If the tool call token is not present, return a text response
