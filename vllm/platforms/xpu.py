@@ -182,12 +182,44 @@ class XPUPlatform(Platform):
             and parallel_config.distributed_executor_backend != "uni"
             and parallel_config.distributed_executor_backend != "external_launcher"
         ):
-            logger.warning(
-                "%s is not supported on XPU, fallback to ray distributed"
-                " executor backend.",
-                parallel_config.distributed_executor_backend,
-            )
-            parallel_config.distributed_executor_backend = "ray"
+            # Check if it's a custom MultiprocExecutor subclass
+            backend = parallel_config.distributed_executor_backend
+            is_multiproc = False
+
+            backend_class_to_check = None
+            if isinstance(backend, type):
+                backend_class_to_check = backend
+            elif isinstance(backend, str):
+                try:
+                    # Try to import from string, e.g. "my_module.MyExecutor"
+                    import importlib
+
+                    module_path, class_name = backend.rsplit(".", 1)
+                    module = importlib.import_module(module_path)
+                    backend_class_to_check = getattr(module, class_name)
+                except (ImportError, ValueError, AttributeError):
+                    # Fallback for simple string check for backward compatibility
+                    # and cases where it's not a full import path.
+                    if "MultiprocExecutor" in backend:
+                        is_multiproc = True
+
+            if backend_class_to_check and not is_multiproc:
+                try:
+                    # Use lazy import to avoid circular dependency
+                    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+                    is_multiproc = issubclass(backend_class_to_check, MultiprocExecutor)
+                except (ImportError, TypeError):
+                    # Not a class or import failed
+                    pass
+
+            if not is_multiproc:
+                logger.warning(
+                    "%s is not supported on XPU, fallback to ray distributed"
+                    " executor backend.",
+                    parallel_config.distributed_executor_backend,
+                )
+                parallel_config.distributed_executor_backend = "ray"
 
         if model_config and model_config.use_mla:
             logger.info(
