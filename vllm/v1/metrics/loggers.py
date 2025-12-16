@@ -132,7 +132,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_preemptions: int = 0
 
     def _enable_perf_stats(self) -> bool:
-        return True
+        return self.vllm_config.observability_config.mfu_metrics != "disabled"
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
@@ -253,8 +253,6 @@ class LoggingStatLogger(StatLoggerBase):
         if not self.mm_caching_metrics.empty:
             log_parts.append("MM cache hit rate: %.1f%%")
             log_args.append(self.mm_caching_metrics.hit_rate * 100)
-        if self._enable_perf_stats():
-            self.perf_metrics_logging.log(log_parts, log_args)
 
         log_fn(
             self.log_prefix + ", ".join(log_parts),
@@ -265,6 +263,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.kv_connector_logging.log(log_fn=log_fn)
         if self.cudagraph_logging is not None:
             self.cudagraph_logging.log(log_fn=log_fn)
+        if self._enable_perf_stats():
+            self.perf_metrics_logging.log(log_fn=log_fn)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:

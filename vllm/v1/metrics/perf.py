@@ -17,7 +17,6 @@ import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
@@ -30,8 +29,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 logger = init_logger(__name__)
 
 
-def log_verbose() -> bool:
-    return envs.VLLM_MFU_LOGGING_LEVEL > 1
+def log_verbose(vllm_config: VllmConfig) -> bool:
+    return vllm_config.observability_config.mfu_metrics == "per-gpu-debug"
 
 
 class InvalidComponent(Exception):
@@ -952,7 +951,7 @@ class UnembedMetrics(ComponentMetrics):
 
 
 class ModelMetrics:
-    def __init__(self, vllm_config: VllmConfig | None = None) -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
         """
         Parse vllm_config to instantiate metrics for each component.
         is_enabled() will return False if no component metrics could be instantiated.
@@ -961,8 +960,6 @@ class ModelMetrics:
         self.vllm_config = vllm_config
 
         self.metrics: list[ComponentMetrics] = []
-        if vllm_config is None:
-            return
         for metric_cls in ComponentMetrics.registered_metrics():
             try:
                 metric = metric_cls.from_vllm_config(vllm_config)
@@ -1078,7 +1075,7 @@ class ModelMetrics:
             else:
                 num_decode_requests += 1
 
-        if log_verbose():
+        if log_verbose(self.vllm_config):
             num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
             read_bytes_breakdown = self.get_read_bytes_breakdown(ctx, True)
             write_bytes_breakdown = self.get_write_bytes_breakdown(ctx, True)
@@ -1109,6 +1106,7 @@ class ModelMetrics:
 
 class PerfMetricsLogging:
     def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.reset()
 
@@ -1134,7 +1132,7 @@ class PerfMetricsLogging:
         self.total_read_bytes_per_gpu += perf_stats.num_read_bytes_per_gpu
         self.total_write_bytes_per_gpu += perf_stats.num_write_bytes_per_gpu
 
-        if log_verbose():
+        if log_verbose(self.vllm_config):
             self.total_calc_duration += perf_stats.calc_duration
             self.total_num_prefill_requests += perf_stats.num_prefill_requests
             self.total_num_decode_requests += perf_stats.num_decode_requests
@@ -1158,7 +1156,7 @@ class PerfMetricsLogging:
                 for key, val in src.items():
                     dst[key] = dst.get(key, 0) + val
 
-    def log(self, log_parts: list[str], log_args: list[int | float | str]):
+    def log(self, log_fn=logger.info):
         if not (
             self.total_num_flops_per_gpu
             or self.total_read_bytes_per_gpu
@@ -1177,16 +1175,14 @@ class PerfMetricsLogging:
             / 1e9
         )
 
-        log_parts.append("MFU: %.1f TF/s/GPU %.1f GB/s/GPU")
-        log_args.extend(
-            [
-                avg_tflops_per_gpu,
-                avg_gbps_per_gpu,
-            ]
+        log_fn(
+            "MFU: %.1f TF/s/GPU %.1f GB/s/GPU",
+            avg_tflops_per_gpu,
+            avg_gbps_per_gpu,
         )
 
-        # log details is logging level is high enough
-        if log_verbose():
+        # log details via debug logging when per-gpu-debug is enabled
+        if log_verbose(self.vllm_config):
             # pretty print breakdowns
             total_num_flops_per_gpu_breakdown = {
                 k: f"{v / 1e12:.1f}TF"
@@ -1201,8 +1197,8 @@ class PerfMetricsLogging:
                 for k, v in self.total_write_bytes_per_gpu_breakdown.items()
             }
 
-            log_parts.append("MFU details: %s")
-            log_args.append(
+            logger.debug(
+                "MFU details: %s",
                 json.dumps(
                     {
                         "prefill_reqs": self.total_num_prefill_requests,
@@ -1215,11 +1211,12 @@ class PerfMetricsLogging:
                             total_write_bytes_per_gpu_breakdown
                         ),
                         "duration": f"{delta_time:.1f}s",
-                        "mfu_calc_overhead": f"{
-                            self.total_calc_duration / delta_time:.1%}",
+                        "mfu_calc_overhead": (
+                            f"{self.total_calc_duration / delta_time:.1%}"
+                        ),
                     },
                     indent=2,
-                )
+                ),
             )
 
         self.reset()
