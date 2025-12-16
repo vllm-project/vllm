@@ -45,20 +45,14 @@ def parse_raw_prompts(
 
         # case 4: array of token arrays
         if is_list_of(prompt, list):
-            if len(prompt) == 0 or (
-                len(prompt) == 1 and isinstance(prompt[0], list) and len(prompt[0]) == 0
-            ):
+            if len(prompt) == 1 and isinstance(prompt[0], list) and len(prompt[0]) == 0:
                 raise ValueError("please provide at least one prompt")
             for elem in prompt:
                 if not isinstance(elem, list):
                     raise TypeError(
                         "prompt must be a list of lists, but found a non-list element."
                     )
-                if not elem:
-                    raise ValueError(
-                        "Empty lists of tokens are not allowed in prompts."
-                    )
-                if not is_list_of(elem, int, check="all"):
+                if not is_list_of(elem, int):
                     raise TypeError(
                         "Nested lists of tokens must contain only integers."
                     )
