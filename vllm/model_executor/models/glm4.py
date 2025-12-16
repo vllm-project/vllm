@@ -29,7 +29,8 @@ import torch
 from torch import nn
 from transformers import Glm4Config
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -77,10 +78,9 @@ class Glm4Attention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim or hidden_size // self.total_num_heads
-        self.rotary_dim = self.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -102,10 +102,8 @@ class Glm4Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=max_position,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=partial_rotary_factor,
             is_neox_style=False,
         )
         self.attn = Attention(

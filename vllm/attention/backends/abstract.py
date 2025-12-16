@@ -6,11 +6,10 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
-from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-
 if TYPE_CHECKING:
     from vllm.config.cache import CacheDType
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -46,8 +45,11 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -142,10 +144,11 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        if not cls.supported_kernel_block_sizes:
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
             return True
 
-        for supported_size in cls.supported_kernel_block_sizes:
+        for supported_size in supported_kernel_block_sizes:
             if isinstance(supported_size, MultipleOf):
                 supported_size = supported_size.base
             # With hybrid_blocks feature, the framework-level block size
@@ -164,6 +167,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return False
 
@@ -174,8 +181,6 @@ class AttentionBackend(ABC):
         By default, only supports decoder attention.
         Backends should override this to support other attention types.
         """
-        from vllm.attention import AttentionType
-
         return attn_type == AttentionType.DECODER
 
     @classmethod
@@ -206,6 +211,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
         attn_type: str,
     ) -> list[str]:
@@ -218,6 +224,10 @@ class AttentionBackend(ABC):
             invalid_reasons.append("kv_cache_dtype not supported")
         if not cls.supports_block_size(block_size):
             invalid_reasons.append("block_size not supported")
+        if use_mm_prefix and not cls.supports_mm_prefix():
+            invalid_reasons.append(
+                "partial multimodal token full attention not supported"
+            )
         if use_mla != cls.is_mla():
             if use_mla:
                 invalid_reasons.append("MLA not supported")
@@ -284,9 +294,25 @@ class AttentionImpl(ABC, Generic[T]):
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
 
+    # Whether the attention impl supports Prefill Context Parallelism.
+    supports_pcp: bool = False
+    # Whether the attention impl(or ops) supports MTP
+    # when cp_kv_cache_interleave_size > 1
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = False
+
     # some attention backends might not always want to return lse
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
+
+    # Whether this attention implementation supports pre-quantized query input.
+    # When True, the attention layer will quantize queries before passing them
+    # to this backend, allowing torch.compile to fuse the quantization with
+    # previous operations. This is typically supported when using FP8 KV cache
+    # with compatible attention kernels (e.g., TRT-LLM).
+    # Subclasses should set this in __init__.
+    # TODO add support to more backends:
+    # https://github.com/vllm-project/vllm/issues/25584
+    supports_quant_query_input: bool = False
 
     dcp_world_size: int
     dcp_rank: int
@@ -356,7 +382,7 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -364,22 +390,6 @@ class AttentionImpl(ABC, Generic[T]):
 
         :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
-        """
-        return False
-
-    def supports_quant_query_input(self) -> bool:
-        """
-        Check if this attention implementation supports pre-quantized query input.
-
-        When True, the attention layer will quantize queries before passing them
-        to this backend, allowing torch.compile to fuse the quantization with
-        previous operations. This is typically supported when using FP8 KV cache
-        with compatible attention kernels (e.g., TRT-LLM).
-        TODO add support to more backends:
-        https://github.com/vllm-project/vllm/issues/25584
-
-        Returns:
-            bool: True if the implementation can accept pre-quantized queries.
         """
         return False
 
@@ -408,7 +418,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
+        kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
     ) -> None:
         raise NotImplementedError

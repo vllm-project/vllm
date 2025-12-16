@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import DbrxConfig
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -222,7 +222,6 @@ class DbrxAttention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position,
             rope_parameters=rope_parameters,
             is_neox_style=True,
