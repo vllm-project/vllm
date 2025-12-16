@@ -209,10 +209,10 @@ class Request:
     def get_finished_reason(self) -> FinishReason | None:
         return RequestStatus.get_finished_reason(self.status)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
+    def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        num_tokens = self.mm_features[input_id].mm_position.length
-        return num_tokens
+        num_embeds = self.mm_features[input_id].mm_position.get_num_embeds
+        return num_embeds
 
     def record_event(
         self,
