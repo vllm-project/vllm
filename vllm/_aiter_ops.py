@@ -642,58 +642,97 @@ _OPS_REGISTERED = False
 
 
 class rocm_aiter_ops:
+    """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
+
+    This class centralizes the import and registration of AITER ops,
+    and provides a unified interface for checking if AITER is enabled.
+    Operations are only available on supported gfx9
+    architectures when aiter is installed.
+
+    The class uses environment variables to control which features are enabled,
+    allowing fine-grained control over which AITER optimizations are used.
+
+    Environment Variables:
+        VLLM_ROCM_USE_AITER: Main toggle for all AITER operations.
+        VLLM_ROCM_USE_AITER_LINEAR: Controls GEMM and quantization ops.
+        VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
+        VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
+        VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
+        VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
+        VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
+        VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
+        VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
+        VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
+        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
+        VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
+
+    Check Functions:
+        All check functions (is_*_enabled) are decorated with @if_aiter_supported,
+        which verifies: (1) platform is ROCm, (2) device arch is gfx9, and
+        (3) aiter library is installed. The check function then also verifies
+        the corresponding environment variable is enabled.
+        i.e.
+        is_enabled() == current_platform.is_rocm() and
+                        current_platform.is_on_gfx9() and
+                        IS_AITER_FOUND and
+                        cls._AITER_ENABLED
+
+    Example:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        # Check if aiter is enabled before using operations
+        if rocm_aiter_ops.is_enabled():
+            result = rocm_aiter_ops.rms_norm(x, weight, epsilon)
+
+    Operations:
+        - RMS normalization: rms_norm, rms_norm2d_with_add
+        - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
+        - Fused MoE: fused_moe, asm_moe_tkw1
+        - Routing: topk_softmax, biased_grouped_topk, grouped_topk
+        - MLA decode: mla_decode_fwd
+        - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
+        - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
+    """
+
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
-    # _LINEAR_ENABLED is intended to control GEMMs and Quant Ops
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-    # _RMSNORM_ENABLED is intended to control RMSNorm Ops
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
-    # _FMOE_ENABLED is intended to control all MoE related Ops
-    # including routing, fused MoE
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
-    # _MLA_ENABLED is intended to control MLA Ops/Backends
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
-    # _MHA_ENABLED is intended to control MHA Ops/Backends
-    # including flash_attn_varlen
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
-    # _TRITON_UNIFIED_ATTN_ENABLED is intended to
-    # control TRITON_UNIFIED_ATTN Ops/Backends
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
-    # _TRITON_ROTARY_EMBED is intended to control TRITON_ROPE Ops
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
-    # _MOE_SHARED_EXPERTS_ENABLED is intended to control
-    # whether to fuse the shared experts with routed experts
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
-    # ================ Check Functions =================
-    # The decorator @if_aiter_supported
-    # is used to check if aiter is supported on the current device.
-    # Conditions:
-    #   1. platform is ROCm
-    #   2. device arch is supported (on_gfx9()) only
-    #   3. aiter library exists (IS_AITER_FOUND)
-    # So if is_enabled() is decorated by @if_aiter_supported,
-    # calling is_enabled() equivalent to checking the conditions above and
-    # `cls._AITER_ENABLED` is True.
-    # i.e.
-    # is_enabled() == current_platform.is_rocm() and
-    #                 current_platform.is_on_gfx9() and
-    #                 IS_AITER_FOUND and
-    #                 cls._AITER_ENABLED
-
-    ## Usage of check functions in other files:
-    # from vllm._aiter_ops import rocm_aiter_ops
-    # ...
-    # # Check if aiter is enabled
-    # if rocm_aiter_ops.is_enabled():
-    #     ...
+    @classmethod
+    def refresh_env_variables(cls):
+        """
+        Since the environment variables are assigned when the module is imported,
+        This is a helper function to reload all the env variables from
+        the environment variables.
+        for example, after monkey patching the env variables in the unit test,
+        you can call this function to reload the env variables.
+        """
+        cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
+        cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
+        cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+        cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
+        cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+        cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+        cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+        cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
+        cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
+        cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
+        cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @classmethod
     @if_aiter_supported
