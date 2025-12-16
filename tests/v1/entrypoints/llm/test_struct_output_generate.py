@@ -700,9 +700,7 @@ def test_structured_output_auto_mode(
     llm = LLM(
         model=model_name,
         max_model_len=1024,
-        structured_outputs_config=dict(
-            backend="outlines" if current_platform.is_rocm() else "auto"
-        ),
+        structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
         load_format="auto",
         config_format="auto",
