@@ -7,6 +7,8 @@ from vllm.utils.flashinfer import has_flashinfer_all2all
 
 assert has_flashinfer_all2all(), "Flashinfer alltoallv module cannot be found"
 
+from typing import Any
+
 
 class CustomCommunicator(CommBackend):
     def __init__(self, group):
@@ -24,4 +26,11 @@ class CustomCommunicator(CommBackend):
         return gathered
 
     def Split(self, color: int, key: int) -> "CustomCommunicator":
+        return self
+
+    def bcast(self, data: Any, root: int) -> Any:
+        return self
+
+
+    def barrier(self) -> None:
         return self
