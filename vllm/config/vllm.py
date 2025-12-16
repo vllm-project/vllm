@@ -280,9 +280,12 @@ class VllmConfig:
             additional_config = self.additional_config
             if isinstance(additional_config, dict):
                 factors["additional"] = additional_config
-            else:
-                assert isinstance(additional_config, SupportsCompileFactors)
+            elif isinstance(additional_config, SupportsCompileFactors):
                 factors["additional"] = additional_config.compile_factors()
+            else:
+                raise TypeError(
+                    "additional_config must be a dict or SupportsCompileFactors"
+                )
         else:
             factors["additional"] = {}
 

@@ -18,7 +18,6 @@ from vllm.config.utils import (
     Range,
     config,
     get_compile_factors,
-    handle_deprecated,
     hash_factors,
 )
 from vllm.logger import init_logger
