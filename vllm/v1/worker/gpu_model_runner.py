@@ -4938,6 +4938,10 @@ class GPUModelRunner(
         # after here.
         set_cudagraph_capturing_enabled(False)
 
+        # Release fragmented memory from graph capture process.
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
         # Lock workspace to prevent resizing during execution.
         # Max workspace sizes should have been captured during warmup/profiling.
         lock_workspace()
