@@ -1522,6 +1522,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2_blockscale_swizzled, requires_grad=False
             )
 
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: FusedMoE,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Optionally prepare extra tensors to carry through DP allgather/EP."""
+        import flashinfer
+
+        a1_gscale = layer.w13_input_scale_quant
+        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
+            hidden_states,
+            a1_gscale,
+            is_sf_swizzled_layout=False,
+        )
+        extra_tensors: list[torch.Tensor] = [hidden_states_sf]
+        return hidden_states_fp4, extra_tensors
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -1576,8 +1594,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
+        # Hidden_states in select_experts is only used to extract metadata
+        if isinstance(x, tuple):
+            x_routing, _ = x
+        else:
+            x_routing = x
         topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
+            hidden_states=x_routing,
             router_logits=router_logits,
         )
 
