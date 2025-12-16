@@ -433,7 +433,6 @@ class MolmoAttention(nn.Module):
         # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -1354,8 +1353,6 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 class MolmoForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsQuant
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping

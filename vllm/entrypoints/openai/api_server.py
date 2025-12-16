@@ -72,7 +72,6 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
@@ -95,6 +94,7 @@ from vllm.entrypoints.utils import (
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
+from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -663,14 +663,27 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(
-        raw_request: Request, reset_running_requests: bool = Query(default=False)
+        raw_request: Request,
+        reset_running_requests: bool = Query(default=False),
+        reset_external: bool = Query(default=False),
     ):
         """
-        Reset the prefix cache. Note that we currently do not check if the
-        prefix cache is successfully reset in the API server.
+        Reset the local prefix cache.
+
+        Optionally, if the query parameter `reset_external=true`
+        also resets the external (connector-managed) prefix cache.
+
+        Note that we currently do not check if the prefix cache
+        is successfully reset in the API server.
+
+        Example:
+            POST /reset_prefix_cache?reset_external=true
         """
         logger.info("Resetting prefix cache...")
-        await engine_client(raw_request).reset_prefix_cache(reset_running_requests)
+
+        await engine_client(raw_request).reset_prefix_cache(
+            reset_running_requests, reset_external
+        )
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")

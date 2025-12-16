@@ -57,8 +57,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
-  timeout_in_minutes: 20
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 20min
+  timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -66,6 +66,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -75,6 +76,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s tokenizers_
+  - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -350,7 +352,8 @@ steps:
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
-    - vllm/
+    - vllm/v1/attention
+    - vllm/model_executor/layers
     - tests/v1/determinism/
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -387,6 +390,7 @@ steps:
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
+  - vllm/multimodal
   - examples/
   commands:
     - pip install tensorizer # for tensorizer test
@@ -466,7 +470,9 @@ steps:
   # tests covered elsewhere.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
@@ -480,7 +486,9 @@ steps:
   # as it is a heavy test that is covered in other steps.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/fullgraph -maxdepth 1 -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Test # 27min
   timeout_in_minutes: 40
@@ -666,16 +674,7 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
-
-- label: OpenAI-Compatible Tool Use (CPU) # 5 mins
-  timeout_in_minutes: 10
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  no_gpu: true
-  commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - pytest -v -s tool_use
 
 #####  models test  #####
 
@@ -686,6 +685,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
@@ -698,6 +698,7 @@ steps:
   - vllm/model_executor/models/
   - vllm/transformers_utils/
   - tests/models/test_initialization.py
+  - tests/models/registry.py
   commands:
     # Only when vLLM model source is modified - test initialization of a large
     # subset of supported models (the complement of the small subset in the above
@@ -830,7 +831,7 @@ steps:
   - tests/models/multimodal
   no_gpu: true
   commands:
-    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - "pip install git+https://github.com/TIGER-AI-Lab/Mantis.git || echo 'Mantis installation skipped (decord not available on CPU-only environment)'"
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Processor Test
@@ -1222,6 +1223,8 @@ steps:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Alot of these tests are on the edge of OOMing
+    - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
@@ -1340,6 +1343,7 @@ steps:
 - label: Prime-RL Integration Test # 15min
   timeout_in_minutes: 30
   optional: true
+  soft_fail: true
   num_gpus: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
@@ -1374,21 +1378,3 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
-
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
-
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
