@@ -242,9 +242,8 @@ async def test_mcp_tool_calling_streaming_types(
     )
 
     stack_of_event_types = []
+    saw_mcp_type = False
     async for event in stream_response:
-        assert "mcp_call" in event.type
-
         if event.type == "response.created":
             stack_of_event_types.append(event.type)
         elif event.type == "response.completed":
@@ -261,9 +260,12 @@ async def test_mcp_tool_calling_streaming_types(
             stack_of_event_types.append(event.type)
         elif event.type.endswith("done") or event.type == "response.mcp_call.completed":
             assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            if "mcp_call" in event.type:
+                saw_mcp_type = True
             stack_of_event_types.pop()
 
     assert len(stack_of_event_types) == 0
+    assert saw_mcp_type, "Should have seen at least one mcp call"
 
 
 def test_get_tool_description():
