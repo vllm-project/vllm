@@ -391,7 +391,7 @@ def _support_torch_compile(
             serialized backend artifacts), then we need to generate a new AOT
             compile artifact from scratch.
             """
-            
+
             from .caching import compilation_config_hash_factors
 
             factors: list[str] = compilation_config_hash_factors(self.vllm_config)
