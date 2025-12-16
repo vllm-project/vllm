@@ -1590,7 +1590,7 @@ def scaled_fp4_quant(
     scale_n = n // block_size
     rounded_n = round_up(scale_n, 4)
     # Use torch.empty for performance - kernel zeros padding at swizzled addresses
-    output_scale = torch.zeros(
+    output_scale = torch.empty(
         (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
     )
 
