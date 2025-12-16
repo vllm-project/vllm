@@ -194,6 +194,21 @@ def get_tokenizer(
         **kwargs,
     )
 
+    if tokenizer_mode == "custom":
+        logger.warning_once(
+            "TokenizerRegistry now uses `tokenizer_mode` as the registry key "
+            "instead of `tokenizer_name`. "
+            "Please update the definition of `.from_pretrained` in "
+            "your custom tokenizer to accept `args=%s`, `kwargs=%s`. "
+            "Then, you can pass `tokenizer_mode=%r` instead of "
+            "`tokenizer_mode='custom'` when initializing vLLM.",
+            args,
+            str(kwargs),
+            tokenizer_name,
+        )
+
+        tokenizer_mode = str(tokenizer_name)
+
     if tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
