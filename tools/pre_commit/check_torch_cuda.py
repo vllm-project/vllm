@@ -10,7 +10,7 @@ import regex as re
 _TORCH_CUDA_RE = re.compile(r"\btorch\.cuda\.empty_cache\b")
 
 
-ALLOWED_FILES = {"tests/", "benchmarks/", "vllm/platforms/*"}
+ALLOWED_FILES = {"tests/", "benchmarks/", "vllm/platforms/"}
 
 
 def scan_file(path: str) -> int:
@@ -29,7 +29,7 @@ def scan_file(path: str) -> int:
 def main():
     returncode = 0
     for filename in sys.argv[1:]:
-        if filename in ALLOWED_FILES:
+        if any(filename.startswith(prefix) for prefix in ALLOWED_FILES):
             continue
         returncode |= scan_file(filename)
     return returncode
