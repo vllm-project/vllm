@@ -19,7 +19,7 @@ from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer, is_torch_equal
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -536,6 +536,9 @@ def _test_backend_correctness(
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.skipif(
+    not is_torch_equal("2.10.0"), reason="Failing on 2.10 https://github.com/pytorch/pytorch/issues/170489"
+)
 def test_causal_backend_correctness(
     batch_spec_name: str, model: str, tensor_parallel_size: int
 ):

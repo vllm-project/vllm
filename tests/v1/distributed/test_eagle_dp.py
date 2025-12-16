@@ -11,11 +11,15 @@ from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.utils.torch_utils import is_torch_equal
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    not is_torch_equal("2.10.0"), reason="Failing on 2.10 https://github.com/pytorch/pytorch/issues/170563"
+)
 async def test_run_eagle_dp():
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
     draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
