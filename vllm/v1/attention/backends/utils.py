@@ -201,10 +201,11 @@ def _make_metadata_with_slice(
     )
     # NOTE: last token can be outside of the last request if we have CG padding.
 
-    # If the "middle" request has tokens in both ubatches, we have to split it.
-    # If ubatch_slice is the first ubatch then we will be splitting the last
-    # request. If it's the second microbatch, then we will be splitting the
-    # first request
+    # If the request is split across ubatches, we have to adjust the metadata.
+    # splits_first_request: The first request in this slice is the continuation of
+    #                       a request that started in a previous slice.
+    # splits_last_request:  The last request in this slice continues into the
+    #                       next slice.
     splits_first_request = first_tok > start_locs[first_req]
     splits_last_request = last_tok < start_locs[last_req + 1] - 1
 
@@ -225,7 +226,10 @@ def _make_metadata_with_slice(
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
 
     if splits_last_request:
-        tokens_skipped = query_start_loc_cpu[-1] - token_slice.stop
+        # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
+        # the tokens skipped because query_start_loc_cpu might have been modified
+        # if splits_first_request is True.
+        tokens_skipped = start_locs[last_req + 1] - token_slice.stop
         query_start_loc[-1] -= tokens_skipped
         query_start_loc_cpu[-1] -= tokens_skipped
 
