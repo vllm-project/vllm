@@ -35,7 +35,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing, SpeechToTextRe
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.models import SupportsTranscription
+from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
@@ -128,8 +128,8 @@ class OpenAISpeechToText(OpenAIServing):
         if isinstance(librosa, PlaceholderModule):
             return
 
-        # Skip warmup if model doesn't support multimodal/audio inputs
-        if not self.model_config.is_multimodal_model:
+        # Skip warmup if model doesn't support transcription
+        if not supports_transcription(self.model_cls):
             return
 
         try:
@@ -186,8 +186,8 @@ class OpenAISpeechToText(OpenAIServing):
         triggers multimodal processing initialization which can take ~2.5s.
         This method processes a dummy audio request to warm up the pipeline.
         """
-        # Skip warmup if model doesn't support multimodal/audio inputs
-        if not self.model_config.is_multimodal_model:
+        # Skip warmup if model doesn't support transcription
+        if not supports_transcription(self.model_cls):
             return
 
         # Only warm up if model supports transcription methods
