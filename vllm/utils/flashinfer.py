@@ -185,6 +185,23 @@ def has_flashinfer_cutedsl() -> bool:
 
 
 @functools.cache
+def has_flashinfer_trtllm_fused_moe() -> bool:
+    """Return `True` if FlashInfer TRTLLM fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+    required_functions = [
+        ("flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+    ]
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
@@ -264,7 +281,9 @@ def supports_trtllm_attention() -> bool:
         return False
 
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:

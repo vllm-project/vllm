@@ -111,7 +111,7 @@ def create_sampling_metadata(
         top_p=top_p,
         top_k=top_k,
         generators=generators,
-        max_num_logprobs=0,
+        max_num_logprobs=None,
         no_penalties=no_penalties,
         prompt_token_ids=prompt_token_ids,
         frequency_penalties=frequency_penalties,

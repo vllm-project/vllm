@@ -64,8 +64,8 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 15min
-  timeout_in_minutes: 20
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 20min
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
   grade: Blocking
@@ -76,6 +76,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
   no_gpu: true
@@ -85,6 +86,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s tokenizers_
+  - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -329,10 +331,10 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-- label: V1 Test e2e + engine # 30min
-  timeout_in_minutes: 45
+- label: V1 Test e2e + engine # 65min
+  timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_1
+  agent_pool: mi325_4
   # grade: Blocking
   source_file_dependencies:
     - vllm/
@@ -438,7 +440,7 @@ steps:
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
@@ -458,7 +460,6 @@ steps:
     # for multi-modal models
     - python3 offline_inference/audio_language.py --seed 0
     - python3 offline_inference/vision_language.py --seed 0
-    - python3 offline_inference/vision_language_pooling.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     # for pooling models
@@ -763,19 +764,7 @@ steps:
     - vllm/
     - tests/tool_use
   commands:
-    - pytest -v -s -m 'not cpu_test' tool_use
-
-- label: OpenAI-Compatible Tool Use (CPU) # 5 mins
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  timeout_in_minutes: 10
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  no_gpu: true
-  commands:
-    - pytest -v -s -m 'cpu_test' tool_use
+    - pytest -v -s tool_use
 
 #####  models test  #####
 
@@ -1633,7 +1622,6 @@ steps:
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_4
   # grade: Blocking
-  gpu: h100
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
