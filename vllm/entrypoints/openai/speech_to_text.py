@@ -141,14 +141,25 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
             processor = cached_processor_from_config(self.model_config)
-            feature_extractor = processor.feature_extractor
-            _ = librosa.feature.melspectrogram(
-                y=dummy_audio,
-                sr=self.asr_config.sample_rate,
-                n_mels=getattr(feature_extractor, "n_mels", 128),
-                n_fft=getattr(feature_extractor, "n_fft", 400),
-                hop_length=getattr(feature_extractor, "hop_length", 160),
-            )
+            feature_extractor = None
+            if hasattr(processor, "feature_extractor"):
+                feature_extractor = processor.feature_extractor
+            elif hasattr(processor, "audio_processor"):
+                # For models like GraniteSpeech that use audio_processor
+                audio_proc = processor.audio_processor
+                if hasattr(audio_proc, "feature_extractor"):
+                    feature_extractor = audio_proc.feature_extractor
+                # If audio_processor doesn't have feature_extractor,
+                # skip mel-spectrogram warmup for these models
+
+            if feature_extractor is not None:
+                _ = librosa.feature.melspectrogram(
+                    y=dummy_audio,
+                    sr=self.asr_config.sample_rate,
+                    n_mels=getattr(feature_extractor, "n_mels", 128),
+                    n_fft=getattr(feature_extractor, "n_fft", 400),
+                    hop_length=getattr(feature_extractor, "hop_length", 160),
+                )
 
             warmup_elapsed = time.perf_counter() - warmup_start
             logger.info("Audio preprocessing warmup completed in %.2fs", warmup_elapsed)
