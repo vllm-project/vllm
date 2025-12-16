@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -104,6 +105,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
             else None
         )
 
+        # Worker-side bookkeeping for async KV loads.
+        # Track which (request_id, block_ids) has already been injected into the
+        # paged KV buffer. Requests can be preempted and later resumed with new
+        # blocks, so we must allow re-loading when block_ids change.
+        self._loaded_req_block_ids: dict[str, tuple[int, ...]] = {}
+        self._finished_recving_req_ids: set[str] = set()
+        self._invalid_block_ids: set[int] = set()
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -128,8 +137,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert self.p2p_nccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
-        if attn_metadata is None:
-            return
 
         def inject_kv_into_layer(
             layer: torch.Tensor,
@@ -160,20 +167,32 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Returns:
                 None. The function modifies `layer` in-place.
             """
-            if (
-                isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2
-            ):  # MLA or FlashInfer
+            # NOTE: forward_context.attn_metadata can be None in kv_connector_no_forward
+            # (used to drive background transfers). Fall back to shape-based
+            # heuristics in that case.
+            if isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2:  # type: ignore[arg-type]
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
                     layer[block_ids, ...] = kv_cache
                 else:
-                    layer[block_ids[:num_block], ...] = kv_cache
+                    overlap = min(len(block_ids), num_block)
+                    if overlap == 0:
+                        logger.warning(
+                            "🚧kv_cache does not match (no overlap), block_ids:%d, "
+                            "num_block:%d, request_id:%s",
+                            len(block_ids),
+                            num_block,
+                            request_id,
+                        )
+                        return
+                    layer[block_ids[:overlap], ...] = kv_cache[:overlap, ...]
                     logger.warning(
                         "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s",
+                        "num_block:%d, overlap:%d, request_id:%s",
                         len(block_ids),
                         num_block,
+                        overlap,
                         request_id,
                     )
 
@@ -183,12 +202,23 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 if len(block_ids) == num_block:
                     layer[:, block_ids, ...] = kv_cache
                 else:
-                    layer[:, block_ids[:num_block], ...] = kv_cache
+                    overlap = min(len(block_ids), num_block)
+                    if overlap == 0:
+                        logger.warning(
+                            "🚧kv_cache does not match (no overlap), block_ids:%d, "
+                            "num_block:%d, request_id:%s",
+                            len(block_ids),
+                            num_block,
+                            request_id,
+                        )
+                        return
+                    layer[:, block_ids[:overlap], ...] = kv_cache[:, :overlap, ...]
                     logger.warning(
                         "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s",
+                        "num_block:%d, overlap:%d, request_id:%s",
                         len(block_ids),
                         num_block,
+                        overlap,
                         request_id,
                     )
 
@@ -199,34 +229,90 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if metadata is None:
             return
 
-        # Load the KV for each request each layer
+        # Load the KV for each request each layer (non-blocking).
         for request in metadata.requests:
             request_id = request.request_id
+            block_ids_key = tuple(int(b) for b in request.block_ids.tolist())
+            if self._loaded_req_block_ids.get(request_id) == block_ids_key:
+                continue
+
             ip, port = self.parse_request_id(request_id, False)
             remote_address = ip + ":" + str(port + self._rank)
-            for layer_name in forward_context.no_compile_layers:
-                layer = forward_context.no_compile_layers[layer_name]
 
-                # Only process layers that have kv_cache
-                # attribute (attention layers) Skip non-attention
-                # layers like FusedMoE
-                kv_cache = getattr(layer, "kv_cache", None)
+            # Collect attention-layer KV buffers to inject into.
+            layers_to_load: list[tuple[str, torch.Tensor]] = []
+            for layer_name, layer_mod in forward_context.no_compile_layers.items():
+                kv_cache = getattr(layer_mod, "kv_cache", None)
                 if kv_cache is None:
                     continue
-
-                layer = kv_cache[forward_context.virtual_engine]
-
-                kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name, remote_address
+                layers_to_load.append(
+                    (layer_name, kv_cache[forward_context.virtual_engine])
                 )
 
-                if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s", request.request_id)
+            ok = True
+            tensor_ids = [
+                f"{request_id}#{layer_name}" for layer_name, _ in layers_to_load
+            ]
+
+            if self.p2p_nccl_engine.send_type == "GET":
+                # Sync pull-based loading: fetch tensors from the remote producer
+                # as needed.
+                for layer_name, layer in layers_to_load:
+                    kv_cache = self.p2p_nccl_engine.recv_tensor(
+                        f"{request_id}#{layer_name}",
+                        remote_address,
+                    )
+                    if kv_cache is None:
+                        logger.warning(
+                            "🚧kv_cache is None (GET load failure), "
+                            "request_id=%s layer=%s",
+                            request_id,
+                            layer_name,
+                        )
+                        ok = False
+                        break
+                    inject_kv_into_layer(layer, kv_cache, request.block_ids, request_id)
+            else:
+                # Async push-based loading: only inject when all layers have
+                # arrived to avoid blocking worker threads.
+                if tensor_ids and not self.p2p_nccl_engine.has_all_recv_tensors(
+                    tensor_ids
+                ):
+                    # Not ready yet (prefill may not have sent KV caches).
                     continue
 
-                inject_kv_into_layer(
-                    layer, kv_cache, request.block_ids, request.request_id
+                for layer_name, layer in layers_to_load:
+                    kv_cache = self.p2p_nccl_engine.get_recv_tensor(
+                        f"{request_id}#{layer_name}"
+                    )
+                    if kv_cache is None:
+                        logger.warning(
+                            "🚧kv_cache is None (load failure), request_id=%s layer=%s",
+                            request_id,
+                            layer_name,
+                        )
+                        ok = False
+                        break
+
+                    inject_kv_into_layer(layer, kv_cache, request.block_ids, request_id)
+
+            if not ok:
+                # Best-effort failure reporting: mark all blocks invalid so the
+                # scheduler can recompute them (kv_load_failure_policy=recompute).
+                self._invalid_block_ids.update(
+                    int(b) for b in request.block_ids.tolist()
                 )
+                # For push-based async loads, mark the request as finished_recving
+                # so the scheduler can handle invalid blocks. For GET (sync),
+                # we do not use the finished_recving path.
+                if self.p2p_nccl_engine.send_type != "GET":
+                    self._finished_recving_req_ids.add(request_id)
+                self._loaded_req_block_ids[request_id] = block_ids_key
+                continue
+
+            if self.p2p_nccl_engine.send_type != "GET":
+                self._finished_recving_req_ids.add(request_id)
+            self._loaded_req_block_ids[request_id] = block_ids_key
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -328,7 +414,20 @@ class P2pNcclConnector(KVConnectorBase_V1):
         assert self.p2p_nccl_engine is not None
 
         no_compile_layers = self._vllm_config.compilation_config.static_forward_context
-        return self.p2p_nccl_engine.get_finished(finished_req_ids, no_compile_layers)
+        finished_sending, _ = self.p2p_nccl_engine.get_finished(
+            finished_req_ids, no_compile_layers
+        )
+
+        # Clear worker-side loaded bookkeeping for finished requests.
+        for req_id in finished_req_ids:
+            self._loaded_req_block_ids.pop(req_id, None)
+
+        finished_recving: set[str] | None = None
+        if not self.is_producer and self._finished_recving_req_ids:
+            finished_recving = set(self._finished_recving_req_ids)
+            self._finished_recving_req_ids.clear()
+
+        return finished_sending, finished_recving
 
     # ==============================
     # Scheduler-side methods
@@ -361,7 +460,26 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if num_external_tokens < 0:
             num_external_tokens = 0
 
-        return num_external_tokens, False
+        send_type = self._kv_transfer_config.get_from_extra_config(
+            "send_type", "PUT_ASYNC"
+        )
+
+        # GET mode is pull-based (no recv_store), so our async readiness-based
+        # flow (WAITING_FOR_REMOTE_KVS + kv_connector_no_forward) is not
+        # supported. Fall back to sync loading for correctness.
+        if send_type == "GET":
+            return num_external_tokens, False
+
+        # PUT/PUT_ASYNC: async remote KV load. Let the scheduler park the request
+        # in WAITING_FOR_REMOTE_KVS and drive KV loading via kv_connector_no_forward.
+        return num_external_tokens, num_external_tokens > 0
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        # Scheduler-side: drop requests whose async KV load has finished.
+        if self.is_producer:
+            return
+        for req_id in connector_output.finished_recving or ():
+            self._requests_need_load.pop(req_id, None)
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -389,6 +507,26 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
 
         meta = P2pNcclConnectorMetadata()
+
+        if not self.is_producer:
+            send_type = self._kv_transfer_config.get_from_extra_config(
+                "send_type", "PUT_ASYNC"
+            )
+            if send_type != "GET":
+                # Consumer: drive async KV loads even when the request isn't
+                # scheduled for compute (WAITING_FOR_REMOTE_KVS).
+                #
+                # NOTE: Do NOT pop `_requests_need_load` here. The scheduler-side
+                # connector can only safely drop entries after the worker reports
+                # `finished_recving` (via update_connector_output()).
+                for req_id, (req, block_ids) in self._requests_need_load.items():
+                    meta.add_request(
+                        request_id=req_id,
+                        token_ids=req.prompt_token_ids or [],
+                        block_ids=block_ids,
+                        block_size=self._block_size,
+                    )
+                return meta
 
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:
@@ -474,6 +612,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self._requests_need_load.clear()
         return meta
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.is_producer or not self._invalid_block_ids:
+            return set()
+        invalid = set(self._invalid_block_ids)
+        self._invalid_block_ids.clear()
+        return invalid
 
     def request_finished(
         self,

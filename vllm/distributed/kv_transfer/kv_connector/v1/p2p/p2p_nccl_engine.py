@@ -367,6 +367,61 @@ class P2pNcclEngine:
 
         return tensor
 
+    def has_all_recv_tensors(self, tensor_ids: list[str]) -> bool:
+        """Return True if all tensor_ids exist in the recv_store.
+
+        This is a non-blocking readiness check used by async KV-loading logic.
+        """
+        with self.recv_store_cv:
+            return all(tensor_id in self.recv_store for tensor_id in tensor_ids)
+
+    def get_recv_tensor(self, tensor_id: str) -> torch.Tensor | None:
+        """Get a received tensor from recv_store without removing it.
+
+        This is intended for PUT/PUT_ASYNC flows where received KVs may need
+        to be reloaded again (e.g., after request preemption). Cleanup is
+        performed by get_finished() when the request truly completes.
+        """
+        with self.recv_store_cv:
+            if tensor_id not in self.recv_store:
+                return None
+            tensor = self.recv_store[tensor_id]
+
+        if tensor is None:
+            return None
+
+        if isinstance(tensor, tuple):
+            addr, dtype, shape = tensor
+            return self.pool.load_tensor(addr, dtype, shape, self.device)
+
+        return tensor
+
+    def pop_recv_tensor(self, tensor_id: str) -> torch.Tensor | None:
+        """Pop a received tensor from the recv_store if present.
+
+        This is intended for PUT/PUT_ASYNC flows. The caller should typically
+        ensure the tensor_id exists (e.g. via has_all_recv_tensors) to avoid
+        conflating 'not received yet' with 'received but failed (None)'.
+        """
+        with self.recv_store_cv:
+            if tensor_id not in self.recv_store:
+                return None
+            tensor = self.recv_store.pop(tensor_id)
+
+        if tensor is None:
+            return None
+
+        if isinstance(tensor, tuple):
+            addr, dtype, shape = tensor
+            loaded = self.pool.load_tensor(addr, dtype, shape, self.device)
+            # Free the pinned-memory block now that we've materialized the tensor.
+            self.pool.free(addr)
+            return loaded
+
+        # Normal CUDA tensor: track buffered bytes.
+        self.buffer_size -= tensor.element_size() * tensor.numel()
+        return tensor
+
     def listen_for_requests(self):
         while True:
             socks = dict(self.poller.poll())
@@ -551,18 +606,35 @@ class P2pNcclEngine:
             call to this method (this call or a prior one).
         """
 
-        # Clear the buffer upon request completion.
+        # Clear buffered tensors and per-request bookkeeping upon request completion.
+        #
+        # NOTE: tensors may have already been popped during async KV load, so we
+        # must not rely on probing recv_store to decide whether to clear the
+        # per-request bookkeeping.
         for request_id in finished_req_ids:
-            for layer_name in no_compile_layers:
-                tensor_id = request_id + "#" + layer_name
-                if tensor_id in self.recv_store:
-                    with self.recv_store_cv:
-                        tensor = self.recv_store.pop(tensor_id, None)
-                        self.send_request_id_to_tensor_ids.pop(request_id, None)
-                        self.recv_request_id_to_tensor_ids.pop(request_id, None)
+            # PUT/PUT_ASYNC: only clear bookkeeping.
+            #
+            # NOTE: For GET mode, send_store acts like a pull cache that may
+            # be needed after the producer request finishes (e.g., synchronous
+            # proxy that starts decode after prefill completes). We intentionally
+            # do NOT clear send_store here.
+            if self.send_type != "GET":
+                self.send_request_id_to_tensor_ids.pop(request_id, None)
+
+            # Clean recv_store (PUT/PUT_ASYNC push receive buffer).
+            with self.recv_store_cv:
+                recv_tensor_ids = self.recv_request_id_to_tensor_ids.pop(
+                    request_id, set()
+                )
+                for tensor_id in recv_tensor_ids:
+                    tensor = self.recv_store.pop(tensor_id, None)
+                    if tensor is None:
+                        continue
                     if isinstance(tensor, tuple):
                         addr, _, _ = tensor
                         self.pool.free(addr)
+                    else:
+                        self.buffer_size -= tensor.element_size() * tensor.numel()
 
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
