@@ -28,8 +28,9 @@ class BlockStored(KVCacheEvent):
     parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
-    lora_name: str | None
+    lora_id: int | None
     medium: str | None
+    lora_name: str | None
 
 
 class BlockRemoved(KVCacheEvent):

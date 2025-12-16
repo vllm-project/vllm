@@ -284,10 +284,13 @@ class BlockPool:
                         num_cached_blocks * block_size : num_full_blocks * block_size
                     ],
                     block_size=block_size,
-                    lora_name=request.lora_request.name
+                    lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,
                     medium=MEDIUM_GPU,
+                    lora_name=request.lora_request.name
+                    if request.lora_request
+                    else None,
                 )
             )
 
