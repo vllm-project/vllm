@@ -78,7 +78,7 @@ class QuarkW8A8Fp8(QuarkScheme):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         fp8_type = torch.float8_e4m3fn
         max_fp8_value = torch.finfo(fp8_type).max
-        max_value = weight.max(dim=1).values
+        max_value = weight.abs().max(dim=1).values
         scale = (max_value / max_fp8_value).float()
         weight = weight / scale.unsqueeze(-1)
         weight = torch.clamp(weight, min=-max_fp8_value, max=max_fp8_value).to(fp8_type)
