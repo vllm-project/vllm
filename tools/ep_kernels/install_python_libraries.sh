@@ -56,6 +56,10 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --nvshmem-ver requires an argument." >&2
                 exit 1
             fi
+            if [[ "$2" =~ / ]]; then
+                echo "Error: NVSHMEM version should not contain slashes." >&2
+                exit 1
+            fi
             NVSHMEM_VER="$2"
             shift 2
             ;;
@@ -65,6 +69,13 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate NVSHMEM_VER to prevent path traversal attacks
+# Only allow alphanumeric characters, dots, and hyphens (typical version string chars)
+if [[ ! "$NVSHMEM_VER" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+    echo "Error: NVSHMEM_VER contains invalid characters. Only alphanumeric, dots, and hyphens are allowed." >&2
+    exit 1
+fi
 
 mkdir -p "$WORKSPACE"
 
