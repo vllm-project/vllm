@@ -146,7 +146,7 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor]:
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(
@@ -199,7 +199,8 @@ class SinusoidsPositionEmbedding(nn.Module):
 
 def _get_feat_extract_output_lengths(input_lengths):
     """
-    Computes the output length of the convolutional layers and the output length of the audio encoder
+    Computes the output length of the convolutional layers and the output length
+    of the audio encoder
     """
 
     input_lengths_leave = input_lengths % 100
@@ -288,10 +289,10 @@ class Qwen3OmniMoeAudioEncoder(PreTrainedModel):
         self._requires_grad = False
 
     def get_input_embeddings(self) -> nn.Module:
-        return self.conv1
+        return self.conv2d1
 
     def set_input_embeddings(self, value: nn.Module):
-        self.conv1 = value
+        self.conv2d1 = value
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -408,7 +409,7 @@ class Qwen3OmniMoeAudioEncoder(PreTrainedModel):
     def compute_attn_mask_seqlen(
         self,
         cu_seqlens: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
