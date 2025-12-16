@@ -57,20 +57,6 @@ check_cpus() {
   echo "GPU type is $gpu_type"
 }
 
-check_arm64_cpus() {
-  # check the number of CPUs and GPU type.
-  declare -g cpu_count=$(nproc)
-  if [[ $cpu_count -gt 0 ]]; then
-    echo "CPU found."
-    echo $cpu_count
-  else
-    echo "Need at least 1 CPU to run benchmarking."
-    exit 1
-  fi
-  declare -g gpu_type="arm64-cpu"
-  echo "GPU type is $gpu_type"
-}
-
 check_hf_token() {
   # check if HF_TOKEN is available and valid
   if [[ -z "$HF_TOKEN" ]]; then
