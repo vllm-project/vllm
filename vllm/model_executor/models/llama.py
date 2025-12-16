@@ -57,7 +57,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import (
+    SupportsCrossEncoding,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
+from .interfaces_base import default_pooling_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -698,3 +705,10 @@ class LlamaForCausalLM(
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+
+@default_pooling_type("CLS")
+class LlamaBidirectionalForSequenceClassification(
+    LlamaForCausalLM, SupportsCrossEncoding
+):
+    pass

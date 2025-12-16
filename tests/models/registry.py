@@ -544,6 +544,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
+    "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
+        "nvidia/llama-nemotron-rerank-1b-v2"
+    ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
     ),

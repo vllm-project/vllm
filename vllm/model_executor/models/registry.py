@@ -244,6 +244,11 @@ _CROSS_ENCODER_MODELS = {
         "bert_with_rope",
         "GteNewForSequenceClassification",
     ),
+    "LlamaBidirectionalForSequenceClassification": (
+        "llama",
+        "LlamaBidirectionalForSequenceClassification",
+    ),
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),
     "ModernBertForSequenceClassification": (
         "modernbert",
         "ModernBertForSequenceClassification",
@@ -257,8 +262,6 @@ _CROSS_ENCODER_MODELS = {
         "roberta",
         "RobertaForSequenceClassification",
     ),
-    # [Auto-converted (see adapters.py)]
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"),  # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
