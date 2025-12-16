@@ -2236,6 +2236,13 @@ class GPUModelRunner(
                     num_encoder_tokens,
                 )
                 assert start_idx < end_idx
+                curr_embeds_start, curr_embeds_end = (
+                    pos_info.get_embeds_indices_in_range(start_idx, end_idx)
+                )
+                # If there are no embeddings in the current range, we skip
+                # gathering the embeddings.
+                if curr_embeds_start == curr_embeds_end:
+                    continue
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
@@ -2243,13 +2250,6 @@ class GPUModelRunner(
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
-                    curr_embeds_start, curr_embeds_end = (
-                        pos_info.get_embeds_indices_in_range(start_idx, end_idx)
-                    )
-
-                    # If there are no embeddings in the current range, the request
-                    # should have never been scheduled.
-                    assert curr_embeds_start < curr_embeds_end
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
