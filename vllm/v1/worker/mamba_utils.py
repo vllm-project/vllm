@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 import itertools
 from typing import Any, Callable
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm.config import CacheConfig
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -11,6 +14,43 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 
+
+@triton.jit
+def batch_memcpy_kernel(
+    src_ptrs,
+    dst_ptrs,
+    sizes,
+    BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(0)
+
+    src_ptr = tl.load(src_ptrs + pid)
+    dst_ptr = tl.load(dst_ptrs + pid)
+    size = tl.load(sizes + pid)
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    for i in range(0, size, BLOCK_SIZE):
+        mask = (i + offsets) < size
+
+        curr_src_ptr = (src_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+        curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
+
+        data = tl.load(curr_src_ptr, mask=mask)
+        tl.store(curr_dst_ptr, data, mask=mask)
+
+def batch_memcpy(src_ptrs, dst_ptrs, sizes):
+    batch = src_ptrs.shape[0]
+    assert dst_ptrs.shape[0] == batch
+    assert sizes.shape[0] == batch
+
+    grid = (batch,)
+    BLOCK_SIZE = 1024
+    batch_memcpy_kernel[grid](
+        src_ptrs,
+        dst_ptrs,
+        sizes,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
     mamba_group_ids: list[int] = []
@@ -56,7 +96,6 @@ def mamba_copy_block_for_qwen_next(
             dest_gdn_state = gdn_state[dest_block_id]
             dest_gdn_state.copy_(src_gdn_state)
 
-from dataclasses import dataclass
 
 @dataclass
 class CopySpec:
@@ -134,7 +173,6 @@ def mamba_copy_block_for_qwen_next_v1(
             # dest_gdn_state.copy_(src_gdn_state)
             assert torch.equal(dest_gdn_state_ref, src_gdn_state_ref)
 
-
 def mamba_copy_block_for_qwen_next_v2(
     kv_cache_config: KVCacheConfig,
     mamba_group_ids: list[int],
@@ -167,6 +205,47 @@ def mamba_copy_block_for_qwen_next_v2(
         dest_state_data = dest_state.view(-1)[:num_elements]
         dest_state_data.copy_(src_state_data)
             
+def mamba_copy_block_for_qwen_next_v3(
+    kv_cache_config: KVCacheConfig,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state: CachedRequestState,
+    forward_context: dict[str, Any],
+):
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+    # print('>>> [BEBUG] mamba_copy_block_for_qwen_next_v3', flush=True)
+    
+    src_state_list = []
+    dest_state_list = []
+    # data_offset_list = []
+    num_elements_list = []
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        for layer_name in layer_names:
+            attention = forward_context[layer_name]
+            kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
+            copy_specs = [conv_copy, full_copy]
+            for state, copy_spec in zip(kv_caches, copy_specs):
+                src_block_id = block_ids[src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)]
+                data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
+                num_elements = copy_spec.num_elements_func(state[0], accept_token_bias)
+                src_state_list.append(state[src_block_id].data_ptr() + data_offset * state.element_size())
+                dest_state_list.append(state[dest_block_id].data_ptr())
+                # data_offset_list.append(data_offset)
+                num_elements_list.append(num_elements * state.element_size())
+
+    src_state_ptrs = torch.tensor(src_state_list, device='cuda', dtype=torch.int64)
+    dst_state_ptrs = torch.tensor(dest_state_list, device='cuda', dtype=torch.int64)
+    # data_offsets = torch.tensor(data_offset_list, device='cuda', dtype=torch.int32)
+    num_elements = torch.tensor(num_elements_list, device='cuda', dtype=torch.int32)
+
+    batch_memcpy(src_state_ptrs, dst_state_ptrs, num_elements)
+
 
 def preprocess_mamba(
     scheduler_output: SchedulerOutput,
@@ -213,7 +292,7 @@ def preprocess_mamba(
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            mamba_copy_block_for_qwen_next_v2(
+            mamba_copy_block_for_qwen_next_v3(
                 kv_cache_config,
                 mamba_group_ids,
                 prev_state_idx,
@@ -261,7 +340,7 @@ def postprocess_mamba(
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
-            mamba_copy_block_for_qwen_next_v2(
+            mamba_copy_block_for_qwen_next_v3(
                 kv_cache_config,
                 mamba_group_ids,
                 src_block_idx,
