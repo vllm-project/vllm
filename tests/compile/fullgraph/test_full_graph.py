@@ -161,7 +161,6 @@ def test_full_graph(
 # only test some of the models
 @create_new_process_for_each_test()
 def test_custom_compile_config(
-    monkeypatch: pytest.MonkeyPatch,
     compilation_config: CompilationConfig,
     model: str,
     model_kwargs: dict[str, Any],
@@ -178,11 +177,6 @@ def test_custom_compile_config(
         "2.9.0.dev"
     ):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
-    if compilation_config.debug_dump_path is not None:
-        # (fixme: @zhxchen17) aot compile breaks depyf assumption on graph module.
-        # Temporarily disable aot_compile to unblock pytorch 2.10.
-        monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "0")
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
