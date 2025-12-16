@@ -503,8 +503,7 @@ main() {
   if [ "$ON_CPU" == "1" ];then
      check_cpus
      ARCH='-cpu'
-  else
-    if [ "$ON_ARM64_CPU" == "1" ];then
+  elif [ "$ON_ARM64_CPU" == "1" ];then
      check_cpus
      ARCH='-arm64-cpu'
   else
