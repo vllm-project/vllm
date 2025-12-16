@@ -73,6 +73,14 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    @model_validator(mode="after")
+    def _validate_eplb_config(self) -> Self:
+        if self.use_async and self.policy != "default":
+            raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.log_balancedness and self.log_balancedness_interval <= 0:
+            raise ValueError("log_balancedness_interval must be greater than 0.")
+        return self
+
 
 @config
 @dataclass
