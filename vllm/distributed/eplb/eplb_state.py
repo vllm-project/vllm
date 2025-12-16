@@ -45,7 +45,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
-from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
+from .policy import AbstractEplbPolicy, EplbPolicyFactory
 from .rebalance_execute import move_from_buffer, rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
@@ -213,7 +213,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.policy: type[AbstractEplbPolicy] = DefaultEplbPolicy
+        self.policy: AbstractEplbPolicy = EplbPolicyFactory.create_policy()
         """
         Selected EPLB algorithm class
         """
@@ -422,7 +422,7 @@ class EplbState:
 
         # Set the policy based on the selected eplb algorithm type.
         policy_type = self.parallel_config.eplb_config.policy
-        self.policy = EPLB_POLICIES[policy_type]
+        self.policy = EplbPolicyFactory.create_policy(policy_type)
         logger.debug("Selected EPLB policy: %d", policy_type)
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
