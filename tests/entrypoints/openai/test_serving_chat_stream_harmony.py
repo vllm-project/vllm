@@ -168,10 +168,31 @@ class TestExtractHarmonyStreamingDelta:
     @pytest.mark.parametrize(
         "channel,recipient",
         [
-            (None, None),
-            ("unknown_channel", None),
             ("commentary", None),
             ("commentary", "browser.search"),
+        ],
+    )
+    def test_returns_tool_call_preambles(self, channel, recipient):
+        """Test that invalid channel/recipient combinations return None."""
+        parser = MockStreamableParser()
+        delta_text = "some text"
+        delta_message, tools_streamed = extract_harmony_streaming_delta(
+            harmony_parser=parser,
+            cur_channel=channel,
+            cur_recipient=recipient,
+            prev_recipient=None,
+            delta_text=delta_text,
+            include_reasoning=True,
+        )
+
+        assert delta_message.content == delta_text
+        assert tools_streamed is False
+
+    @pytest.mark.parametrize(
+        "channel,recipient",
+        [
+            (None, None),
+            ("unknown_channel", None),
         ],
     )
     def test_returns_none_for_invalid_inputs(self, channel, recipient):
