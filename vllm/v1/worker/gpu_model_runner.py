@@ -4741,6 +4741,7 @@ class GPUModelRunner(
                 # - If we measure after warmups, cache release masks the allocation
                 # By measuring before warmups, we capture the true first-capture cost.
                 torch.cuda.synchronize()
+                torch.cuda.empty_cache()
                 before_first_capture = torch.cuda.mem_get_info()[0]
                 self._dummy_run(
                     full_largest,
@@ -4875,6 +4876,7 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None

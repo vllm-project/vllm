@@ -351,7 +351,7 @@ class Worker(WorkerBase):
         self.peak_activation_memory = (
             profile_result.torch_peak_increase + first_capture_memory
         )
-        self.cudagraph_memory_estimate = graph_memory
+        self.cudagraph_memory_estimate = first_capture_memory + graph_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -476,9 +476,6 @@ class Worker(WorkerBase):
             )
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
-        # Note: This is graph pool memory only. Workspace/activation memory is
-        # measured separately in peak_activation_memory and is also unavailable
-        # for KV cache, but is not included in these numbers.
         if (
             hasattr(self, "cudagraph_memory_estimate")
             and self.cudagraph_memory_estimate > 0
@@ -487,13 +484,11 @@ class Worker(WorkerBase):
             diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
             logger.info(
                 "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
-                "difference: %s GiB (%.1f%%). "
-                "Note: workspace/activation memory (%.2f GiB) is tracked separately.",
+                "difference: %s GiB (%.1f%%).",
                 GiB(cuda_graph_memory_bytes),
                 GiB(self.cudagraph_memory_estimate),
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
-                GiB(self.peak_activation_memory),
             )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
