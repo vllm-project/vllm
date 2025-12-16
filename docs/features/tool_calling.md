@@ -142,7 +142,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
-* Additional mistral function-calling models are compatible as well.
+* Additional Mistral function-calling models are compatible as well.
 
 Known issues:
 
@@ -158,12 +158,25 @@ Known issues:
 
 Recommended flags:
 
-1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+1. To use the official Mistral AI's format:
 
-    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+    `--tool-call-parser mistral`
 
-2. To use the default Transformers tokenization backend:
-    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+2. To use the Transformers format when available:
+
+    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+!!! note
+    Models officially released by Mistral AI have two possible formats:
+
+    1. The official format that is used by default with `auto` or `mistral` arguments:
+
+        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
+
+    2. The Transformers format, when available, that is used with `hf` arguments:
+
+        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -358,9 +371,23 @@ Olmo 3 models output tool calls in a format that is very similar to the one expe
 
 Supported models:
 
-* TODO (will be updated after Olmo 3 release)
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
 
 Flags: `--tool-call-parser olmo3`
+
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -393,7 +420,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py](../../vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py).
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -408,7 +435,7 @@ Here is a summary of a plugin file:
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens
@@ -441,7 +468,7 @@ Here is a summary of a plugin file:
     # register the tool parser to ToolParserManager
     ToolParserManager.register_lazy_module(
         name="example",
-        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        module_path="vllm.tool_parsers.example",
         class_name="ExampleToolParser",
     )
 

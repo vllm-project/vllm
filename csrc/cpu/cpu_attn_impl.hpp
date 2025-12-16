@@ -1,7 +1,6 @@
 #ifndef CPU_ATTN_HPP
 #define CPU_ATTN_HPP
 
-#include <unistd.h>
 #include <type_traits>
 #include <cstddef>
 
@@ -12,9 +11,10 @@
 #include "cpu_types.hpp"
 #include "scratchpad_manager.h"
 #include "cpu_attn_macros.h"
+#include "utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16 };
+enum class ISA { AMX, VEC, VEC16, NEON };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -143,6 +143,12 @@ struct AttentionMetadata {
       case ISA::VEC:
         ss << "VEC, ";
         break;
+      case ISA::VEC16:
+        ss << "VEC16, ";
+        break;
+      case ISA::NEON:
+        ss << "NEON, ";
+        break;
     }
     ss << "workitem_group_num: " << workitem_group_num
        << ", reduction_item_num: " << reduction_item_num
@@ -180,7 +186,7 @@ struct AttentionMetadata {
 //  - Intermediate outputs: q_tile_size * head_dim * output_buffer_elem_size + 2
 //  * q_tile_size * 4, partial output, max + sum (float)
 // Reduction scratchpad contains:
-//  - flags: bool array to indicate wether the split is finished
+//  - flags: bool array to indicate whether the split is finished
 //  - outputs: split_num * q_tile_size * head_dim * output_buffer_elem_size
 //  - max, sum: 2 * split_num * q_tile_size * 4
 class AttentionScratchPad {
@@ -754,7 +760,7 @@ class AttentionScheduler {
         return l2_cache_size >> 1;  // use 50% of L2 cache
       }
       // Fallback if sysctlbyname fails
-      return 128 * 1024 >> 1;  // use 50% of 128KB
+      return 128LL * 1024 >> 1;  // use 50% of 128KB
 #else
       long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
       TORCH_CHECK_NE(l2_cache_size, -1);
@@ -841,7 +847,7 @@ struct VecTypeTrait<c10::BFloat16> {
 };
 #endif
 
-#if !defined(__powerpc__)
+#if !defined(__powerpc__) && !defined(__s390x__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
@@ -1240,14 +1246,8 @@ class AttentionMainLoop {
         // rescale sum and partial outputs
         if (need_rescale) {
           // compute rescale factor
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           // rescale sum
           new_sum_val += rescale_factor * init_sum_val;
@@ -1883,15 +1883,8 @@ class AttentionMainLoop {
                                    : curr_output_buffer;
           float rescale_factor = final_max > curr_max ? curr_max - final_max
                                                       : final_max - curr_max;
-
-#ifdef DEFINE_FAST_EXP
-          vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-          rescale_factor_vec = fast_exp(rescale_factor_vec);
-          rescale_factor = rescale_factor_vec.get_last_elem();
-#else
           rescale_factor = std::exp(rescale_factor);
           vec_op::FP32Vec16 rescale_factor_vec(rescale_factor);
-#endif
 
           local_sum[head_idx] = final_max > curr_max
                                     ? final_sum + rescale_factor * curr_sum

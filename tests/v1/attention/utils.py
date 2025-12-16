@@ -106,8 +106,8 @@ def create_common_attn_metadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,
@@ -185,6 +185,8 @@ def create_vllm_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
 
     device_config = DeviceConfig()
@@ -338,6 +340,13 @@ full_cg_backend_configs = {
         env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+    ),
+    "RocmAttn": BackendConfig(
+        name="RocmAttn",
+        env_vars={"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
+        comp_config={
+            "cudagraph_mode": "FULL",
         },
     ),
 }

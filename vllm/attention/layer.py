@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
 
-from collections.abc import Callable
+import functools
 from typing import cast
 
 import torch
@@ -10,10 +10,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionType,
+    MLAAttentionImpl,
+)
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.layers.mm_encoder_attention import maybe_get_vit_flash_attn_backend
 from vllm.attention.selector import get_attn_backend
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -22,6 +27,7 @@ from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     UnquantizedLinearMethod,
@@ -43,106 +49,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
-else:
-    on_gfx9 = lambda *args, **kwargs: False
-
-
-FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
-USE_XFORMERS_OPS = None
-
-
-def check_xformers_availability():
-    global USE_XFORMERS_OPS
-    if USE_XFORMERS_OPS is not None:
-        return USE_XFORMERS_OPS
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        try:
-            from importlib.util import find_spec
-
-            find_spec("xformers.ops")
-            USE_XFORMERS_OPS = True
-        except ImportError:
-            USE_XFORMERS_OPS = False
-
-    # the warning only needs to be shown once
-    if not USE_XFORMERS_OPS:
-        logger.warning("Xformers is not available, falling back.")
-
-    return USE_XFORMERS_OPS
-
-
-def check_upstream_fa_availability(dtype: torch.dtype):
-    if (
-        dtype in (torch.float16, torch.bfloat16)
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(80)
-    ):
-        from transformers.utils import is_flash_attn_2_available
-
-        return is_flash_attn_2_available()
-    if current_platform.is_rocm():
-        from importlib.util import find_spec
-
-        return find_spec("flash_attn") is not None
-    return False
-
-
-def maybe_get_vit_flash_attn_backend(
-    attn_backend: AttentionBackendEnum,
-    use_upstream_fa: bool,
-    attn_backend_override: AttentionBackendEnum | None = None,
-) -> tuple[AttentionBackendEnum, Callable | None]:
-    if current_platform.is_rocm():
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = AttentionBackendEnum.ROCM_AITER_FA
-
-        elif (
-            check_upstream_fa_availability(torch.get_default_dtype())
-            and on_gfx9()
-            and attn_backend_override is None
-        ):
-            attn_backend = AttentionBackendEnum.FLASH_ATTN
-            use_upstream_fa = True
-        else:
-            return AttentionBackendEnum.TORCH_SDPA, None
-
-    elif current_platform.is_cuda():
-        if (
-            attn_backend != AttentionBackendEnum.FLASH_ATTN
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            attn_backend = AttentionBackendEnum.FLASH_ATTN
-            use_upstream_fa = True
-    elif current_platform.is_xpu():
-        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
-            "XPU platform only supports FLASH_ATTN as vision attention backend."
-        )
-        use_upstream_fa = False
-    else:
-        return AttentionBackendEnum.TORCH_SDPA, None
-
-    if attn_backend in {
-        AttentionBackendEnum.FLASH_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    }:
-        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-        else:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-    else:
-        flash_attn_varlen_func = None
-
-    return attn_backend, flash_attn_varlen_func
 
 
 def _init_kv_cache_quant(
@@ -280,6 +187,10 @@ class Attention(nn.Module, AttentionLayerBase):
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
+        # NOTE: model_config may be None during certain tests
+        model_config = vllm_config.model_config
+        self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
@@ -291,10 +202,29 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
+                use_mm_prefix=self.use_mm_prefix,
                 attn_type=attn_type,
             )
         else:
             self.attn_backend = attn_backend
+
+        # prefix caching + batch invariance is currently not supported for
+        # FLASHINFER and TRITON_MLA.
+        if (
+            cache_config is not None
+            and cache_config.enable_prefix_caching
+            and vllm_is_batch_invariant()
+            and (
+                self.attn_backend.get_name() == "FLASHINFER"
+                or self.attn_backend.get_name() == "TRITON_MLA"
+            )
+        ):
+            logger.warning_once(
+                "Disabling prefix caching for FLASHINFER/TRITON_MLA "
+                "with batch invariance, as it is not yet supported.",
+                scope="local",
+            )
+            cache_config.enable_prefix_caching = False
 
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(
@@ -310,7 +240,8 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
+        backend_name = self.attn_backend.get_name()
+        self.backend = AttentionBackendEnum.__members__.get(backend_name)
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -352,7 +283,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.kv_cache_dtype.startswith("fp8")
-            and self.impl.supports_quant_query_input()
+            and self.impl.supports_quant_query_input
         ):
             self.query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
@@ -387,7 +318,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input():
+            if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
         if self.use_output:
@@ -516,60 +447,35 @@ class MultiHeadAttention(nn.Module):
         attn_backend_override = None
         if multimodal_config is not None:
             attn_backend_override = multimodal_config.mm_encoder_attn_backend
-        backend = get_vit_attn_backend(
+
+        self.attn_backend = get_vit_attn_backend(
             head_size=head_size,
             dtype=dtype,
             attn_backend_override=attn_backend_override,
         )
 
-        # Some auto-selected backends can be upgraded
-        # to upstream flash attention if available.
-        # If vllm native fa is selected, we use it directly.
-        use_upstream_fa = False
-
-        self.attn_backend = (
-            backend
-            if backend
-            in {
-                AttentionBackendEnum.TORCH_SDPA,
-                AttentionBackendEnum.XFORMERS,
-                AttentionBackendEnum.PALLAS,
-                AttentionBackendEnum.ROCM_AITER_FA,
-                AttentionBackendEnum.FLASH_ATTN,
-            }
-            else AttentionBackendEnum.TORCH_SDPA
+        self._flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
-
-        self.attn_backend, self._flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                use_upstream_fa,
-                attn_backend_override=attn_backend_override,
-            )
-        )
-
-        if (
-            self.attn_backend == AttentionBackendEnum.XFORMERS
-            and not check_xformers_availability()
-        ):
-            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        # this condition is just to make sure that the
-        # use_upstream_fa in the log is correct
+        self.fa_version = None
         if (
-            current_platform.is_rocm()
-            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            and current_platform.is_cuda()
         ):
-            use_upstream_fa = True
+            self.fa_version = get_flash_attn_version()
+            assert self._flash_attn_varlen_func is not None
+            self._flash_attn_varlen_func = functools.partial(
+                self._flash_attn_varlen_func, fa_version=self.fa_version
+            )
 
         logger.info_once(
-            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
-            f"use_upstream_fa: {use_upstream_fa}"
+            f"Using {self.attn_backend} for MultiHeadAttention in multimodal encoder."
         )
 
     def forward(
@@ -612,12 +518,6 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
-            )
-        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(
-                query, key, value, scale=self.scale
             )
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
@@ -700,6 +600,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             use_mla=True,
             use_sparse=use_sparse,
         )
+
+        if (
+            cache_config is not None
+            and cache_config.enable_prefix_caching
+            and vllm_is_batch_invariant()
+            and (
+                self.attn_backend.get_name() == "TRITON_MLA"
+                or self.attn_backend.get_name() == "FLASHINFER"
+            )
+        ):
+            logger.warning_once(
+                "Disabling prefix caching for TRITON_MLA / FLASHINFER "
+                "with batch invariance, as it is not yet supported.",
+                scope="local",
+            )
+            cache_config.enable_prefix_caching = False
+
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             num_heads=self.num_heads,

@@ -21,22 +21,20 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 if TYPE_CHECKING:
     import outlines_core as oc
     import transformers.file_utils as file_utils
-    import transformers.models.gpt2.tokenization_gpt2 as tokenization_gpt2
     import xgrammar as xgr
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
 
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
-    tokenization_gpt2 = LazyLoader(
-        "tokenization_gpt2",
-        globals(),
-        "transformers.models.gpt2.tokenization_gpt2",
+    bytes_to_unicode = LazyLoader(
+        "bytes_to_unicode", globals(), "transformers.convert_slow_tokenizer"
     )
 
-    AnyTokenizer = object
+    TokenizerLike = object
     SchedulerOutput = object
     InputBatch = object
 
@@ -195,7 +193,7 @@ re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
 def _reduced_vocabulary(
-    tokenizer: AnyTokenizer,
+    tokenizer: TokenizerLike,
     eos_token_id: int,
 ) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
@@ -204,7 +202,7 @@ def _reduced_vocabulary(
         A Dict of token string -> equivalent token ids
     """
 
-    unicode_to_bytes = {v: k for k, v in tokenization_gpt2.bytes_to_unicode().items()}
+    unicode_to_bytes = {v: k for k, v in bytes_to_unicode().items()}
 
     def convert_token_to_string(token: str) -> str:
         string = tokenizer.convert_tokens_to_string([token])
@@ -222,7 +220,7 @@ def _reduced_vocabulary(
     vocabulary: dict[bytes, list[int]] = {}
     empty_token_ids: list[int] = []
     for token, token_idx in tokenizer.get_vocab().items():
-        if token in tokenizer.all_special_tokens:  # type: ignore
+        if token in tokenizer.all_special_tokens:
             continue
 
         token_str = convert_token_to_string(token)
@@ -261,7 +259,7 @@ def _reduced_vocabulary(
     return vocabulary
 
 
-def get_outlines_vocabulary(tokenizer: AnyTokenizer) -> oc.Vocabulary:
+def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     """Get the `Vocabulary` object for a given tokenizer."""
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
