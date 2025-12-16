@@ -13,7 +13,7 @@ vLLM uses a “right-shifted” versioning scheme where a new patch release is o
 
 ## Release Cadence
 
-Patch release is released on bi-weekly basis. Post release 1-3 days after patch release and uses same branch as patch release.
+Patch release is released on bi-weekly basis. Post release 1-2 days after patch release and uses same branch as patch release.
 Following is the release cadence for year 2025. All future release dates below are tentative. Please note: Post releases are optional.
 
 | Release Date | Patch release versions | Post Release versions |
