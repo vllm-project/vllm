@@ -476,6 +476,7 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    maximum_concurrent_videos: int | None = MultiModalConfig.max_concurrent_videos
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -983,6 +984,14 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
+        multimodal_group.add_argument(
+            "--maximum-concurrent-videos",
+            type=int,
+            default=None,
+            help="Maximum number of videos that can be preprocessed concurrently. "
+            "This limits VRAM usage from video decoding. The count is spread "
+            "evenly over API server processes.",
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1254,6 +1263,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            maximum_concurrent_videos=self.maximum_concurrent_videos,
             io_processor_plugin=self.io_processor_plugin,
         )
 

@@ -312,6 +312,15 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --exclude-log-deltas requires --enable-log-outputs")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    
+    # Validate maximum_concurrent_videos
+    if hasattr(args, "maximum_concurrent_videos") and args.maximum_concurrent_videos is not None:
+        if hasattr(args, "api_server_count") and args.maximum_concurrent_videos < args.api_server_count:
+            logger.warning(
+                f"--maximum-concurrent-videos ({args.maximum_concurrent_videos}) "
+                f"is less than --api-server-count ({args.api_server_count}). "
+                f"Some API servers will have a limit of 0."
+            )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

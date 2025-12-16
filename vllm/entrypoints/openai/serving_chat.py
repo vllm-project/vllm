@@ -170,6 +170,29 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+        
+        # Initialize MediaConnector for video semaphore management
+        try:
+            from vllm import envs as vllm_envs
+            from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY
+            multimodal_config = self.model_config.multimodal_config
+            media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None) if multimodal_config else None
+            max_concurrent_videos = getattr(multimodal_config, "max_concurrent_videos", None) if multimodal_config else None
+            self._media_connector = MEDIA_CONNECTOR_REGISTRY.load(
+                vllm_envs.VLLM_MEDIA_CONNECTOR,
+                media_io_kwargs=media_io_kwargs,
+                allowed_local_media_path=self.model_config.allowed_local_media_path or "",
+                allowed_media_domains=self.model_config.allowed_media_domains,
+                max_concurrent_videos=max_concurrent_videos,
+            )
+            if max_concurrent_videos:
+                logger.info(
+                    "Chat service initialized with video concurrency limit: %d",
+                    max_concurrent_videos
+                )
+        except Exception as e:
+            logger.warning("Failed to initialize MediaConnector for video semaphore: %s", e)
+            self._media_connector = None
 
     async def warmup(self) -> None:
         """
@@ -243,7 +266,57 @@ class OpenAIServingChat(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
+        
+        # Count videos in the request to acquire appropriate semaphore slots
+        try:
+            from vllm.entrypoints.chat_utils import count_videos_in_messages
+            video_count = count_videos_in_messages(request.messages)
+            if video_count > 0:
+                logger.debug("Request has %d video(s), will acquire semaphore", video_count)
+        except Exception as e:
+            logger.warning("Failed to count videos in request: %s", e)
+            video_count = 0
 
+        # Acquire semaphore for entire request lifecycle (including video loading)
+        if video_count > 0 and hasattr(self, '_media_connector') and self._media_connector:
+            # Check if response will be streaming - need to handle differently
+            if request.stream:
+                # For streaming, wrap the generator to hold semaphore during iteration
+                return self._stream_with_video_semaphore(
+                    request, raw_request, video_count
+                )
+            else:
+                # For non-streaming, acquire semaphore for the entire await
+                async with self._media_connector.acquire_video_semaphore(video_count):
+                    return await self._create_chat_completion_inner(request, raw_request)
+        else:
+            return await self._create_chat_completion_inner(request, raw_request)
+    
+    async def _stream_with_video_semaphore(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None,
+        video_count: int,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Wrapper for streaming responses that holds the video semaphore
+        while the stream is being consumed.
+        """
+        async with self._media_connector.acquire_video_semaphore(video_count):
+            result = await self._create_chat_completion_inner(request, raw_request)
+            # result should be an AsyncGenerator for streaming
+            async for item in result:
+                yield item
+
+    async def _create_chat_completion_inner(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        """
+        Inner method that processes the chat completion request.
+        Called after semaphore acquisition.
+        """
         try:
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True
@@ -442,6 +515,7 @@ class OpenAIServingChat(OpenAIServing):
                 request_metadata,
             )
 
+        # Non-streaming response
         try:
             return await self.chat_completion_full_generator(
                 request,

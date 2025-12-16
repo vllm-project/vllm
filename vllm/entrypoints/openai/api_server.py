@@ -166,6 +166,30 @@ async def build_async_engine_client(
     if client_config:
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
+        
+        # Calculate per-process video limit with remainder distribution
+        if hasattr(args, "maximum_concurrent_videos") and args.maximum_concurrent_videos:
+            client_count = engine_args._api_process_count
+            client_index = engine_args._api_process_rank
+            
+            base_limit = args.maximum_concurrent_videos // client_count
+            remainder = args.maximum_concurrent_videos % client_count
+            
+            # Process 0 gets any remainder slots
+            max_concurrent_videos_per_process = (
+                base_limit + remainder if client_index == 0 else base_limit
+            )
+            
+            # Override the engine args with per-process limit
+            engine_args.maximum_concurrent_videos = max_concurrent_videos_per_process
+            
+            logger.info(
+                "Video concurrency limit: %d videos per process (process %d of %d, total limit: %d)",
+                max_concurrent_videos_per_process,
+                client_index,
+                client_count,
+                args.maximum_concurrent_videos,
+            )
 
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)

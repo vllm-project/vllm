@@ -6,6 +6,7 @@ import atexit
 import mimetypes
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -49,6 +50,11 @@ _M = TypeVar("_M")
 
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
+# Global process-level video concurrency semaphore
+# This is shared across all MediaConnector instances in the same process
+_global_video_semaphore: asyncio.Semaphore | None = None
+_video_semaphore_lock: asyncio.Lock | None = None
+
 
 @MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
@@ -59,6 +65,7 @@ class MediaConnector:
         *,
         allowed_local_media_path: str = "",
         allowed_media_domains: list[str] | None = None,
+        max_concurrent_videos: int | None = None,
     ) -> None:
         """
         Args:
@@ -70,6 +77,8 @@ class MediaConnector:
             allowed_local_media_path: A local directory to load media files from.
             allowed_media_domains: If set, only media URLs that belong to this
                                    domain can be used for multi-modal inputs.
+            max_concurrent_videos: Maximum number of videos that can be
+                                   preprocessed concurrently in this process.
         """
         super().__init__()
 
@@ -98,6 +107,80 @@ class MediaConnector:
         if allowed_media_domains is None:
             allowed_media_domains = []
         self.allowed_media_domains = allowed_media_domains
+        
+        # Store the max_concurrent_videos for semaphore initialization
+        self._max_concurrent_videos = max_concurrent_videos
+
+    async def _get_video_semaphore(self) -> asyncio.Semaphore | None:
+        """
+        Get or create the global process-level video semaphore.
+        This ensures the semaphore is shared across all MediaConnector instances.
+        """
+        global _global_video_semaphore, _video_semaphore_lock
+        
+        if self._max_concurrent_videos is None or self._max_concurrent_videos <= 0:
+            return None
+        
+        # Lazily create the lock if needed
+        if _video_semaphore_lock is None:
+            _video_semaphore_lock = asyncio.Lock()
+        
+        # Double-checked locking pattern for thread-safe singleton initialization
+        if _global_video_semaphore is None:
+            async with _video_semaphore_lock:
+                if _global_video_semaphore is None:
+                    _global_video_semaphore = asyncio.Semaphore(self._max_concurrent_videos)
+                    logger.info(
+                        "Global video concurrency semaphore created with limit: %d (process-wide shared)",
+                        self._max_concurrent_videos,
+                    )
+        
+        return _global_video_semaphore
+
+    @asynccontextmanager
+    async def acquire_video_semaphore(self, video_count: int = 1):
+        """
+        Public method to acquire semaphore slots for the entire request lifecycle.
+        Should be used at the request level (not just during video loading) to
+        ensure VRAM is reserved for the entire time videos are in memory.
+        
+        Args:
+            video_count: Number of videos being processed (number of slots to acquire)
+        """
+        semaphore = await self._get_video_semaphore()
+        
+        if semaphore and video_count > 0:
+            # Check if we'll need to wait
+            if semaphore._value < video_count:
+                logger.info(
+                    "Video semaphore: Need %d slot(s) but only %d available, will block until slots free",
+                    video_count,
+                    semaphore._value,
+                )
+            
+            # Acquire N slots for N videos
+            for _ in range(video_count):
+                await semaphore.acquire()
+            
+            logger.debug(
+                "Acquired %d video semaphore slot(s), remaining available: %d",
+                video_count,
+                semaphore._value,
+            )
+            try:
+                yield
+            finally:
+                # Release N slots
+                for _ in range(video_count):
+                    semaphore.release()
+                logger.debug(
+                    "Released %d video semaphore slot(s), now available: %d",
+                    video_count,
+                    semaphore._value,
+                )
+        else:
+            # No-op if no semaphore or no videos
+            yield
 
     def _load_data_url(
         self,
@@ -320,6 +403,10 @@ class MediaConnector:
         Asynchronously load video from an HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
+        
+        Note: This method does NOT acquire the video semaphore. The semaphore
+        should be acquired at the request level to ensure VRAM is reserved
+        for the entire request lifecycle, not just during loading.
         """
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
