@@ -328,6 +328,13 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         self.quant_fp8 = QuantFP8(quant_key.scale.static, quant_key.scale.group_shape)
 
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        scale: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.quant_fp8(input, scale)
+
     def forward_rocm_aiter(
         self,
         input: torch.Tensor,
