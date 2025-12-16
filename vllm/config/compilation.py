@@ -937,7 +937,7 @@ class CompilationConfig:
                     or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
                 ):
                     logger.warning_once(
-                        "Using piecewise compilation with empty splitting_ops"
+                        "Using piecewise cudagraph with empty splitting_ops"
                     )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
