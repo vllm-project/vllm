@@ -101,7 +101,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_hidden_layers,
                     model_config.hf_text_config.num_experts_per_tok,
                 ),
-                dtype=torch.int16,
+                dtype=torch.int32,
                 device="cuda",
             )
 
@@ -112,7 +112,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     model_config.hf_text_config.num_hidden_layers,
                     model_config.hf_text_config.num_experts_per_tok,
                 )
-                self.dest_size = int(np.prod(shape)) * np.dtype(np.int16).itemsize
+                self.dest_size = int(np.prod(shape)) * np.dtype(np.int32).itemsize
                 self.lock_file = f"{LOCK_FILE_PREFIX}_{instance_id}.lock"
                 self.shm_name = f"{BUFFER_PREFIX}_{instance_id}"
 
@@ -147,7 +147,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
 
                     self._shm = shm
                     self._host_buffer_view = np.ndarray(
-                        shape, dtype=np.int16, buffer=self._shm.buf
+                        shape, dtype=np.int32, buffer=self._shm.buf
                     )
                     # init 0
                     self._host_buffer_view.fill(0)
@@ -294,7 +294,7 @@ class _RoutedExpertsReaderReal(RoutedExpertsReader):
                         )
 
                     self._host_buffer_view = np.ndarray(
-                        shape, dtype=np.int16, buffer=self._shm.buf
+                        shape, dtype=np.int32, buffer=self._shm.buf
                     )
                 finally:
                     unlock_file(fp)
