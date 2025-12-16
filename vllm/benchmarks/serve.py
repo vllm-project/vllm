@@ -76,7 +76,7 @@ async def get_first_model_from_server(
                         f"No models found on the server at {base_url}. "
                         "Make sure the server is running and has models loaded."
                     )
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, json.JSONDecodeError) as e:
             raise RuntimeError(
                 f"Failed to fetch models from server at {models_url}. "
                 "Check that:\n"
@@ -1422,6 +1422,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
         )
+
+    # Map general --input-len and --output-len to all dataset-specific arguments
+    if args.input_len is not None:
+        args.random_input_len = args.input_len
+        args.sonnet_input_len = args.input_len
+
+    if args.output_len is not None:
+        args.random_output_len = args.output_len
+        args.sonnet_output_len = args.output_len
+        args.sharegpt_output_len = args.output_len
+        args.custom_output_len = args.output_len
+        args.hf_output_len = args.output_len
+        args.spec_bench_output_len = args.output_len
+        args.prefix_repetition_output_len = args.output_len
 
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length
