@@ -196,8 +196,6 @@ class PlaceholderRange:
         If start_idx=3 and end_idx=5, the output is (1, 3) because we want to get
         the second and the third embeddings from the encoder output.
         """
-        assert start_idx <= end_idx
-
         if self.embeds_cumsum is None:
             return start_idx, end_idx
 
