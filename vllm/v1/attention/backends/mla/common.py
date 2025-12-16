@@ -681,7 +681,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         # For main run, qo_indptr == kv_indptr
         kv_indptr = qo_indptr.clone()
-        
+        q_data_type = (
+            current_platform.fp8_dtype()
+            if self.kv_cache_spec.kv_cache_dtype == "fp8"
+            else self.model_config.dtype
+        )
         # Prepare main prefill
         self._fi_prefill_main.plan(
             qo_indptr=qo_indptr,
@@ -694,7 +698,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             sm_scale=self._global_hyperparameters.sm_scale,
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-            q_data_type=torch.float8_e4m3fn,
+            q_data_type=q_data_type,
         )
 
         # Prepare context prefills
@@ -713,7 +717,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     sm_scale=self._global_hyperparameters.sm_scale,
                     window_left=self._global_hyperparameters.window_left,
                     logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-                    q_data_type=torch.float8_e4m3fn,
+                    q_data_type=q_data_type,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
@@ -1370,9 +1374,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return attn_out
 
     def _run_prefill_new_tokens_fa(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running FlashAttention prefill new tokens")
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -1387,9 +1397,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_fi(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running FlashInfer prefill new tokens")
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
         if fp8_attention:
@@ -1409,9 +1425,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_new_tokens_cudnn(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running Cudnn prefill new tokens")
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
         assert fp8_attention is False, "Cudnn prefill does not support fp8 attention"
@@ -1436,11 +1458,19 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return output
 
     def _run_prefill_context_chunk_fa(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running FlashAttention prefill context chunk")
         assert prefill.chunked_context is not None
-        assert fp8_attention is False, "FlashAttention prefill does not support fp8 attention"
+        assert fp8_attention is False, (
+            "FlashAttention prefill does not support fp8 attention"
+        )
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -1455,9 +1485,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_context_chunk_fi(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v, 
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running FlashInfer prefill context chunk")
         assert isinstance(prefill, FlashInferPrefillMetadata)
         if fp8_attention:
             fp8_dtype = current_platform.fp8_dtype()
@@ -1475,9 +1511,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return attn_out, lse.transpose(0, 1).contiguous()
 
     def _run_prefill_context_chunk_cudnn(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running Cudnn prefill context chunk")
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
@@ -1502,9 +1544,15 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        q,
+        k,
+        v,
+        return_softmax_lse,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running TRT-LLM ragged prefill new tokens")
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
@@ -1542,15 +1590,21 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_context_chunk_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v,
-        fp8_attention: bool
+        self,
+        prefill: MLACommonPrefillMetadata,
+        chunk_idx: int,
+        q,
+        k,
+        v,
+        fp8_attention: bool,
     ):
+        logger.debug_once("Running TRT-LLM ragged prefill context chunk")
         """TRT-LLM ragged attention for context chunks (non-causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
         assert prefill.chunked_context is not None
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
-        
+
         out = torch.zeros(
             q.shape[0],
             q.shape[1],
@@ -1559,13 +1613,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             dtype=q.dtype,
         )
         self._workspace_buffer.fill_(0)
-        
+
         if fp8_attention:
             fp8_dtype = current_platform.fp8_dtype()
             q = q.to(fp8_dtype)
             k = k.to(fp8_dtype)
             v = v.to(fp8_dtype)
-        
+
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
@@ -1718,7 +1772,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
-        fp8_attention: bool
+        fp8_attention: bool,
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -1786,7 +1840,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
-        fp8_attention: bool 
+        fp8_attention: bool,
     ):
         assert k_scale is None, "DCP not support scaled kvcache now."
         assert attn_metadata.prefill is not None
@@ -1932,7 +1986,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(
-                   q, kv_c_and_k_pe_cache, attn_metadata, k_scale, fp8_attention
+                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale, fp8_attention
                 )
 
             # unpad if necessary
