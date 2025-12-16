@@ -74,6 +74,9 @@ BATCH_SPECS = {
     ),
     "large_decode": BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
     "large_prefill": BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
+    "mixed_large": BatchSpec(
+        seq_lens=[1024, 2048, 4096, 1024, 2048, 4096], query_lens=[1, 1, 1, 32, 32, 32]
+    ),
     "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
 }
@@ -587,7 +590,14 @@ SLIDING_WINDOW_BACKENDS_TO_TEST = [
 
 @pytest.mark.parametrize(
     "batch_spec_name",
-    ["small_decode", "small_prefill", "mixed_medium", "large_decode", "large_prefill"],
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "mixed_large",
+    ],
 )
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
