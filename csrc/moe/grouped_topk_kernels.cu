@@ -446,9 +446,13 @@ __device__ inline T apply_sigmoid(T val) {
 
 template <ScoringFunc SF, typename T>
 __device__ inline T apply_scoring(T val) {
-  if constexpr (SF == SCORING_SIGMOID) {
+  if constexpr (SF == SCORING_NONE) {
+    return val;
+  } else if constexpr (SF == SCORING_SIGMOID) {
     return apply_sigmoid(val);
   } else {
+    static_assert(SF == SCORING_NONE || SF == SCORING_SIGMOID,
+                  "Unsupported ScoringFunc in apply_scoring");
     return val;
   }
 }
@@ -670,10 +674,13 @@ __global__ void group_idx_and_topk_idx_kernel(
 
   if (case_id < num_tokens) {
     if (if_proceed_next_topk) {
+      float scale = routed_scaling_factor;
+      if (renormalize) {
+        scale /= topk_sum;
+      }
       for (int i = lane_id; i < topk; i += WARP_SIZE) {
         float base = cuda_cast<float, T>(s_topk_value[i]);
-        float value = renormalize ? (base / topk_sum * routed_scaling_factor)
-                                  : (base * routed_scaling_factor);
+        float value = base * scale;
         topk_indices[i] = s_topk_idx[i];
         topk_values[i] = value;
       }
