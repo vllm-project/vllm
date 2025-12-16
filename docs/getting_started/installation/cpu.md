@@ -258,11 +258,6 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
     - GPTQ (x86 only)
     - compressed-tensor INT8 W8A8 (x86, s390x)
 
-### (x86 only) What is the purpose of `VLLM_CPU_SGL_KERNEL`?
-
-- Both of them require `amx` CPU flag.
-    - `VLLM_CPU_SGL_KERNEL` can provide better performance for MoE models and small-batch scenarios.
-
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 
 In some container environments (like Docker), NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are blocked/denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
