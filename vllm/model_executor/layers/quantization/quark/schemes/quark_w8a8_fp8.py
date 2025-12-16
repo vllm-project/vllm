@@ -55,7 +55,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         # lovelace and up
         return 89
     
-    def quant_per_tensor(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def quant_per_tensor(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         splited_weights = weight.split(self.output_partition_sizes, dim=0)
         fp8_type = torch.float8_e4m3fn
         max_fp8_value = torch.finfo(fp8_type).max
@@ -63,15 +65,23 @@ class QuarkW8A8Fp8(QuarkScheme):
         for idx, part in enumerate(splited_weights):
             max_value = abs(part).max().float()
             weight_scales.append(max_value / max_fp8_value)
-            splited_weights[idx] = (part / weight_scales[-1]).to(fp8_type)
-        return torch.stack(splited_weights, dim=0), torch.tensor(weight_scales, dtype=torch.float32)
+            part_weight = part / weight_scales[-1]
+            splited_weights[idx] = torch.clamp(
+                part_weight, min=-max_fp8_value, max=max_fp8_value
+            ).to(fp8_type)
+        return torch.stack(splited_weights, dim=0), torch.tensor(
+            weight_scales, dtype=torch.float32
+        )
 
-    def quant_per_channel(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def quant_per_channel(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         fp8_type = torch.float8_e4m3fn
         max_fp8_value = torch.finfo(fp8_type).max
         max_value = weight.max(dim=1).values
         scale = (max_value / max_fp8_value).float()
-        weight = (weight / scale.unsqueeze(-1)).to(fp8_type)
+        weight = weight / scale.unsqueeze(-1)
+        weight = torch.clamp(weight, min=-max_fp8_value, max=max_fp8_value).to(fp8_type)
         return weight, scale
 
     def process_weights_after_loading(self, layer) -> None:
