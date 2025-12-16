@@ -355,6 +355,7 @@ class MLACommonPrefillMetadata:
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     query_seq_lens: torch.Tensor | None = None
+    q_data_type: torch.dtype | None = None
 
 
 @dataclass
@@ -539,6 +540,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             metadata_cls if metadata_cls is not None else MLACommonMetadata
         )
         self.kv_cache_spec = kv_cache_spec
+        self.q_data_type = (
+            current_platform.fp8_dtype()
+            if "fp8" in self.kv_cache_spec.cache_dtype_str
+            else vllm_config.model_config.dtype
+        )
         scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -681,11 +687,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         # For main run, qo_indptr == kv_indptr
         kv_indptr = qo_indptr.clone()
-        q_data_type = (
-            current_platform.fp8_dtype()
-            if self.kv_cache_spec.kv_cache_dtype == "fp8"
-            else self.model_config.dtype
-        )
         # Prepare main prefill
         self._fi_prefill_main.plan(
             qo_indptr=qo_indptr,
@@ -698,7 +699,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             sm_scale=self._global_hyperparameters.sm_scale,
             window_left=self._global_hyperparameters.window_left,
             logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-            q_data_type=q_data_type,
+            q_data_type=self.q_data_type,
         )
 
         # Prepare context prefills
@@ -717,7 +718,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     sm_scale=self._global_hyperparameters.sm_scale,
                     window_left=self._global_hyperparameters.window_left,
                     logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
-                    q_data_type=q_data_type,
+                    q_data_type=self.q_data_type,
                 )
 
         prefill.prefill_main = self._fi_prefill_main
@@ -974,6 +975,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
+                q_data_type=self.q_data_type,
             )
 
             if self._use_cudnn_prefill:
