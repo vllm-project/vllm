@@ -1134,7 +1134,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             name=name,
             documentation=documentation,
             multiprocess_mode="mostrecent",
-            labelnames=metrics_info.keys(),
+            labelnames=list(metrics_info.keys()),
         )
         for engine_index in self.engine_indexes:
             metrics_info = config_obj.metrics_info()
@@ -1210,7 +1210,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 lora_info_labels = {
                     self.labelname_running_lora_adapters: running_lora_adapters,
                     self.labelname_waiting_lora_adapters: waiting_lora_adapters,
-                    self.labelname_max_lora: self.max_lora,
+                    self.labelname_max_lora: str(self.max_lora),
                 }
                 self.gauge_lora_info.labels(**lora_info_labels).set(time.time())  # type: ignore[attr-defined]
 
