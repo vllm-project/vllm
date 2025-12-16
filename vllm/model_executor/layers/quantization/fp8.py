@@ -1127,7 +1127,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             return None
 
-        return fp8_w8a8_moe_quant_config(
+        moe_quant_config = fp8_w8a8_moe_quant_config(
             w1_scale=(
                 layer.w13_weight_scale_inv
                 if self.block_quant
@@ -1140,6 +1140,31 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             block_shape=self.weight_block_size,
         )
+
+        # TODO(wentao): expand this to other quant methods.
+        if self.allow_deep_gemm:
+            from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+                DeepGemmExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+            from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+            assert (
+                moe_quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
+            ), (
+                "DeepGemm requires moe_quant_config.block_shape == "
+                "get_mk_alignment_for_contiguous_layout(). "
+                f"Got {moe_quant_config.block_shape}."
+            )
+
+            moe_quant_config.moe_kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                DeepGemmExperts(moe_quant_config),
+            )
+
+        return moe_quant_config
 
     @property
     def supports_eplb(self) -> bool:
