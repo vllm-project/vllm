@@ -72,11 +72,7 @@ class ClassificationMixin(OpenAIServing):
                 if ret:
                     return ret
 
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+                _, engine_prompts = await self._preprocess_chat(
                     cast(ChatCompletionRequest, chat_request),
                     ctx.tokenizer,
                     messages,

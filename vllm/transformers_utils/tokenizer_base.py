@@ -11,7 +11,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer_base.TokenizerBase` has been "
             "moved to `vllm.tokenizers.TokenizerLike`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -23,7 +23,7 @@ def __getattr__(name: str):
         warnings.warn(
             "`vllm.transformers_utils.tokenizer_base.TokenizerRegistry` has been "
             "moved to `vllm.tokenizers.TokenizerRegistry`. "
-            "The old name will be removed in v0.13.",
+            "The old name will be removed in v0.14.",
             DeprecationWarning,
             stacklevel=2,
         )

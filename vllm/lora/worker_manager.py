@@ -8,8 +8,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.lora.models import (
-    LoRAModel,
+from vllm.lora.lora_model import LoRAModel
+from vllm.lora.model_manager import (
     LoRAModelManager,
     LRUCacheLoRAModelManager,
     create_lora_manager,

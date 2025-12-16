@@ -114,7 +114,6 @@ class QWenAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )
@@ -281,6 +280,9 @@ class QWenBaseModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.wte(input_ids)
 
     def compute_logits(
         self,

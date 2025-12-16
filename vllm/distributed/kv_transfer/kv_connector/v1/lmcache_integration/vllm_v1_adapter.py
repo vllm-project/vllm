@@ -27,7 +27,14 @@ from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
     LMCacheAsyncLookupServer,
 )
 from lmcache.v1.offload_server.zmq_server import ZMQOffloadServer
-from lmcache.v1.plugin.plugin_launcher import PluginLauncher
+
+try:
+    from lmcache.v1.plugin.runtime_plugin_launcher import RuntimePluginLauncher
+except ImportError:
+    # Backwards compatibility for lmcache <= 0.3.10-post1
+    from lmcache.v1.plugin.plugin_launcher import (
+        PluginLauncher as RuntimePluginLauncher,
+    )
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
@@ -683,7 +690,7 @@ class LMCacheConnectorV1Impl:
             self.api_server = InternalAPIServer(self)
             self.api_server.start()
             # Launch plugins
-            self.plugin_launcher = PluginLauncher(
+            self.plugin_launcher = RuntimePluginLauncher(
                 self.config,
                 role,
                 self.worker_count,
