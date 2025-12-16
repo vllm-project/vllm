@@ -40,9 +40,31 @@ EP_SIZE = TP_SIZE × DP_SIZE
 
 Where:
 
-- `TP_SIZE`: Tensor parallel size (always 1 for now)
+- `TP_SIZE`: Tensor parallel size
 - `DP_SIZE`: Data parallel size
 - `EP_SIZE`: Expert parallel size (computed automatically)
+
+### Layer Behavior with EP Enabled
+
+When EP is enabled, different layers in MoE models behave differently:
+
+| Layer Type | Behavior | Parallelism Used |
+|------------|----------|------------------|
+| **Expert (MoE) Layers** | Sharded across all EP ranks | Expert Parallel (EP) of size `TP × DP` |
+| **Attention Layers** | Behavior depends on TP size | See below |
+
+**Attention layer parallelism:**
+
+- **When `TP = 1`**: Attention weights are **replicated** across all DP ranks (data parallelism)
+- **When `TP > 1`**: Attention weights are **sharded** using tensor parallelism across TP ranks within each DP group
+
+For example, with `TP=2, DP=4` (8 GPUs total):
+
+- Expert layers form an EP group of size 8, with experts distributed across all GPUs
+- Attention layers use TP=2 within each of the 4 DP groups
+
+!!! note "Key Difference from Data Parallel Deployment"
+    Without `--enable-expert-parallel`, MoE layers would use tensor parallelism (forming a TP group of size `TP × DP`), similar to dense models. With EP enabled, expert layers switch to expert parallelism, which can provide better efficiency and locality for MoE models.
 
 ### Example Command
 
@@ -81,7 +103,7 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --data-parallel-size-local 8 \           # Local DP size on this node (8 GPUs per node)
     --data-parallel-address 192.168.1.100 \  # Replace with actual IP of Node 1
     --data-parallel-rpc-port 13345 \         # RPC communication port, can be any port as long as reachable by all nodes
-    --api-server-count=8                     # Number of API servers for load handling (scaling this out to total ranks are recommended)
+    --api-server-count=8                     # Number of API servers for load handling (scaling this out to # local ranks is recommended)
 
 # Node 2 (Secondary - headless mode, no API server)
 vllm serve deepseek-ai/DeepSeek-V3-0324 \
@@ -119,9 +141,6 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 Enable EPLB with the `--enable-eplb` flag.
 
-!!! note "Model Support"
-    Currently only DeepSeek V3 architecture is supported.
-
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
 ### EPLB Parameters
@@ -134,6 +153,8 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
+| `policy` | The policy type for expert parallel load balancing | `"default"` |
 
 For example:
 
@@ -182,6 +203,26 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
 ```
 
 For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
+
+## Advanced Configuration
+
+### Performance Optimization
+
+- **DeepEP kernels**: The `high_throughput` and `low_latency` kernels are optimized for disaggregated serving and may show poor performance for mixed workloads
+- **Dual Batch Overlap**: Use `--enable-dbo` to overlap all-to-all communication with compute. See [Dual Batch Overlap](../design/dbo.md) for more details.
+- **Async scheduling (experimental)**: Try `--async-scheduling` to overlap scheduling with model execution.
+
+### Troubleshooting
+
+- **`non-zero status: 7 cannot register cq buf`**: When using Infiniband/RoCE, make sure host VM and pods show `ulimit -l` "unlimited".
+- **`init failed for transport: IBGDA`**: The InfiniBand GDA kernel modules are missing. Run `tools/ep_kernels/configure_system_drivers.sh` on each GPU node and reboot. Also fixes error `NVSHMEM API called before NVSHMEM initialization has completed`.
+- **NVSHMEM peer disconnect**: Usually a networking misconfiguration. If deploying via Kubernetes, verify that every pod runs with `hostNetwork: true`, `securityContext.privileged: true` to access Infiniband.
+
+### Benchmarking
+
+- Use simulator flags `VLLM_MOE_ROUTING_SIMULATION_STRATEGY=uniform_random` and `VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1` so token routing is balanced across EP ranks.
+
+- Increasing `VLLM_MOE_DP_CHUNK_SIZE` may increase throughput by increasing the maximum batch size for inter-rank token transfers. This may cause DeepEP  to throw `assert self.nvshmem_qp_depth >= (num_max_dispatch_tokens_per_rank + 1) * 2`, which can be fixed by increasing environment variable `NVSHMEM_QP_DEPTH`.
 
 ## Disaggregated Serving (Prefill/Decode Split)
 
@@ -273,3 +314,9 @@ except Exception as e:
     print(f"❌ Error during disaggregated serving: {e}")
     print("Check that both prefill and decode instances are running and accessible")
 ```
+
+### Benchmarking
+
+- To simulate the decode deployment of disaggregated serving, pass `--kv-transfer-config '{"kv_connector":"DecodeBenchConnector","kv_role":"kv_both"}'` to the `vllm serve` invocation. The connector populates KV cache with random values so decode can be profiled in isolation.
+
+- **CUDAGraph capture**: Use `--compilation_config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` to enable CUDA graph capture for decode only and save KV cache.

@@ -51,3 +51,4 @@ setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic == 0.71.0
 model-hosting-container-standards >= 0.1.9, < 1.0.0
+mcp

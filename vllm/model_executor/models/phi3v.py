@@ -64,6 +64,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
+    _require_is_multimodal,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -562,8 +563,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
     dummy_inputs=Phi3VDummyInputsBuilder,
 )
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.wte": "embed_tokens",
@@ -689,17 +688,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
-        if is_multimodal is None:
-            raise ValueError(
-                "`embed_input_ids` now requires `is_multimodal` arg, "
-                "please update your model runner according to "
-                "https://github.com/vllm-project/vllm/pull/16229."
-            )
-
         return _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
+            is_multimodal=_require_is_multimodal(is_multimodal),
         )
 
     def forward(

@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
+EPLBPolicyOption = Literal["default"]
 
 
 @config
@@ -64,6 +65,9 @@ class EPLBConfig:
     """
     Whether to use non-blocking EPLB.
     """
+
+    policy: EPLBPolicyOption = "default"
+    """The policy type for expert parallel load balancing (EPLB)."""
 
 
 @config
@@ -152,6 +156,8 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+    ubatch_size: int = 0
+    """Number of ubatch size."""
 
     dbo_decode_token_threshold: int = 32
     """The threshold for dual batch overlap for batches only containing decodes.
@@ -180,13 +186,14 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model
-    workers, either "ray" or "mp" (multiprocessing). If the product
-    of pipeline_parallel_size and tensor_parallel_size is less than
-    or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, this will default
-    to "ray" if Ray is installed and fail otherwise. Note that tpu
-    only support Ray for distributed inference."""
+    """Backend to use for distributed model workers, either "ray" or "mp"
+    (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
+    is less than or equal to the number of GPUs available, "mp" will be used to
+    keep processing on a single host. Otherwise, an error will be raised. To use "mp"
+    you must also set nnodes, and to use "ray" you must manually set
+    distributed_executor_backend to "ray".
+
+    Note that tpu only support Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -312,11 +319,6 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
-        if self.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "Prefill context parallelism is not fully supported. "
-                "Please set prefill_context_parallel_size to 1."
-            )
         return self
 
     @property
@@ -324,6 +326,14 @@ class ParallelConfig:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
         including data parallelism."""
         return self.world_size * self.data_parallel_size
+
+    @property
+    def use_ubatching(self) -> bool:
+        return self.enable_dbo or self.ubatch_size > 1
+
+    @property
+    def num_ubatches(self) -> int:
+        return 2 if self.enable_dbo else self.ubatch_size
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -562,8 +572,11 @@ class ParallelConfig:
             ):
                 gpu_count = cuda_device_count_stateless()
                 raise ValueError(
-                    f"Tensor parallel size ({self.world_size}) cannot be "
-                    f"larger than the number of available GPUs ({gpu_count})."
+                    f"World size ({self.world_size}) is larger than the number of "
+                    f"available GPUs ({gpu_count}) in this node. If this is "
+                    "intentional and you are using:\n"
+                    "- ray, set '--distributed-executor-backend ray'.\n"
+                    "- multiprocessing, set '--nnodes' appropriately."
                 )
             elif self.data_parallel_backend == "ray":
                 logger.info(
@@ -593,10 +606,14 @@ class ParallelConfig:
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
             )
-        if self.distributed_executor_backend not in ("mp", "uni") and self.nnodes > 1:
+        allowed_backends = ("mp", "uni", "external_launcher")
+        if (
+            self.distributed_executor_backend not in allowed_backends
+            and self.nnodes > 1
+        ):
             raise ValueError(
                 "nnodes > 1 can only be set when distributed executor "
-                "backend is mp or uni."
+                "backend is mp, uni or external_launcher."
             )
 
     @property

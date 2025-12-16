@@ -135,7 +135,7 @@ class AttentionGroup:
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
-    # so that if they use internal persistant buffers for cudagraphs, and they
+    # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
@@ -313,8 +313,12 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                # We know that the GPU runner is not impacted by this
+            if (
+                current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+                or current_platform.is_cpu()
+            ):
+                # We know that the GPU / CPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
                 pass
@@ -337,7 +341,7 @@ def is_residual_scattered_for_sp(
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled.
 
-    This follows the same logic as SequenceParallelismPass.is_applicable():
+    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes

@@ -44,8 +44,6 @@ def unsupported_array_schemas():
 @pytest.fixture
 def unsupported_object_schemas():
     return [
-        {"type": "object", "minProperties": 1},
-        {"type": "object", "maxProperties": 5},
         {"type": "object", "propertyNames": {"pattern": "^[a-z]+$"}},
         {"type": "object", "patternProperties": {"^S": {"type": "string"}}},
     ]
@@ -79,6 +77,8 @@ def supported_schema():
                 },
             },
         },
+        "minProperties": 1,
+        "maxProperties": 100,
     }
 
 

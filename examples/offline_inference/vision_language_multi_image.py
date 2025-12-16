@@ -76,7 +76,7 @@ def load_aria(question: str, image_urls: list[str]) -> ModelRequestData:
 
 
 def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "CohereForAI/aya-vision-8b"
+    model_name = "CohereLabs/aya-vision-8b"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -1382,7 +1382,7 @@ def run_generate(
     model,
     question: str,
     image_urls: list[str],
-    seed: int | None,
+    seed: int,
     tensor_parallel_size: int | None,
 ):
     req_data = model_example_map[model](question, image_urls)
@@ -1416,7 +1416,7 @@ def run_chat(
     model: str,
     question: str,
     image_urls: list[str],
-    seed: int | None,
+    seed: int,
     tensor_parallel_size: int | None,
 ):
     req_data = model_example_map[model](question, image_urls)
@@ -1494,7 +1494,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     parser.add_argument(

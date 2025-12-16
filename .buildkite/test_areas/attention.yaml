@@ -1,0 +1,21 @@
+group: Attention
+depends_on: 
+  - image-build
+steps:
+- label: V1 attention (H100)
+  timeout_in_minutes: 30
+  gpu: h100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - pytest -v -s v1/attention
+
+- label: V1 attention (B200)
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this

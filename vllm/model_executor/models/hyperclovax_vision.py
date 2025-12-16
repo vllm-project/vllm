@@ -592,8 +592,6 @@ class HCXVisionCAbstractor(nn.Module):
     dummy_inputs=HCXVisionDummyInputsBuilder,
 )
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

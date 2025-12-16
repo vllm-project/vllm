@@ -1,0 +1,26 @@
+group: Engine
+depends_on: 
+  - image-build
+steps:
+- label: Engine
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/
+  - tests/engine
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
+  - tests/test_vllm_port
+  commands:
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+
+- label: V1 e2e + engine
+  timeout_in_minutes: 45
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # TODO: accuracy does not match, whether setting
+    # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
+    - pytest -v -s v1/e2e
+    - pytest -v -s v1/engine
