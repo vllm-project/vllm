@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "deepspeedfp",
-    "tpu_int8",
     "fp8",
     "ptpc_fp8",
     "fbgemm_fp8",
