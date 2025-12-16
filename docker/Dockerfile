@@ -520,19 +520,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 
-# Install FlashInfer pre-compiled kernel cache and binaries
-# https://docs.flashinfer.ai/installation.html
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==0.5.3 \
-    && uv pip install --system flashinfer-jit-cache==0.5.3 \
-        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && flashinfer show-config
-
-COPY examples examples
-COPY benchmarks benchmarks
-COPY ./vllm/collect_env.py .
-
->>>>>>> acbb19925 (xformers_release)
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
