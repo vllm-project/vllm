@@ -28,7 +28,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
 ??? console "pip"
     ```bash
     # use pip
-    pip install vllm==${VLLM_VERSION}+cpu" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install vllm==${VLLM_VERSION}+cpu --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
     Before use vLLM CPU installed via wheels, make sure TCMalloc and Intel OpenMP are installed and added to `LD_PRELOAD`:
