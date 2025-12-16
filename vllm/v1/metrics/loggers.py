@@ -10,6 +10,7 @@ from typing import TypeAlias, TypeVar
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphLogging
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.config.model import get_served_model_name
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
     KVConnectorPrometheus,
@@ -420,7 +421,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         labelnames = ["model_name", "engine"]
-        model_name = vllm_config.model_config.served_model_name
+        model_name = get_served_model_name(
+            vllm_config.model_config.model, vllm_config.model_config.served_model_name
+        )
         max_model_len = vllm_config.model_config.max_model_len
 
         per_engine_labelvalues: dict[int, list[str]] = {
