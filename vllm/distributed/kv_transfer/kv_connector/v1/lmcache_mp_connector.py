@@ -905,12 +905,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         This should be called when a request is finished to prevent memory leak.
         """
         # Clean up request tracker
-        if request_id in self.request_trackers:
-            del self.request_trackers[request_id]
+        if self.request_trackers.pop(request_id, None):
             logger.debug(
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
         # Clean up lookup future in scheduler adapter
-        if hasattr(self, 'scheduler_adapter'):
-            self.scheduler_adapter.cleanup_request(request_id)
+        self.scheduler_adapter.cleanup_request(request_id)

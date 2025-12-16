@@ -153,8 +153,7 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
-        if request_id in self.lookup_futures:
-            del self.lookup_futures[request_id]
+        self.lookup_futures.pop(request_id, None)
 
     # Helper functions
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
