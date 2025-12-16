@@ -943,12 +943,24 @@ class GPUModelRunner(
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
-
-                if self.use_async_scheduling and num_output_tokens > 0:
+                if self.use_async_scheduling:
                     # We must recover the output token ids for resumed requests in the
                     # async scheduling case, so that correct input_ids are obtained.
-                    resumed_token_ids = req_data.all_token_ids[req_id]
-                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
+                    if num_output_tokens > 0:
+                        resumed_token_ids = req_data.all_token_ids[req_id]
+                        req_state.output_token_ids = resumed_token_ids[
+                            -num_output_tokens:
+                        ]
+
+                    # When async scheduling + spec decode, we don't have pre-step draft
+                    # token ids for these reqs, so directly clear them here.
+                    if req_id in scheduler_output.scheduled_spec_decode_tokens:
+                        num_spec_tokens = len(
+                            scheduler_output.scheduled_spec_decode_tokens[req_id]
+                        )
+                        scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
+                        scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
+                        scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
 
                 reqs_to_add.append(req_state)
                 continue
