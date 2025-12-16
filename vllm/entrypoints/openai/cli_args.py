@@ -197,8 +197,7 @@ class FrontendArgs:
     enable_offline_docs: bool = False
     """
     Enable offline FastAPI documentation for air-gapped environments.
-    Uses fastapi-offline to bundle static assets locally. Requires
-    fastapi-offline to be installed.
+    Uses vendored static assets bundled with vLLM.
     """
 
     @staticmethod
