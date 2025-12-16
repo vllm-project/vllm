@@ -109,12 +109,12 @@ async def transfer_run_periodically(
 
         assert state.is_async
         for model_state in state.model_states.values():
-            if not model_state.new_indices_computed:
-                run_rebalance_experts(model_state, state)
-                logger.info(
-                    "Async worker computed new indices for model %s",
-                    model_state.model_name,
-                )
+            # Rebalance experts is done once, only when the async worker wakes up.
+            run_rebalance_experts(model_state, state)
+            logger.info(
+                "Async worker computed new indices for model %s",
+                model_state.model_name,
+            )
 
             current_num_layers = model_state.model.num_moe_layers
             while (

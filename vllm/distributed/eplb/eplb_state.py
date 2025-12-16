@@ -197,10 +197,6 @@ class EplbModelState:
     """
     Whether the async EPLB needs to poll peers for buffer readiness.
     """
-    new_indices_computed: bool
-    """
-    The flag indicates whether the new indices have been computed.
-    """
     eplb_stats: EplbStats | None
     """
     EPLB stats for the model.
@@ -543,7 +539,6 @@ class EplbState:
             layer_to_transfer=0,
             rebalanced=False,
             pending_global_ready_check=False,
-            new_indices_computed=False,
             eplb_stats=None,
             is_unchanged=np.array([]),
             is_received_locally=np.array([]),
@@ -918,7 +913,6 @@ class EplbState:
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
-                eplb_model_state.new_indices_computed = False
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
             self.rearrange_event.set()
