@@ -57,7 +57,7 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
-    MultiModalKwargs,
+    MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
@@ -938,7 +938,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
 
@@ -1391,7 +1391,7 @@ class IsaacVisionEmbedding(nn.Module):
 class IsaacForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
