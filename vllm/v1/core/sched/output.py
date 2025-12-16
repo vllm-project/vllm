@@ -147,6 +147,9 @@ class CachedRequestData:
             f")"
         )
 
+    def __repr__(self) -> str:
+        return self.anon_repr()
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
