@@ -1624,7 +1624,6 @@ class Scheduler(SchedulerInterface):
             num_computed_tokens = max(len(group) for group in block_ids) * self.block_size
             # Handle the case where num request tokens less than one block.
             print("SCHEDULER request.num_tokens", request.num_tokens,"\n", flush=True)
-            # FIXME I don't understand why we do this and not just req.num_tokens
             num_computed_tokens = min(num_computed_tokens, request.num_tokens)
             if num_computed_tokens == request.num_tokens:
                 num_computed_tokens -= 1

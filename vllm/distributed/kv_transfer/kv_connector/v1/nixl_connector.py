@@ -738,11 +738,14 @@ class NixlConnectorScheduler:
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
         if len(meta.reqs_to_recv) > 0:
+            # FIXME ReqMeta(local_block_ids=[[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 330],
+            # this looks wrong, you shouldnt write to 0..? or is it like just skip the transfer?
             print("build_connector_meta", meta.reqs_to_recv, "\n", flush=True)
 
         return meta
 
-    def request_finished(
+    def 
+    (
         self,
         request: "Request",
         block_ids: list[int] | tuple[list[int], ...],
@@ -785,7 +788,6 @@ class NixlConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
-        # FIXME
         print(f"block_ids: {block_ids}\n\n", flush=True)
         if isinstance(block_ids, tuple):
             delay_free_blocks = any(len(group) > 0 for group in block_ids)
@@ -803,6 +805,11 @@ class NixlConnectorScheduler:
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
+            # FIXME HMA will "pad" groups with fewer blocks with 0s (eg SWA ones). 
+            # Here we un-pad blocks to send the actual remote blocks to be read.
+            # Actually, wait for https://github.com/vllm-project/vllm/pull/30166, on first
+            # scheduling step blocks are over-allocated as if all layers were FA.
+            block_ids = tuple([block for block in group if block != 0] for group in block_ids)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -1264,10 +1271,6 @@ class NixlConnectorWorker:
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
         print("SPLIT K AND V", split_k_and_v, "\n", flush=True)
         for layer_name, cache_or_caches in xfer_buffers.items():
-            # These are actually already ~grouped at this point (2384263)
-            # model.layers.0.self_attn.attn, model.layers.2.self_attn.attn,
-            # model.layers.4.self_attn.attn, model.layers.6.self_attn.attn..)
-            # print(layer_name,"\n", flush=True)
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
@@ -2065,9 +2068,9 @@ class NixlConnectorWorker:
             req_id,
         )
         print(
-            "read_blocks_for_req",
+            "read_blocks_for_req local and REMOTE blocks",
             meta.local_physical_block_ids,
-            meta.remote_block_ids,
+            meta.remote.block_ids,
             "\n",
             flush=True,
         )
@@ -2209,6 +2212,7 @@ class NixlConnectorWorker:
             local_block_descs_ids = np.concatenate(local_descs_list)
             remote_block_descs_ids = np.concatenate(remote_descs_list)
 
+        # FIXME blows up here
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
