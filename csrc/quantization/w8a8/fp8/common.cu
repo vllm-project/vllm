@@ -4,6 +4,7 @@
 #include "quantization/vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/Exceptions.h>
+#include <tuple>
 
 namespace vllm {
 
@@ -175,11 +176,11 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 }  // namespace vllm
 
 void static_scaled_fp8_quant(
-    torch::Tensor& out,                  // [..., d]
-    torch::Tensor const& input,          // [..., d]
-    torch::Tensor const& scale,          // various shapes
-    std::optional<int64_t> opt_group_m,  // optional explicit group_m
-    std::optional<int64_t> opt_group_n)  // optional explicit group_n
+    torch::Tensor& out,          // [..., d]
+    torch::Tensor const& input,  // [..., d]
+    torch::Tensor const& scale,  // various shapes
+    std::optional<std::tuple<int64_t, int64_t>>
+        opt_group_shape)  // optional explicit (group_m, group_n)
 {
   TORCH_CHECK(input.stride(-1) == 1,
               "last dimension of input must be contiguous");
@@ -195,10 +196,6 @@ void static_scaled_fp8_quant(
   int group_m, group_n;
   int64_t scale_stride_0, scale_stride_1;
 
-  // If explicit group shape is provided, use it
-  const bool has_explicit_group =
-      opt_group_m.has_value() && opt_group_n.has_value();
-
   if (scale.dim() == 0 || scale.numel() == 1) {
     // Per-tensor: one scale for the entire tensor
     group_m = num_tokens;
@@ -208,16 +205,15 @@ void static_scaled_fp8_quant(
   } else if (scale.dim() == 1) {
     // 1D scale: require explicit group_shape to disambiguate per-channel vs
     // per-token (avoids edge case where num_tokens == hidden_size)
-    TORCH_CHECK(has_explicit_group,
+    TORCH_CHECK(opt_group_shape.has_value(),
                 "1D scale requires explicit group_shape to disambiguate "
                 "per-channel vs per-token quantization. "
                 "Use group_shape=(-1, 1) for per-channel or group_shape=(1, "
                 "-1) for per-token.");
 
-    group_m = opt_group_m.value() == -1 ? num_tokens
-                                        : static_cast<int>(opt_group_m.value());
-    group_n = opt_group_n.value() == -1 ? hidden_size
-                                        : static_cast<int>(opt_group_n.value());
+    const auto& [opt_group_m, opt_group_n] = opt_group_shape.value();
+    group_m = opt_group_m == -1 ? num_tokens : static_cast<int>(opt_group_m);
+    group_n = opt_group_n == -1 ? hidden_size : static_cast<int>(opt_group_n);
 
     // Validate the explicit group shape matches the 1D scale
     const int64_t scale_len = scale.numel();
@@ -227,9 +223,9 @@ void static_scaled_fp8_quant(
 
     TORCH_CHECK(scale_len == expected_scale_numel, "1D scale length (",
                 scale_len, ") does not match expected size (",
-                expected_scale_numel, ") for group_shape (",
-                opt_group_m.value(), ", ", opt_group_n.value(),
-                ") with input shape (", num_tokens, ", ", hidden_size, ")");
+                expected_scale_numel, ") for group_shape (", opt_group_m, ", ",
+                opt_group_n, ") with input shape (", num_tokens, ", ",
+                hidden_size, ")");
 
     // For 1D scale, determine strides based on which dim is trivial
     // Scale indexing: scale[gi * scale_stride_0 + gj * scale_stride_1]
@@ -266,18 +262,14 @@ void static_scaled_fp8_quant(
     int inferred_group_n = hidden_size / scale_size_1;
 
     // Use explicit if provided, otherwise use inferred
-    if (has_explicit_group) {
-      group_m = opt_group_m.value() == -1
-                    ? num_tokens
-                    : static_cast<int>(opt_group_m.value());
-      group_n = opt_group_n.value() == -1
-                    ? hidden_size
-                    : static_cast<int>(opt_group_n.value());
+    if (opt_group_shape.has_value()) {
+      const auto& [opt_group_m, opt_group_n] = opt_group_shape.value();
+      group_m = opt_group_m == -1 ? num_tokens : static_cast<int>(opt_group_m);
+      group_n = opt_group_n == -1 ? hidden_size : static_cast<int>(opt_group_n);
 
       // Validate explicit matches inferred
       TORCH_CHECK(group_m == inferred_group_m && group_n == inferred_group_n,
-                  "Explicit group_shape (", opt_group_m.value(), ", ",
-                  opt_group_n.value(),
+                  "Explicit group_shape (", opt_group_m, ", ", opt_group_n,
                   ") does not match inferred group shape (", inferred_group_m,
                   ", ", inferred_group_n, ") from 2D scale tensor shape (",
                   scale_size_0, ", ", scale_size_1, ")");
