@@ -349,14 +349,15 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase if open for >1 day and 10 commits behind main
+- name: auto-rebase if ready and 40 commits behind main
   conditions:
     - base = main
-    - "#commits-behind >= 10"
+    - "#commits-behind >= 40"
     - -closed
     - -draft
     - -conflict
-    - -label~=needs-rebase
+    - -label=ready
+    - "#approved-reviews-by >= 1"
   actions:
     rebase: {}
 
