@@ -688,16 +688,13 @@ class Fp8LinearMethod(LinearMethodBase):
 def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute | None:
     from vllm.model_executor.layers.fused_moe import (
         FlashInferExperts,
-        MarlinExperts,
-        TritonExperts,
         TritonOrDeepGemmExperts,
     )
 
     _BACKEND_TO_KERNEL = {
         Fp8MoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
         Fp8MoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
-        Fp8MoeBackend.MARLIN: MarlinExperts,
-        Fp8MoeBackend.TRITON: TritonExperts,
+        Fp8MoeBackend.TRITON: TritonOrDeepGemmExperts,
     }
 
     if (
@@ -1069,51 +1066,51 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Initialize quant config.
         # TODO: make this a standard part of the lifecycle
         # after process_weights_after_loading
-        config = self.get_fused_moe_quant_config(layer)
-        assert config is not None
-        assert self.kernel is not None
-        self.moe_quant_config = config
-        from vllm.model_executor.layers.fused_moe import (
-            FlashInferExperts,
-            TritonOrDeepGemmExperts,
-        )
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-            FlashInferAllGatherMoEPrepareAndFinalize,
-        )
-        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-            MoEPrepareAndFinalizeNoEP,
-        )
-
-        if self.kernel is FlashInferExperts:
-            use_dp = self.moe.dp_size > 1
-            self.fn = mk.FusedMoEModularKernel(
-                FlashInferAllGatherMoEPrepareAndFinalize(
-                    use_dp=use_dp, use_deepseek_fp8_block_scale=self.block_quant
-                ),
-                self.kernel(
-                    out_dtype=torch.get_default_dtype(),
-                    quant_config=self.moe_quant_config,
-                    ep_rank=self.moe.ep_rank,
-                    ep_size=self.moe.ep_size,
-                    tp_rank=self.moe.tp_rank,
-                    tp_size=self.moe.tp_size,
-                    use_dp=use_dp,
-                    use_deepseek_fp8_block_scale=self.block_quant,
-                ),
-            )
-            self.use_inplace = False
-
-        elif self.kernel is TritonOrDeepGemmExperts:
-            self.fn = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
-                self.kernel(
-                    quant_config=self.moe_quant_config,
-                    allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                ),
-            )
-            self.use_inplace = True
+        if self.kernel is None:
+            pass
         else:
-            raise NotImplementedError
+            config = self.get_fused_moe_quant_config(layer)
+            assert config is not None
+            self.moe_quant_config = config
+            from vllm.model_executor.layers.fused_moe import (
+                FlashInferExperts,
+                TritonOrDeepGemmExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+                FlashInferAllGatherMoEPrepareAndFinalize,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+
+            if self.kernel is FlashInferExperts:
+                use_dp = self.moe.dp_size > 1
+                self.fn = mk.FusedMoEModularKernel(
+                    FlashInferAllGatherMoEPrepareAndFinalize(
+                        use_dp=use_dp, use_deepseek_fp8_block_scale=self.block_quant
+                    ),
+                    self.kernel(
+                        out_dtype=torch.get_default_dtype(),
+                        quant_config=self.moe_quant_config,
+                        ep_rank=self.moe.ep_rank,
+                        ep_size=self.moe.ep_size,
+                        tp_rank=self.moe.tp_rank,
+                        tp_size=self.moe.tp_size,
+                        use_dp=use_dp,
+                        use_deepseek_fp8_block_scale=self.block_quant,
+                    ),
+                )
+                self.use_inplace = False
+
+            elif self.kernel is TritonOrDeepGemmExperts:
+                self.fn = mk.FusedMoEModularKernel(
+                    MoEPrepareAndFinalizeNoEP(),
+                    self.kernel(
+                        quant_config=self.moe_quant_config,
+                        allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                    ),
+                )
+                self.use_inplace = True
 
     def maybe_make_prepare_finalize(
         self,
