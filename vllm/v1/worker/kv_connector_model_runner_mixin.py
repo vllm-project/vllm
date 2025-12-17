@@ -191,8 +191,8 @@ class KVConnectorModelRunnerMixin:
 
         attn_backend = attn_group.backend
         if (
-            getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-            != kv_cache_spec.head_size
+            hasattr(kv_cache_spec, "head_size_v")
+            and kv_cache_spec.head_size_v != kv_cache_spec.head_size
         ):
             kwargs = {"head_size_v": kv_cache_spec.head_size_v}
             stride_kwargs = {"diff_kv": True}
@@ -269,8 +269,8 @@ class KVConnectorModelRunnerMixin:
 
         attn_backend = attn_group.backend
         if (
-            getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-            != kv_cache_spec.head_size
+            hasattr(kv_cache_spec, "head_size_v")
+            and kv_cache_spec.head_size_v != kv_cache_spec.head_size
         ):
             kwargs = {"head_size_v": kv_cache_spec.head_size_v}
             stride_kwargs = {"diff_kv": True}

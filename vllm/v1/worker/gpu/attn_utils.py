@@ -102,8 +102,8 @@ def _reshape_kv_cache(
 
             attn_backend = attn_backends[layer_name]
             if (
-                getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-                != kv_cache_spec.head_size
+                hasattr(kv_cache_spec, "head_size_v")
+                and kv_cache_spec.head_size_v != kv_cache_spec.head_size
             ):
                 kwargs = {"head_size_v": kv_cache_spec.head_size_v}
                 stride_kwargs = {"diff_kv": True}

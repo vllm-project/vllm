@@ -5207,8 +5207,8 @@ class GPUModelRunner(
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
                     if (
-                        getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-                        != kv_cache_spec.head_size
+                        hasattr(kv_cache_spec, "head_size_v")
+                        and kv_cache_spec.head_size_v != kv_cache_spec.head_size
                     ):
                         kwargs = {"head_size_v": kv_cache_spec.head_size_v}
                         stride_kwargs = {"diff_kv": True}
