@@ -15,7 +15,12 @@ Here is an example for docker run command for CPU. For GPUs skip setting the `ON
 ```bash
 export VLLM_COMMIT=1da94e673c257373280026f75ceb4effac80e892 # use full commit hash from the main branch
 export HF_TOKEN=<valid Hugging Face token>
-docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface -e HF_TOKEN=$HF_TOKEN -e ON_CPU=1 --shm-size=16g --name vllm-cpu-ci public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}-cpu
+if [[ "$(uname -m)" == aarch64 || "$(uname -m)" == arm64 ]]; then
+  IMG_SUFFIX="arm64-cpu"
+else
+  IMG_SUFFIX="cpu"
+fi
+docker run -it --entrypoint /bin/bash -v /data/huggingface:/root/.cache/huggingface -e HF_TOKEN=$HF_TOKEN -e ON_ARM64_CPU=1 --shm-size=16g --name vllm-cpu-ci public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:${VLLM_COMMIT}-${IMG_SUFFIX}
 ```
 
 Then, run below command inside the docker instance.
