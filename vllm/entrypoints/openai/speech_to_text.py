@@ -171,12 +171,11 @@ class OpenAISpeechToText(OpenAIServing):
 
             warmup_elapsed = time.perf_counter() - warmup_start
             logger.info("Audio preprocessing warmup completed in %.2fs", warmup_elapsed)
-        except Exception as e:
+        except Exception:
             # Don't fail initialization if warmup fails - log exception and continue
             logger.exception(
                 "Audio preprocessing warmup failed (non-fatal): %s. "
                 "First request may experience higher latency.",
-                e,
             )
 
     def _warmup_input_processor(self) -> None:
@@ -231,12 +230,11 @@ class OpenAISpeechToText(OpenAIServing):
 
             warmup_elapsed = time.perf_counter() - warmup_start
             logger.info("Input processor warmup completed in %.2fs", warmup_elapsed)
-        except Exception as e:
+        except Exception:
             # Don't fail initialization if warmup fails - log warning and continue
             logger.exception(
                 "Input processor warmup failed (non-fatal): %s. "
-                "First request may experience higher latency.",
-                e,
+                "First request may experience higher latency."
             )
 
     @cached_property
