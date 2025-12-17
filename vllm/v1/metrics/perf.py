@@ -46,12 +46,8 @@ class InvalidComponent(Exception):
 
 
 @dataclass
-class PerfStats:
-    num_flops_per_gpu: int = 0
-    num_read_bytes_per_gpu: int = 0
-    num_write_bytes_per_gpu: int = 0
-
-    ## verbose metrics (printed when verbose logging is enabled)
+class DebugPerfStats:
+    ## Stats for debugging the metrics calculation
     calc_duration: float = 0.0  # time spent calculating these stats
     num_prefill_requests: int = 0
     num_decode_requests: int = 0
@@ -59,6 +55,14 @@ class PerfStats:
     num_flops_per_gpu_breakdown: dict[str, int] | None = None
     num_read_bytes_per_gpu_breakdown: dict[str, int] | None = None
     num_write_bytes_per_gpu_breakdown: dict[str, int] | None = None
+
+
+@dataclass
+class PerfStats:
+    num_flops_per_gpu: int = 0
+    num_read_bytes_per_gpu: int = 0
+    num_write_bytes_per_gpu: int = 0
+    debug_stats: DebugPerfStats | None = None
 
 
 @dataclass
@@ -1058,14 +1062,17 @@ class ModelMetrics:
             is_prefill = num_tokens > 1
             ctx.add(num_tokens, context_len, is_prefill)
 
+        num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
+        read_bytes_breakdown = self.get_read_bytes_breakdown(ctx, True)
+        write_bytes_breakdown = self.get_write_bytes_breakdown(ctx, True)
+        perf_stats = PerfStats(
+            sum(num_flops_breakdown.values()),
+            sum(read_bytes_breakdown.values()),
+            sum(write_bytes_breakdown.values()),
+        )
+
         if log_verbose(self.vllm_config):
-            num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
-            read_bytes_breakdown = self.get_read_bytes_breakdown(ctx, True)
-            write_bytes_breakdown = self.get_write_bytes_breakdown(ctx, True)
-            perf_stats = PerfStats(
-                sum(num_flops_breakdown.values()),
-                sum(read_bytes_breakdown.values()),
-                sum(write_bytes_breakdown.values()),
+            perf_stats.debug_stats = DebugPerfStats(
                 time.monotonic() - t0,
                 ctx.num_prefill_requests,
                 ctx.num_decode_requests,
@@ -1074,12 +1081,6 @@ class ModelMetrics:
                 read_bytes_breakdown,
                 write_bytes_breakdown,
             )
-        else:
-            perf_stats = PerfStats(
-                self.get_num_flops(ctx, True),
-                self.get_read_bytes(ctx, True),
-                self.get_write_bytes(ctx, True),
-            )
 
         return perf_stats
 
@@ -1087,20 +1088,11 @@ class ModelMetrics:
 #### Logging ####
 
 
-class PerfMetricsLogging:
-    def __init__(self, vllm_config: VllmConfig):
-        self.vllm_config = vllm_config
-        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+class PerfMetricsDebugLogging:
+    def __init__(self):
         self.reset()
 
     def reset(self):
-        self.last_log_time = time.monotonic()
-
-        self.total_num_flops_per_gpu: int = 0
-        self.total_read_bytes_per_gpu: int = 0
-        self.total_write_bytes_per_gpu: int = 0
-
-        # verbose metrics
         self.total_calc_duration: float = 0.0
         self.total_num_prefill_requests: int = 0
         self.total_num_decode_requests: int = 0
@@ -1110,34 +1102,95 @@ class PerfMetricsLogging:
         self.total_read_bytes_per_gpu_breakdown: dict[str, int] = {}
         self.total_write_bytes_per_gpu_breakdown: dict[str, int] = {}
 
+    def observe(self, debug_stats: DebugPerfStats) -> None:
+        self.total_calc_duration += debug_stats.calc_duration
+        self.total_num_prefill_requests += debug_stats.num_prefill_requests
+        self.total_num_decode_requests += debug_stats.num_decode_requests
+        self.total_num_batches += 1
+
+        for dst, src in zip(
+            [
+                self.total_context_breakdown,
+                self.total_num_flops_per_gpu_breakdown,
+                self.total_read_bytes_per_gpu_breakdown,
+                self.total_write_bytes_per_gpu_breakdown,
+            ],
+            [
+                debug_stats.context_breakdown,
+                debug_stats.num_flops_per_gpu_breakdown,
+                debug_stats.num_read_bytes_per_gpu_breakdown,
+                debug_stats.num_write_bytes_per_gpu_breakdown,
+            ],
+        ):
+            assert isinstance(src, dict)
+            for key, val in src.items():
+                dst[key] = dst.get(key, 0) + val
+
+    def log(self, log_fn, delta_time: float):
+        # pretty print breakdowns
+        total_num_flops_per_gpu_breakdown = {
+            k: f"{v / 1e12:.1f}TF"
+            for k, v in self.total_num_flops_per_gpu_breakdown.items()
+        }
+        total_read_bytes_per_gpu_breakdown = {
+            k: f"{v / 1e9:.1f}GB"
+            for k, v in self.total_read_bytes_per_gpu_breakdown.items()
+        }
+        total_write_bytes_per_gpu_breakdown = {
+            k: f"{v / 1e9:.1f}GB"
+            for k, v in self.total_write_bytes_per_gpu_breakdown.items()
+        }
+
+        logger.debug(
+            "MFU details: %s",
+            json.dumps(
+                {
+                    "prefill_reqs": self.total_num_prefill_requests,
+                    "decode_reqs": self.total_num_decode_requests,
+                    "num_batches": self.total_num_batches,
+                    "context_breakdown": self.total_context_breakdown,
+                    "flops_breakdown": total_num_flops_per_gpu_breakdown,
+                    "num_read_bytes_breakdown": total_read_bytes_per_gpu_breakdown,
+                    "num_write_bytes_breakdown": (total_write_bytes_per_gpu_breakdown),
+                    "duration": f"{delta_time:.1f}s",
+                    "mfu_calc_overhead": (
+                        f"{self.total_calc_duration / delta_time:.1%}"
+                    ),
+                },
+                indent=2,
+            ),
+        )
+
+
+class PerfMetricsLogging:
+    def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
+        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
+
+        self.debug_logging: PerfMetricsDebugLogging | None = None
+        if log_verbose(self.vllm_config):
+            self.debug_logging = PerfMetricsDebugLogging()
+
+        self.reset()
+
+    def reset(self):
+        self.last_log_time = time.monotonic()
+
+        self.total_num_flops_per_gpu: int = 0
+        self.total_read_bytes_per_gpu: int = 0
+        self.total_write_bytes_per_gpu: int = 0
+
+        if self.debug_logging:
+            self.debug_logging.reset()
+
     def observe(self, perf_stats: PerfStats) -> None:
         self.total_num_flops_per_gpu += perf_stats.num_flops_per_gpu
         self.total_read_bytes_per_gpu += perf_stats.num_read_bytes_per_gpu
         self.total_write_bytes_per_gpu += perf_stats.num_write_bytes_per_gpu
 
-        if log_verbose(self.vllm_config):
-            self.total_calc_duration += perf_stats.calc_duration
-            self.total_num_prefill_requests += perf_stats.num_prefill_requests
-            self.total_num_decode_requests += perf_stats.num_decode_requests
-            self.total_num_batches += 1
-
-            for dst, src in zip(
-                [
-                    self.total_context_breakdown,
-                    self.total_num_flops_per_gpu_breakdown,
-                    self.total_read_bytes_per_gpu_breakdown,
-                    self.total_write_bytes_per_gpu_breakdown,
-                ],
-                [
-                    perf_stats.context_breakdown,
-                    perf_stats.num_flops_per_gpu_breakdown,
-                    perf_stats.num_read_bytes_per_gpu_breakdown,
-                    perf_stats.num_write_bytes_per_gpu_breakdown,
-                ],
-            ):
-                assert isinstance(src, dict)
-                for key, val in src.items():
-                    dst[key] = dst.get(key, 0) + val
+        if self.debug_logging:
+            assert perf_stats.debug_stats is not None
+            self.debug_logging.observe(perf_stats.debug_stats)
 
     def log(self, log_fn=logger.info):
         if not (
@@ -1164,43 +1217,8 @@ class PerfMetricsLogging:
             avg_gbps_per_gpu,
         )
 
-        # log details via debug logging when per-gpu-debug is enabled
-        if log_verbose(self.vllm_config):
-            # pretty print breakdowns
-            total_num_flops_per_gpu_breakdown = {
-                k: f"{v / 1e12:.1f}TF"
-                for k, v in self.total_num_flops_per_gpu_breakdown.items()
-            }
-            total_read_bytes_per_gpu_breakdown = {
-                k: f"{v / 1e9:.1f}GB"
-                for k, v in self.total_read_bytes_per_gpu_breakdown.items()
-            }
-            total_write_bytes_per_gpu_breakdown = {
-                k: f"{v / 1e9:.1f}GB"
-                for k, v in self.total_write_bytes_per_gpu_breakdown.items()
-            }
-
-            logger.debug(
-                "MFU details: %s",
-                json.dumps(
-                    {
-                        "prefill_reqs": self.total_num_prefill_requests,
-                        "decode_reqs": self.total_num_decode_requests,
-                        "num_batches": self.total_num_batches,
-                        "context_breakdown": self.total_context_breakdown,
-                        "flops_breakdown": total_num_flops_per_gpu_breakdown,
-                        "num_read_bytes_breakdown": total_read_bytes_per_gpu_breakdown,
-                        "num_write_bytes_breakdown": (
-                            total_write_bytes_per_gpu_breakdown
-                        ),
-                        "duration": f"{delta_time:.1f}s",
-                        "mfu_calc_overhead": (
-                            f"{self.total_calc_duration / delta_time:.1%}"
-                        ),
-                    },
-                    indent=2,
-                ),
-            )
+        if self.debug_logging:
+            self.debug_logging.log(log_fn, delta_time)
 
         self.reset()
 
