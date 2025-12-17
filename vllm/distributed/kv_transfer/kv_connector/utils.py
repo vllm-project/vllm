@@ -198,9 +198,9 @@ class TpKVTopology:
     is_mla: bool
     total_num_kv_heads: int
     attn_backend: type[AttentionBackend]
+    tensor_shape: torch.Size
     engine_id: str
     remote_block_size: dict[str, int]
-    cross_layers: bool
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -217,6 +217,12 @@ class TpKVTopology:
         attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
 
+        test_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1234, block_size=16, num_kv_heads=8, head_size=256
+        )
+
+        self._cross_layers_blocks = len(self.tensor_shape) != len(test_shape)
+
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
@@ -225,7 +231,7 @@ class TpKVTopology:
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
         return not (
-            self.cross_layers
+            self._cross_layers_blocks
             or self.is_mla
             or self._use_pallas
             or self.is_kv_layout_blocks_first
@@ -239,13 +245,16 @@ class TpKVTopology:
     def block_size(self) -> int:
         return self.remote_block_size[self.engine_id]
 
-    def block_size_position(self, device_type: str) -> int:
-        if device_type == "cpu" or self.cross_layers:
-            block_size_position = -2
-        else:
-            block_size_position = -2 if self.is_mla else -3
+    @property
+    def use_pallas(self) -> bool:
+        return self._use_pallas
 
-        return block_size_position
+    @property
+    def cross_layers_blocks(self) -> bool:
+        return self._cross_layers_blocks
+
+    def block_size_position(self, device_type: str) -> int:
+        return -2 if self.is_mla or self._cross_layers_blocks else -3
 
     def tp_ratio(
         self,
