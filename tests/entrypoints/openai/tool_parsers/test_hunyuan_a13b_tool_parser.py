@@ -12,7 +12,7 @@ from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 
 def make_tool_call(name, arguments):

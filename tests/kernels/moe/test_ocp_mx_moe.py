@@ -17,7 +17,7 @@ QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
 ) >= version.parse("0.8.99")
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
-    current_platform.is_cuda() and current_platform.is_device_capability(100)
+    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
 )
 
 HOPPER_MXFP4_BF16_AVAILABLE = (
@@ -70,12 +70,12 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
             f"{torch.cuda.device_count()}"
         )
 
-    # `cuda_graph_sizes=[16]` to reduce load time.
+    # `cudagraph_capture_sizes=[16]` to reduce load time.
     with vllm_runner(
         model_case.model_id,
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
-        cuda_graph_sizes=[16],
+        cudagraph_capture_sizes=[16],
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
@@ -799,7 +799,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
 @pytest.mark.skipif(
     not (
         current_platform.is_cuda()
-        and current_platform.is_device_capability(100)
+        and current_platform.is_device_capability_family(100)
         and has_flashinfer()
     ),
     reason="NVIDIA GPU sm100 and flashinfer are required for this test",

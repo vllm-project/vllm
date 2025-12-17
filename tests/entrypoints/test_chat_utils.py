@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 import pytest
+import torch
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.assets.audio import AudioAsset
@@ -28,7 +29,8 @@ from vllm.multimodal.utils import (
     encode_image_base64,
     encode_video_base64,
 )
-from vllm.tokenizers import MistralTokenizer, get_tokenizer
+from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.serial_utils import tensor2base64
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -795,9 +797,13 @@ def test_parse_chat_messages_empty_image_embeds_with_uuid(
             "content": "<|image_1|>\nWhat's in this image?",
         }
     ]
+
     assert mm_data is not None
     assert "image" in mm_data
-    assert mm_data["image"] is None
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 1
+    assert mm_data["image"][0] is None
+
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[uuid])
 
 
@@ -824,10 +830,11 @@ def test_parse_chat_messages_empty_audio_embeds_with_uuid(
     # Should have audio in mm_data as None (UUID provided)
     assert mm_data is not None
     assert "audio" in mm_data
-    assert mm_data["audio"] is None
+    assert isinstance(mm_data["audio"], list)
+    assert len(mm_data["audio"]) == 1
+    assert mm_data["audio"][0] is None
+
     # UUID should be recorded
-    assert mm_uuids is not None
-    assert "audio" in mm_uuids
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[uuid])
 
 
@@ -915,6 +922,183 @@ async def test_parse_chat_messages_audio_embeds_async(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[None])
 
 
+def test_parse_chat_messages_multiple_image_embeds(
+    phi3v_model_config_image_embeds,
+):
+    """Test that multiple image_embeds in a single message are now supported.
+
+    This test validates the fix for the limitation that previously only allowed
+    one message with {'type': 'image_embeds'}. Now multiple image embeddings
+    can be provided in a single request, similar to regular images.
+    """
+    # Create two sample image embedding tensors
+    image_embedding_1 = torch.randn(256, 1024)
+    image_embedding_2 = torch.randn(128, 1024)
+
+    # Encode them as base64 using the convenience function
+    base64_image_embedding_1 = tensor2base64(image_embedding_1)
+    base64_image_embedding_2 = tensor2base64(image_embedding_2)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_2,
+                    },
+                    {"type": "text", "text": "Describe these two images."},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nDescribe these two images.",
+        }
+    ]
+
+    # Verify mm_data contains a list of embeddings (not a single embedding)
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+
+    # Verify each embedding has the correct shape
+    assert isinstance(mm_data["image"][0], torch.Tensor)
+    assert mm_data["image"][0].shape == image_embedding_1.shape
+    assert isinstance(mm_data["image"][1], torch.Tensor)
+    assert mm_data["image"][1].shape == image_embedding_2.shape
+
+    # Verify UUIDs (None since we didn't provide any)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
+def test_parse_chat_messages_multiple_image_embeds_with_uuids(
+    phi3v_model_config_image_embeds,
+):
+    """Test multiple image_embeds with UUIDs.
+
+    This validates that UUIDs are properly tracked for multiple embeddings.
+    """
+    uuid1 = "image-uuid-1"
+    uuid2 = "image-uuid-2"
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": None,
+                        "uuid": uuid1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": None,
+                        "uuid": uuid2,
+                    },
+                    {"type": "text", "text": "Compare these images."},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nCompare these images.",
+        }
+    ]
+
+    # Verify mm_data contains a list with None values (UUID references)
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+    assert mm_data["image"][0] is None
+    assert mm_data["image"][1] is None
+
+    # Verify UUIDs are correctly tracked
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[uuid1, uuid2])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_multiple_image_embeds_async(
+    phi3v_model_config_image_embeds,
+):
+    """Test multiple image_embeds with async parsing.
+
+    This validates the AsyncMultiModalItemTracker also supports multiple embeddings.
+    """
+    # Create two sample image embedding tensors
+    image_embedding_1 = torch.randn(200, 768)
+    image_embedding_2 = torch.randn(150, 768)
+
+    # Encode them as base64 using the convenience function
+    base64_image_embedding_1 = tensor2base64(image_embedding_1)
+    base64_image_embedding_2 = tensor2base64(image_embedding_2)
+
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_1,
+                    },
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": base64_image_embedding_2,
+                    },
+                    {"type": "text", "text": "What do these images show?"},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nWhat do these images show?",
+        }
+    ]
+
+    # Await the future and verify mm_data
+    mm_data = await mm_future
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 2
+
+    # Verify each embedding has the correct shape
+    assert isinstance(mm_data["image"][0], torch.Tensor)
+    assert mm_data["image"][0].shape == image_embedding_1.shape
+    assert isinstance(mm_data["image"][1], torch.Tensor)
+    assert mm_data["image"][1].shape == image_embedding_2.shape
+
+    # Verify UUIDs
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
 @pytest.mark.asyncio
 async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
     phi3v_model_config_image_embeds,
@@ -943,8 +1127,103 @@ async def test_parse_chat_messages_empty_image_embeds_with_uuid_async(
     mm_data = await mm_future
     assert mm_data is not None
     assert "image" in mm_data
-    assert mm_data["image"] is None
+    assert isinstance(mm_data["image"], list)
+    assert len(mm_data["image"]) == 1
+    assert mm_data["image"][0] is None
+
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[uuid])
+
+
+def test_parse_chat_messages_empty_dict_image_embeds(
+    phi3v_model_config_image_embeds,
+):
+    """Test that empty dictionary for image_embeds is handled without errors."""
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_embeds", "image_embeds": {}},
+                    {"type": "text", "text": "What's in this image?"},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\nWhat's in this image?",
+        }
+    ]
+
+    # Verify mm_data contains an empty dictionary of embeddings
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], dict)
+    assert len(mm_data["image"]) == 0
+
+    # Verify UUIDs (None since we didn't provide any)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
+def test_parse_chat_messages_multiple_dict_image_embeds(
+    phi3v_model_config_image_embeds,
+):
+    """Test that multiple dictionaries for image_embeds is handled without errors."""
+    # Create two sample image embedding tensors
+    batch_size = 2
+    image_embedding_1 = torch.randn(batch_size, 256, 1024)
+    image_embedding_2 = torch.randn(batch_size, 3)
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_embeds",
+                        "image_embeds": {
+                            "image_embedding_1": tensor2base64(p),
+                            "image_embedding_2": tensor2base64(i),
+                        },
+                    }
+                    for p, i in zip(image_embedding_1, image_embedding_2)
+                ]
+                + [
+                    {"type": "text", "text": "Describe these two images."},
+                ],
+            }
+        ],
+        phi3v_model_config_image_embeds,
+        content_format="string",
+    )
+
+    # Verify conversation structure
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "<|image_1|>\n<|image_2|>\nDescribe these two images.",
+        }
+    ]
+
+    # Verify mm_data contains a dictionary of multi-embeddings
+    assert mm_data is not None
+    assert "image" in mm_data
+    assert isinstance(mm_data["image"], dict)
+    assert len(mm_data["image"]) == batch_size
+
+    # Verify each embedding has the correct shape
+    assert isinstance(mm_data["image"]["image_embedding_1"], torch.Tensor)
+    assert mm_data["image"]["image_embedding_1"].shape == image_embedding_1.shape
+    assert isinstance(mm_data["image"]["image_embedding_2"], torch.Tensor)
+    assert mm_data["image"]["image_embedding_2"].shape == image_embedding_2.shape
+
+    # Verify UUIDs (None since we didn't provide any)
+    _assert_mm_uuids(mm_uuids, batch_size, expected_uuids=[None, None])
 
 
 @pytest.mark.asyncio
