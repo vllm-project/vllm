@@ -1117,14 +1117,13 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             # Pad weight to match swizzled scale dimensions
             if weight_scale_rows_padded != weight_current_rows:
                 pad_rows = weight_scale_rows_padded - weight_current_rows
-                assert pad_rows >= 0, (
+                assert pad_rows > 0, (
                     f"Weight scale rows ({weight_scale_rows_padded}) < "
                     f"weight rows ({weight_current_rows})."
                 )
-                if pad_rows > 0:
-                    weight = torch.nn.functional.pad(
-                        weight, (0, 0, 0, pad_rows)
-                    ).contiguous()
+                weight = torch.nn.functional.pad(
+                    weight, (0, 0, 0, pad_rows)
+                ).contiguous()
 
             # Calculate the number of k blocks padded to satisfy alignment
             # constraints for the weight
@@ -1133,7 +1132,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             num_k_blocks_padded = swizzled_weight_scale.shape[1]
             k_bytes_padded = (num_k_blocks_padded * group_size) // 2
             k_bytes_orig = weight.shape[1]
-
 
             if k_bytes_padded != k_bytes_orig:
                 pad_bytes = k_bytes_padded - k_bytes_orig
@@ -1211,7 +1209,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 x_blockscale = torch.nn.functional.pad(
                     x_blockscale, (0, pad_scales), value=0.0
                 ).contiguous()
-
 
             mm_args = (
                 x_fp4,

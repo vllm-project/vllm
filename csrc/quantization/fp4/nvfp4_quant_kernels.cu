@@ -50,61 +50,47 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                 "Vec size is not matched.");
 
   int sf_m = round_up<int>(numRows, 128);
-  
-  // Columns (SFs) are packed in blocks of 4.
   int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
   int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
-  
-  // Total columns to iterate (includes padding columns)
-  int num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE; 
+  int num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE;
 
-  // Get the global scaling factor
   float const global_scale = SFScale == nullptr ? 1.0f : SFScale[0];
 
-
-  // 2. Unified Loop: Iterate over PADDED rows and PADDED columns
-  // This ensures we visit every single scale factor address to initialize it.
+  // Iterate over all rows and cols including padded ones -
+  //  ensures we visit every single scale factor address to initialize it.
   for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
-    for (int colIdx = threadIdx.x; colIdx < num_padded_cols / CVT_FP4_ELTS_PER_THREAD;
+    for (int colIdx = threadIdx.x;
+         colIdx < num_padded_cols / CVT_FP4_ELTS_PER_THREAD;
          colIdx += blockDim.x) {
-      
-      // Calculate logical element index
       int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
-      
+
       PackedVec in_vec;
 
-      // 3. Handle Padding (Vertical OR Horizontal)
       // If we are outside valid rows OR outside valid columns -> Use Zeros
       if (rowIdx >= numRows || elem_idx >= numCols) {
-          // Padding Zone: Fake input as zeros. 
-          // This results in a Scale Factor of 0.0, safely zeroing the output SF.
-          memset(&in_vec, 0, sizeof(PackedVec));
+        memset(&in_vec, 0, sizeof(PackedVec));
 
       } else {
-          // Valid Region: Load actual data
-          // Calculate input offset based on original stride
-          int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-          in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
+        // Valid Region: Load actual data
+        int64_t inOffset =
+            rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+        in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
       }
 
-      // 4. Calculate Swizzled Scale Factor Address
-      // This works for valid AND padding regions to find the correct SF location
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, num_padded_cols, SFout);
 
-      // 5. Quantize
-      // - Valid input -> Real scale
-      // - Zero input -> Zero scale (Correctly handles padding initialization)
-      // This function handles the intra-block bit packing safely.
-      auto out_val = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, global_scale, sf_out);
-      
-      // 6. Write Output Tensor (Only if strictly within valid bounds)
-      // We do NOT write output for padding because the 'out' tensor is not padded.
+      auto out_val =
+          cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, global_scale, sf_out);
+
+      // We do NOT write output for padding because the 'out' tensor is not
+      // padded.
       if (rowIdx < numRows && elem_idx < numCols) {
-          int64_t inOffset = rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-          out[inOffset] = out_val;
+        int64_t inOffset =
+            rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+        out[inOffset] = out_val;
       }
     }
   }
@@ -121,7 +107,6 @@ void invokeFP4Quantization(int m, int n, T const* input, float const* SFScale,
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
   dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
-
 
   // Launch the cvt kernel.
   if (useUE8M0) {
