@@ -329,35 +329,23 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
 
 
 def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
-    """Count total warmup iterations for progress bar."""
-    total = 0
-    block_m = get_mk_alignment_for_contiguous_layout()[0]
-
     seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
     seen_grouped_sizes: set[torch.Size] = set(
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
 
+    total = 0
     for m in model.modules():
         if _fp8_linear_may_use_deep_gemm(m):
             w, _, _ = _extract_data_from_linear_base_module(m)
             if w.size() not in seen_fp8_sizes:
                 total += len(_get_fp8_gemm_nt_m_values(w, max_tokens))
                 seen_fp8_sizes.add(w.size())
-
-    for m in model.modules():
-        if _fused_moe_grouped_gemm_may_use_deep_gemm(m):
+        elif _fused_moe_grouped_gemm_may_use_deep_gemm(m):
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
             if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
                 continue
-            num_experts = w13.size(0)
-            max_tokens_adj = min(
-                get_dp_group().world_size * max_tokens,
-                envs.VLLM_FUSED_MOE_CHUNK_SIZE,
-            )
-            MAX_M = compute_aligned_M(
-                max_tokens_adj, num_topk, num_experts, block_m, expert_tokens_meta=None
-            )
+            MAX_M, block_m, _ = _get_grouped_gemm_params(w13, w2, num_topk, max_tokens)
             n_values = (MAX_M - block_m) // block_m + 1
             if w13.size() not in seen_grouped_sizes:
                 total += n_values
