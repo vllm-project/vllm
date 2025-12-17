@@ -97,10 +97,8 @@ def test_fault_receiver():
     check_thread = threading.Thread(target=check_published_message, daemon=True)
     check_thread.start()
 
-    time.sleep(0.1)
+    received_fault = engine_exception_q.get(timeout=1)
 
-    assert not engine_exception_q.empty()
-    received_fault = engine_exception_q.get_nowait()
     assert received_fault.engine_id == "1"
     assert received_fault.type == "dead"
 
@@ -177,6 +175,7 @@ async def test_handle_fault_async(instruction):
     time.sleep(0.1)
 
     uuid = None
+    uuid_received = threading.Event()
 
     def receive_cmd(cmd_socket):
         nonlocal uuid
@@ -190,11 +189,12 @@ async def test_handle_fault_async(instruction):
         else:
             assert cmd_dict["method"] == "pause"
         assert cmd_dict["timeout"] == 3
+        uuid_received.set()
 
     def response_cmd(cmd_socket):
         nonlocal uuid
-        while uuid is None:
-            time.sleep(0.1)
+        if not uuid_received.wait(timeout=2):
+            pytest.fail("Timeout waiting for UUID")
         execute_result = {"sentinel_tag": "DP_0", "success": True, "method_uuid": uuid}
         cmd_socket.send_multipart([b"", json.dumps(execute_result).encode("utf-8")])
 

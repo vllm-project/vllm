@@ -154,6 +154,7 @@ async def build_async_engine_client_from_engine_args(
         if async_llm:
             async_llm.shutdown()
 
+
 async def check_engine_fault(raw_request: Request):
     client = engine_client(raw_request)
     assert hasattr(client, "engine_core")

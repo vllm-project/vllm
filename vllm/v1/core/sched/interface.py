@@ -82,24 +82,13 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def preempt_request(
         self,
-        scheduled_timestamp: float | None = None,
-        preempted_req: Optional["Request"] = None,
-    ) -> "Request":
-        """
-        Preempt a running request and move it back to the waiting queue.
+        request: "Request",
+        timestamp: float,
+    ) -> None:
+        """Preempt a request and put it back to the waiting queue.
 
-        This method removes the specified request from the running queue (or the
-        last running request if none is specified), updates its status and statistics,
-        and moves it back to the waiting queue. Optionally records a preemption event
-        if logging is enabled.
-
-        Args:
-            scheduled_timestamp: Optional timestamp for logging the preemption event.
-            preempted_req: Specific request to preempt. If None, preempt the last
-                request in the running queue.
-
-        Returns:
-            The request that was preempted and returned to the waiting queue.
+        NOTE: The request should be popped from the running queue outside of this
+        method.
         """
         raise NotImplementedError
 

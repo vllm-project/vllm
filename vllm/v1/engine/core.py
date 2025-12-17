@@ -311,8 +311,10 @@ def busy_loop_wrapper(busy_loop_func):
                     )
 
                     # Put running requests into waiting list.
-                    for req in list(self.scheduler.running):
-                        self.scheduler.preempt_request(preempted_req=req)
+                    timestamp = time.monotonic()
+                    while self.scheduler.running:
+                        request = self.scheduler.running.pop()
+                        self.scheduler.preempt_request(request, timestamp)
                     self.scheduler.prev_step_scheduled_req_ids.clear()
                     if self.batch_queue is not None:
                         self.batch_queue.clear()
