@@ -17,7 +17,7 @@ from utils import (
 
 import vllm.model_executor.layers.batch_invariant as batch_invariant
 from vllm import LLM, SamplingParams
-from vllm.utils.torch_utils import is_torch_equal
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
 
@@ -29,7 +29,7 @@ IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
     BACKENDS,
 )
 @pytest.mark.skipif(
-    not is_torch_equal("2.10.0"), reason="Failing on 2.10 https://github.com/pytorch/pytorch/issues/170490"
+    not is_torch_equal_or_newer("2.10.0"), reason="Failing on 2.10 https://github.com/pytorch/pytorch/issues/170490"
 )
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     backend,

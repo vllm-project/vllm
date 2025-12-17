@@ -13,7 +13,7 @@ from vllm import LLM, SamplingParams
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer, is_torch_equal
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
 
@@ -178,7 +178,7 @@ def test_custom_compile_config(
     ):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
     
-    if compilation_config.use_inductor_graph_partition and is_torch_equal(
+    if compilation_config.use_inductor_graph_partition and is_torch_equal_or_newer(
         "2.10.0"
     ):
         pytest.skip("ailing on 2.10 https://github.com/pytorch/pytorch/issues/170570")
