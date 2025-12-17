@@ -1,0 +1,33 @@
+group: LoRA
+depends_on: 
+  - image-build
+steps:
+- label: LoRA %N
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/lora
+  - tests/lora
+  commands:
+    - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py
+  parallelism: 4
+
+
+- label: LoRA TP (Distributed)
+  timeout_in_minutes: 30
+  num_gpus: 4
+  source_file_dependencies:
+  - vllm/lora
+  - tests/lora
+  commands:
+    # FIXIT: find out which code initialize cuda before running the test
+    # before the fix, we need to use spawn to test it
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Alot of these tests are on the edge of OOMing
+    - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    # There is some Tensor Parallelism related processing logic in LoRA that
+    # requires multi-GPU testing for validation.
+    - pytest -v -s -x lora/test_chatglm3_tp.py
+    - pytest -v -s -x lora/test_llama_tp.py
+    - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_gptoss_tp.py

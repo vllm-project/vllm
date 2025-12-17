@@ -300,7 +300,6 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
         np.testing.assert_array_equal(frames_missing, FAKE_OUTPUT_2)
         assert metadata_missing["video_backend"] == "test_video_backend_override_2"
 
-
 # ============================================================================
 # Frame Recovery Tests
 # ============================================================================

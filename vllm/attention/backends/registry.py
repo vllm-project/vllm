@@ -43,7 +43,6 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
 
     FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
     TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
-    XFORMERS = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
@@ -202,8 +201,8 @@ _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 def register_backend(
     backend: AttentionBackendEnum | MambaAttentionBackendEnum,
-    is_mamba: bool = False,
     class_path: str | None = None,
+    is_mamba: bool = False,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
@@ -253,35 +252,3 @@ def register_backend(
         return lambda x: x
 
     return decorator
-
-
-# Backwards compatibility alias for plugins
-class _BackendMeta(type):
-    """Metaclass to provide deprecation warnings when accessing _Backend."""
-
-    def __getattribute__(cls, name: str):
-        if name not in ("__class__", "__mro__", "__name__"):
-            logger.warning(
-                "_Backend has been renamed to AttentionBackendEnum. "
-                "Please update your code to use AttentionBackendEnum instead. "
-                "_Backend will be removed in a future release."
-            )
-        return getattr(AttentionBackendEnum, name)
-
-    def __getitem__(cls, name: str):
-        logger.warning(
-            "_Backend has been renamed to AttentionBackendEnum. "
-            "Please update your code to use AttentionBackendEnum instead. "
-            "_Backend will be removed in a future release."
-        )
-        return AttentionBackendEnum[name]
-
-
-class _Backend(metaclass=_BackendMeta):
-    """Deprecated: Use AttentionBackendEnum instead.
-
-    This class is provided for backwards compatibility with plugins
-    and will be removed in a future release.
-    """
-
-    pass

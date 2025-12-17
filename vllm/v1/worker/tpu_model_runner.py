@@ -17,9 +17,8 @@ import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import MLAAttention
+from vllm.attention.layer import Attention, MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
@@ -216,7 +215,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
-        self.hidden_size = model_config.get_hidden_size()
+        self.inputs_embeds_size = model_config.get_inputs_embeds_size()
         self.vocab_size = model_config.get_vocab_size()
 
         # Multi-modal data support
@@ -247,6 +246,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
+        # NOTE(rob): num_prompt_logprobs only includes reqs
+        # that are currently in the prefill phase.
+        self.num_prompt_logprobs: dict[str, int] = {}
 
         # Initialize input batch early to avoid AttributeError in _update_states
         self.input_batch = InputBatch(
@@ -420,6 +422,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.num_prompt_logprobs.pop(req_id, None)
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -476,6 +479,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
+
+            if sampling_params and sampling_params.prompt_logprobs is not None:
+                self.num_prompt_logprobs[req_id] = (
+                    self.input_batch.vocab_size
+                    if sampling_params.prompt_logprobs == -1
+                    else sampling_params.prompt_logprobs
+                )
 
             req_ids_to_add.append(req_id)
 
@@ -959,8 +969,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_kwargs,
             device=self.device,
             pin_memory=self.pin_memory,
-            merge_by_field_config=model.merge_by_field_config,
-            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1396,7 +1404,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             input_ids = None
             inputs_embeds = torch.zeros(
-                (num_tokens, self.hidden_size), dtype=self.dtype, device=self.device
+                (num_tokens, self.inputs_embeds_size),
+                dtype=self.dtype,
+                device=self.device,
             )
         else:
             input_ids = torch.zeros((num_tokens), dtype=torch.int32).to(self.device)
@@ -2039,15 +2049,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_item = dummy_mm_data[modality][0]
         dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
-        model = cast(SupportsMultiModal, self.model)
         return next(
             grouped_mm_kwargs
             for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
                 dummy_mm_items,
                 device=self.device,
                 pin_memory=self.pin_memory,
-                merge_by_field_config=model.merge_by_field_config,
-                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 
