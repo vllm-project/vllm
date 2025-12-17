@@ -4613,6 +4613,8 @@ class GPUModelRunner(
         )
 
         self.initialize_kv_cache(minimal_config)
+        self.cache_config.num_gpu_blocks = minimal_config.num_blocks
+
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
 
     @staticmethod
@@ -4646,29 +4648,20 @@ class GPUModelRunner(
         graphs from profiling are deleted after measurement and their private
         pool is automatically cleaned up.
         """
-        # Ensure all GPU operations are complete before cleanup
         torch.cuda.synchronize()
-
-        # Clear KV cache tensors to free GPU memory
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
             self.kv_caches.clear()
-
-        # Clear cross-layer KV cache if present
         if hasattr(self, "cross_layers_kv_cache"):
             self.cross_layers_kv_cache = None
             self.cross_layers_attn_backend = None
-
-        # Clear attention groups
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
-
-        # Clear KV cache config
         if hasattr(self, "kv_cache_config"):
             delattr(self, "kv_cache_config")
+        self.cache_config.num_gpu_blocks = None
 
-        # Force garbage collection to free GPU memory
         gc.collect()
         torch.cuda.empty_cache()
 
