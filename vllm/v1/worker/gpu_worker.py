@@ -239,7 +239,7 @@ class Worker(WorkerBase):
             torch.cuda.empty_cache()
 
             # take current memory snapshot
-            self.init_snapshot = init_snapshot = MemorySnapshot()
+            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             self.requested_memory = request_memory(init_snapshot, self.cache_config)
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
