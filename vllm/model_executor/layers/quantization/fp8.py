@@ -1065,27 +1065,50 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             FlashInferExperts,
             TritonOrDeepGemmExperts,
         )
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+            FlashInferAllGatherMoEPrepareAndFinalize,
+        )
         from vllm.model_executor.layers.fused_moe.prepare_finalize import (
             MoEPrepareAndFinalizeNoEP,
         )
 
-        if isinstance(self.kernel, FlashInferExperts):
-            kernel = self.kernel(
-                out_dtype=torch.get_default_dtype(),
-                quant_config=self.moe_quant_config,
-                ep_rank=self.moe.ep_rank,
-                ep_size=self.moe.ep_size,
-                tp_rank=self.moe.tp_rank,
-                tp_size=self.moe.tp_size,
-                use_dp=self.moe.dp_size > 1,
-                use_deepseek_fp8_block_scale=self.block_quant,
+        if isinstance(self.kernel, type(FlashInferExperts)):
+            use_dp = self.moe.dp_size > 1
+            self.fn = mk.FusedMoEModularKernel(
+                FlashInferAllGatherMoEPrepareAndFinalize(
+                    use_dp=use_dp, use_deepseek_fp8_block_scale=self.block_quant
+                ),
+                self.kernel(
+                    out_dtype=torch.get_default_dtype(),
+                    quant_config=self.moe_quant_config,
+                    ep_rank=self.moe.ep_rank,
+                    ep_size=self.moe.ep_size,
+                    tp_rank=self.moe.tp_rank,
+                    tp_size=self.moe.tp_size,
+                    use_dp=use_dp,
+                    use_deepseek_fp8_block_scale=self.block_quant,
+                ),
             )
-        elif isinstance(self.kernel, TritonOrDeepGemmExperts):
-            kernel = self.kernel(quant_config=self.moe_quant_config)
+            self.use_inplace = False
+            assert layer.activation == "silu", (
+                f"Expected 'silu' activation but got {layer.activation}"
+            )
+            if not self.block_quant:
+                assert (
+                    not layer.renormalize and layer.custom_routing_function is not None
+                )
+                assert layer.scoring_func == "sigmoid", (
+                    f"Expected 'sigmoid' scoring func but got {layer.scoring_func}"
+                )
+
+        elif isinstance(self.kernel, type(TritonOrDeepGemmExperts)):
+            self.fn = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                self.kernel(quant_config=self.moe_quant_config),
+            )
+            self.use_inplace = True
         else:
             raise NotImplementedError
-
-        self.fn = mk.FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), kernel)
 
     def maybe_make_prepare_finalize(
         self,
@@ -1311,30 +1334,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
-            )
-            if not self.block_quant:
-                assert (
-                    not layer.renormalize and layer.custom_routing_function is not None
-                )
-                assert layer.scoring_func == "sigmoid", (
-                    f"Expected 'sigmoid' scoring func but got {layer.scoring_func}"
-                )
-            # Delegate to CUTLASS FlashInfer path; function already bound with
-            # use_deepseek_fp8_block_scale for block-quant when applicable
-            result = self.flashinfer_moe_fn(
-                x,
-                layer,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
         else:
             result = self.fn(
                 x,
@@ -1342,30 +1341,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                inplace=True,
+                inplace=self.use_inplace,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
-
-            # result = fused_experts(
-            #     hidden_states=x,
-            #     w1=layer.w13_weight,
-            #     w2=layer.w2_weight,
-            #     topk_weights=topk_weights,
-            #     topk_ids=topk_ids,
-            #     inplace=True,
-            #     activation=layer.activation,
-            #     global_num_experts=layer.global_num_experts,
-            #     apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            #     expert_map=layer.expert_map,
-            #     quant_config=self.moe_quant_config,
-            #     allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-            #     allow_cutlass_block_scaled_grouped_gemm=(
-            #         self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM # noqa: E501
-            #     ),
-            # )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
