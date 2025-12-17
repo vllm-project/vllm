@@ -1948,8 +1948,8 @@ class FusedMoE(CustomOp):
                 else:
                     hidden_states_combined, router_logits = dispatch_res
 
-            # Run shared experts before matrix multiply.
-            # because matrix multiply maybe modify the hidden_states.
+                # Run shared experts before matrix multiply.
+                # because matrix multiply maybe modify the hidden_states.
                 if has_separate_shared_experts and not use_shared_experts_stream:
                     assert self.shared_experts is not None
                     shared_output = self.shared_experts(hidden_states)
