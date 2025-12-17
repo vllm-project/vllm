@@ -1069,13 +1069,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert config is not None
             self.moe_quant_config = config
 
-            if self.kernel is FlashInferExperts:
+            if self.kernel_cls is FlashInferExperts:
                 use_dp = self.moe.dp_size > 1
                 self.fn = mk.FusedMoEModularKernel(
                     FlashInferAllGatherMoEPrepareAndFinalize(
                         use_dp=use_dp, use_deepseek_fp8_block_scale=self.block_quant
                     ),
-                    self.kernel(
+                    self.kernel_cls(
                         out_dtype=torch.get_default_dtype(),
                         quant_config=self.moe_quant_config,
                         ep_rank=self.moe.ep_rank,
@@ -1088,10 +1088,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
                 self.use_inplace = False
 
-            elif self.kernel is TritonOrDeepGemmExperts:
+            elif self.kernel_cls is TritonOrDeepGemmExperts:
                 self.fn = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
-                    self.kernel(
+                    self.kernel_cls(
                         quant_config=self.moe_quant_config,
                         allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
                     ),
