@@ -814,7 +814,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     use_audio_in_video = False
 
         # normal case with `use_audio_in_video=False`
-        if is_update_applied:
+        if (not use_audio_in_video) and is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
                 prompt_ids,
                 mm_prompt_updates,
