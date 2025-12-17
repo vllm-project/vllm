@@ -1209,7 +1209,12 @@ def mamba_get_block_table_tensor(
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
         block_table_tensor = common_attn_metadata.block_table_tensor
-        start_indices = (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size
+        # NOTE: For 0-length requests in CUDA graph, use a start_index of 0 
+        # to handle the invalid block table.
+        start_indices = torch.clamp(
+            (common_attn_metadata.seq_lens - 1) // kv_cache_spec.block_size, 
+            min=0,
+        )
         offsets = torch.arange(
             1 + kv_cache_spec.num_speculative_blocks, device=block_table_tensor.device
         )
