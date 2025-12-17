@@ -1484,6 +1484,7 @@ class FusedMoE(CustomOp):
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
     def ensure_moe_quant_config_init(self):
+        assert self.quant_method.moe_quant_config is not None
         if self.quant_method.moe_quant_config is None:
             # Note: the moe_quant_config can't be constructed until after
             # weight loading post processing.
@@ -1892,7 +1893,6 @@ class FusedMoE(CustomOp):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
-
         self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 

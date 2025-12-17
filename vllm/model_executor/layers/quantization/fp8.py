@@ -685,10 +685,7 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
 
-abc = "abc"
-
-
-def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute:
+def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute | None:
     from vllm.model_executor.layers.fused_moe import (
         FlashInferExperts,
         MarlinExperts,
@@ -696,18 +693,19 @@ def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute:
         TritonOrDeepGemmExperts,
     )
 
-    if (
-        backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-        or backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
-    ):
-        assert False
-
     _BACKEND_TO_KERNEL = {
         Fp8MoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
         Fp8MoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
         Fp8MoeBackend.MARLIN: MarlinExperts,
         Fp8MoeBackend.TRITON: TritonExperts,
     }
+
+    if (
+        backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        or backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
+    ):
+        return None
+
     return _BACKEND_TO_KERNEL[backend]
 
 
@@ -892,6 +890,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         self.rocm_aiter_moe_enabled = False
 
+        # self.mk =
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -1055,6 +1055,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
+
+        # Initialize quant config.
+        # TODO: make this a standard part of the lifecycle
+        # after process_weights_after_loading
+        config = self.get_fused_moe_quant_config(layer)
+        assert config is not None
+        assert self.kernel is not None
+        self.moe_quant_config = config
+        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+            MoEPrepareAndFinalizeNoEP,
+        )
+
+        self.fn = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(), self.kernel(self.moe_quant_config)
+        )
 
     def maybe_make_prepare_finalize(
         self,
@@ -1305,26 +1320,36 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
-            self.kernel()
-            from vllm.model_executor.layers.fused_moe import fused_experts
-
-            result = fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
+            result = self.fn(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
                 inplace=True,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
-                quant_config=self.moe_quant_config,
-                allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
-                allow_cutlass_block_scaled_grouped_gemm=(
-                    self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
-                ),
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
+
+            # result = fused_experts(
+            #     hidden_states=x,
+            #     w1=layer.w13_weight,
+            #     w2=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     inplace=True,
+            #     activation=layer.activation,
+            #     global_num_experts=layer.global_num_experts,
+            #     apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            #     expert_map=layer.expert_map,
+            #     quant_config=self.moe_quant_config,
+            #     allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+            #     allow_cutlass_block_scaled_grouped_gemm=(
+            #         self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM # noqa: E501
+            #     ),
+            # )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
             assert not isinstance(result, tuple), (
