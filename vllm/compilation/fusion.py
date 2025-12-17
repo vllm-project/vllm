@@ -71,6 +71,13 @@ if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
+if current_platform.is_rocm():
+    TRITON_PER_TOKEN_GROUP_QUANT_OP = (
+        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
+    )
+    QUANT_OPS[kFp8Dynamic128Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
+    QUANT_OPS[kFp8Dynamic64Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
+
 
 class FusedRMSQuantKey(NamedTuple):
     """
@@ -137,12 +144,15 @@ class RMSNormQuantPattern:
         self.FUSED_OP = FUSED_OPS[key]
 
         self.rmsnorm_matcher = (
-            MatcherRMSNorm(epsilon)
+            MatcherRMSNorm(epsilon, enabled=True)
             if not key.fused_add
-            else MatcherFusedAddRMSNorm(epsilon)
+            else MatcherFusedAddRMSNorm(epsilon, enabled=True)
         )
         self.quant_matcher = MatcherQuantFP8(
-            key.quant, use_col_major_scales=use_col_major_scales, use_e8m0=use_e8m0
+            key.quant,
+            enabled=True,
+            use_col_major_scales=use_col_major_scales,
+            use_e8m0=use_e8m0,
         )
 
 
@@ -334,6 +344,11 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             return result, scale
 
         def replacement(input: torch.Tensor, weight: torch.Tensor):
+            # Return the same pattern if input is not contiguous.
+            # This has the same effect as skipping replacement.
+            if not input.is_contiguous():
+                return pattern(input, weight)
+
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
@@ -490,25 +505,23 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
             # Fuse fused_add_rms_norm + fp8 group quant
-            # Only register group quant patterns on CUDA where the C++ op exists
-            if current_platform.is_cuda():
-                FusedAddRMSNormGroupQuantPattern(
-                    epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
-                ).register(self.patterns)
+            FusedAddRMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            ).register(self.patterns)
 
-                # Fuse rms_norm + fp8 group quant
-                RMSNormGroupQuantPattern(
-                    epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
-                ).register(self.patterns)
+            # Fuse rms_norm + fp8 group quant
+            RMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            ).register(self.patterns)
 
-                FusedAddRMSNormGroupQuantPattern(
-                    epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
-                ).register(self.patterns)
+            FusedAddRMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
+            ).register(self.patterns)
 
-                # Fuse rms_norm + fp8 group quant
-                RMSNormGroupQuantPattern(
-                    epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
-                ).register(self.patterns)
+            # Fuse rms_norm + fp8 group quant
+            RMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 64)
+            ).register(self.patterns)
 
             # Fuse fused_add_rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(

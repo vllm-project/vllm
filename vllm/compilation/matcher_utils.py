@@ -40,6 +40,12 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+if current_platform.is_rocm():
+    TRITON_PER_TOKEN_GROUP_QUANT_OP = (
+        torch.ops.vllm.per_token_group_quant_fp8_row_scales.default
+    )
+    QUANT_OPS[kFp8Dynamic128Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
+    QUANT_OPS[kFp8Dynamic64Sym] = TRITON_PER_TOKEN_GROUP_QUANT_OP
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
