@@ -749,9 +749,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             returned by the engine.
         """
         # Clean up request tracker to prevent memory leak
-        # Note: We clean up here because the request is finished
-        # The store operation will use the tracker info that was already
-        # captured in the metadata during previous build_connector_meta calls
         self._cleanup_request_tracker(request.request_id)
         return True, None
 
@@ -911,4 +908,4 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 request_id,
             )
         # Clean up lookup future in scheduler adapter
-        self.scheduler_adapter.cleanup_request(request_id)
+        self.scheduler_adapter.cleanup_lookup_result(request_id)

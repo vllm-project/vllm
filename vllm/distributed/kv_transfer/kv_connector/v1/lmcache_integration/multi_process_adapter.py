@@ -147,7 +147,7 @@ class LMCacheMPSchedulerAdapter:
         """
         return self.blocks_in_chunk
 
-    def cleanup_request(self, request_id: str) -> None:
+    def cleanup_lookup_result(self, request_id: str) -> None:
         """
         Clean up lookup future for a finished request to prevent memory leak.
         Args:
