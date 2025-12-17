@@ -74,6 +74,9 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+  // Precompute SF layout parameter (constant for entire kernel).
+  int32_t const numKTiles = (numCols + 63) / 64;
+
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
   // (448.f / (Alpha_A / 6.f)).
@@ -101,7 +104,7 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
-              rowIdx, colIdx, numCols, SFout);
+              rowIdx, colIdx, numKTiles, SFout);
 
       out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(out_silu_mul, SFScaleVal,
                                                      sf_out);

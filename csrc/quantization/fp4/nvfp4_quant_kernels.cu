@@ -55,6 +55,9 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+  // SF layout parameter is constant for entire kernel.
+  int32_t const numKTiles = (numCols + 63) / 64;
+
   int sf_m = round_up<int>(numRows, 128);
   int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
   int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
@@ -85,7 +88,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
                                              CVT_FP4_NUM_THREADS_PER_SF>(
-              rowIdx, colIdx, numCols, SFout);
+              rowIdx, colIdx, numKTiles, SFout);
 
       out_pos =
           cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, global_scale, sf_out);
