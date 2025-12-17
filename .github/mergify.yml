@@ -235,6 +235,20 @@ pull_request_rules:
       add:
         - rocm
 
+- name: label-cpu
+  description: Automatically apply cpu label
+  conditions:
+    - label != stale
+    - files~=^(?!.*kv_offload)(?!.*cpu_offload).*\bcpu.*
+  actions:
+    label:
+      add:
+        - cpu
+    assign:
+      users:
+        - "fadara01"
+        - "aditew01"
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
