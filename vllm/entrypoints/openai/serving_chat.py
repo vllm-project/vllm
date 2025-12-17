@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Any, Final
 
 import jinja2
 import partial_json_parser
@@ -1796,11 +1796,13 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        _chat_template_kwargs: dict[str, Any] = request.chat_template_kwargs or {}
         sys_msg = get_system_message(
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=request.tools is not None,
+            **_chat_template_kwargs,
         )
         messages.append(sys_msg)
 
