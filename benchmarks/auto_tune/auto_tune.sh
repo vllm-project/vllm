@@ -14,14 +14,19 @@ DOWNLOAD_DIR=${DOWNLOAD_DIR:-""}
 INPUT_LEN=${INPUT_LEN:-4000}
 
 cleanup() {
-    local pid=$(lsof -t -i :8004 2>/dev/null)
-    if [[ -n "$pid" ]]; then
-        echo "Stopping existing vllm serve process on port 8004 (PID: $pid)"
-        kill -TERM "$pid" 2>/dev/null || true
+    local pids
+    pids=$(lsof -t -i :8004 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+        echo "Stopping existing vllm serve process(es) on port 8004 (PIDs: ${pids//$'
+'/ })"
+        # Word splitting will feed PIDs to kill.
+        kill -TERM $pids 2>/dev/null || true
         sleep 1
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -KILL "$pid" 2>/dev/null || true
-        fi
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+        done
     fi
 }
 
