@@ -632,14 +632,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         if [ "$CUDA_MAJOR" -ge 13 ]; then \
             uv pip install --system nixl-cu13 || true; \
         fi; \
-	apt update -y && \
+    apt update -y && \
         apt install -y --no-install-recommends \
-		libcusparse-dev-${CUDA_VERSION_DASH} \
-		libcublas-dev-${CUDA_VERSION_DASH} \
-		libcusolver-dev-${CUDA_VERSION_DASH} && \
+        libcusparse-dev-${CUDA_VERSION_DASH} \
+        libcublas-dev-${CUDA_VERSION_DASH} \
+        libcusolver-dev-${CUDA_VERSION_DASH} && \
         rm -rf /var/lib/apt/lists/* && \
-	ls /usr/local/cuda/include/ && \
-	uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation || true; \
+    ls /usr/local/cuda/include/ && \
+    uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation || true; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
