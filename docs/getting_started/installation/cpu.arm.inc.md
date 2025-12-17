@@ -27,6 +27,19 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
     pip install vllm==${VLLM_VERSION}+cpu --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
     ```
 
+!!! warning "set `LD_PRELOAD`"
+    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+    ```bash
+    # install TCMalloc
+    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+
+    # manually find the path
+    sudo find / -iname *libtcmalloc_minimal.so.4
+    TC_PATH=...
+
+    # add them to LD_PRELOAD
+    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
 
 **Install the latest code**
@@ -104,6 +117,19 @@ VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
 ```
 
 Testing has been conducted on AWS Graviton3 instances for compatibility.
+
+!!! warning "set `LD_PRELOAD`"
+    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+    ```bash
+    # install TCMalloc
+    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+
+    # manually find the path
+    sudo find / -iname *libtcmalloc_minimal.so.4
+    TC_PATH=...
+
+    # add them to LD_PRELOAD
+    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
