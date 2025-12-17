@@ -429,14 +429,18 @@ class RadioInternVisionModel(nn.Module):
         max_img_size = int(
             round(config.max_img_size / config.patch_size) * config.patch_size
         )
-        uq_teachers = set(t["name"] for t in config.teachers)
+        args = getattr(config, "args", dict())
+        teachers = args.get("teachers", set())
+        unique_teachers = set(t["name"] for t in teachers)
         self.patch_generator = ViTPatchGenerator(
             config.patch_size,
             config.hidden_size,
             input_dims=self.img_size,
             max_input_dims=max_img_size,
             cls_token=True,
-            num_cls_tokens=len(uq_teachers) if config.cls_token_per_teacher else 1,
+            num_cls_tokens=len(unique_teachers)
+            if args.get("cls_token_per_teacher", False)
+            else 1,
             register_multiple=config.reg_tokens,
         )
 
@@ -492,9 +496,11 @@ class RadioModel(nn.Module):
         )
 
         summary_idxs = None
-        if hasattr(config, "teachers"):
+        args = getattr(config, "args", {})
+        teachers = args.get("teachers", None)
+        if teachers is not None:
             summary_idxs = torch.tensor(
-                [i for i, t in enumerate(config.teachers) if t.get("use_summary", True)]
+                [i for i, t in enumerate(teachers) if t.get("use_summary", True)]
             )
             if summary_idxs.numel() > 0:
                 self.register_buffer("summary_idxs", summary_idxs)
