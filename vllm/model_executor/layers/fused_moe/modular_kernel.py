@@ -795,7 +795,10 @@ class FusedMoEModularKernel(torch.nn.Module):
                     top_k,
                     global_num_experts,
                     local_num_experts,
-                    expert_tokens_meta,
+                    # expert_tokens_meta help in allocating optimal/minimal
+                    # amount of workspace. Mark it None, so we allocate for
+                    # the worst-case scenario.
+                    expert_tokens_meta=None,
                 )
             )
 
