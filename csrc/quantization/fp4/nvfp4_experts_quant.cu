@@ -25,6 +25,7 @@
 #include <cuda_fp8.h>
 #include "dispatch_utils.h"
 
+#include "cuda_utils.h"
 #include "nvfp4_utils.cuh"
 #include "launch_bounds_utils.h"
 
