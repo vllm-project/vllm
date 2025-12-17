@@ -11,7 +11,10 @@ from nvfp4_utils import (
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import flashinfer_quant_nvfp4_8x4_sf_layout, flashinfer_scaled_fp4_mm
+from vllm.utils.flashinfer import (
+    flashinfer_quant_nvfp4_8x4_sf_layout,
+    flashinfer_scaled_fp4_mm,
+)
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -95,7 +98,9 @@ def test_flashinfer_nvfp4_gemm(
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
     if backend == "trtllm_8x4_sf_layout":
-        a_fp4, a_scale_interleaved = flashinfer_quant_nvfp4_8x4_sf_layout(a_dtype, a_global_scale)
+        a_fp4, a_scale_interleaved = flashinfer_quant_nvfp4_8x4_sf_layout(
+            a_dtype, a_global_scale
+        )
         is_sf_128x4_layout = False
     else:
         # ops.scaled_fp4_quant returns swizzled scales, while weights

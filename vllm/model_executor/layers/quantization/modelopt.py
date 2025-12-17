@@ -77,10 +77,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
 from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import (
+    flashinfer_quant_nvfp4_8x4_sf_layout,
     flashinfer_scaled_fp4_mm,
     has_flashinfer,
     has_flashinfer_moe,
-    flashinfer_quant_nvfp4_8x4_sf_layout
 )
 from vllm.utils.math_utils import round_up
 
@@ -1084,7 +1084,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             prepare_fp4_layer_for_marlin(layer)
             del layer.alpha
             del layer.input_scale
-        elif self.backend == "flashinfer-trtllm" or self.backend == "flashinfer-trtllm_8x4_sf_layout":
+        elif (
+            self.backend == "flashinfer-trtllm"
+            or self.backend == "flashinfer-trtllm_8x4_sf_layout"
+        ):
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -1131,12 +1134,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_dtype = x.dtype
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
-        if self.backend == "flashinfer-trtllm_8x4_sf_layout":        
+        if self.backend == "flashinfer-trtllm_8x4_sf_layout":
             x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(
                 x, layer.input_scale_inv
             )
             x_blockscale = x_blockscale.view(torch.float8_e4m3fn)
-        else: 
+        else:
             # quantize BF16 or FP16 to (FP4 and interleaved block scale)
             x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 

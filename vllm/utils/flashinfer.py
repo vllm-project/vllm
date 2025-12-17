@@ -459,8 +459,7 @@ if has_flashinfer():
         device_types="cuda",
     )
     def flashinfer_nvfp4_quantize(
-        a: torch.Tensor,
-        a_global_sf: torch.Tensor
+        a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import SfLayout
         from flashinfer import nvfp4_quantize as nvfp4_quantize_
@@ -473,8 +472,7 @@ if has_flashinfer():
         "vllm::flashinfer_nvfp4_quantize",
     )
     def flashinfer_nvfp4_quantize_fake(
-        a: torch.Tensor,
-        a_global_sf: torch.Tensor
+        a: torch.Tensor, a_global_sf: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         padded_rows = ((a.shape[0] + 7) // 8) * 8
         return torch.empty(

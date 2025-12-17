@@ -23,7 +23,9 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
     return out[0:m, 0:k]
 
 
-def convert_swizzled_8x4_layout_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
+def convert_swizzled_8x4_layout_to_linear(
+    a_sf_swizzled: torch.Tensor, m, k, block_size
+):
     m_tiles = (m + 8 - 1) // 8
     f = block_size * 4
     k_tiles = (k + f - 1) // f
@@ -34,7 +36,13 @@ def convert_swizzled_8x4_layout_to_linear(a_sf_swizzled: torch.Tensor, m, k, blo
 
 
 def dequantize_nvfp4_to_dtype(
-    tensor_fp4, tensor_sf, global_scale, dtype, device, block_size=16, is_sf_128x4_layout=True
+    tensor_fp4,
+    tensor_sf,
+    global_scale,
+    dtype,
+    device,
+    block_size=16,
+    is_sf_128x4_layout=True,
 ):
     """Dequantize the fp4 tensor back to high precision."""
     # Two fp4 values are packed into one uint8.
