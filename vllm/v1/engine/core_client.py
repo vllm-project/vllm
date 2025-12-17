@@ -178,6 +178,11 @@ class EngineCoreClient(ABC):
     ) -> None:
         raise NotImplementedError
 
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        raise NotImplementedError
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -251,6 +256,11 @@ class EngineCoreClient(ABC):
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        raise NotImplementedError
+
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
         raise NotImplementedError
 
 
@@ -338,6 +348,11 @@ class InprocClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return False
+
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.engine_core.reconfigure(max_num_seqs, max_num_batched_tokens)
 
 
 @dataclass
@@ -804,6 +819,11 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def reconfigure(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return self.call_utility("reconfigure", max_num_seqs, max_num_batched_tokens)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -1012,6 +1032,13 @@ class AsyncMPClient(MPClient):
     ) -> list[_R]:
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
+        )
+
+    async def reconfigure_async(
+        self, max_num_seqs: int | None, max_num_batched_tokens: int | None
+    ) -> bool:
+        return await self.call_utility_async(
+            "reconfigure", max_num_seqs, max_num_batched_tokens
         )
 
 
