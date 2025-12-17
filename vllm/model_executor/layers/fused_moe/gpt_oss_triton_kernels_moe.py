@@ -24,7 +24,13 @@ if has_triton_kernels():
     try:
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import FnSpecs, FusedActivation, matmul_ogs
-        from triton_kernels.routing import RoutingData, routing_from_bitmatrix
+        from triton_kernels.routing import (
+            ExptData,
+            GatherIndx,
+            RoutingData,
+            ScatterIndx,
+            routing_from_bitmatrix,
+        )
         from triton_kernels.tensor import Bitmatrix
     except (AttributeError, ImportError) as e:
         logger.error(
@@ -46,8 +52,6 @@ def pack_bitmatrix(
 ):
     """
     Packs topk_ids into a bitmatrix.
-    code reference:
-    https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
     """
     pid_m = tl.program_id(0)
     offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -59,187 +63,350 @@ def pack_bitmatrix(
     rem = indices % 32
     one = tl.cast(1, tl.uint32)
 
-    # Iterate through all the relevant bitmatrix columns.
     for i in range(bm_cols):
-        # When BLOCK_SIZE_K=32, offs is just the column index.
         offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
-        # All topks that need to go into this column has the correct bit set.
-        # Other bits are 0. x is a 2D tensor.
         x = tl.where(
             div[:, :, None] == offs[None, None, :], (one << rem)[:, :, None], 0
         )
-        # Reduce x to get a single int32_t bitpack.
         y = tl.reduce_or(x, axis=1)
         bitmatrix_ptrs = bitmatrix + offsets_m[:, None] * bm_cols + offs[None, :]
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"ROWS_PER_PID": r}, num_warps=num_warps, num_stages=num_stages)
-        for r in [1, 2, 4, 8, 16, 32]
-        for num_warps in [1, 2, 4, 8, 16]
-        for num_stages in [1, 2, 3]
-    ],
-    key=["N", "topk"],
-    cache_results=True,
-)
 @triton.jit
-def _topk_softmax_kernel(
+def _global_barrier_cas(
+    barrier_ptr,
+    num_programs: tl.constexpr,
+    phase: tl.constexpr,
+):
+    counter_ptr = barrier_ptr + phase
+
+    # each pid increments counter when it arrives
+    arrived = tl.atomic_add(counter_ptr, 1, sem="acq_rel")
+
+    if arrived == num_programs - 1:
+        # last pid to arrive resets the counter
+        tl.atomic_xchg(counter_ptr, 0, sem="release")
+    else:
+        while tl.atomic_cas(counter_ptr, 0, 0) != 0:
+            pass
+
+
+@triton.jit
+def _cdiv(n, d):
+    return (n + d - 1) // d
+
+
+@triton.jit
+def _fused_topk_softmax_routing_kernel(
     logits_ptr,
+    stride_logits_m,
+    stride_logits_n,
     weights_ptr,
+    stride_weights_m,
+    stride_weights_k,
     indices_ptr,
-    M: tl.constexpr,
-    N: tl.constexpr,
+    stride_indices_m,
+    stride_indices_k,
+    hist_ptr,  # [N] global histogram
+    expt_offs_ptr,  # [N] prefix sum of histogram (token_offs_raw)
+    partial_hist_ptr,  # [num_programs, N] per-program histogram
+    stride_partial_m,
+    stride_partial_n,
+    gate_scal_ptr,  # [M * topk] reordered weights
+    topk_index_ptr,  # [M * topk] gather indices
+    gate_index_ptr,  # [M * topk] scatter indices
+    token_offs_pad_ptr,  # [NUM_BLOCK_SIZES, N+1] padded offsets for each block_m
+    stride_token_offs_m,
+    stride_token_offs_n,
+    block_pid_map_ptr,  # [NUM_BLOCK_SIZES, max_n_tiles] pid mapping
+    stride_pid_map_m,
+    stride_pid_map_n,
+    max_n_tiles,
+    barrier_ptr,  # [2] barrier counters
+    M,  # num_tokens (can be dynamic)
+    N: tl.constexpr,  # num_experts
     topk: tl.constexpr,
-    stride_lm,
-    stride_ln,
-    stride_wm,
-    stride_wk,
-    stride_im,
-    stride_ik,
+    num_programs: tl.constexpr,
     RENORM: tl.constexpr,
     ROWS_PER_PID: tl.constexpr,
-    num_stages: tl.constexpr,
-    bitmatrix,
-    bm_cols: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
+    NUM_BLOCK_SIZES: tl.constexpr,  # number of block_m sizes (4 or 5)
+    BLOCK_M_LOG2_START: tl.constexpr,  # log2 of smallest block_m (4 for 16)
 ):
+    """
+    Fully fused kernel combining:
+    - Phase 1: topk + softmax + hist accumulation
+    - Phase 2: prefixsum + ExptData init (single program)
+    - Phase 3: gather/scatter indices + block_pid_map
+    """
     pid = tl.program_id(0)
-    num_programs = tl.num_programs(0)
 
     offs_n = tl.arange(0, N)
     offs_k = tl.arange(0, topk)
 
-    rows = tl.arange(0, ROWS_PER_PID)
-    for row_idx in tl.range(
-        pid * ROWS_PER_PID,
-        M,
-        num_programs * ROWS_PER_PID,
-        num_stages,
-        warp_specialize=True,
-    ):
-        topk_vals = tl.full([ROWS_PER_PID, topk], float("-inf"), dtype=tl.float32)
-        topk_idxs = tl.zeros([ROWS_PER_PID, topk], dtype=tl.int32)
-        row_indices = row_idx + rows  # [ROWS_PER_POD,]
-        row_mask = row_indices < M
+    local_hist = tl.zeros([N], dtype=tl.int32)
 
-        # broadcast to [ROWS_PER_PID, BLOCKN]
-        ptr_off = (
-            logits_ptr + row_indices[:, None] * stride_lm + offs_n[None, :] * stride_ln
-        )
-        logits = tl.load(ptr_off, mask=row_mask[:, None], other=float("-inf"))
+    row_start = pid * ROWS_PER_PID
+    row_end = tl.minimum(row_start + ROWS_PER_PID, M)
+
+    for row_idx in range(row_start, row_end):
+        logits_row_ptr = logits_ptr + row_idx * stride_logits_m
+        logits = tl.load(logits_row_ptr + offs_n * stride_logits_n)
 
         if not RENORM:
-            logits = tl.softmax(logits, dim=1, keep_dims=True)
+            logits = tl.softmax(logits, dim=0)
 
-        # XXX: may use topk from triton_kernels
+        topk_vals = tl.full([topk], float("-inf"), dtype=tl.float32)
+        topk_idxs = tl.zeros([topk], dtype=tl.int32)
+
         for k in tl.static_range(topk):
-            cur_max = tl.max(logits, axis=1, keep_dims=True)  # [ROWS_PER_PID, 1]
-            cur_idx = tl.argmax(logits, axis=1, keep_dims=True)
+            cur_max = tl.max(logits, axis=0)
+            cur_idx = tl.argmax(logits, axis=0)
 
-            k_mask = offs_k == k
-            topk_vals = tl.where(
-                k_mask, cur_max, topk_vals
-            )  # [ROWS_PER PID, 1], [ROWS_PER PID, topkpadded]
-            topk_idxs = tl.where(k_mask, cur_idx, topk_idxs)
+            topk_vals = tl.where(offs_k == k, cur_max, topk_vals)
+            topk_idxs = tl.where(offs_k == k, cur_idx, topk_idxs)
 
-            mask_selected = cur_idx == offs_n[None, :]  # [ROWSPERPID,1] [1,BLOCKN]
+            mask_selected = offs_n == cur_idx
             logits = tl.where(mask_selected, float("-inf"), logits)
 
         if RENORM:
-            topk_vals = tl.softmax(topk_vals, dim=1, keep_dims=True)
+            topk_vals = tl.softmax(topk_vals, dim=0)
 
-        experts_group_size: tl.constexpr = 32
-        div = topk_idxs // experts_group_size
-        rem = topk_idxs % experts_group_size
-        one = tl.cast(1, tl.uint32)
+        weights_row_ptr = weights_ptr + row_idx * stride_weights_m
+        indices_row_ptr = indices_ptr + row_idx * stride_indices_m
+        tl.store(weights_row_ptr + offs_k * stride_weights_k, topk_vals)
+        tl.store(indices_row_ptr + offs_k * stride_indices_k, topk_idxs.to(tl.int16))
 
-        for i in tl.static_range(bm_cols):
-            offs = tl.arange(0, BLOCK_SIZE_K // experts_group_size) + i * (
-                BLOCK_SIZE_K // experts_group_size
-            )  # [BLOCKSIZEK//32]
-            x = tl.where(
-                div[:, :, None] == offs[None, None, :], (one << rem)[:, :, None], 0
-            )  # [ROWSPERPID, topk(global_gid),1] == [1,1,BLOCKSIZEK//32(local_gid)]
-            # -> [ROWSPERPID,topk(gid),BLOCKSIZEK//32]
-            y = tl.reduce_or(x, axis=1)  # [ROWSPERPID,BLOCKSIZEK//32]
-            bitmatrix_ptrs = (
-                bitmatrix + row_indices[:, None] * bm_cols + offs[None, :]
-            )  # [M,bm_cols] + [ROWSPERPID,1] + [1, BLOCKSIZEK//32]
-            tl.store(bitmatrix_ptrs, y, mask=row_indices[:, None] < M)
+        for k in tl.static_range(topk):
+            expert_id = tl.sum(tl.where(offs_k == k, topk_idxs, 0))
+            tl.atomic_add(hist_ptr + expert_id, 1, sem="relaxed")
+            local_hist = tl.where(offs_n == expert_id, local_hist + 1, local_hist)
 
-        # WB
-        tl.store(
-            weights_ptr
-            + row_indices[:, None] * stride_wm  # [ROWSPERPID,1]
-            + offs_k[None, :] * stride_wk,  # [1, topkpadded]
-            topk_vals,
-            mask=row_mask[:, None],
-        )
-        tl.store(
-            indices_ptr
-            + row_indices[:, None] * stride_im
-            + offs_k[None, :] * stride_ik,
-            topk_idxs,
-            mask=row_mask[:, None],
-        )
+    partial_hist_row_ptr = partial_hist_ptr + pid * stride_partial_m
+    tl.store(partial_hist_row_ptr + offs_n * stride_partial_n, local_hist)
+
+    _global_barrier_cas(barrier_ptr, num_programs, phase=0)
+
+    if pid == 0:
+        hist = tl.load(hist_ptr + offs_n)
+
+        cumsum = 0
+        for i in tl.static_range(N):
+            h = tl.sum(tl.where(offs_n == i, hist, 0))
+            tl.store(expt_offs_ptr + i, cumsum)
+            cumsum = cumsum + h
+        tl.store(expt_offs_ptr + N, cumsum)
+
+        for size_idx in tl.static_range(NUM_BLOCK_SIZES):
+            block_m_log2 = (
+                BLOCK_M_LOG2_START + size_idx
+            )  # 4, 5, 6, 7 (for 16, 32, 64, 128)
+            block_m = 1 << block_m_log2
+
+            cumsum_pad = 0
+            for i in tl.static_range(N):
+                h = tl.sum(tl.where(offs_n == i, hist, 0))
+                n_tiles = (h + block_m - 1) // block_m  # cdiv
+                offs_pad_ptr = token_offs_pad_ptr + size_idx * stride_token_offs_m
+                tl.store(offs_pad_ptr + i * stride_token_offs_n, cumsum_pad)
+                cumsum_pad = cumsum_pad + n_tiles
+            offs_pad_ptr = token_offs_pad_ptr + size_idx * stride_token_offs_m
+            tl.store(offs_pad_ptr + N * stride_token_offs_n, cumsum_pad)
+
+        for size_idx in tl.static_range(NUM_BLOCK_SIZES):
+            pid_map_row_ptr = block_pid_map_ptr + size_idx * stride_pid_map_m
+            for tile_idx in range(max_n_tiles):
+                tl.store(pid_map_row_ptr + tile_idx * stride_pid_map_n, -1)
+
+        for size_idx in tl.static_range(NUM_BLOCK_SIZES):
+            block_m_log2 = BLOCK_M_LOG2_START + size_idx
+            block_m = 1 << block_m_log2
+
+            offs_pad_ptr = token_offs_pad_ptr + size_idx * stride_token_offs_m
+            pid_map_row_ptr = block_pid_map_ptr + size_idx * stride_pid_map_m
+
+            for expert_id in range(N):
+                h = tl.load(hist_ptr + expert_id)
+                n_tiles = (h + block_m - 1) // block_m
+                tile_start = tl.load(offs_pad_ptr + expert_id * stride_token_offs_n)
+
+                for block_idx in range(n_tiles):
+                    # Pack (block_idx << 16) | expert_id
+                    packed_val = (block_idx << 16) | expert_id
+                    tl.store(
+                        pid_map_row_ptr + (tile_start + block_idx) * stride_pid_map_n,
+                        packed_val,
+                    )
+
+    _global_barrier_cas(barrier_ptr, num_programs, phase=1)
+
+    expt_offs = tl.load(expt_offs_ptr + offs_n)
+
+    prior_contrib = tl.zeros([N], dtype=tl.int32)
+    for p in range(pid):
+        prior_partial_ptr = partial_hist_ptr + p * stride_partial_m
+        prior_hist = tl.load(prior_partial_ptr + offs_n * stride_partial_n)
+        prior_contrib = prior_contrib + prior_hist
+
+    local_offset = tl.zeros([N], dtype=tl.int32)
+
+    for row_idx in range(row_start, row_end):
+        weights_row_ptr = weights_ptr + row_idx * stride_weights_m
+        indices_row_ptr = indices_ptr + row_idx * stride_indices_m
+        weights = tl.load(weights_row_ptr + offs_k * stride_weights_k)
+        expert_ids = tl.load(indices_row_ptr + offs_k * stride_indices_k).to(tl.int32)
+
+        for k in tl.static_range(topk):
+            expert_id = tl.sum(tl.where(offs_k == k, expert_ids, 0))
+            weight_val = tl.sum(tl.where(offs_k == k, weights, 0.0))
+            flat_idx = row_idx * topk + k
+
+            expert_base = tl.sum(tl.where(offs_n == expert_id, expt_offs, 0))
+            expert_prior = tl.sum(tl.where(offs_n == expert_id, prior_contrib, 0))
+            expert_local = tl.sum(tl.where(offs_n == expert_id, local_offset, 0))
+
+            global_pos = expert_base + expert_prior + expert_local
+
+            tl.store(gate_scal_ptr + global_pos, weight_val)
+            tl.store(topk_index_ptr + global_pos, flat_idx)
+            tl.store(gate_index_ptr + flat_idx, global_pos)
+
+            local_offset = tl.where(offs_n == expert_id, local_offset + 1, local_offset)
 
 
 def fused_routing(
     router_logits: torch.Tensor,
     topk: int,
     renormalize: bool = True,
-) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
-    M, N = router_logits.shape  # num_tokens, num_experts
-    weights = torch.empty(
-        (M, topk), device=router_logits.device, dtype=router_logits.dtype
-    )
-    indices = torch.empty((M, topk), device=router_logits.device, dtype=torch.int16)
+) -> tuple["RoutingData", "GatherIndx", "ScatterIndx"]:
+    """
+    Fully fused topk, softmax, routing, and ExptData computation.
+    """
+    M, N = router_logits.shape
+    device = router_logits.device
+    dtype = router_logits.dtype
 
-    BLOCK_N = triton.next_power_of_2(N)  # num_padded_experts
+    # Validate constraints
+    BLOCK_N = triton.next_power_of_2(N)
     topk_padded = triton.next_power_of_2(topk)
-    assert (BLOCK_N == N) and (topk_padded == topk)
+    assert (BLOCK_N == N) and (topk_padded == topk), (
+        f"N and topk must be power of 2, got N={N}, topk={topk}"
+    )
 
-    BLOCK_SIZE_K = 32
-    bm_cols = triton.cdiv(N, BLOCK_SIZE_K)  # n_bitpacks
-    bitmatrix = torch.zeros((M, bm_cols), dtype=torch.uint32, device=indices.device)
+    weights = torch.empty((M, topk), device=device, dtype=dtype)
+    indices = torch.empty((M, topk), device=device, dtype=torch.int16)
+    hist = torch.zeros(N, device=device, dtype=torch.int32)
+    expt_offs = torch.empty(N + 1, device=device, dtype=torch.int32)
 
-    grid = lambda META: (triton.cdiv(M, META["ROWS_PER_PID"]),)
+    n_gates = M * topk
+    gate_scal = torch.empty(n_gates, device=device, dtype=dtype)
+    topk_index = torch.empty(n_gates, device=device, dtype=torch.int32)
+    gate_index = torch.empty(n_gates, device=device, dtype=torch.int32)
 
-    _topk_softmax_kernel[grid](
+    # block_m sizes: 16, 32, 64, 128 (NUM_BLOCK_SIZES=4)
+    BLOCK_M_LOG2_START = 4
+    NUM_BLOCK_SIZES = 4
+
+    if n_gates <= N:
+        max_n_tiles = n_gates
+    else:
+        min_block_m = 1 << BLOCK_M_LOG2_START  # 16
+        max_n_tiles = N - 1 - ((N - n_gates - 1) // min_block_m)
+
+    token_offs_pad = torch.empty(
+        (NUM_BLOCK_SIZES, N + 1), device=device, dtype=torch.int32
+    )
+    block_pid_map = torch.full(
+        (NUM_BLOCK_SIZES, max_n_tiles), -1, device=device, dtype=torch.int32
+    )
+
+    barrier = torch.zeros(2, device=device, dtype=torch.int32)
+
+    device_props = torch.cuda.get_device_properties(device)
+    num_sms = device_props.multi_processor_count
+
+    max_num_programs = 64
+    ROWS_PER_PID = 4
+    desired_programs = triton.cdiv(M, ROWS_PER_PID)
+    num_programs = min(desired_programs, num_sms, max_num_programs)
+    ROWS_PER_PID = triton.cdiv(M, num_programs)
+
+    partial_hist = torch.zeros((num_programs, N), device=device, dtype=torch.int32)
+
+    _fused_topk_softmax_routing_kernel[(num_programs,)](
         logits_ptr=router_logits,
+        stride_logits_m=router_logits.stride(0),
+        stride_logits_n=router_logits.stride(1),
         weights_ptr=weights,
+        stride_weights_m=weights.stride(0),
+        stride_weights_k=weights.stride(1),
         indices_ptr=indices,
+        stride_indices_m=indices.stride(0),
+        stride_indices_k=indices.stride(1),
+        hist_ptr=hist,
+        expt_offs_ptr=expt_offs,
+        partial_hist_ptr=partial_hist,
+        stride_partial_m=partial_hist.stride(0),
+        stride_partial_n=partial_hist.stride(1),
+        gate_scal_ptr=gate_scal,
+        topk_index_ptr=topk_index,
+        gate_index_ptr=gate_index,
+        token_offs_pad_ptr=token_offs_pad,
+        stride_token_offs_m=token_offs_pad.stride(0),
+        stride_token_offs_n=token_offs_pad.stride(1),
+        block_pid_map_ptr=block_pid_map,
+        stride_pid_map_m=block_pid_map.stride(0),
+        stride_pid_map_n=block_pid_map.stride(1),
+        max_n_tiles=max_n_tiles,
+        barrier_ptr=barrier,
         M=M,
         N=N,
         topk=topk,
-        stride_lm=router_logits.stride(0),
-        stride_ln=router_logits.stride(1),
-        stride_wm=weights.stride(0),
-        stride_wk=weights.stride(1),
-        stride_im=indices.stride(0),
-        stride_ik=indices.stride(1),
+        num_programs=num_programs,
         RENORM=renormalize,
-        bitmatrix=bitmatrix,
-        bm_cols=bm_cols,
-        BLOCK_SIZE_K=BLOCK_SIZE_K,
+        ROWS_PER_PID=ROWS_PER_PID,
+        NUM_BLOCK_SIZES=NUM_BLOCK_SIZES,
+        BLOCK_M_LOG2_START=BLOCK_M_LOG2_START,
     )
 
-    bitmatrix_shape = [M, bm_cols * 32]
-    bitmatrix_shape_max = [M, None]
-    bitmatrix = Bitmatrix(
-        bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
-    )
+    gate_scal = gate_scal.to(torch.bfloat16)
     weights = weights.to(torch.bfloat16)
 
-    return routing_from_bitmatrix(bitmatrix, weights, indices, N, topk)
+    token_offs_pad_dict = {
+        (1 << (BLOCK_M_LOG2_START + i)): token_offs_pad[i]
+        for i in range(NUM_BLOCK_SIZES)
+    }
+    block_pid_map_dict = {
+        (1 << (BLOCK_M_LOG2_START + i)): block_pid_map[i]
+        for i in range(NUM_BLOCK_SIZES)
+    }
+
+    # token_offs_raw is expt_offs[:N]
+    token_offs_raw = expt_offs[: N + 1]
+
+    expt_data = ExptData(
+        hist=hist,
+        token_offs_raw=token_offs_raw,
+        token_offs_pad=token_offs_pad_dict,
+        block_pid_map=block_pid_map_dict,
+    )
+
+    gather_index = GatherIndx(topk_index, gate_index)
+    scatter_index = ScatterIndx(gate_index, topk_index)
+    routing_data = RoutingData(
+        gate_scal=gate_scal,
+        expt_hist=hist,
+        n_expts_tot=N,
+        n_expts_act=topk,
+        expt_data=expt_data,
+    )
+    return routing_data, gather_index, scatter_index
 
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
-    w1,  # Tensor or triton_kernels.Tensor
-    w2,  # Tensor or triton_kernels.Tensor
+    w1,
+    w2,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
@@ -272,15 +439,14 @@ def triton_kernel_moe_forward(
     )
 
 
-# This is a triton implementation of the fused_experts function
 def triton_kernel_fused_experts(
     output_tensor: torch.Tensor,
     hidden_states: torch.Tensor,
-    w1,  # Tensor or triton_kernels.Tensor
-    w2,  # Tensor or triton_kernels.Tensor
-    routing_data,  # RoutingData
-    gather_indx,  # GatherIndx
-    scatter_indx,  # ScatterIndx
+    w1,
+    w2,
+    routing_data,
+    gather_indx,
+    scatter_indx,
     topk: int,
     activation: str = "silu",
     quant_config: FusedMoEQuantConfig | None = None,
@@ -295,12 +461,10 @@ def triton_kernel_fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
-    # Shape check, only check non-mxfp4
     assert hidden_states.ndim == 2
     assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
@@ -319,7 +483,6 @@ def triton_kernel_fused_experts(
             dtype=hidden_states.dtype,
         )
 
-    # Add batch_dim to output buffer because matmul_ogs expects 3D output
     intermediate_cache = _resize_cache(
         intermediate_cache, (batch_dim, M * topk, N // 2)
     )
@@ -371,7 +534,7 @@ def make_routing_data(
     BLOCK_SIZE_M = 512
     BLOCK_SIZE_K = 32
 
-    bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)  # n_bitpacks
+    bm_cols = triton.cdiv(num_local_experts, BLOCK_SIZE_K)
     bitmatrix = torch.zeros(
         (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
     )
@@ -393,7 +556,6 @@ def make_routing_data(
         bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None
     )
 
-    # matmul_ogs expects invalid topk_weights to be -1s
     topk_weights = torch.where(topk_ids == -1, -1.0, topk_weights)
     routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(
         bitmatrix, topk_weights, topk_ids, num_local_experts, num_topk
@@ -416,22 +578,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
-        - a: The hidden states, input to the MoE layer.
-        - w1: The first set of expert weights.
-        - w2: The second set of expert weights.
-        - topk_ids: The topk ids.
-        Note: extracting the problem shape from the weight and activation
-        tensors is not obvious.  It needs to be done this way specifically
-        due to subtle issues with particular kernels, e.g. the int4 kernels
-        divide the trailing dimension by two, so it's not "correct" to
-        extract N or K from the trailing dimension of w1 or w2.  Similarly,
-        some kernels transpose the weights, so this needs to be kept in mind.
-        Note: This implementation covers most cases. However, if experts
-        require a specialized implementation, like MarlinExperts, they are free
-        to override this function.
-        """
         assert w1.dim() == 3 and w2.dim() == 3
         E, _, N = w1.size()
         K = a1.size(-1)
@@ -446,7 +592,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return E, M, N, K, topk
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Weight application and reduction happens in the fused_experts kernel.
         return TopKWeightAndReduceNoOP()
 
     def _make_routing_data(
@@ -460,7 +605,6 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 class OAITritonExperts(BaseOAITritonExperts):
     def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
@@ -486,7 +630,6 @@ class OAITritonExperts(BaseOAITritonExperts):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # workspace are allocated inside the kernel
         workspace1 = (0, 0)
         workspace2 = (M * topk, N // 2)
         output = (M, K)
@@ -535,24 +678,14 @@ class OAITritonExperts(BaseOAITritonExperts):
             quant_config=self.quant_config,
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
-            expert_map=None,  # applied already
+            expert_map=None,
             intermediate_cache=workspace2,
             a1q_scale=a1q_scale,
         )
 
 
 class UnfusedOAITritonExperts(BaseOAITritonExperts):
-    """
-    A Triton based MoE expert class that operates on expert standard
-    format and explicitly keeps the activation and reduction (moe_sum) steps
-    unfused from the matmul_ogs kernel. This exposes injection points
-    for activation and moe_sum.
-
-    One use case for it is to inject LoRA modules on the activation and moe_sum.
-    """
-
     def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
         super().__init__(quant_config)
 
@@ -578,7 +711,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # workspace are allocated inside the kernel
         workspace1 = (M * topk, N // 2)
         workspace2 = (M * topk, max(N, K))
         output = (M, K)
@@ -620,7 +752,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
         topk = topk_ids.size(1)
 
-        # type check, uint8 means mxfp4
         assert hidden_states.dtype == torch.bfloat16
         assert (
             self.quant_config.w1_bias is None
@@ -631,7 +762,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             or self.quant_config.w2_bias.dtype == torch.float32
         )
 
-        # Shape check, only check non-mxfp4
         assert hidden_states.ndim == 2
         assert hidden_states.shape[-1] == w1.shape[-2]
         assert w2.shape[-1] == w1.shape[1]
@@ -643,7 +773,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         if global_num_experts == -1:
             global_num_experts = E
 
-        # Note that the output tensor might be in workspace13
         intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
         intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
         intermediate_cache2 = _resize_cache(workspace13, (M * topk, N // 2))
@@ -666,9 +795,6 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
-        # matmul_ogs grouped reduction fuse sum across multiple experts:
-        # y[dst_ind // n_expts_act, :] += x[src_ind, :]
-        # Need to set n_expts_act to 1 to unfuse moe_sum
         routing_data.n_expts_act = 1
 
         matmul_ogs(
