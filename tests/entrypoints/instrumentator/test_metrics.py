@@ -14,10 +14,9 @@ import requests
 from prometheus_client.parser import text_string_to_metric_families
 from transformers import AutoTokenizer
 
+from tests.conftest import LocalAssetServer
+from tests.utils import RemoteOpenAIServer
 from vllm import version
-
-from ...conftest import LocalAssetServer
-from ...utils import RemoteOpenAIServer
 
 MODELS = {
     "text": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",

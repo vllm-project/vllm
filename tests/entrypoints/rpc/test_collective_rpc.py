@@ -37,7 +37,7 @@ def server():
         "--max-num-seqs",
         "128",
         "--worker-extension-cls",
-        "tests.entrypoints.openai.test_collective_rpc.TestWorkerExtension",
+        "tests.entrypoints.rpc.test_collective_rpc.TestWorkerExtension",
     ]
     with RemoteOpenAIServer(
         MODEL_NAME,

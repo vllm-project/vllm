@@ -4,7 +4,7 @@
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
