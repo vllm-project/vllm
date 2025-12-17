@@ -1084,7 +1084,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             MoEPrepareAndFinalizeNoEP,
         )
 
-        if isinstance(self.kernel, type(FlashInferExperts)):
+        if self.kernel is FlashInferExperts:
             use_dp = self.moe.dp_size > 1
             self.fn = mk.FusedMoEModularKernel(
                 FlashInferAllGatherMoEPrepareAndFinalize(
@@ -1103,10 +1103,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             self.use_inplace = False
 
-        elif isinstance(self.kernel, type(TritonOrDeepGemmExperts)):
+        elif self.kernel is TritonOrDeepGemmExperts:
             self.fn = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
-                self.kernel(quant_config=self.moe_quant_config),
+                self.kernel(
+                    quant_config=self.moe_quant_config,
+                    allow_deep_gemm=(self.fp8_backend == Fp8MoeBackend.DEEPGEMM),
+                ),
             )
             self.use_inplace = True
         else:
