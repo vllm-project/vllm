@@ -1522,7 +1522,8 @@ class FusedMoE(CustomOp):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        packed: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
@@ -1545,15 +1546,15 @@ class FusedMoE(CustomOp):
             if self.quant_method.supports_eplb:
                 if self.expert_load_view is None:
                     raise ValueError(
-                        "enable_eplb=True requiere expert_load_view != None"
+                        "enable_eplb=True required expert_load_view != None"
                     )
                 if self.logical_to_physical_map is None:
                     raise ValueError(
-                        "enable_eplb=True requiere logical_to_physical_map != None"
+                        "enable_eplb=True required logical_to_physical_map != None"
                     )
                 if self.logical_replica_count is None:
                     raise ValueError(
-                        "enable_eplb=True requiere logical_replica_count != None"
+                        "enable_eplb=True required logical_replica_count != None"
                     )
             else:
                 raise NotImplementedError(

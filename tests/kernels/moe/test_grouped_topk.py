@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.platforms import current_platform
 
 
+# NOTE(elvircrn): Modify this
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )

@@ -1567,24 +1567,28 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e_score_correction_bias=layer.e_score_correction_bias,
             )
 
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         # EPLB path
         if (
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
+            packed_tensor = layer.select_exerts(
+                hidden_states=x,
+                router_logits=router_logits,
+                packed=True
+            )
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
                 x=x,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
+                packed_tensor=packed_tensor,
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
             )
+
+        topk_weights, topk_ids, _ = layer.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+        )
 
         if self.use_marlin:
             return fused_marlin_moe(
