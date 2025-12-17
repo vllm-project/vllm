@@ -957,36 +957,39 @@ define_extension_target(
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
-#
-# _C_stable extension (ops registered via STABLE_TORCH_LIBRARY)
-#
-set(VLLM_STABLE_EXT_SRC
-  "csrc/activation_kernels.cu"
-  "csrc/torch_bindings_stable.cpp")
 
-set_gencode_flags_for_srcs(
-  SRCS "${VLLM_STABLE_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}")
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  #
+  # _C_stable extension (ops registered via STABLE_TORCH_LIBRARY)
+  #
+  set(VLLM_STABLE_EXT_SRC
+    "csrc/activation_kernels.cu"
+    "csrc/torch_bindings_stable.cpp")
 
-message(STATUS "Enabling C_stable extension.")
-define_extension_target(
-  _C_stable
-  DESTINATION vllm
-  LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_STABLE_EXT_SRC}
-  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  USE_SABI 3
-  WITH_SOABI)
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_STABLE_EXT_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
 
-# Set TORCH_TARGET_VERSION for stable ABI compatibility.
-# This ensures we only use C-shim APIs available in PyTorch 2.10+.
-target_compile_definitions(_C_stable PRIVATE
-  TORCH_TARGET_VERSION=0x020A000000000000ULL)
+  message(STATUS "Enabling C_stable extension.")
+  define_extension_target(
+    _C_stable
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_STABLE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
 
-# Needed to use cuda APIs from C-shim
-target_compile_definitions(_C_stable PRIVATE
-  USE_CUDA)
+  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+  # This ensures we only use C-shim APIs available in PyTorch 2.10+.
+  target_compile_definitions(_C_stable PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL)
+
+  # Needed to use cuda APIs from C-shim
+  target_compile_definitions(_C_stable PRIVATE
+    USE_CUDA)
+endif()
 
 #
 # _moe_C extension
