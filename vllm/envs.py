@@ -1654,6 +1654,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",
