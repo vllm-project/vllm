@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Callable
-from typing import TypeVar, Optional
+from typing import TypeVar
 
 import regex as re
 import torch
@@ -21,7 +21,12 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+<<<<<<< HEAD
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
+=======
+from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.slab_helper import process_slab_activation_loop
+>>>>>>> 2ccff6432 (ran pre-commit command)
 from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
@@ -38,8 +43,11 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
+<<<<<<< HEAD
 from vllm.v1.worker.utils import MultiModalBudget
 from vllm.lora.slab_helper import process_slab_activation_loop
+=======
+>>>>>>> 2ccff6432 (ran pre-commit command)
 
 logger = init_logger(__name__)
 
@@ -256,42 +264,40 @@ class LoRAModelManager:
 
         if SLAB_OPTIMIZATION:
             # Check for cached CPU slab and metadata from LoRAModel
-            has_cpu_slab = hasattr(lora_model, '_cached_cpu_slab')
-            has_gpu_slab = hasattr(lora_model, '_cached_gpu_slab')
-            has_metadata = hasattr(lora_model, '_cached_metadata')
-            
+            has_cpu_slab = hasattr(lora_model, "_cached_cpu_slab")
+            has_gpu_slab = hasattr(lora_model, "_cached_gpu_slab")
+            has_metadata = hasattr(lora_model, "_cached_metadata")
+
             if has_cpu_slab and has_metadata:
-                # MEMORY EFFICIENT: Create GPU slab only during activation (respects max_loras constraint)
-                cpu_slab = lora_model._cached_cpu_slab
-                metadata = lora_model._cached_metadata
-                loras_dict = getattr(lora_model, '_loras_dict', {})
-                
+                # MEMORY EFFICIENT: Create GPU slab only during activation
+                cpu_slab = lora_model._cached_cpu_slab  # type: ignore[attr-defined]
+                metadata = lora_model._cached_metadata  # type: ignore[attr-defined]
+
                 # Transfer to GPU only when activated
                 gpu_slab = cpu_slab.to(device="cuda", non_blocking=True)
-                
-                # Cache GPU slab for this activation (will be cleaned up when deactivated)
-                lora_model._cached_gpu_slab = gpu_slab
-            
+
+                # Cache GPU slab for this activation
+                lora_model._cached_gpu_slab = gpu_slab  # type: ignore[attr-defined]
+
             elif has_gpu_slab and has_metadata:
-                gpu_slab = lora_model._cached_gpu_slab
-                metadata = lora_model._cached_metadata
-            
+                gpu_slab = lora_model._cached_gpu_slab  # type: ignore[attr-defined]
+                metadata = lora_model._cached_metadata  # type: ignore[attr-defined]
+
             else:
-                return False            
+                return False
             # Use helper function for the full activation loop with all optimizations
             process_slab_activation_loop(
-                self.modules, 
-                lora_model, 
-                self._get_lora_layer_weights, 
-                self.lora_config, 
-                gpu_slab, 
-                metadata, 
-                index
+                self.modules,
+                lora_model,
+                self._get_lora_layer_weights,
+                self.lora_config,
+                gpu_slab,
+                metadata,
+                index,
             )
-            
+
             return True
         else:
-            
             for module_name, module in self.modules.items():
                 module_lora = self._get_lora_layer_weights(lora_model, module_name)
                 if not module_lora:
@@ -308,15 +314,15 @@ class LoRAModelManager:
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
-            
-            # MEMORY CLEANUP: Free GPU slab when deactivating to respect max_loras constraint
+
+            # Free GPU slab when deactivating to respect max_loras constraint
             if SLAB_OPTIMIZATION and lora_id in self._registered_adapters:
                 lora_model = self._registered_adapters[lora_id]
-                if hasattr(lora_model, '_cached_gpu_slab'):
+                if hasattr(lora_model, "_cached_gpu_slab"):
                     # Free GPU slab to make room for other LoRAs
                     del lora_model._cached_gpu_slab
                     torch.cuda.empty_cache()  # Force GPU memory cleanup
-            
+
         except ValueError:
             pass
 
@@ -326,8 +332,12 @@ class LoRAModelManager:
             self._create_merged_loras_inplace(lora)
             self._registered_adapters[lora.id] = lora
         else:
-            # Slab optimization: slab is already built with target modules in from_lora_tensors
-            logger.debug(f"[SLAB_OPTIMIZATION] Registering LoRA {lora.id} - slab already built with target modules")
+            # Slab optimization: slab already built with target modules
+            logger.debug(
+                "[SLAB_OPTIMIZATION] Registering LoRA %d - "
+                "slab already built with target modules",
+                lora.id,
+            )
             self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
@@ -614,7 +624,8 @@ class LoRAModelManager:
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
+                    replacement_loras,
+                    module_name,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(

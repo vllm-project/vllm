@@ -40,7 +40,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 
 from .utils import _get_lora_device
-from vllm.logger import init_logger
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -520,7 +519,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         # Device-aware scatter: optimize GPU→GPU case (slab optimization)
         is_gpu_source = w1_lora_a.is_cuda
-        
+
         if is_gpu_source:
             # Fast path: GPU→GPU scatter (source already on GPU from slab)
             self.w13_lora_a_stacked[0][
@@ -693,8 +692,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
     ):
-        logger = init_logger(__name__)
-
         """Overwrites lora tensors at index."""
         # Make mypy happy
         assert isinstance(lora_a, list)
@@ -750,9 +747,9 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
         # Device-aware scatter: optimize GPU→GPU case (slab optimization)
         is_gpu_source = w13_lora_a.is_cuda
-        
+
         # logger.info(f"  - is_gpu_source: {is_gpu_source}")
-        
+
         if is_gpu_source:
             # Fast path: GPU→GPU scatter (source already on GPU from slab)
             self.w13_lora_a_stacked[0][

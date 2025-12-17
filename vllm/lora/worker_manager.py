@@ -5,10 +5,9 @@ from contextlib import contextmanager
 from typing import Any, Literal
 
 import torch
-from vllm.envs import SLAB_OPTIMIZATION
-
 
 from vllm.config import VllmConfig
+from vllm.envs import SLAB_OPTIMIZATION
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
@@ -88,31 +87,37 @@ class WorkerLoRAManager:
         self._adapter_manager = lora_manager
         return lora_manager.model
 
-    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
+    def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel | None:
         if SLAB_OPTIMIZATION:
             lora_path = get_adapter_absolute_path(lora_request.lora_path)
             # Check for dummy/fake warmup paths
-            if ("/not/a/real/path" in lora_path or 
-                "warmup" in lora_request.lora_name.lower() or
-                not lora_path or lora_path == "/not/a/real/path"):
+            if (
+                "/not/a/real/path" in lora_path
+                or "warmup" in lora_request.lora_name.lower()
+                or not lora_path
+                or lora_path == "/not/a/real/path"
+            ):
                 logger.warning(
-                    f"[SLAB_OPTIMIZATION] Skipping dummy warmup LoRA: "
-                    f"{lora_request.lora_name} (path: {lora_path}) - "
-                    f"not needed with slab optimization"
+                    "[SLAB_OPTIMIZATION] Skipping dummy warmup LoRA: %s "
+                    "(path: %s) - not needed with slab optimization",
+                    lora_request.lora_name,
+                    lora_path,
                 )
                 return None
-            
+
             # Check if adapter_config.json exists for real LoRAs
             import os
+
             lora_config_path = os.path.join(lora_path, "adapter_config.json")
             if not os.path.exists(lora_config_path):
                 logger.warning(
-                    f"[SLAB_OPTIMIZATION] Skipping LoRA {lora_request.lora_name} - "
-                    f"adapter_config.json not found at {lora_config_path}, "
-                    f"likely dummy warmup"
+                    "[SLAB_OPTIMIZATION] Skipping LoRA %s - "
+                    "adapter_config.json not found at %s, likely dummy warmup",
+                    lora_request.lora_name,
+                    lora_config_path,
                 )
                 return None
-        
+
         try:
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
@@ -141,24 +146,41 @@ class WorkerLoRAManager:
             # to ensure correct loading of lora weights.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
-            # Get target modules, lora_config, AND packed_modules info for slab optimization
-            target_modules_dict = None
-            target_lora_config = None
-            packed_modules = None
-            packed_modules_mapping = None
-            
-            if SLAB_OPTIMIZATION and hasattr(self, '_adapter_manager'):
-                target_modules_dict = getattr(self._adapter_manager, 'modules', None)
-                target_lora_config = getattr(self._adapter_manager, 'lora_config', None)
-                packed_modules = getattr(self._adapter_manager, 'packed_modules', None)
-                packed_modules_mapping = getattr(self._adapter_manager, 'packed_modules_mapping', None)
-                
-                if target_modules_dict and target_lora_config:
-                    logger.debug(f"[SLAB_OPTIMIZATION] Passing {len(target_modules_dict)} target modules and lora_config (fully_sharded_loras={target_lora_config.fully_sharded_loras}) to LoRA creation")
-                    logger.debug(f"[SLAB_OPTIMIZATION] Passing {len(packed_modules) if packed_modules else 0} packed_modules for pre-slab packing")
-                else:
-                    logger.warning(f"[SLAB_OPTIMIZATION] Missing target info - modules: {target_modules_dict is not None}, lora_config: {target_lora_config is not None}")
+            # Get target modules, lora_config, AND packed_modules info
+            target_modules_dict: dict | None = None
+            target_lora_config: Any = None
+            packed_modules_dict: dict | None = None
+            packed_modules_map: dict | None = None
 
+            if SLAB_OPTIMIZATION and hasattr(self, "_adapter_manager"):
+                target_modules_dict = getattr(self._adapter_manager, "modules", None)
+                target_lora_config = getattr(self._adapter_manager, "lora_config", None)
+                packed_modules_dict = getattr(
+                    self._adapter_manager, "packed_modules", None
+                )
+                packed_modules_map = getattr(
+                    self._adapter_manager, "packed_modules_mapping", None
+                )
+
+                if target_modules_dict and target_lora_config:
+                    logger.debug(
+                        "[SLAB_OPTIMIZATION] Passing %d target modules and "
+                        "lora_config (fully_sharded_loras=%s) to LoRA creation",
+                        len(target_modules_dict),
+                        target_lora_config.fully_sharded_loras,
+                    )
+                    logger.debug(
+                        "[SLAB_OPTIMIZATION] Passing %d packed_modules for "
+                        "pre-slab packing",
+                        len(packed_modules_dict) if packed_modules_dict else 0,
+                    )
+                else:
+                    logger.warning(
+                        "[SLAB_OPTIMIZATION] Missing target info - "
+                        "modules: %s, lora_config: %s",
+                        target_modules_dict is not None,
+                        target_lora_config is not None,
+                    )
 
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
@@ -172,11 +194,11 @@ class WorkerLoRAManager:
                 embedding_padding_modules=self.embedding_padding_modules,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
-                target_modules_dict=target_modules_dict,      # Pass target modules for slab optimization
-                target_lora_config=target_lora_config,         # Pass lora_config with fully_sharded_loras flag
-                slab_path=lora_request.slab_path,              # Pass slab path for disk save/load
-                packed_modules=packed_modules,                 # NEW: Pass packed_modules for pre-slab packing
-                packed_modules_mapping=packed_modules_mapping, # NEW: Pass packing mapping
+                target_modules_dict=target_modules_dict,
+                target_lora_config=target_lora_config,
+                slab_path=lora_request.slab_path,
+                packed_modules=packed_modules_dict,
+                packed_modules_mapping=packed_modules_map,
             )
 
         except FileNotFoundError as e:
@@ -247,7 +269,10 @@ class WorkerLoRAManager:
         loaded_adapter = self._load_adapter(adapter_request)
         if loaded_adapter is None:
             # Dummy warmup LoRA was skipped under SLAB_OPTIMIZATION
-            logger.debug(f"[SLAB_OPTIMIZATION] Skipped dummy LoRA: {adapter_request.lora_name}")
+            logger.debug(
+                "[SLAB_OPTIMIZATION] Skipped dummy LoRA: %s",
+                adapter_request.lora_name,
+            )
             return False
         loaded = self._adapter_manager.add_adapter(loaded_adapter)
         self._adapter_manager.activate_adapter(loaded_adapter.id)
@@ -319,9 +344,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora = self._load_adapter(lora_request)
             if lora is None:
                 # Dummy warmup LoRA was skipped under SLAB_OPTIMIZATION
-                logger.debug(f"[SLAB_OPTIMIZATION] Skipped dummy LoRA: {lora_request.lora_name}")
+                logger.debug(
+                    "[SLAB_OPTIMIZATION] Skipped dummy LoRA: %s",
+                    lora_request.lora_name,
+                )
                 return False
-
 
             # Loading succeeded, now check if we will exceed cache capacity and
             # evict if the oldest adapter if so

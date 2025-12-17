@@ -6,21 +6,22 @@ import os
 import safetensors.torch
 import torch
 
+from vllm.config.lora import LoRAConfig
+from vllm.envs import SLAB_OPTIMIZATION
 from vllm.logger import init_logger
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
+from vllm.lora.slab_helper import (
+    create_slab_optimized_lora_model,
+)
 from vllm.lora.utils import (
     get_lora_id,
     is_base_embeddding_weights,
     parse_fine_tuned_lora_name,
 )
-from vllm.envs import SLAB_OPTIMIZATION
-from typing import TypeVar, Optional
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.lora.slab_helper import create_slab_optimized_lora_model, process_slab_activation_loop
-from vllm.config.lora import LoRAConfig
 
 logger = init_logger(__name__)
 
@@ -58,17 +59,17 @@ class LoRAModel:
             rank=self.rank,
             loras=self.loras.copy(),
         )
-        
+
         # Copy slab metadata if present (for SLAB optimization)
-        if hasattr(self, '_cached_cpu_slab'):
-            cloned._cached_cpu_slab = self._cached_cpu_slab
-        if hasattr(self, '_cached_metadata'):
-            cloned._cached_metadata = self._cached_metadata
-        if hasattr(self, '_lora_dir'):
-            cloned._lora_dir = self._lora_dir
-        if hasattr(self, '_loras_dict'):
-            cloned._loras_dict = self._loras_dict
-            
+        if hasattr(self, "_cached_cpu_slab"):
+            cloned._cached_cpu_slab = self._cached_cpu_slab  # type: ignore[attr-defined]
+        if hasattr(self, "_cached_metadata"):
+            cloned._cached_metadata = self._cached_metadata  # type: ignore[attr-defined]
+        if hasattr(self, "_lora_dir"):
+            cloned._lora_dir = self._lora_dir  # type: ignore[attr-defined]
+        if hasattr(self, "_loras_dict"):
+            cloned._loras_dict = self._loras_dict  # type: ignore[attr-defined]
+
         return cloned
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -90,10 +91,10 @@ class LoRAModel:
         embedding_modules: dict[str, str] | None = None,
         embedding_padding_modules: list[str] | None = None,
         weights_mapper: WeightsMapper | None = None,
-        lora_dir: Optional[str] = None,
+        lora_dir: str | None = None,
         target_modules_dict: dict | None = None,
         target_lora_config: LoRAConfig | None = None,
-        slab_path: Optional[str] = None,
+        slab_path: str | None = None,
         packed_modules: dict | None = None,
         packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
@@ -101,11 +102,7 @@ class LoRAModel:
         if not SLAB_OPTIMIZATION:
             pin_memory = str(device) == "cpu" and is_pin_memory_available()
             loras: dict[str, LoRALayerWeights] = {}
-            
-            # Track sizes for logging
-            module_sizes: dict[str, dict[str, int]] = {}
-            total_lora_bytes = 0
-            
+
             for tensor_name, tensor in tensors.items():
                 if is_base_embeddding_weights(tensor_name):
                     continue
@@ -116,7 +113,6 @@ class LoRAModel:
                     loras[module_name] = LoRALayerWeights.from_config(
                         module_name, peft_helper
                     )
-                    module_sizes[module_name] = {'lora_a': 0, 'lora_b': 0}
 
                 if is_lora_a:
                     if (
@@ -125,76 +121,91 @@ class LoRAModel:
                         and model_vocab_size != tensor.shape[1]
                     ):
                         raise RuntimeError(
-                            f"The embedding LoRA size({tensor.shape[1]}) must be consistent"
-                            f" with the base model's vocabulary size({model_vocab_size})."
+                            f"The embedding LoRA size({tensor.shape[1]}) "
+                            f"must be consistent with the base model's "
+                            f"vocabulary size({model_vocab_size})."
                         )
                     loras[module_name].lora_a = tensor.to(device=device, dtype=dtype)
                     if pin_memory:
-                        loras[module_name].lora_a = loras[module_name].lora_a.pin_memory()
-                    
+                        loras[module_name].lora_a = loras[
+                            module_name
+                        ].lora_a.pin_memory()
+
                 else:
                     loras[module_name].lora_b = tensor.to(device=device, dtype=dtype)
 
                     if pin_memory:
-                        loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
+                        loras[module_name].lora_b = loras[
+                            module_name
+                        ].lora_b.pin_memory()
 
             return cls(lora_model_id, peft_helper.r, loras)
         else:
             logger.debug("Using slab-based LoRA tensor optimization")
-            
-            from vllm.lora.slab_helper import check_slab_cache, get_cached_lora_model
-            
+
+            from vllm.lora.slab_helper import check_slab_cache
+
             cache_hit, lora_model_cached = check_slab_cache(
                 lora_dir, peft_helper, target_lora_config, target_modules_dict
             )
-            
+
             if cache_hit and lora_model_cached is not None:
-                logger.debug(f"[SLAB_CACHE_HIT] Using cached slab for {lora_dir}, cloning with ID {lora_model_id}")
-                # Clone cached model with correct ID (each add_lora call gets new ID)
+                logger.debug(
+                    "[SLAB_CACHE_HIT] Using cached slab for %s, cloning with ID %s",
+                    lora_dir,
+                    lora_model_id,
+                )
+                # Clone cached model with correct ID
                 return lora_model_cached.clone(lora_model_id)
-            
-            logger.debug(f"Building new slab for {lora_dir}")
+
+            logger.debug("Building new slab for %s", lora_dir)
             lora_model, gpu_slab, metadata = create_slab_optimized_lora_model(
                 lora_model_id=lora_model_id,
                 tensors=tensors,
                 peft_helper=peft_helper,
                 device=device,
                 dtype=dtype,
-                embeddings=False,
+                embeddings=None,
                 target_embedding_padding=model_vocab_size,
                 embedding_modules=embedding_modules,
                 embedding_padding_modules=embedding_padding_modules,
                 weights_mapper=weights_mapper,
                 lora_dir=lora_dir,
                 lora_config=peft_helper,
-                target_modules_dict=target_modules_dict,     # Pass target modules from LoRAManager
-                target_lora_config=target_lora_config,        # Pass target lora_config with fully_sharded_loras
-                slab_path=slab_path,                          # Pass slab path for disk save/load
-                packed_modules=packed_modules,                # NEW: Pass packed_modules for packing BEFORE slab build
-                packed_modules_mapping=packed_modules_mapping # NEW: Pass packing mapping
+                target_modules_dict=target_modules_dict,
+                target_lora_config=target_lora_config,
+                slab_path=slab_path,
+                packed_modules=packed_modules,
+                packed_modules_mapping=packed_modules_mapping,
             )
-            
-            if gpu_slab is not None and metadata is not None and target_modules_dict is not None:
+
+            if (
+                gpu_slab is not None
+                and metadata is not None
+                and target_modules_dict is not None
+            ):
                 # Pre-cache metadata lookup once for all modules
-                if not hasattr(metadata, '_lookup_cache'):
-                    metadata._lookup_cache = {info.module_name: info for info in metadata.tensor_infos}
-                
-                # Instead of calling expensive create_lora_weights, just cache slab references
+                if not hasattr(metadata, "_lookup_cache"):
+                    metadata._lookup_cache = {
+                        info.module_name: info for info in metadata.tensor_infos
+                    }
+
+                # Instead of calling create_lora_weights, just cache slab references
                 for module_name, module in target_modules_dict.items():
-                    if hasattr(module, 'create_lora_weights'):
+                    if hasattr(module, "create_lora_weights"):
                         module._gpu_slab_ref = gpu_slab
                         module._slab_metadata_ref = metadata
                         module._slab_ready = True
                         module._using_slab_views = True
             # Add any post-processing after slab model creation
             torch.cuda.synchronize()  # Check for pending GPU operations
-            
+
             # Cache the built LoRAModel for future reuse
             from vllm.lora.slab_helper import cache_lora_model
+
             cache_lora_model(lora_dir, lora_model)
-                
+
             return lora_model
-         
 
     @classmethod
     def from_local_checkpoint(
@@ -213,7 +224,7 @@ class LoRAModel:
         tensorizer_config_dict: dict | None = None,
         target_modules_dict: dict | None = None,
         target_lora_config: LoRAConfig | None = None,
-        slab_path: Optional[str] = None,
+        slab_path: str | None = None,
         packed_modules: dict | None = None,
         packed_modules_mapping: dict | None = None,
     ) -> "LoRAModel":
@@ -305,8 +316,9 @@ class LoRAModel:
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
+        lora_id = get_lora_id() if lora_model_id is None else lora_model_id
         return cls.from_lora_tensors(
-            lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
+            lora_model_id=lora_id,
             tensors=tensors,
             peft_helper=peft_helper,
             device=device,
