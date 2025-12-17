@@ -306,6 +306,87 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
 # ============================================================================
 
 
+def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that frame recovery correctly uses the next valid frame when
+    target frames fail to load.
+
+    Uses simulate_corruption.mp4 and mocks VideoCapture.grab() to fail
+    on specific frame indices, then verifies recovery produces more frames.
+    """
+    import cv2
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        # Load the test video
+        video_path = ASSETS_DIR / "simulate_corruption.mp4"
+        with open(video_path, "rb") as f:
+            video_data = f.read()
+
+        # Get video info to determine which frames to fail
+        # We'll fail frames at indices that would be sampled
+        # For a video sampled at 10 frames, simulate failures on 2 of them
+        fail_on_frames = {5, 15, 25}  # Fail on these frame indices
+
+        # Store original VideoCapture class
+        original_video_capture = cv2.VideoCapture
+
+        class MockVideoCapture:
+            """Wrapper that simulates grab() failures on specific frames."""
+
+            def __init__(self, *args, **kwargs):
+                self._cap = original_video_capture(*args, **kwargs)
+                self._current_frame = -1
+
+            def grab(self):
+                self._current_frame += 1
+                if self._current_frame in fail_on_frames:
+                    return False  # Simulate failure
+                return self._cap.grab()
+
+            def retrieve(self):
+                return self._cap.retrieve()
+
+            def get(self, prop):
+                return self._cap.get(prop)
+
+            def isOpened(self):
+                return self._cap.isOpened()
+
+            def release(self):
+                return self._cap.release()
+
+        # Patch cv2.VideoCapture
+        m.setattr(cv2, "VideoCapture", MockVideoCapture)
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+
+        # Test WITHOUT recovery - should have fewer frames due to failures
+        frames_no_recovery, meta_no = loader.load_bytes(
+            video_data, num_frames=30, frame_recovery=False
+        )
+
+        # Test WITH recovery - should recover using next valid frames
+        frames_with_recovery, meta_yes = loader.load_bytes(
+            video_data, num_frames=30, frame_recovery=True
+        )
+
+        # With recovery should have MORE frames than without
+        assert frames_with_recovery.shape[0] > frames_no_recovery.shape[0], (
+            f"Recovery should produce more frames. "
+            f"Without: {frames_no_recovery.shape[0]}, "
+            f"With: {frames_with_recovery.shape[0]}"
+        )
+
+        # Verify metadata consistency
+        assert frames_no_recovery.shape[0] == len(meta_no["frames_indices"])
+        assert frames_with_recovery.shape[0] == len(meta_yes["frames_indices"])
+
+        # Verify temporal order is preserved
+        assert meta_yes["frames_indices"] == sorted(meta_yes["frames_indices"])
+
+
 def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
     """
     Test frame recovery with an actual corrupted video file.
