@@ -201,8 +201,8 @@ _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
 def register_backend(
     backend: AttentionBackendEnum | MambaAttentionBackendEnum,
-    is_mamba: bool = False,
     class_path: str | None = None,
+    is_mamba: bool = False,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
