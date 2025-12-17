@@ -16,8 +16,12 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def setup_offline_docs(app: FastAPI) -> None:
-    """Setup offline FastAPI documentation with vendored static assets."""
+def attach_router(app: FastAPI) -> None:
+    """Attach offline docs router if enabled via args."""
+    args = getattr(app.state, "args", None)
+    if args is None or not getattr(args, "enable_offline_docs", False):
+        return
+
     static_dir = pathlib.Path(__file__).parent / "static"
 
     if not static_dir.exists():

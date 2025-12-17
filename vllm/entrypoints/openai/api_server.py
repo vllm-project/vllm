@@ -964,11 +964,6 @@ def build_app(args: Namespace) -> FastAPI:
         )
     elif args.enable_offline_docs:
         app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
-        from vllm.entrypoints.serve.instrumentator.offline_docs import (
-            setup_offline_docs,
-        )
-
-        setup_offline_docs(app)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args

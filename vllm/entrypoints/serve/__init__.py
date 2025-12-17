@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 from fastapi import FastAPI
 
 
@@ -11,6 +10,7 @@ def register_vllm_serve_api_routers(app: FastAPI):
     )
 
     attach_lora_router(app)
+
     from vllm.entrypoints.serve.elastic_ep.api_router import (
         attach_router as attach_elastic_ep_router,
     )
@@ -58,3 +58,9 @@ def register_vllm_serve_api_routers(app: FastAPI):
     )
 
     attach_health_router(app)
+
+    from vllm.entrypoints.serve.instrumentator.offline_docs import (
+        attach_router as attach_offline_docs_router,
+    )
+
+    attach_offline_docs_router(app)
