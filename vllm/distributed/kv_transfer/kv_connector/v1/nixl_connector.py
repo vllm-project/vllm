@@ -760,6 +760,9 @@ class NixlConnectorScheduler:
             self._reqs_not_processed.add(request.request_id)
             return False, None
 
+        # Clear _reqs_need_save if a request is aborted as partial prefill.
+        self._reqs_need_save.pop(request.request_id, None)
+
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
         delay_free_blocks = len(block_ids) > 0
