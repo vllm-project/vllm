@@ -3,7 +3,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
