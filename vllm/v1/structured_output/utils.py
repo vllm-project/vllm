@@ -31,7 +31,7 @@ else:
     oc = LazyLoader("oc", globals(), "outlines_core")
     file_utils = LazyLoader("file_utils", globals(), "transformers.file_utils")
     convert_slow_tokenizer = LazyLoader(
-        "convert_slow_tokenizer", globals(), "transformers"
+        "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
 
     TokenizerLike = object
