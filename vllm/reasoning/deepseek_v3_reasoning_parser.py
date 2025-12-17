@@ -26,6 +26,8 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
 
         chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
         thinking = bool(chat_kwargs.pop("thinking", False))
+        enable_thinking = bool(chat_kwargs.pop("enable_thinking", False))
+        thinking = thinking or enable_thinking
 
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
