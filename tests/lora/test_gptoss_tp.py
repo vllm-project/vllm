@@ -68,30 +68,33 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         # Normalize SQL: remove whitespace/newlines, uppercase, remove punct
         gen_normalized = (
-            ''.join(generated_texts[i].split())
-            .upper().replace(',', '').replace(';', '')
+            "".join(generated_texts[i].split())
+            .upper()
+            .replace(",", "")
+            .replace(";", "")
         )
         exp_normalized = (
-            ''.join(EXPECTED_LORA_OUTPUT[i].split())
-            .upper().replace(',', '').replace(';', '')
+            "".join(EXPECTED_LORA_OUTPUT[i].split())
+            .upper()
+            .replace(",", "")
+            .replace(";", "")
         )
-        
+
         # Check key SQL keywords are present
-        key_keywords = ['SELECT', 'FROM', 'FARM']
-        
+        key_keywords = ["SELECT", "FROM", "FARM"]
+
         # For AVG query
-        if 'AVG' in exp_normalized:
-            key_keywords.extend([
-                'AVG', 'WORKING_HORSES', 'WHERE', 'TOTAL_HORSES', '5000'
-            ])
-        # For MAX/MIN query  
-        elif 'MAX' in exp_normalized and 'MIN' in exp_normalized:
-            key_keywords.extend(['MAX', 'MIN', 'COWS'])
-        
+        if "AVG" in exp_normalized:
+            key_keywords.extend(
+                ["AVG", "WORKING_HORSES", "WHERE", "TOTAL_HORSES", "5000"]
+            )
+        # For MAX/MIN query
+        elif "MAX" in exp_normalized and "MIN" in exp_normalized:
+            key_keywords.extend(["MAX", "MIN", "COWS"])
+
         for keyword in key_keywords:
             assert keyword in gen_normalized, (
-                f"Expected keyword '{keyword}' not found in SQL: "
-                f"{generated_texts[i]}"
+                f"Expected keyword '{keyword}' not found in SQL: {generated_texts[i]}"
             )
 
 
