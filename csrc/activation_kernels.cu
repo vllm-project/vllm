@@ -8,8 +8,9 @@
 #include <cmath>
 #include <algorithm>
 
-#include "stable_dispatch_utils.h"
 #include "cuda_compat.h"
+#include "stable_dispatch_utils.h"
+#include "torch_stable_utils.h"
 
 namespace vllm {
 
@@ -111,11 +112,6 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 // Launch activation and gating kernel using stable APIs.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
-// Changes from original:
-// - torch::Tensor -> torch::stable::Tensor
-// - at::cuda::OptionalCUDAGuard -> torch::stable::accelerator::DeviceGuard
-// - at::cuda::getCurrentCUDAStream() -> aoti_torch_get_current_cuda_stream()
-// - VLLM_DISPATCH_FLOATING_TYPES -> VLLM_STABLE_DISPATCH_FLOATING_TYPES
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                    \
   int d = input.size(-1) / 2;                                               \
   int64_t num_tokens = input.numel() / input.size(-1);                      \
@@ -125,10 +121,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
     return;                                                                 \
   }                                                                         \
   torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  void* stream_ptr = nullptr;                                               \
-  TORCH_ERROR_CODE_CHECK(                                                   \
-      aoti_torch_get_current_cuda_stream(input.get_device(), &stream_ptr)); \
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);         \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
       input.scalar_type(), "act_and_mul_kernel", [&] {                      \
         vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>     \
@@ -295,10 +288,7 @@ __global__ void swigluoai_and_mul_kernel(
   dim3 grid(num_tokens);                                                    \
   dim3 block(std::min(d, 1024));                                            \
   torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  void* stream_ptr = nullptr;                                               \
-  TORCH_ERROR_CODE_CHECK(                                                   \
-      aoti_torch_get_current_cuda_stream(input.get_device(), &stream_ptr)); \
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);         \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
       input.scalar_type(), "act_and_mul_kernel_with_param", [&] {           \
         vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>>     \
@@ -314,10 +304,7 @@ __global__ void swigluoai_and_mul_kernel(
   dim3 grid(num_tokens);                                                       \
   dim3 block(std::min(d, 1024));                                               \
   torch::stable::accelerator::DeviceGuard device_guard(input.get_device());    \
-  void* stream_ptr = nullptr;                                                  \
-  TORCH_ERROR_CODE_CHECK(                                                      \
-      aoti_torch_get_current_cuda_stream(input.get_device(), &stream_ptr));    \
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);            \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());           \
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                         \
       input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
         vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
@@ -394,10 +381,7 @@ __global__ void activation_kernel(
   dim3 grid(num_tokens);                                                    \
   dim3 block(std::min(d, 1024));                                            \
   torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  void* stream_ptr = nullptr;                                               \
-  TORCH_ERROR_CODE_CHECK(                                                   \
-      aoti_torch_get_current_cuda_stream(input.get_device(), &stream_ptr)); \
-  cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_ptr);         \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
       input.scalar_type(), "activation_kernel", [&] {                       \
         vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                 \
