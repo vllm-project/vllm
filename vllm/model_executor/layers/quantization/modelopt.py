@@ -481,6 +481,16 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 )
                 self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
 
+            if (
+                self.moe.is_lora_enabled
+                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+            ):
+                raise ValueError(
+                    f"FlashInfer {self.flashinfer_moe_backend.value} "
+                    "does not support LoRA."
+                    " Please disable VLLM_USE_FLASHINFER_MOE_FP8 to use LoRA."
+                )
+
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
