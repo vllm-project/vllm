@@ -607,6 +607,16 @@ class NemotronHModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+        if get_tensor_model_parallel_rank() == 0:
+            print(f"SMOR: ****************************************************************")
+            print("SMOR ************** NEMOTRON H FORWARD CALLED ************** ")
+            print(f"SMOR: positions: {positions}")
+            if inputs_embeds is not None:
+                print(f"SMOR: inputs_embeds.shape: {inputs_embeds.shape}")
+            else:
+                print(f"SMOR: input_ids.shape: {input_ids.shape}")
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
