@@ -1254,7 +1254,8 @@ def validate_fp8_block_shape(
 
     if getattr(layer, "allow_fp8_block_shape_mismatch", False):
         logger.debug(
-            "Skipping FP8 block shape validation for layer %s due to detected mismatch allowance.",
+            "Skipping FP8 block shape validation for layer %s due to detected"
+            " mismatch allowance.",
             getattr(layer, "prefix", "<unknown>"),
         )
         return
