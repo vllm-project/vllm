@@ -136,6 +136,13 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [regex]
+  # prevent use torch.cuda APIs
+  - id: check-torch-cuda-call
+    name: "Prevent new 'torch.cuda' APIs call"
+    entry: python tools/pre_commit/check_torch_cuda.py
+    language: python
+    types: [python]
+    additional_dependencies: [regex]
   - id: check-pickle-imports
     name: Prevent new pickle/cloudpickle imports
     entry: python tools/pre_commit/check_pickle_imports.py

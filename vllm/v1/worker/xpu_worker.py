@@ -76,7 +76,7 @@ class XPUWorker(Worker):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        torch.xpu.empty_cache()
+        torch.accelerator.empty_cache()
         torch.xpu.reset_peak_memory_stats()
 
         free_gpu_memory, total_gpu_memory = torch.xpu.mem_get_info()
