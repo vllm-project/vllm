@@ -143,7 +143,7 @@ class MiMoV2MoE(nn.Module):
 
         dtype = getattr(config, "moe_router_dtype", "float32")
         if dtype == "auto":
-            self.gate_dtype = None  # 使用默认 dtype
+            self.gate_dtype = None
         elif dtype == "float" or dtype == "float32":
             self.gate_dtype = torch.float32
         elif dtype == "bfloat16":

@@ -935,7 +935,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
-        v_head_size: Optional[int] = None,
+        v_head_size: int | None = None,
     ):
         self.hidden_size = hidden_size
         self.head_size = head_size
