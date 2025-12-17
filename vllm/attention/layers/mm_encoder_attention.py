@@ -10,6 +10,7 @@ from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_torch_sdpa_wrapper,
 )
+from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -100,6 +101,10 @@ class MMEncoderAttention(CustomOp):
         self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
             self.attn_backend,
         )
+
+        if self.is_flash_attn_backend:
+            assert self.flash_attn_varlen_func is not None
+            self._fa_version = get_flash_attn_version()
 
         logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
 
@@ -204,6 +209,7 @@ class MMEncoderAttention(CustomOp):
             max_seqlen=max_seqlen,
             batch_size=bsz,
             is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
+            fa_version=self._fa_version,
         )
         return output
 
