@@ -1025,13 +1025,6 @@ class ModelMetrics:
             total.update(prefixed)
         return total
 
-    def get_perf_stats_per_gpu(self, ctx: ExecutionContext) -> PerfStats:
-        return PerfStats(
-            self.get_num_flops(ctx, True),
-            self.get_read_bytes(ctx, True),
-            self.get_write_bytes(ctx, True),
-        )
-
     def get_step_perf_stats_per_gpu(
         self, scheduler_output: SchedulerOutput
     ) -> PerfStats:
