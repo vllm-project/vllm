@@ -2798,7 +2798,12 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        num_tokens_padded = num_tokens
+        if self.model_config.quantization == "fp8":
+            # FP8 GEMM kernels generally perform better when M is a multiple of 4.
+            # TODO: Better huristics for FP8/SP/DP combinations.
+            num_tokens_padded = round_up(num_tokens_padded, 4)
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens_padded)
         uniform_decode = (
             (
                 (max_num_scheduled_tokens == self.uniform_decode_query_len)
