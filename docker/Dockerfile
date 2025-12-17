@@ -541,6 +541,7 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
@@ -609,24 +610,40 @@ RUN mv vllm src/vllm
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
+ARG CUDA_VERSION
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
+# lmcache requires explicit specifying CUDA_HOME
+ARG torch_cuda_arch_list
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
+    CUDA_HOME=/usr/local/cuda; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt || true; \
-        if [ "$CUDA_MAJOR" -ge 13]; then \
+        if [ "$CUDA_MAJOR" -ge 13 ]; then \
             uv pip install --system nixl-cu13 || true; \
-        fi \
+        fi; \
+	apt update -y && \
+        apt install -y --no-install-recommends \
+		libcusparse-dev-${CUDA_VERSION_DASH} \
+		libcublas-dev-${CUDA_VERSION_DASH} \
+		libcusolver-dev-${CUDA_VERSION_DASH} && \
+        rm -rf /var/lib/apt/lists/* && \
+	ls /usr/local/cuda/include/ && \
+	uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation ; \
     fi
 
+# uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation \ #|| true; \
 ENV VLLM_USAGE_SOURCE production-docker-image
 
 # define sagemaker first, so it is not default from `docker build`
