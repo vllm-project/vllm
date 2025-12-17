@@ -829,6 +829,10 @@ class CompressedTensorsW4A16Nvfp4MoeMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert layer.activation == "silu", "Only SiLU activation is supported."
+        if layer.enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for `CompressedTensorsW4A16Nvfp4MoeMethod` yet."
+            )
 
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
