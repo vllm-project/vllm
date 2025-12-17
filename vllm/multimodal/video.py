@@ -169,7 +169,7 @@ class VideoLoader:
                         frames_list.append(rgb_frame)
                         valid_frame_indices.append(recovered_idx)
                         recovered_map[recovered_idx] = idx
-                        logger.debug(
+                        logger.info(
                             "Recovered frame %d using frame %d (delay: %d)",
                             recovered_idx,
                             idx,
@@ -218,7 +218,6 @@ class VideoLoader:
         num_expected_frames: int,
         max_frame_idx: int,
     ) -> tuple[npt.NDArray, int, list[int]]:
-        """Legacy read method without recovery (for backward compatibility)."""
         import cv2
 
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -336,7 +335,6 @@ class OpenCVVideoBackend(VideoLoader):
             )
             frame_idx = uniform_sampled_frames.tolist()
 
-        # Use recovery-enabled method or legacy method
         if frame_recovery:
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
                 cap, frame_idx, total_frames_num
@@ -435,7 +433,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
                     }
                 )
 
-        # Use recovery-enabled method or legacy method
         if frame_recovery:
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
                 cap, frame_indices_list, total_frames_num
