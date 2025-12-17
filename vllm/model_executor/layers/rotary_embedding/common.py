@@ -271,18 +271,7 @@ class ApplyRotaryEmb(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         # TODO (bigPYJ1151): need to enable fused CPU ROPE here
-        origin_dtype = x.dtype
-        if self.enable_fp32_compute:
-            x = x.float()
-            cos = cos.float()
-            sin = sin.float()
-
-        output = self.forward_native(x, cos, sin)
-
-        if self.enable_fp32_compute:
-            output = output.to(origin_dtype)
-
-        return output
+        return self.forward_native(x, cos, sin)
 
     def extra_repr(self) -> str:
         s = f"is_neox_style={self.is_neox_style}"
