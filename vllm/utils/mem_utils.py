@@ -76,7 +76,7 @@ class MemorySnapshot:
 
             device_fn = current_platform.current_device
             assert device_fn is not None
-            self._device: torch.device = device_fn()
+            self._device = torch.device(device_fn())
         else:
             self._device = torch.device(self.device)
 
