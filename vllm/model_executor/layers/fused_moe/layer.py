@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     is_flashinfer_supporting_global_sf,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -66,7 +67,7 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
     rocm_aiter_grouped_topk,
 )
@@ -1593,19 +1594,26 @@ class FusedMoE(CustomOp):
                 grouped_topk_impl = partial(
                     rocm_aiter_grouped_topk,
                     num_fused_shared_experts=self.num_fused_shared_experts,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
                 )
             else:
-                grouped_topk_impl = grouped_topk
+                grouped_topk_impl = GroupedTopk(
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                )
 
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                num_expert_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
                 e_score_correction_bias=self.e_score_correction_bias,
             )
         elif self.e_score_correction_bias is not None:
@@ -1933,10 +1941,46 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
+            extra_tensors = None
             if do_naive_dispatch_combine:
-                hidden_states_combined, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits, self.is_sequence_parallel
+                # Avoid circular import
+                from vllm.model_executor.layers.quantization.modelopt import (
+                    ModelOptNvFp4FusedMoE,
                 )
+
+                post_quant_allgather = (
+                    has_flashinfer_trtllm_fused_moe()
+                    and self.quant_method is not None
+                    and self.dp_size > 1
+                    and self.use_ep
+                    and isinstance(self.quant_method, ModelOptNvFp4FusedMoE)
+                )
+                if post_quant_allgather:
+                    hidden_states_to_dispatch, extra_tensors = (
+                        self.quant_method.prepare_dp_allgather_tensor(
+                            self, hidden_states, router_logits
+                        )
+                    )
+                else:
+                    hidden_states_to_dispatch = hidden_states
+
+                dispatch_res = get_ep_group().dispatch(
+                    hidden_states_to_dispatch,
+                    router_logits,
+                    self.is_sequence_parallel,
+                    extra_tensors=extra_tensors,
+                )
+                if extra_tensors is not None:
+                    hidden_states_combined, router_logits, extra_tensors_combined = (
+                        dispatch_res
+                    )
+                    hidden_states_combined = (
+                        hidden_states_combined,
+                        extra_tensors_combined[0],
+                    )
+                else:
+                    hidden_states_combined, router_logits = dispatch_res
+
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
             if has_separate_shared_experts and not use_shared_experts_stream:
