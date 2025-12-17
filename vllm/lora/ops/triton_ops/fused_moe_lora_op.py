@@ -95,7 +95,7 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 
 
 def _adjust_kernel_inputs(
-    max_loras: int,
+    num_active_loras: int,
     sorted_token_ids: torch.Tensor | None,
     expert_ids: torch.Tensor,
 ):
@@ -109,7 +109,7 @@ def _adjust_kernel_inputs(
     else:
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
-        grid_lora_dim = max_loras + 1
+        grid_lora_dim = num_active_loras
     return grid_lora_dim, stride_tl, stride_el
 
 
@@ -354,6 +354,7 @@ def _fused_moe_lora_shrink(
     num_warps: int,
     num_stages: int,
     split_k: int,
+    num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -373,7 +374,7 @@ def _fused_moe_lora_shrink(
     b_ptr = _get_ptr(lora_a_stacked, device)
 
     grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
-        w1_lora_a_stacked.shape[0], sorted_token_ids, expert_ids
+        num_active_loras, sorted_token_ids, expert_ids
     )
     grid = lambda META: (
         split_k
@@ -412,6 +413,7 @@ def _fused_moe_lora_shrink(
         stride_el,
         slice_a_size=qcurr_hidden_states.numel(),
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
+        max_loras=lora_a_stacked[0].shape[0],
         num_slice_a=1,
         num_slice_c=num_slices,
         token_mapping_factor=1 if mul_routed_weight else top_k_num,
@@ -457,6 +459,7 @@ def _fused_moe_lora_expand(
     num_warps: int,
     num_stages: int,
     split_k: int,
+    num_active_loras: int,
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
@@ -484,7 +487,7 @@ def _fused_moe_lora_expand(
     }
 
     grid_lora_dim, stride_tl, stride_el = _adjust_kernel_inputs(
-        w1_lora_b_stacked.shape[0], sorted_token_ids, expert_ids
+        num_active_loras, sorted_token_ids, expert_ids
     )
 
     grid = lambda META: (
@@ -648,6 +651,7 @@ def _fused_moe_lora(
         shrink_num_warps,
         shrink_num_stages,
         shrink_split_k,
+        num_active_loras,
         mul_routed_weight,
         use_gdc=use_gdc,
     )
@@ -695,6 +699,7 @@ def _fused_moe_lora(
         expand_num_warps,
         expand_num_stages,
         expand_split_k,
+        num_active_loras,
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
@@ -761,6 +766,7 @@ def _fused_moe_lora_shrink_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
+    num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -796,6 +802,7 @@ def _fused_moe_lora_expand_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
+    num_active_loras: int,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
