@@ -791,7 +791,10 @@ class CompressedTensorsW4A16Nvfp4MoeMethod(CompressedTensorsMoEMethod):
                 "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
-    def maybe_make_prepare_finalize(self) -> None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> None:
         if self.use_marlin:
             return None
         else:
