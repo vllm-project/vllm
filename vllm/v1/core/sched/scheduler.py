@@ -219,11 +219,7 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        self.min_batch_size = self.scheduler_config.min_batch_size
-
-    def _should_wait_for_min_batch_size(self) -> bool:
-        num_schedulable_requests = len(self.running) + len(self.waiting)
-        return num_schedulable_requests < self.min_batch_size
+        self.slowdown_threshold = self.scheduler_config.slowdown_threshold
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -236,20 +232,6 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
-
-        if self._should_wait_for_min_batch_size():
-            return SchedulerOutput(
-                scheduled_new_reqs=[],
-                scheduled_cached_reqs=CachedRequestData.make_empty(),
-                num_scheduled_tokens={},
-                total_num_scheduled_tokens=0,
-                scheduled_spec_decode_tokens={},
-                scheduled_encoder_inputs={},
-                num_common_prefix_blocks=[],
-                preempted_req_ids=None,
-                finished_req_ids=self.finished_req_ids,
-                free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            )
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -774,6 +756,16 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+        if len(num_scheduled_tokens) < self.slowdown_threshold:
+            logger.warning(
+                "%d requests are scheduled, which is less than the slowdown"
+                "threshold %d. Sleeping for 10 seconds...",
+                len(num_scheduled_tokens),
+                self.slowdown_threshold,
+            )
+            time.sleep(10)
+
         return scheduler_output
 
     def _preempt_request(

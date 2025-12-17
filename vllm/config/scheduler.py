@@ -143,12 +143,10 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
-    min_batch_size: int = Field(default=0, ge=0)
-    """ Scheduler will not schedule any requests if total numeber of running and 
-    waiting requests is less than this threshold. This is useful for testing
-    decode node performance under a disaggregated prefill setting,
-    ensuring the decode node only runs when it receives enough requests along
-    with their KV caches from the prefill node. Default is 0 (disabled)."""
+    slowdown_threshold: int = Field(default=0, ge=0)
+    """Scheduler will sleep for 10 seconds if the number of scheduled requests is
+    less than this threshold. Useful for benchmarking decode node under P/D Disagg.
+    """
 
     @staticmethod
     def default_factory(**kwargs):

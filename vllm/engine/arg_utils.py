@@ -566,6 +566,7 @@ class EngineArgs:
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     stream_interval: int = SchedulerConfig.stream_interval
+    slowdown_threshold: int = SchedulerConfig.slowdown_threshold
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
@@ -1103,7 +1104,7 @@ class EngineArgs:
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
         scheduler_group.add_argument(
-            "--min-batch-size", **scheduler_kwargs["min_batch_size"]
+            "--slowdown-threshold", **scheduler_kwargs["slowdown_threshold"]
         )
 
         # Compilation arguments
@@ -1616,6 +1617,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            slowdown_threshold=self.slowdown_threshold,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
