@@ -60,13 +60,6 @@ class PerfStats:
     num_read_bytes_per_gpu_breakdown: dict[str, int] | None = None
     num_write_bytes_per_gpu_breakdown: dict[str, int] | None = None
 
-    def __add__(self, other: "PerfStats") -> "PerfStats":
-        return PerfStats(
-            self.num_flops_per_gpu + other.num_flops_per_gpu,
-            self.num_read_bytes_per_gpu + other.num_read_bytes_per_gpu,
-            self.num_write_bytes_per_gpu + other.num_write_bytes_per_gpu,
-        )
-
 
 @dataclass
 class ExecutionContext:
