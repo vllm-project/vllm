@@ -107,6 +107,7 @@ class VllmSerializableFunction(SerializableCallable):
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
         state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
         is_encoder = state.get("is_encoder", False)
         vllm_backend = VllmBackend(
