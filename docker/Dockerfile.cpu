@@ -15,6 +15,8 @@
 # Build arguments:
 #   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
 #   VLLM_CPU_DISABLE_AVX512=false (default)|true
+#   VLLM_CPU_AVX2=false (default)|true|1 (for cross-compilation)
+#   VLLM_CPU_AVX512=false (default)|true|1 (for cross-compilation)
 #   VLLM_CPU_AVX512BF16=false (default)|true
 #   VLLM_CPU_AVX512VNNI=false (default)|true
 #   VLLM_CPU_AMXBF16=false |true (default)
@@ -88,6 +90,12 @@ ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512=0
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
+# Support for cross-compilation with AVX2 ISA: docker build --build-arg VLLM_CPU_AVX2="1" ...
+ARG VLLM_CPU_AVX2=0
+ENV VLLM_CPU_AVX2=${VLLM_CPU_AVX2}
+# Support for cross-compilation with AVX512 ISA: docker build --build-arg VLLM_CPU_AVX512="1" ...
+ARG VLLM_CPU_AVX512=0
+ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
 # Support for building with AVX512BF16 ISA: docker build --build-arg VLLM_CPU_AVX512BF16="true" ...
 ARG VLLM_CPU_AVX512BF16=0
 ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
