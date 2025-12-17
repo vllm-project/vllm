@@ -114,10 +114,10 @@ def get_requires_for_build_wheel(config_settings=None) -> list[str]:
 
         if machine() == "ppc64le":
             requirements_extras.extend(
-                _read_requirements("requirements/torch-ppc64le.txt"))
+                _read_requirements("requirements/torch/ppc64le.txt"))
         else:
             requirements_extras.extend(
-                _read_requirements("requirements/torch-cpu.txt"))
+                _read_requirements("requirements/torch/cpu.txt"))
     elif VLLM_TARGET_DEVICE == "cuda":
         from platform import machine, system
 

@@ -570,16 +570,16 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
-    return VLLM_TARGET_DEVICE == "cuda" and not (_is_neuron() or _is_tpu()
-                                                 or _is_hpu())
+    return VLLM_TARGET_DEVICE == "cuda" and has_cuda and not _is_tpu()
 
 
 def _is_hip() -> bool:
-    return VLLM_TARGET_DEVICE == "rocm"
+    if VLLM_TARGET_DEVICE == "rocm":
+        return True
 
+    import torch
 
-def _is_neuron() -> bool:
-    return VLLM_TARGET_DEVICE == "neuron"
+    return VLLM_TARGET_DEVICE == "cuda" and torch.version.hip is not None
 
 
 def _is_tpu() -> bool:
@@ -598,7 +598,7 @@ def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
 
 
-def get_rocm_version():
+def get_rocm_version() -> str:
     from torch.utils.cpp_extension import ROCM_HOME
 
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
@@ -629,7 +629,11 @@ def get_rocm_version():
             return f"{major.value}.{minor.value}.{patch.value}"
         return None
     except Exception:
-        return None
+        import torch
+
+        if torch.version.hip is None:
+            raise SetupError("Couldn't get rocm version")
+        return torch.version.hip
 
 
 def get_nvcc_cuda_version() -> Version:
@@ -658,31 +662,28 @@ def get_vllm_version() -> str:
         return get_version(write_to="vllm/_version.py")
 
     version = get_version(write_to="vllm/_version.py")
-    if "sdist" in sys.argv:
+
+    if "sdist" in sys.argv: # FIXME: we should detect building sdist here
         # skip local version specifiers for source distribution builds
         return version
 
-    # dev versions might already contain local version specifiers
-    sep = "+" if "+" not in version else "."
+    sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
         version += f"{sep}empty"
     elif _is_cuda():
-        if envs.VLLM_USE_PRECOMPILED:
-            return f"{version}{sep}precompiled"
-
-        cuda_version = str(get_nvcc_cuda_version())
-        if cuda_version != MAIN_CUDA_VERSION:
-            cuda_version_str = cuda_version.replace(".", "")[:3]
-            version += f"{sep}cu{cuda_version_str}"
+        if envs.VLLM_USE_PRECOMPILED and not envs.VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX:
+            version += f"{sep}precompiled"
+        else:
+            cuda_version = str(get_nvcc_cuda_version())
+            if cuda_version != MAIN_CUDA_VERSION:
+                cuda_version_str = cuda_version.replace(".", "")[:3]
+                # skip this for source tarball, required for pypi
+                if "sdist" not in sys.argv:
+                    version += f"{sep}cu{cuda_version_str}"
     elif _is_hip():
-        import torch
-
-        if torch.version.hip is None:
-            raise SetupError("Couldn't get rocm version")
-
         # Get the Rocm Version
-        rocm_version = get_rocm_version() or torch.version.hip
+        rocm_version = get_rocm_version()
         if rocm_version and rocm_version != envs.VLLM_MAIN_CUDA_VERSION:
             version += f"{sep}rocm{rocm_version.replace('.', '')[:3]}"
     elif _is_tpu():
