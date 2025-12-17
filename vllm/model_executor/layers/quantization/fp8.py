@@ -717,14 +717,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
         # NOTE(rob): in progress migrating all into this format.
-        self.kernel_cls: mk.FusedMoEPermuteExpertsUnpermute | None = None
-        if (
-            self.fp8_backend == Fp8MoeBackend.DEEPGEMM
-            or self.fp8_backend == Fp8MoeBackend.TRITON
-        ):
-            self.kernel_cls = TritonOrDeepGemmExperts
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            self.kernel_cls = FlashInferExperts
+        BACKEND_2_KERNEL = {
+            Fp8MoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
+            Fp8MoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
+            Fp8MoeBackend.TRITON: TritonOrDeepGemmExperts,
+        }
+        self.kernel_cls = BACKEND_2_KERNEL.get(self.fp8_backend, None)
 
         self.marlin_input_dtype = None
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
@@ -1054,9 +1052,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
-        # Initialize quant config.
-        # TODO: make this a standard part of the lifecycle
-        # after process_weights_after_loading
+        # NOTE(rob): this is a WIP refactor. We are first migrating
+        # all of the kernels in the TP case to use mk. Once this is
+        # done, then we will initialzie the TP case and DP/EP case
+        # via the same code path (i.e. via maybe_init_modular_kernel).
         if self.kernel_cls is None:
             pass
         else:
@@ -1065,7 +1064,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             if self.kernel_cls is FlashInferExperts:
-                self.fn = mk.FusedMoEModularKernel(
+                self.mk = mk.FusedMoEModularKernel(
                     FlashInferAllGatherMoEPrepareAndFinalize(
                         use_dp=(self.moe.dp_size > 1),
                         use_deepseek_fp8_block_scale=self.block_quant,
@@ -1084,7 +1083,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.use_inplace = False
 
             elif self.kernel_cls is TritonOrDeepGemmExperts:
-                self.fn = mk.FusedMoEModularKernel(
+                self.mk = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     self.kernel_cls(
                         quant_config=self.moe_quant_config,
@@ -1220,6 +1219,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            # TODO(rob): convert this to MK.
             if layer.enable_eplb:
                 raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
             assert layer.activation == "silu", (
@@ -1284,6 +1284,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 rocm_aiter_fused_experts,
             )
 
+            # TODO(rob): convert this to MK.
             result = rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
@@ -1319,7 +1320,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
         else:
-            result = self.fn(
+            result = self.mk(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
