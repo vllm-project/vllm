@@ -585,7 +585,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
-            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(input_quant):
+            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
+                input_quant
+            ):
                 if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
                     return CompressedTensorsW4A4Fp4()
                 else:

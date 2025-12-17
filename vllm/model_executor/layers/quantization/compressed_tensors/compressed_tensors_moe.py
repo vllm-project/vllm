@@ -197,8 +197,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         elif quant_config._is_nvfp4_format(weight_quant):
             if quant_config._is_nvfp4_format(input_quant):
                 return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
-            assert input_quant is None
-            return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name, use_marlin=True)
+            if input_quant is not None:
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format"
+                )
+            return CompressedTensorsW4A4Nvfp4MoEMethod(
+                moe=layer.moe_config, layer_name=layer_name, use_marlin=True
+            )
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -227,7 +232,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
 
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None, use_marlin: bool = False):  # noqa: E501
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        layer_name: str | None = None,
+        use_marlin: bool = False,
+    ):  # noqa: E501
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support,
         )
