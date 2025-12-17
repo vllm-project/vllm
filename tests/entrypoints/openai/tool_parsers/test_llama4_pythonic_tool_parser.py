@@ -10,8 +10,8 @@ from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 # Test cases similar to pythonic parser but with Llama4 specific format
 SIMPLE_FUNCTION_OUTPUT = "[get_weather(city='LA', metric='C')]"
