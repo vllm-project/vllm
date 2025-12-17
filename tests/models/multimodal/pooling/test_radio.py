@@ -67,9 +67,7 @@ def run_radio_test(
 
     vllm_config = RadioConfig(
         model_name=hf_config.args["model"],
-        reg_tokens=hf_config.args["register_multiple"],
-        max_img_size=hf_config.args["cpe_max_size"],
-        **hf_config.to_dict(),
+        **hf_config.args,
     )
     vllm_model = RadioModel(vllm_config)
     vllm_model.load_weights(hf_model.state_dict())

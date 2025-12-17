@@ -427,21 +427,17 @@ class RadioInternVisionModel(nn.Module):
             to_2tuple(config.patch_size), config.image_size
         )
         max_img_size = int(
-            round(config.max_img_size / config.patch_size) * config.patch_size
+            round(config.cpe_max_size / config.patch_size) * config.patch_size
         )
-        args = getattr(config, "args", dict())
-        teachers = args.get("teachers", set())
-        unique_teachers = set(t["name"] for t in teachers)
+        unique_teachers = set(t["name"] for t in config.teachers)
         self.patch_generator = ViTPatchGenerator(
             config.patch_size,
             config.hidden_size,
             input_dims=self.img_size,
             max_input_dims=max_img_size,
             cls_token=True,
-            num_cls_tokens=len(unique_teachers)
-            if args.get("cls_token_per_teacher", False)
-            else 1,
-            register_multiple=config.reg_tokens,
+            num_cls_tokens=len(unique_teachers) if config.cls_token_per_teacher else 1,
+            register_multiple=config.register_multiple,
         )
 
         self.encoder = InternVisionEncoder(
@@ -496,11 +492,9 @@ class RadioModel(nn.Module):
         )
 
         summary_idxs = None
-        args = getattr(config, "args", {})
-        teachers = args.get("teachers", None)
-        if teachers is not None:
+        if config.teachers:
             summary_idxs = torch.tensor(
-                [i for i, t in enumerate(teachers) if t.get("use_summary", True)]
+                [i for i, t in enumerate(config.teachers) if t.get("use_summary", True)]
             )
             if summary_idxs.numel() > 0:
                 self.register_buffer("summary_idxs", summary_idxs)
