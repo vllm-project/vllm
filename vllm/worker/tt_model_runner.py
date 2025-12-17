@@ -1387,7 +1387,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     tt_out, async_read=True)
             else:
                 # outputs ttnn host tensors
-                tt_out = self.model.read_decode_output(tt_out)
+                tt_out = self.model.read_decode_output(tt_out,
+                                                       async_read=False)
                 # outputs torch tensor
                 tt_out = self.model.process_decode_output_host(
                     tt_out, is_tokens=model_input.perform_device_sampling)
