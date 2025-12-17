@@ -970,7 +970,7 @@ class CompilationConfig:
             # if torch compile cache key issue fixed
             # See https://github.com/vllm-project/vllm/pull/25093
             logger.info(
-                "WideEP: Disabling CUDA Graphs since DeepEP high-throughput "
+                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput "
                 "kernels are optimized for prefill and are incompatible with "
                 "CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
