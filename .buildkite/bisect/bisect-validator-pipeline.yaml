@@ -1,0 +1,27 @@
+# Validator Pipeline for Git Bisect
+#
+# This pipeline dynamically generates and runs only specific test steps
+# based on the TARGET_JOBS environment variable. It's designed to be used
+# by the git bisect driver (bisect_driver.py) to efficiently test
+# specific failing jobs during bisection.
+#
+# Usage:
+#   Trigger this pipeline with TARGET_JOBS environment variable set to
+#   a comma-separated list of job labels to run.
+#
+# Example:
+#   TARGET_JOBS="Basic Correctness Test,Prefix Caching Test"
+#
+# If TARGET_JOBS is not set or empty, all tests will run (default behavior).
+
+env:
+  TARGET_JOBS: "${TARGET_JOBS:-}"
+
+steps:
+  - label: ":pipeline: Generate validation steps"
+    command: |
+      echo "--- Generating validation pipeline"
+      echo "TARGET_JOBS: $${TARGET_JOBS}"
+      python3 .buildkite/bisect/bisect_validator.py | buildkite-agent pipeline upload
+    agents:
+      queue: "cpu_queue_postmerge"

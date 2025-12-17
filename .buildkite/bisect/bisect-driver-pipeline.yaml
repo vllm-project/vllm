@@ -1,0 +1,75 @@
+# Driver Pipeline for Git Bisect
+#
+# This pipeline runs the git bisect driver on CI, automating the process
+# of finding the first bad commit by triggering validation builds at each
+# bisect step.
+#
+# Usage:
+#   Trigger this pipeline with the following environment variables:
+#   - GOOD_SHA: Commit SHA known to be good (required)
+#   - BAD_SHA: Commit SHA known to be bad (required)
+#   - BAD_BUILD: Build number to query for failed jobs (optional)
+#   - PIPELINE: Pipeline slug to use (optional, default: "test-pipeline")
+#   - VALIDATION_PIPELINE: Validation pipeline slug (optional, default: "validation")
+#
+# Example via CLI:
+#   buildkite-agent pipeline upload .buildkite/bisect/bisect-driver-pipeline.yaml
+#   # Then set env vars in Buildkite UI before triggering
+#
+# Example via API:
+#   curl -X POST "https://api.buildkite.com/v2/organizations/vllm/pipelines/bisect-driver/builds" \
+#     -H "Authorization: Bearer $TOKEN" \
+#     -d '{
+#       "commit": "HEAD",
+#       "branch": "main",
+#       "env": {
+#         "GOOD_SHA": "abc123",
+#         "BAD_SHA": "def456"
+#       }
+#     }'
+
+env:
+  GOOD_SHA: "${GOOD_SHA:-}"
+  BAD_SHA: "${BAD_SHA:-}"
+  BAD_BUILD: "${BAD_BUILD:-}"
+  PIPELINE: "${PIPELINE:-test-pipeline}"
+  VALIDATION_PIPELINE: "${VALIDATION_PIPELINE:-validation}"
+
+steps:
+  - label: ":git: Git Bisect Driver"
+    command: |
+      echo "--- Validating inputs"
+      if [ -z "$${GOOD_SHA}" ] || [ -z "$${BAD_SHA}" ]; then
+        echo "Error: GOOD_SHA and BAD_SHA environment variables are required"
+        echo "GOOD_SHA: $${GOOD_SHA}"
+        echo "BAD_SHA: $${BAD_SHA}"
+        exit 1
+      fi
+
+      echo "--- Running git bisect"
+      echo "Good SHA: $${GOOD_SHA}"
+      echo "Bad SHA: $${BAD_SHA}"
+      echo "Pipeline: $${PIPELINE}"
+      echo "Validation Pipeline: $${VALIDATION_PIPELINE}"
+
+      # Build command arguments
+      ARGS="$${GOOD_SHA} $${BAD_SHA}"
+      ARGS="$${ARGS} --pipeline $${PIPELINE}"
+      ARGS="$${ARGS} --validation-pipeline $${VALIDATION_PIPELINE}"
+
+      if [ -n "$${BAD_BUILD}" ]; then
+        echo "Bad Build: $${BAD_BUILD}"
+        ARGS="$${ARGS} --bad-build $${BAD_BUILD}"
+      fi
+
+      # Run the bisect driver
+      python3 .buildkite/bisect/bisect_driver.py $${ARGS}
+
+    agents:
+      queue: "cpu_queue_postmerge"
+
+    # Allow up to 12 hours for bisect to complete (depends on number of commits)
+    timeout_in_minutes: 720
+
+    # Don't fail the entire pipeline if bisect is interrupted
+    soft_fail: false
