@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import LoRAConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.model_manager import (
@@ -44,7 +44,9 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        if not isinstance(vllm_config.lora_config, LoRAConfig):
+            raise ValueError("LoRA is not enabled in vLLM config.")
+        self.lora_config: LoRAConfig = vllm_config.lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()

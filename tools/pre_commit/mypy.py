@@ -32,6 +32,7 @@ FILES = [
     "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
+    "vllm/lora",
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/plugins",
@@ -57,7 +58,6 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/attention",
     "vllm/compilation",
-    "vllm/lora",
     "vllm/model_executor",
     # v1 related
     "vllm/v1/attention",

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -40,7 +41,7 @@ class LoRAConfig:
     parallelism. Enabling this will use the fully sharded layers. At high
     sequence length, max rank or tensor parallel size, this is likely faster.
     """
-    max_cpu_loras: int | None = None
+    max_cpu_loras: int = None
     """Maximum number of LoRAs to store in CPU memory. Must be >= than
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
@@ -77,15 +78,20 @@ class LoRAConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    @field_validator("max_cpu_loras", mode="wrap")
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        """Called after __post_init__"""
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
-            raise ValueError(
-                f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})"
-            )
+            raise ValueError(f"{self.max_cpu_loras=} must be >= {self.max_loras=}")
 
         return self
 

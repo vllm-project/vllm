@@ -91,6 +91,11 @@ class PEFTHelper:
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
 
+            if tensorizer_config.tensorizer_dir is None:
+                raise ValueError(
+                    "PEFTHelper.from_local_dir expects 'tensorizer_dir' in "
+                    "'tensorizer_config_dict', but it was not found."
+                )
             lora_config_path = os.path.join(
                 tensorizer_config.tensorizer_dir, "adapter_config.json"
             )

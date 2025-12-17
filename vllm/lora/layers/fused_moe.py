@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -56,7 +56,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._w13_slices = 2
         self._inject_lora_into_fused_moe()
 
-    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
+    def _normalize_keys(
+        self, config: Mapping[str, int | None]
+    ) -> dict[str, int | None]:
         normalized_config = {}
         for key, value in config.items():
             if key.islower():
@@ -78,8 +80,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         M: int,
         layer: FusedMoE,
         top_k: int,
-        config_dtype: str,
+        config_dtype: str | None,
     ):
+        shrink_config: Mapping[str, int | None]
+        expand_config: Mapping[str, int | None]
         if envs.VLLM_TUNED_CONFIG_FOLDER:
             hidden_size = layer.hidden_size
             intermediate_size = layer.intermediate_size_per_partition
@@ -102,16 +106,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_intermediate_size=intermediate_size,  # lora_b_stacked.shape[-2],
             )
         else:  # fall back to the default config
-            get_config_func = functools.partial(
-                try_get_optimal_moe_config,
-                layer.w13_weight.size(),
-                layer.w2_weight.size(),
-                top_k,
-                config_dtype,
-                block_shape=layer.quant_method.moe_quant_config.block_shape,
+            kwargs = dict(
+                w1_shape=layer.w13_weight.size(),
+                w2_shape=layer.w2_weight.size(),
+                top_k=top_k,
+                dtype=config_dtype,
+                block_shape=getattr(layer.moe_quant_config, "block_shape", None),
             )
-            shrink_config = get_config_func(M)
-            expand_config = get_config_func(M)
+            shrink_config = try_get_optimal_moe_config(M=M, **kwargs)
+            expand_config = try_get_optimal_moe_config(M=M, **kwargs)
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config
@@ -120,8 +123,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         moe_state_dict = {}
         top_k = self.base_layer.top_k
 
-        self.base_layer.ensure_moe_quant_config_init()
-        quant_config = self.base_layer.quant_method.moe_quant_config
+        quant_config = self.base_layer.moe_quant_config
+        if quant_config is None:
+            raise ValueError("moe_quant_config must be provided for FusedMoEWithLoRA")
 
         prepare_finalize = MoEPrepareAndFinalizeNoEP()
         m_fused_moe_fn = FusedMoEModularKernel(
@@ -298,13 +302,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        fused_experts = m_fused_moe_fn.fused_experts
+        fused_experts = m_fused_moe_fn.fused_experts  # type: ignore[method-assign]
 
-        m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)
-        fused_experts.activation = act_decorator(
+        m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)  # type: ignore[method-assign]
+        fused_experts.activation = act_decorator(  # type: ignore[method-assign]
             self.base_layer, fused_experts.activation
         )
-        fused_experts.moe_sum = moe_sum_decorator(
+        fused_experts.moe_sum = moe_sum_decorator(  # type: ignore[method-assign]
             self.base_layer, fused_experts.moe_sum
         )
         self.base_layer.quant_method = FusedMoEModularMethod(
