@@ -507,6 +507,19 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if (
+                    self._is_non_gated_moe
+                    and len(replacement_loras) > 0
+                    and len(replacement_loras) % 3 != 0
+                ):
+                    assert len(replacement_loras) % 2 == 0, (
+                        "Expected pairs of LoRAs weights for non-gated MoE."
+                    )
+                    padded_loras: list[LoRALayerWeights | None] = []
+                    for i in range(0, len(replacement_loras), 2):
+                        padded_loras.extend(replacement_loras[i : i + 2])
+                        padded_loras.append(None)
+                    replacement_loras = padded_loras
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
                     replacement_loras,
                     module_name,
