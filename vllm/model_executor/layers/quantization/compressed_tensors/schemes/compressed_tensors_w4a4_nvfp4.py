@@ -23,7 +23,11 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.flashinfer import (
+    flashinfer_quant_nvfp4_8x4_sf_layout,
+    flashinfer_scaled_fp4_mm,
+    has_flashinfer,
+)
 
 logger = init_logger(__name__)
 
@@ -131,7 +135,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
-        if self.backend == "flashinfer-trtllm":
+        if (
+            self.backend == "flashinfer-trtllm"
+            or self.backend == "flashinfer-trtllm_8x4_sf_layout"
+        ):
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -186,8 +193,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
-        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
+        if self.backend == "flashinfer-trtllm_8x4_sf_layout":
+            x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(x, layer.input_scale_inv)
+            x_blockscale = x_blockscale.view(torch.float8_e4m3fn)
+        else:
+            # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
         mm_args = (
             x_fp4,
