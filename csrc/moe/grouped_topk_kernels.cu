@@ -837,7 +837,7 @@ __global__ void group_idx_and_topk_idx_kernel_packed(
                                   : (base * routed_scaling_factor);
         auto v16 = __float2bfloat16(value);
         auto v16_s16= static_cast<int>(*reinterpret_cast<short*>(&v16));
-        int32_t packed_tensor = (s_topk_idx[i] << 16) | v16_s16);
+        int32_t packed_tensor = (s_topk_idx[i] << 16) | v16_s16;
         packed_tensors[i] = packed_tensor;
       }
     } else {
@@ -845,7 +845,7 @@ __global__ void group_idx_and_topk_idx_kernel_packed(
         float value = 1.0f / topk;
         auto v16 = __float2bfloat16(value);
         auto v16_s16 = static_cast<int>(*reinterpret_cast<short*>(&v16));
-        int32_t packed_tensor = (i << 16) | v16_s16);
+        int32_t packed_tensor = (i << 16) | v16_s16;
         packed_tensors[i] = packed_tensor;
       }
     }
