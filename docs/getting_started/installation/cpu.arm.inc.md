@@ -19,7 +19,7 @@ Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels c
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index
 ```
 
 ??? console "pip"
@@ -50,7 +50,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 
 To install from nightly index, run:
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index
 ```
 
 ??? console "pip (there's a caveat)"
@@ -69,7 +69,7 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```bash
 export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index
 ```
 
 # --8<-- [end:pre-built-wheels]
