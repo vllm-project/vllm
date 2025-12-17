@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -18,6 +18,7 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
     ProfilerConfig,
@@ -72,8 +73,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.tokenizers.hf import get_cached_tokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -175,6 +176,10 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        attention_config: Configuration for attention mechanisms. Can be a
+            dictionary or an AttentionConfig instance. If a dictionary, it will
+            be converted to an AttentionConfig. Allows specifying the attention
+            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -199,7 +204,7 @@ class LLM:
         quantization: QuantizationMethods | None = None,
         revision: str | None = None,
         tokenizer_revision: str | None = None,
-        seed: int | None = None,
+        seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
@@ -213,6 +218,7 @@ class LLM:
         | StructuredOutputsConfig
         | None = None,
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
+        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -252,51 +258,28 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        if compilation_config is not None:
-            if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    mode=CompilationMode(compilation_config)
-                )
-            elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
-            else:
-                compilation_config_instance = compilation_config
-        else:
-            compilation_config_instance = CompilationConfig()
+        def _make_config(value: Any, cls: type[_R]) -> _R:
+            """Convert dict/None/instance to a config instance."""
+            if value is None:
+                return cls()
+            if isinstance(value, dict):
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+            return value
 
-        if structured_outputs_config is not None:
-            if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
-            else:
-                structured_outputs_instance = structured_outputs_config
+        if isinstance(compilation_config, int):
+            compilation_config_instance = CompilationConfig(
+                mode=CompilationMode(compilation_config)
+            )
         else:
-            structured_outputs_instance = StructuredOutputsConfig()
+            compilation_config_instance = _make_config(
+                compilation_config, CompilationConfig
+            )
 
-        if profiler_config is not None:
-            if isinstance(profiler_config, dict):
-                profiler_config_instance = ProfilerConfig(
-                    **{
-                        k: v
-                        for k, v in profiler_config.items()
-                        if is_init_field(ProfilerConfig, k)
-                    }
-                )
-            else:
-                profiler_config_instance = profiler_config
-        else:
-            profiler_config_instance = ProfilerConfig()
+        structured_outputs_instance = _make_config(
+            structured_outputs_config, StructuredOutputsConfig
+        )
+        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
+        attention_config_instance = _make_config(attention_config, AttentionConfig)
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
@@ -341,6 +324,7 @@ class LLM:
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
             profiler_config=profiler_config_instance,
+            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -366,16 +350,6 @@ class LLM:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
-
-    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
-        if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer = tokenizer
-        else:
-            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()

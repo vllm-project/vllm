@@ -498,15 +498,15 @@ def awq_dequantize(
 def awq_gemm(
     input: torch.Tensor,
     qweight: torch.Tensor,
-    qzeros: torch.Tensor,
     scales: torch.Tensor,
+    qzeros: torch.Tensor,
     split_k_iters: int,
 ) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import awq_gemm_triton
 
-        return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
-    return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
+        return awq_gemm_triton(input, qweight, scales, qzeros, split_k_iters)
+    return torch.ops._C.awq_gemm(input, qweight, scales, qzeros, split_k_iters)
 
 
 # gptq
@@ -632,8 +632,8 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def _awq_gemm_fake(
         input: torch.Tensor,
         qweight: torch.Tensor,
-        qzeros: torch.Tensor,
         scales: torch.Tensor,
+        qzeros: torch.Tensor,
         split_k_iters: torch.SymInt,
     ) -> torch.Tensor:
         num_in_feats = input.size(0)
@@ -2400,6 +2400,29 @@ def cp_gather_cache(
 ) -> None:
     torch.ops._C_cache_ops.cp_gather_cache(
         src_cache, dst, block_table, cu_seq_lens, batch_size, seq_starts
+    )
+
+
+def cp_gather_and_upconvert_fp8_kv_cache(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    workspace_starts: torch.Tensor,
+    batch_size: int,
+) -> None:
+    """Gather and upconvert FP8 KV cache to BF16 workspace.
+
+    Args:
+        src_cache: FP8 KV cache [num_blocks, block_size, 656]
+        dst: BF16 output workspace [total_tokens, 576]
+        block_table: Block indices [num_reqs, max_blocks]
+        seq_lens: Sequence lengths [num_reqs]
+        workspace_starts: Workspace start offsets [num_reqs]
+        batch_size: Number of requests
+    """
+    torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
+        src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
     )
 
 

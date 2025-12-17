@@ -60,12 +60,12 @@ def test_profiling(model_id: str, max_model_len: int):
         total_num_patches.item() + num_tiles.item() + 3
     )  # image start, image, image end
 
-    profiled_tokens = profiler.get_mm_max_contiguous_tokens(
+    profiled_tokens = profiler.get_mm_max_tokens(
         max_model_len,
         mm_counts=mm_counts,
     )
 
-    assert total_tokens == profiled_tokens["image"]
+    assert total_num_patches == profiled_tokens["image"]
     assert total_tokens == sum(
         placeholder.length
         for placeholder in decoder_dummy_data.multi_modal_placeholders["image"]

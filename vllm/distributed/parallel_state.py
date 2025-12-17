@@ -1007,10 +1007,17 @@ class GroupCoordinator:
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(
-                hidden_states, router_logits, is_sequence_parallel
+            return self.device_communicator.dispatch(  # type: ignore[call-arg]
+                hidden_states,
+                router_logits,
+                is_sequence_parallel,
+                extra_tensors,
             )
         else:
             return hidden_states, router_logits
@@ -1586,6 +1593,8 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Reset environment variable cache
+    envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 

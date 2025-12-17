@@ -137,11 +137,8 @@ class OpenAIServingPooling(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+
+                _, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,

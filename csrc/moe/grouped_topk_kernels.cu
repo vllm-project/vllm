@@ -446,9 +446,13 @@ __device__ inline T apply_sigmoid(T val) {
 
 template <ScoringFunc SF, typename T>
 __device__ inline T apply_scoring(T val) {
-  if constexpr (SF == SCORING_SIGMOID) {
+  if constexpr (SF == SCORING_NONE) {
+    return val;
+  } else if constexpr (SF == SCORING_SIGMOID) {
     return apply_sigmoid(val);
   } else {
+    static_assert(SF == SCORING_NONE || SF == SCORING_SIGMOID,
+                  "Unsupported ScoringFunc in apply_scoring");
     return val;
   }
 }
@@ -481,8 +485,6 @@ __device__ void topk_with_k2(T* output, T const* input, T const* bias,
       largest = value;
     }
   }
-
-  __syncwarp();  // Ensure all threads have valid data before reduction
   // Get the top2 warpwise
   T max1 = cg::reduce(tile, largest, cg::greater<T>());
 
@@ -589,7 +591,6 @@ __global__ void group_idx_and_topk_idx_kernel(
     int pre_count_equal_to_top_value = 0;
     // Use loop to find the largset top_group
     while (count_equal_to_top_value < target_num_min) {
-      __syncwarp();  // Ensure all threads have valid data before reduction
       topk_group_value = cg::reduce(tile, value, cg::greater<T>());
       if (value == topk_group_value) {
         value = neg_inf<T>();
@@ -644,10 +645,8 @@ __global__ void group_idx_and_topk_idx_kernel(
       }
     }
     queue.done();
-    __syncwarp();
     // Get the topk_idx
     queue.dumpIdx(s_topk_idx);
-    __syncwarp();
   }
 
   // Load the valid score value
@@ -675,10 +674,13 @@ __global__ void group_idx_and_topk_idx_kernel(
 
   if (case_id < num_tokens) {
     if (if_proceed_next_topk) {
+      float scale = routed_scaling_factor;
+      if (renormalize) {
+        scale /= topk_sum;
+      }
       for (int i = lane_id; i < topk; i += WARP_SIZE) {
         float base = cuda_cast<float, T>(s_topk_value[i]);
-        float value = renormalize ? (base / topk_sum * routed_scaling_factor)
-                                  : (base * routed_scaling_factor);
+        float value = base * scale;
         topk_indices[i] = s_topk_idx[i];
         topk_values[i] = value;
       }
