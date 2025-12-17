@@ -39,7 +39,12 @@ class DeepGemmQuantScaleFMT(Enum):
         if cached is not None:
             return
 
-        if not is_deep_gemm_e8m0_used():
+        use_e8m0 = (
+            envs.VLLM_USE_DEEP_GEMM_E8M0
+            and is_deep_gemm_supported()
+            and (_fp8_gemm_nt_impl is not None)
+        )
+        if not use_e8m0:
             cls._oracle_cache = cls.FLOAT32  # type: ignore
             return
 
