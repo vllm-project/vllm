@@ -64,7 +64,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsPP,
 )
-from .interfaces_base import default_pooling_type
+from .interfaces_base import attn_type
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -707,13 +707,13 @@ class LlamaForCausalLM(
         return name, loaded_weight
 
 
-@default_pooling_type("CLS")
+@attn_type("encoder_only")
 class LlamaBidirectionalForSequenceClassification(
     LlamaForCausalLM, SupportsCrossEncoding
 ):
     pass
 
 
-@default_pooling_type("CLS")
+@attn_type("encoder_only")
 class LlamaBidirectionalModel(LlamaForCausalLM):
     pass

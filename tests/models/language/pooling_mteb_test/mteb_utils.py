@@ -15,6 +15,7 @@ import tests.ci_envs as ci_envs
 from tests.models.utils import (
     EmbedModelInfo,
     RerankModelInfo,
+    check_embeddings_close,
     get_vllm_extra_kwargs,
 )
 
@@ -53,28 +54,14 @@ _empty_model_meta = ModelMeta(
 )
 
 
-class VllmMtebEncoder(mteb.EncoderProtocol):
-    mteb_model_meta = _empty_model_meta
-
-    def __init__(self, vllm_model):
-        self.llm = vllm_model
-        self.rng = np.random.default_rng(seed=42)
-
+class MtebEncoderMixin(mteb.EncoderProtocol):
     def encode(
         self,
         inputs: DataLoader[mteb.types.BatchedInput],
         *args,
         **kwargs,
     ) -> np.ndarray:
-        # Hoping to discover potential scheduling
-        # issues by randomizing the order.
-        sentences = [text for batch in inputs for text in batch["text"]]
-        r = self.rng.permutation(len(sentences))
-        sentences = [sentences[i] for i in r]
-        outputs = self.llm.embed(sentences, use_tqdm=False)
-        embeds = np.array(outputs)
-        embeds = embeds[np.argsort(r)]
-        return embeds
+        raise NotImplementedError
 
     def similarity(
         self,
@@ -101,7 +88,31 @@ class VllmMtebEncoder(mteb.EncoderProtocol):
         return sim
 
 
-class HFMtebEncoder(mteb.EncoderProtocol):
+class VllmMtebEncoder(MtebEncoderMixin):
+    mteb_model_meta = _empty_model_meta
+
+    def __init__(self, vllm_model):
+        self.llm = vllm_model
+        self.rng = np.random.default_rng(seed=42)
+
+    def encode(
+        self,
+        inputs: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        # Hoping to discover potential scheduling
+        # issues by randomizing the order.
+        sentences = [text for batch in inputs for text in batch["text"]]
+        r = self.rng.permutation(len(sentences))
+        sentences = [sentences[i] for i in r]
+        outputs = self.llm.embed(sentences, use_tqdm=False)
+        embeds = np.array(outputs)
+        embeds = embeds[np.argsort(r)]
+        return embeds
+
+
+class HFMtebEncoder(MtebEncoderMixin):
     mteb_model_meta = _empty_model_meta
 
     def __init__(self, hf_model):
@@ -142,31 +153,7 @@ class HFMtebEncoder(mteb.EncoderProtocol):
         return sim
 
 
-class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
-    mteb_model_meta = _empty_model_meta
-
-    def __init__(self, vllm_model):
-        self.llm = vllm_model
-        self.rng = np.random.default_rng(seed=42)
-
-    def predict(
-        self,
-        inputs1: DataLoader[mteb.types.BatchedInput],
-        inputs2: DataLoader[mteb.types.BatchedInput],
-        *args,
-        **kwargs,
-    ) -> np.ndarray:
-        queries = [text for batch in inputs1 for text in batch["text"]]
-        corpus = [text for batch in inputs2 for text in batch["text"]]
-
-        outputs = self.llm.score(
-            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
-        )
-        scores = np.array(outputs)
-        return scores
-
-
-class OpenAIClientMtebEncoder(VllmMtebEncoder):
+class OpenAIClientMtebEncoder(MtebEncoderMixin):
     def __init__(self, model_name: str, client):
         self.model_name = model_name
         self.client = client
@@ -191,6 +178,30 @@ class OpenAIClientMtebEncoder(VllmMtebEncoder):
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
+
+
+class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
+    def __init__(self, vllm_model):
+        self.llm = vllm_model
+        self.rng = np.random.default_rng(seed=42)
+
+    def predict(
+        self,
+        inputs1: DataLoader[mteb.types.BatchedInput],
+        inputs2: DataLoader[mteb.types.BatchedInput],
+        *args,
+        **kwargs,
+    ) -> np.ndarray:
+        queries = [text for batch in inputs1 for text in batch["text"]]
+        corpus = [text for batch in inputs2 for text in batch["text"]]
+
+        outputs = self.llm.score(
+            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
+        )
+        scores = np.array(outputs)
+        return scores
 
 
 class ScoreClientMtebEncoder(mteb.CrossEncoderProtocol):
@@ -319,6 +330,16 @@ def mteb_test_embed_models(
                 HFMtebEncoder(hf_model), MTEB_EMBED_TASKS
             )
             st_dtype = next(hf_model.model.parameters()).dtype
+
+            # Check embeddings close to hf outputs
+            hf_outputs = hf_model.encode(example_prompts)
+            check_embeddings_close(
+                embeddings_0_lst=hf_outputs,
+                embeddings_1_lst=vllm_outputs,
+                name_0="hf",
+                name_1="vllm",
+                tol=1e-2,
+            )
     else:
         st_main_score = model_info.mteb_score
         st_dtype = "Constant"
