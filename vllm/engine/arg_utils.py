@@ -74,7 +74,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
-from vllm.config.observability import DetailedTraceModules, MfuMetricsLevel
+from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -523,7 +523,7 @@ class EngineArgs:
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
-    mfu_metrics: MfuMetricsLevel = ObservabilityConfig.mfu_metrics
+    enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1044,8 +1044,8 @@ class EngineArgs:
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
         )
         observability_group.add_argument(
-            "--mfu-metrics",
-            **observability_kwargs["mfu_metrics"],
+            "--enable-mfu-metrics",
+            **observability_kwargs["enable_mfu_metrics"],
         )
 
         # Scheduler arguments
@@ -1694,7 +1694,7 @@ class EngineArgs:
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
-            mfu_metrics=self.mfu_metrics,
+            enable_mfu_metrics=self.enable_mfu_metrics,
         )
 
         # Compilation config overrides

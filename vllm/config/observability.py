@@ -13,7 +13,6 @@ from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
 DetailedTraceModules = Literal["model", "worker", "all"]
-MfuMetricsLevel = Literal["disabled", "per-gpu", "per-gpu-debug"]
 
 
 @config
@@ -65,12 +64,8 @@ class ObservabilityConfig:
     module in the model and attach informations such as input/output shapes to
     nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
 
-    mfu_metrics: MfuMetricsLevel = "disabled"
-    """Enable Model FLOPs Utilization (MFU) metrics.
-    - disabled: No MFU stats collection or logging
-    - per-gpu: Log aggregated TF/s and GB/s per GPU
-    - per-gpu-debug: Same as per-gpu, plus detailed breakdowns via debug logging
-      (prefill/decode counts, component FLOPs, etc.)"""
+    enable_mfu_metrics: bool = False
+    """Enable Model FLOPs Utilization (MFU) metrics."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:

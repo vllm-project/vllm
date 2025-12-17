@@ -17,6 +17,7 @@ import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
@@ -27,10 +28,6 @@ from vllm.utils.torch_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
-
-
-def log_verbose(vllm_config: VllmConfig) -> bool:
-    return vllm_config.observability_config.mfu_metrics == "per-gpu-debug"
 
 
 class InvalidComponent(Exception):
@@ -1071,7 +1068,7 @@ class ModelMetrics:
             sum(write_bytes_breakdown.values()),
         )
 
-        if log_verbose(self.vllm_config):
+        if envs.VLLM_DEBUG_MFU_METRICS:
             perf_stats.debug_stats = DebugPerfStats(
                 time.monotonic() - t0,
                 ctx.num_prefill_requests,
@@ -1168,7 +1165,7 @@ class PerfMetricsLogging:
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
 
         self.debug_logging: PerfMetricsDebugLogging | None = None
-        if log_verbose(self.vllm_config):
+        if envs.VLLM_DEBUG_MFU_METRICS:
             self.debug_logging = PerfMetricsDebugLogging()
 
         self.reset()

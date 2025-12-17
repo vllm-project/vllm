@@ -132,7 +132,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_preemptions: int = 0
 
     def _enable_perf_stats(self) -> bool:
-        return self.vllm_config.observability_config.mfu_metrics != "disabled"
+        return self.vllm_config.observability_config.enable_mfu_metrics
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.

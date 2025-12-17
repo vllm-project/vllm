@@ -221,10 +221,7 @@ class Scheduler(SchedulerInterface):
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
         self.perf_metrics: ModelMetrics | None = None
-        if (
-            self.log_stats
-            and vllm_config.observability_config.mfu_metrics != "disabled"
-        ):
+        if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
     def schedule(self) -> SchedulerOutput:
