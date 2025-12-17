@@ -39,8 +39,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int):
     for i in range(len(expected_lora_output)):
         # Check for key Chinese name to verify LoRA is applied
         assert "\u9648\u58eb\u680b" in generated_texts[i], (
-            f"Expected Chinese name '陈士栋' not found in: "
-            f"{generated_texts[i]}"
+            f"Expected Chinese name '陈士栋' not found in: {generated_texts[i]}"
         )
 
 

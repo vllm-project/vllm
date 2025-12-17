@@ -42,7 +42,7 @@ class LoRAModelRunnerMixin:
             vllm_config,
             device,
             model.embedding_modules,
-            getattr(model, 'embedding_padding_modules', []),
+            getattr(model, "embedding_padding_modules", []),
         )
         return self.lora_manager.create_lora_manager(model, vllm_config)
 
@@ -85,7 +85,9 @@ class LoRAModelRunnerMixin:
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
-            input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
+            input_batch.make_lora_inputs(  # type: ignore[attr-defined]
+                num_scheduled_tokens, num_sampled_tokens
+            )
         )
         return self._set_active_loras(
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type

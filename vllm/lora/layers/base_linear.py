@@ -115,12 +115,12 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # Device-aware scatter: optimize GPU→GPU case (slab optimization)
         if lora_a.is_cuda:
             # Fast path: GPU→GPU scatter (already on GPU from slab)
-            self.lora_a_stacked[0][
-                index, 0, : lora_a.shape[0], : lora_a.shape[1]
-            ] = lora_a
-            self.lora_b_stacked[0][
-                index, 0, : lora_b.shape[0], : lora_b.shape[1]
-            ] = lora_b
+            self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]] = (
+                lora_a
+            )
+            self.lora_b_stacked[0][index, 0, : lora_b.shape[0], : lora_b.shape[1]] = (
+                lora_b
+            )
         else:
             # Standard path: CPU→GPU transfer (baseline case)
             self.lora_a_stacked[0][
