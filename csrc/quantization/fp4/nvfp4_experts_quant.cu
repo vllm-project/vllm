@@ -222,12 +222,8 @@ void quant_impl(void* output, void* output_scale, void* input,
                 void* input_global_scale, void* input_offset_by_experts,
                 void* output_scale_offset_by_experts, int m_topk, int k,
                 int n_experts, cudaStream_t stream) {
-  // TODO: this multiProcessorCount should be cached.
-  int device;
-  cudaGetDevice(&device);
-  int multiProcessorCount;
-  cudaDeviceGetAttribute(&multiProcessorCount, cudaDevAttrMultiProcessorCount,
-                         device);
+  int multiProcessorCount =
+      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
 
   // Grid, Block size.
   // Each thread converts 8 values.
