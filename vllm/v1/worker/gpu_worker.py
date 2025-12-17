@@ -56,7 +56,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
-from .utils import check_enough_init_memory
+from .utils import request_memory
 
 logger = init_logger(__name__)
 
@@ -239,11 +239,8 @@ class Worker(WorkerBase):
             torch.cuda.empty_cache()
 
             # take current memory snapshot
-            self.init_snapshot = MemorySnapshot()
-            self.requested_memory = check_enough_init_memory(
-                self.init_snapshot,
-                self.cache_config,
-            )
+            self.init_snapshot = init_snapshot = MemorySnapshot()
+            self.requested_memory = request_memory(init_snapshot, self.cache_config)
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 

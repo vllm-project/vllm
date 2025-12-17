@@ -250,10 +250,7 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def check_enough_init_memory(
-    init_snapshot: MemorySnapshot,
-    cache_config: CacheConfig,
-) -> float:
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> float:
     """
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
