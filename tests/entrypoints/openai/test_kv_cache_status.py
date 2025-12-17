@@ -6,15 +6,13 @@ import asyncio
 import json
 from unittest.mock import patch
 
-import pytest
-
 from vllm.v1.metrics.reader import Counter, Gauge
 
 
 class TestKVCacheStatusEndpoint:
     """Tests for the /v1/kv_cache/status endpoint logic."""
 
-    @patch('vllm.entrypoints.openai.api_server.get_metrics_snapshot')
+    @patch("vllm.entrypoints.openai.api_server.get_metrics_snapshot")
     def test_response_structure_with_metrics(self, mock_get_metrics_snapshot):
         """Test that the response has all required fields with valid metrics."""
         from vllm.entrypoints.openai.api_server import get_kv_cache_status
@@ -50,7 +48,7 @@ class TestKVCacheStatusEndpoint:
         assert response["prefix_cache_hits_total"] == 750
         assert response["prefix_cache_hit_rate"] == 0.75
 
-    @patch('vllm.entrypoints.openai.api_server.get_metrics_snapshot')
+    @patch("vllm.entrypoints.openai.api_server.get_metrics_snapshot")
     def test_prefix_cache_hit_rate_calculation(self, mock_get_metrics_snapshot):
         """Test that hit rate is calculated correctly."""
         from vllm.entrypoints.openai.api_server import get_kv_cache_status
@@ -69,9 +67,9 @@ class TestKVCacheStatusEndpoint:
 
         assert response["prefix_cache_hit_rate"] == 0.75
 
-    @patch('vllm.entrypoints.openai.api_server.get_metrics_snapshot')
+    @patch("vllm.entrypoints.openai.api_server.get_metrics_snapshot")
     def test_prefix_cache_hit_rate_zero_queries(self, mock_get_metrics_snapshot):
-        """Test hit rate when no queries have been made (avoid division by zero)."""
+        """Test hit rate when no queries have been made."""
         from vllm.entrypoints.openai.api_server import get_kv_cache_status
 
         mock_metrics = [
@@ -88,9 +86,9 @@ class TestKVCacheStatusEndpoint:
 
         assert response["prefix_cache_hit_rate"] == 0.0
 
-    @patch('vllm.entrypoints.openai.api_server.get_metrics_snapshot')
+    @patch("vllm.entrypoints.openai.api_server.get_metrics_snapshot")
     def test_response_with_empty_metrics(self, mock_get_metrics_snapshot):
-        """Test that response returns default values when no metrics available."""
+        """Test that response returns default values when no metrics."""
         from vllm.entrypoints.openai.api_server import get_kv_cache_status
 
         mock_get_metrics_snapshot.return_value = []
@@ -112,7 +110,7 @@ class TestKVCacheStatusEndpoint:
         assert response["prefix_cache_queries_total"] == 0
         assert response["prefix_cache_hits_total"] == 0
 
-    @patch('vllm.entrypoints.openai.api_server.get_metrics_snapshot')
+    @patch("vllm.entrypoints.openai.api_server.get_metrics_snapshot")
     def test_num_used_blocks_calculation(self, mock_get_metrics_snapshot):
         """Test that num_used_blocks is correctly calculated."""
         from vllm.entrypoints.openai.api_server import get_kv_cache_status
