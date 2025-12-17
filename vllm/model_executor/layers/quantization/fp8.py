@@ -728,11 +728,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         self.marlin_input_dtype = None
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
-        if self.use_marlin and layer.activation != "silu":
-            raise NotImplementedError(
-                "MARLIN FP8 MoE only supports SiLU activation currently."
-            )
-
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
