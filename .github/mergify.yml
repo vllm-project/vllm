@@ -349,15 +349,15 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase if ready and 40 commits behind main
+- name: auto-rebase if approved, ready, and 40 commits behind main
   conditions:
     - base = main
+    - label=ready
+    - "#approved-reviews-by >= 1"
     - "#commits-behind >= 40"
     - -closed
     - -draft
     - -conflict
-    - label=ready
-    - "#approved-reviews-by >= 1"
   actions:
     rebase: {}
 
