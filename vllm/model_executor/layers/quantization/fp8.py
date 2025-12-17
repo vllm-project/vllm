@@ -719,11 +719,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # NOTE(rob): in progress migrating all into this format.
         self.kernel_cls: mk.FusedMoEPermuteExpertsUnpermute | None = None
         if (
-            self.fp8_backend == Fp8MoEMethod.DEEPGEMM
-            or self.fp8_backend == Fp8MoEMethod.TRITON
+            self.fp8_backend == Fp8MoeBackend.DEEPGEMM
+            or self.fp8_backend == Fp8MoeBackend.TRITON
         ):
             self.kernel_cls = TritonOrDeepGemmExperts
-        elif self.fp8_backend == Fp8MoEMethod.FLASHINFER_CUTLASS:
+        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.kernel_cls = FlashInferExperts
 
         self.marlin_input_dtype = None
@@ -1301,6 +1301,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_config=self.moe_quant_config,
             )
         elif self.use_marlin:
+            # TODO(rob): convert this to MK.
             assert layer.activation == "silu", (
                 f"{layer.activation} not supported for Marlin MoE."
             )

@@ -79,7 +79,6 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
-    from vllm.model_executor.layers.fused_moe.fused_marlin_moe import MarlinExperts
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         TritonExperts,
         fused_experts,
@@ -107,7 +106,6 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
-        "MarlinExperts",
         "FlashInferExperts",
     ]
 else:
