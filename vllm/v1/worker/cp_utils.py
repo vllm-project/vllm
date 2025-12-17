@@ -27,11 +27,14 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             if dcp_size > 1:
-                assert layer_impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer_impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
+                raise ValueError(
+                    "Decode Context Parallelism (DCP) requires the attention backend to "
+                    "return softmax LSE values during decode. "
+                    f"The current attention backend ({attention_impl.__class__.__name__}) "
+                    "does not support this.\n\n"
+                    "To fix this, try using a different attention backend, for example:\n"
+                    "  export VLLM_ATTENTION_BACKEND=FLASH_ATTENTION\n"
+                    "or disable DCP."
                 )
 
             if pcp_size > 1:
