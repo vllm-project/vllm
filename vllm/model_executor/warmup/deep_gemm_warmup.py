@@ -10,7 +10,7 @@ import torch
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEModularMethod
@@ -333,19 +333,22 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     total = 0
     block_m = get_mk_alignment_for_contiguous_layout()[0]
 
+    seen_fp8_sizes: set[torch.Size] = set(FP8_GEMM_NT_WARMUP_CACHE)
+    seen_grouped_sizes: set[torch.Size] = set(
+        GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
+    )
+
     for m in model.modules():
         if _fp8_linear_may_use_deep_gemm(m):
             w, _, _ = _extract_data_from_linear_base_module(m)
-            if w.size() not in FP8_GEMM_NT_WARMUP_CACHE:
+            if w.size() not in seen_fp8_sizes:
                 total += len(_get_fp8_gemm_nt_m_values(w, max_tokens))
+                seen_fp8_sizes.add(w.size())
 
     for m in model.modules():
         if _fused_moe_grouped_gemm_may_use_deep_gemm(m):
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
-            if (
-                w13.size() in GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
-                and w2.size() in GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
-            ):
+            if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
                 continue
             num_experts = w13.size(0)
             max_tokens_adj = min(
@@ -356,10 +359,12 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
                 max_tokens_adj, num_topk, num_experts, block_m, expert_tokens_meta=None
             )
             n_values = (MAX_M - block_m) // block_m + 1
-            if w13.size() not in GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
+            if w13.size() not in seen_grouped_sizes:
                 total += n_values
-            if w2.size() not in GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE:
+                seen_grouped_sizes.add(w13.size())
+            if w2.size() not in seen_grouped_sizes:
                 total += n_values
+                seen_grouped_sizes.add(w2.size())
     return total
 
 
@@ -368,6 +373,11 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     if total == 0:
         return
 
-    with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
-        deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
-        deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+    # Only show progress bar on rank 0 to avoid cluttered output
+    if is_global_first_rank():
+        with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
+            deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
+            deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
+    else:
+        deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
+        deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
