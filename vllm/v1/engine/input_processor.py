@@ -35,7 +35,7 @@ from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines,
 )
 from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
-from vllm.v1.worker.utils import MultiModalBudget, check_enough_init_memory
+from vllm.v1.worker.utils import MultiModalBudget, request_memory
 
 logger = init_logger(__name__)
 
@@ -696,7 +696,7 @@ class InputProcessor:
                     device,
                 )
             else:
-                check_enough_init_memory(baseline_snapshot, self.cache_config)
+                request_memory(baseline_snapshot, self.cache_config)
 
             with memory_profiling(baseline_snapshot) as diff:
                 for (
