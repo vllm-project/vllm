@@ -208,7 +208,8 @@ def test_attn_quant(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -297,7 +298,8 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -409,7 +411,8 @@ def test_tp2_attn_quant_async_tp(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties

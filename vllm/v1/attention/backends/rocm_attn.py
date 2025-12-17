@@ -165,7 +165,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set --attention-config.backend=FLEX_ATTENTION to use "
+                "Set --attention-backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 
