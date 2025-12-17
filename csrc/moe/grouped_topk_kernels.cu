@@ -1042,7 +1042,7 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
       {num_tokens, n_group}, torch::dtype(data_type).device(torch::kCUDA));
   // Always output float32 for topk_values (eliminates Python-side conversion)
   torch::Tensor topk_values = torch::empty(
-      {num_tokens, topk}, torch::dtype(torch::kFloat32).device(torch::kCUDA));
+      {num_tokens, topk}, torch::dtype(!packed ? torch::kFloat32 : torch::kInt32).device(torch::kCUDA));
   torch::Tensor topk_indices = torch::empty(
       {num_tokens, topk}, torch::dtype(torch::kInt32).device(torch::kCUDA));
 
