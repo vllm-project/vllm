@@ -1727,9 +1727,7 @@ def scaled_fp8_quant(
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        group_m = group_shape[0] if group_shape is not None else None
-        group_n = group_shape[1] if group_shape is not None else None
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_m, group_n)
+        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 

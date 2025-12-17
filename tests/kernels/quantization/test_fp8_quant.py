@@ -34,11 +34,9 @@ def opcheck_fp8_quant(
     group_shape=None,
 ):
     if scale is not None:
-        group_m = group_shape[0] if group_shape else None
-        group_n = group_shape[1] if group_shape else None
         opcheck(
             torch.ops._C.static_scaled_fp8_quant,
-            (output, input, scale, group_m, group_n),
+            (output, input, scale, group_shape),
         )
     elif use_per_token_if_dynamic:
         scale = torch.empty(
