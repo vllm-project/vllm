@@ -654,19 +654,28 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
 
 #### Video Frame Recovery
 
-For improved robustness when processing potentially corrupted video files, vLLM supports optional frame recovery. When enabled, if some frames fail to load during sequential reading, the system will attempt to recover them by seeking to nearby frames in the video. Works with common video formats like MP4 when using OpenCV backends, but may not work for all.
+For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
 
-To enable video frame recovery, pass the `recovery_offset` parameter via `--media-io-kwargs`:
+To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
 
 ```bash
-# Example: Enable recovery with offset of 5 frames
+# Example: Enable frame recovery
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --media-io-kwargs '{"video": {"recovery_offset": 5}}'
+  --media-io-kwargs '{"video": {"frame_recovery": true}}'
 ```
 
 **Parameters:**
 
-- `recovery_offset`: Maximum distance (in frames) to search for recovery frames. Set to `0` to disable recovery (default). Higher values provide better recovery but may impact performance.
+- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+
+**How it works:**
+
+1. The system reads frames sequentially
+2. If a target frame fails to grab, it's marked as "failed"
+3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
+4. This approach handles both mid-video corruption and end-of-video truncation
+
+Works with common video formats like MP4 when using OpenCV backends.
 
 #### Custom RGBA Background Color
 
