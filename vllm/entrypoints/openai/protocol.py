@@ -1654,13 +1654,23 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
-    # --8<-- [start:responses-extra-params]
+    # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
     # see serialize_input_messages and serialize_output_messages
-    input_messages: ResponseInputOutputMessage | None = None
-    output_messages: ResponseInputOutputMessage | None = None
-    # --8<-- [end:responses-extra-params]
+    input_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token input to model."
+        ),
+    )
+    output_messages: ResponseInputOutputMessage | None = Field(
+        default=None,
+        description=(
+            "If enable_response_messages, we can show raw token output of model."
+        ),
+    )
+    # --8<-- [end:responses-response-extra-params]
 
     # NOTE: openAI harmony doesn't serialize TextContent properly,
     # TODO: this fixes for TextContent, but need to verify for tools etc
