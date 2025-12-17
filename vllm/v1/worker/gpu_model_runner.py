@@ -4735,11 +4735,16 @@ class GPUModelRunner(
                     self.max_model_len,
                     self.max_num_tokens // full_largest,
                 )
-                # Measure first capture with no warmups. This is critical because:
-                # - Warmups run in eager mode (NONE) - no FA3 split buffer
-                # - First capture runs in graph mode (FULL) - allocates split buffer
-                # - If we measure after warmups, cache release masks the allocation
-                # By measuring before warmups, we capture the true first-capture cost.
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                    self._dummy_run(
+                        full_largest,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        force_attention=True,
+                        uniform_decode=True,
+                        skip_eplb=True,
+                        remove_lora=False,
+                        activate_lora=False,
+                    )
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
                 before_first_capture = torch.cuda.mem_get_info()[0]
