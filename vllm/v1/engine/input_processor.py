@@ -679,12 +679,11 @@ class InputProcessor:
             )
 
             baseline_snapshot = MemorySnapshot(device=device)
-
-            import torch
+            device_ = baseline_snapshot.device_
 
             # Only check init memory if we are sure that the EngineCore is not
             # loading weights or running profiling on the same GPU
-            new_device_index = torch.device(device).index or 0
+            new_device_index = device_.index
             local_gpu_count = (
                 parallel_config.data_parallel_size_local * parallel_config.world_size
             )
@@ -693,7 +692,7 @@ class InputProcessor:
                     "Both EngineCore and multi-modal processor are using "
                     "the same GPU (%s). This may result in inaccurate memory "
                     "profiling, and resource contention during inference.",
-                    device,
+                    device_,
                 )
             else:
                 request_memory(baseline_snapshot, self.cache_config)
@@ -715,11 +714,11 @@ class InputProcessor:
                 "Multi-modal processing took %.4f GiB and %.6f seconds on %s",
                 memory_usage / GiB_bytes,
                 diff.profile_time,
-                device,
+                device_,
             )
             if memory_usage > diff.before_profile.free_memory:
                 raise ValueError(
-                    f"Not enough memory in {device} for multi-modal processor. "
+                    f"Not enough memory in {device_} for multi-modal processor. "
                     f"Try reducing `api_server_count` or revert to CPU processing."
                 )
 
