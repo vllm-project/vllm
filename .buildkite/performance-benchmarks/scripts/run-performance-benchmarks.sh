@@ -502,11 +502,7 @@ main() {
   ARCH=''
   if [[ "$ON_CPU" == "1" ]]; then
     check_cpus
-    if [[ "$(uname -m)" == "aarch64" ]] || [[ "$(uname -m)" == "arm64" ]]; then
-      ARCH='-arm64-cpu'
-    else
-      ARCH='-cpu'
-    fi
+    ARCH="-$gpu_type"
   else
      check_gpus
      ARCH="$arch_suffix"
