@@ -13,7 +13,6 @@ extern "C" {
 
 // https://rocm.docs.amd.com/projects/HIPIFY/en/latest/tables/CUDA_Driver_API_functions_supported_by_HIP.html
 typedef unsigned long long CUdevice;
-typedef hipDeviceAttribute_t CUdevice_attribute;
 typedef hipDeviceptr_t CUdeviceptr;
 typedef hipError_t CUresult;
 typedef hipCtx_t CUcontext;
@@ -56,13 +55,6 @@ CUresult cuCtxSetCurrent(CUcontext ctx) {
 // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__PRIMARY__CTX.html
 CUresult cuDevicePrimaryCtxRetain(CUcontext* ctx, CUdevice dev) {
   return hipDevicePrimaryCtxRetain(ctx, dev);
-}
-
-// Device Management
-// https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__DEVICE.html
-CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib,
-                              CUdevice dev) {
-  return hipDeviceGetAttribute(pi, attrib, dev);
 }
 
 // Virtual Memory Management
