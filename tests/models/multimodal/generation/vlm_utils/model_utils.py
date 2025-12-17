@@ -25,6 +25,7 @@ from transformers import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
+from vllm.platforms import current_platform
 from vllm.utils.collection_utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
@@ -366,6 +367,40 @@ def gemma3_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOut
 
 def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4V."""
+    if current_platform.is_rocm():
+        import types
+
+        config = hf_model.model.config
+        if hasattr(config, "num_layers") and not hasattr(config, "num_hidden_layers"):
+            config.num_hidden_layers = config.num_layers
+        config.output_hidden_states = True
+
+        def patched_prepare_cache(
+            self, generation_config, model_kwargs, *args, **kwargs
+        ):
+            model_kwargs["past_key_values"] = None
+            model_kwargs["use_cache"] = False
+            return model_kwargs
+
+        hf_model.model._prepare_cache_for_generation = types.MethodType(
+            patched_prepare_cache, hf_model.model
+        )
+        original_generate = hf_model.model.generate
+
+        def patched_generate(*args, **kwargs):
+            kwargs["output_hidden_states"] = True
+            kwargs["return_dict_in_generate"] = True
+            return original_generate(*args, **kwargs)
+
+        hf_model.model.generate = patched_generate
+        original_forward = hf_model.model.forward
+
+        def patched_forward(*args, **kwargs):
+            kwargs["output_hidden_states"] = True
+            return original_forward(*args, **kwargs)
+
+        hf_model.model.forward = patched_forward
+
     hf_processor = hf_model.processor
 
     def processor(*args, text="", images=None, **kwargs):
@@ -406,7 +441,15 @@ def glm4_1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         if videos is not None and is_list_of(videos, tuple):
             # If videos is a list of tuples, we assume each tuple contains
             # (video_array, metadata) as in the case of GLM4.1V.
-            video_metadata = [[VideoMetadata(**video[1])] for video in videos]
+            # Filter out 'do_sample_frames' as it's not a valid VideoMetadata arg
+            video_metadata = [
+                [
+                    VideoMetadata(
+                        **{k: v for k, v in video[1].items() if k != "do_sample_frames"}
+                    )
+                ]
+                for video in videos
+            ]
             videos = [[video[0]] for video in videos]
         else:
             video_metadata = None

@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -15,8 +16,8 @@ from vllm.outputs import (
     RequestOutput,
 )
 from vllm.sampling_params import RequestOutputKind
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -93,7 +94,7 @@ class RequestState:
         request_id: str,
         parent_req: ParentRequest | None,
         request_index: int,
-        lora_name: str | None,
+        lora_request: LoRARequest | None,
         output_kind: RequestOutputKind,
         prompt: str | None,
         prompt_token_ids: list[int] | None,
@@ -112,7 +113,8 @@ class RequestState:
         self.request_id = request_id
         self.parent_req = parent_req
         self.request_index = request_index
-        self.lora_name = lora_name
+        self.lora_request = lora_request
+        self.lora_name = lora_request.lora_name if lora_request is not None else None
         self.output_kind = output_kind
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
@@ -139,7 +141,7 @@ class RequestState:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
         prompt: str | None,
         parent_req: ParentRequest | None,
@@ -178,9 +180,7 @@ class RequestState:
             request_id=request.request_id,
             parent_req=parent_req,
             request_index=request_index,
-            lora_name=(
-                request.lora_request.name if request.lora_request is not None else None
-            ),
+            lora_request=request.lora_request,
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,
@@ -289,6 +289,7 @@ class RequestState:
 
         return RequestOutput(
             request_id=request_id,
+            lora_request=self.lora_request,
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
@@ -341,7 +342,10 @@ class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
     def __init__(
-        self, tokenizer: AnyTokenizer, log_stats: bool, stream_interval: int = 1
+        self,
+        tokenizer: TokenizerLike | None,
+        log_stats: bool,
+        stream_interval: int = 1,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -647,6 +651,7 @@ class OutputProcessor:
             ),
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
+            num_cached_tokens=req_state.num_cached_tokens,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

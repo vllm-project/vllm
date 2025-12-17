@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import base64
-import io
 import json
 
 import openai  # use the official client for correctness check
@@ -13,6 +11,7 @@ from transformers import AutoConfig
 
 from tests.conftest import ImageTestAssets
 from tests.utils import RemoteOpenAIServer
+from vllm.utils.serial_utils import tensor2base64
 
 # any model with a chat template should work here
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
@@ -50,18 +49,6 @@ async def client_with_image_embeds(server_with_image_embeds):
         yield async_client
 
 
-def encode_image_embedding_to_base64(image_embedding) -> str:
-    """
-    Encode image embedding to base64 string
-    """
-    buffer = io.BytesIO()
-    torch.save(image_embedding, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    base64_image_embedding = base64.b64encode(binary_data).decode("utf-8")
-    return base64_image_embedding
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("dtype", [torch.half, torch.float16, torch.float32])
@@ -73,7 +60,7 @@ async def test_completions_with_image_embeds(
 ):
     # Test case: Single image embeds input
     image_embeds = image_assets[0].image_embeds.to(dtype=dtype)
-    base64_image_embedding = encode_image_embedding_to_base64(image_embeds)
+    base64_image_embedding = tensor2base64(image_embeds)
     chat_completion = await client_with_image_embeds.chat.completions.create(
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
