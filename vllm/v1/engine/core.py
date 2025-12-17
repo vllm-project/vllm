@@ -56,7 +56,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
-from vllm.v1.engine.BaseSentinel import BaseSentinel
+from vllm.v1.engine.base_sentinel import BaseSentinel
 from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,

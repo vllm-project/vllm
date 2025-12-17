@@ -46,7 +46,7 @@ from vllm.v1.engine import (
     ReconfigureRankType,
     UtilityOutput,
 )
-from vllm.v1.engine.BaseSentinel import BaseSentinel
+from vllm.v1.engine.base_sentinel import BaseSentinel
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
