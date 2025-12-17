@@ -172,7 +172,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(
-                positions,
+                torch.add(positions, offsets) if offsets is not None else positions,
                 query,
                 key,
                 self.head_size,
