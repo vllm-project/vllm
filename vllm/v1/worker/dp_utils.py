@@ -35,14 +35,15 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     return device, group
 
 
-def _run_ar(
+def _run_ar_async(
     should_ubatch: bool,
     should_dp_pad: bool,
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dist.Work]:
+    """Start all_reduce asynchronously, return tensor and work handle."""
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
@@ -52,7 +53,28 @@ def _run_ar(
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
     tensor[4][dp_rank] = cudagraph_mode
-    dist.all_reduce(tensor, group=group)
+    work = dist.all_reduce(tensor, group=group, async_op=True)
+    return tensor, work
+
+
+def _run_ar(
+    should_ubatch: bool,
+    should_dp_pad: bool,
+    orig_num_tokens_per_ubatch: int,
+    padded_num_tokens_per_ubatch: int,
+    cudagraph_mode: int,
+    parallel_config: ParallelConfig,
+) -> torch.Tensor:
+    """Run all_reduce synchronously."""
+    tensor, work = _run_ar_async(
+        should_ubatch,
+        should_dp_pad,
+        orig_num_tokens_per_ubatch,
+        padded_num_tokens_per_ubatch,
+        cudagraph_mode,
+        parallel_config,
+    )
+    work.wait()
     return tensor
 
 
@@ -100,6 +122,52 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     return int(tensor[4, :].min().item())
 
 
+def _process_ar_result(
+    tensor: torch.Tensor,
+    should_attempt_dp_padding: bool,
+    num_ubatches: int,
+) -> tuple[bool, torch.Tensor, int]:
+    """
+    Process the result of a DP coordination all_reduce.
+
+    Args:
+        tensor: The tensor after all_reduce completes
+        should_attempt_dp_padding: The original dp_padding flag
+        num_ubatches: Number of microbatches
+
+    Returns:
+        tuple[should_ubatch, num_tokens_after_padding, synced_cudagraph_mode]
+    """
+    should_dp_pad = bool(torch.all(tensor[3] == 1).item())
+
+    # DP ranks should all have the same value for should_attempt_dp_padding.
+    assert should_attempt_dp_padding == should_dp_pad
+
+    # Check conditions for microbatching
+    should_ubatch = _post_process_ubatch(tensor, num_ubatches)
+
+    if should_ubatch and not should_dp_pad:
+        logger.debug_once(
+            "Microbatching has been triggered and requires DP padding. "
+            "Enabling DP padding even though it has been explicitly "
+            "disabled.",
+            scope="global",
+        )
+        should_dp_pad = True
+
+    # Pad all DP ranks up to the maximum token count across ranks if
+    # should_dp_pad is True
+    num_tokens_after_padding = _post_process_dp_padding(
+        tensor,
+        should_dp_pad,
+    )
+
+    # Synchronize cudagraph_mode across ranks (take min)
+    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
+
+    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
+
+
 def _synchronize_dp_ranks(
     num_tokens_unpadded: int,
     num_tokens_padded: int,
@@ -140,34 +208,9 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    should_dp_pad = bool(torch.all(tensor[3] == 1).item())
-
-    # DP ranks should all have the same value for should_attempt_dp_padding.
-    assert should_attempt_dp_padding == should_dp_pad
-
-    # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
-
-    if should_ubatch and not should_dp_pad:
-        logger.debug_once(
-            "Microbatching has been triggered and requires DP padding. "
-            "Enabling DP padding even though it has been explicitly "
-            "disabled.",
-            scope="global",
-        )
-        should_dp_pad = True
-
-    # Pad all DP ranks up to the maximum token count across ranks if
-    # should_dp_pad is True
-    num_tokens_after_padding = _post_process_dp_padding(
-        tensor,
-        should_dp_pad,
+    return _process_ar_result(
+        tensor, should_attempt_dp_padding, parallel_config.num_ubatches
     )
-
-    # Synchronize cudagraph_mode across ranks (take min)
-    synced_cudagraph_mode = _post_process_cudagraph_mode(tensor)
-
-    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
 
 
 def coordinate_batch_across_dp(
@@ -238,3 +281,75 @@ def coordinate_batch_across_dp(
     )
 
     return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)
+
+
+# Type alias for the async work handle
+DPCoordinationHandle = tuple[
+    torch.Tensor,  # tensor with all_reduce data
+    dist.Work,  # async work handle
+    bool,  # should_attempt_dp_padding
+    int,  # num_ubatches
+]
+
+
+def start_dp_coordination_async(
+    num_tokens_unpadded: int,
+    num_tokens_padded: int,
+    should_attempt_ubatching: bool,
+    should_attempt_dp_padding: bool,
+    cudagraph_mode: int,
+    parallel_config: ParallelConfig,
+) -> DPCoordinationHandle | None:
+    """
+    Start the DP coordination all_reduce asynchronously.
+
+    This should be called early (before GPU sync points) to allow the
+    all_reduce to overlap with GPU work.
+
+    Args:
+        num_tokens_unpadded: Number of tokens without padding
+        num_tokens_padded: Number of tokens with padding
+        should_attempt_ubatching: Whether to attempt microbatching
+        should_attempt_dp_padding: Whether to pad all DP ranks to same size
+        cudagraph_mode: The cudagraph mode (0=NONE, 1=PIECEWISE, 2=FULL)
+        parallel_config: The parallel config
+
+    Returns:
+        A handle to pass to finish_dp_coordination, or None if DP size is 1
+    """
+    if parallel_config.data_parallel_size == 1:
+        return None
+
+    tensor, work = _run_ar_async(
+        should_ubatch=should_attempt_ubatching,
+        should_dp_pad=should_attempt_dp_padding,
+        orig_num_tokens_per_ubatch=num_tokens_unpadded,
+        padded_num_tokens_per_ubatch=num_tokens_padded,
+        cudagraph_mode=cudagraph_mode,
+        parallel_config=parallel_config,
+    )
+    return (tensor, work, should_attempt_dp_padding, parallel_config.num_ubatches)
+
+
+def finish_dp_coordination(
+    handle: DPCoordinationHandle | None,
+) -> tuple[bool, torch.Tensor | None, int]:
+    """
+    Wait for the async DP coordination to complete and process results.
+
+    Args:
+        handle: The handle returned by start_dp_coordination_async
+
+    Returns:
+        tuple[should_ubatch, num_tokens_after_padding, synced_cudagraph_mode]
+    """
+    if handle is None:
+        # DP size is 1, return defaults
+        return False, None, 0
+
+    tensor, work, should_attempt_dp_padding, num_ubatches = handle
+
+    # Wait for the all_reduce to complete
+    work.wait()
+
+    return _process_ar_result(tensor, should_attempt_dp_padding, num_ubatches)
