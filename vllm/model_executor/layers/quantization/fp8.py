@@ -745,21 +745,28 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-            if self.block_quant:
-                assert self.weight_block_size == [128, 128], (
-                    f"Only support weight_block_size == [128, 128], "
-                    f"got {self.weight_block_size}"
+            if self.block_quant and self.weight_block_size != [128, 128]:
+                raise NotImplementedError(
+                    "FlashInfer CUTLASS FP8 MoE backend only supports block "
+                    "size [128, 128]."
                 )
-            else:
-                assert (
-                    not layer.renormalize and layer.custom_routing_function is not None
+            if not self.block_quant:
+                if layer.renormalize or layer.custom_routing_function is not None:
+                    raise NotImplementedError(
+                        "FlashInfer CUTLASS FP8 MoE backend does custom routing "
+                        f"function or renormalization, but got {layer.renormalize} and "
+                        f"{layer.custom_routing_function}."
+                    )
+                if layer.scoring_func != "sigmoid":
+                    raise NotImplementedError(
+                        "FlashInfer CUTLASS FP8 MoE backend only supports "
+                        f"'sigmoid' scoring function, but got {layer.scoring_func}."
+                    )
+            if layer.activation != "silu":
+                raise NotImplementedError(
+                    "FlashInfer CUTLASS FP8 MoE backend only supports SiLU "
+                    "activation function, but got {layer.activation}."
                 )
-                assert layer.scoring_func == "sigmoid", (
-                    f"Expected 'sigmoid' scoring func but got {layer.scoring_func}"
-                )
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
-            )
 
     def create_weights(
         self,
