@@ -750,11 +750,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     f"Only support weight_block_size == [128, 128], "
                     f"got {self.weight_block_size}"
                 )
-            # self.flashinfer_moe_fn = partial(
-            #     flashinfer_cutlass_moe_fp8,
-            #     moe=self.moe,
-            #     use_deepseek_fp8_block_scale=self.block_quant,
-            # )
+            else:
+                assert (
+                    not layer.renormalize and layer.custom_routing_function is not None
+                )
+                assert layer.scoring_func == "sigmoid", (
+                    f"Expected 'sigmoid' scoring func but got {layer.scoring_func}"
+                )
+            assert layer.activation == "silu", (
+                f"Expected 'silu' activation but got {layer.activation}"
+            )
 
     def create_weights(
         self,
@@ -1090,16 +1095,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 ),
             )
             self.use_inplace = False
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
-            )
-            if not self.block_quant:
-                assert (
-                    not layer.renormalize and layer.custom_routing_function is not None
-                )
-                assert layer.scoring_func == "sigmoid", (
-                    f"Expected 'sigmoid' scoring func but got {layer.scoring_func}"
-                )
 
         elif isinstance(self.kernel, type(TritonOrDeepGemmExperts)):
             self.fn = mk.FusedMoEModularKernel(
