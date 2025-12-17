@@ -9,9 +9,11 @@
 from .chunk import chunk_gated_delta_rule
 from .fused_recurrent import fused_recurrent_gated_delta_rule
 from .layernorm_guard import RMSNormGated
-
+from .layernorm_guard import RMSNormGated
+from .fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 __all__ = [
     "RMSNormGated",
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
+    "fused_qkvzba_split_reshape_cat",
 ]
