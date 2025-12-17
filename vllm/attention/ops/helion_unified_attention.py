@@ -3,6 +3,7 @@
 import helion
 import helion.language as hl
 import torch
+
 from vllm.triton_utils import next_power_of_2
 
 from .triton_unified_attention import (
@@ -388,7 +389,7 @@ configs = nv_configs if torch.version.cuda else amd_configs
     autotune_baseline_fn=_triton_baseline_fn,
     autotune_effort="quick",
     # for in-place autotuning, not recommended for micro-benchmarks
-    #  or inital config selection
+    #  or initial config selection
     autotune_accuracy_check=False,
     autotune_ignore_errors=True,
     print_repro=False,
