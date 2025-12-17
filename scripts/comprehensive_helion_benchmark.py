@@ -77,7 +77,7 @@ def cleanup_gpu_resources():
             gc.collect()
 
             # Clear torch compilation cache
-            if hasattr(torch, '_dynamo'):
+            if hasattr(torch, "_dynamo"):
                 torch._dynamo.reset()
 
             # Synchronize all CUDA streams
@@ -188,7 +188,7 @@ def run_kernel_benchmark(
     hidden_size: int,
     iterations: int = 5000,
     warmup: int = 50,
-    no_capture: bool = False,
+    no_capture: bool = True,
 ) -> tuple[bool, dict | None]:
     """
     Run full benchmark for a specific kernel with a specific hidden_size.
@@ -243,10 +243,14 @@ def run_kernel_benchmark(
 
         # Debug: Print working directory and environment info
         import os
+
         current_dir = os.getcwd()
         logger.info("Current working directory: %s", current_dir)
         logger.info("Python executable: %s", sys.executable)
-        logger.info("CUDA_VISIBLE_DEVICES: %s", os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set'))
+        logger.info(
+            "CUDA_VISIBLE_DEVICES: %s",
+            os.environ.get("CUDA_VISIBLE_DEVICES", "Not set"),
+        )
 
         # Run benchmark with real-time progress display
         start_time = time.time()
@@ -255,23 +259,25 @@ def run_kernel_benchmark(
         env = os.environ.copy()
 
         # Ensure proper CUDA environment
-        env['PYTHONUNBUFFERED'] = '1'  # Disable Python output buffering
+        env["PYTHONUNBUFFERED"] = "1"  # Disable Python output buffering
 
         # Add Triton-specific environment variables to help with subprocess execution
-        env['TRITON_CACHE_DIR'] = str(Path.home() / '.triton')  # Explicit cache directory
-        env['CUDA_LAUNCH_BLOCKING'] = '0'  # Allow asynchronous CUDA launches
-        env['TORCH_CUDA_ARCH_LIST'] = ''  # Let it auto-detect
+        env["TRITON_CACHE_DIR"] = str(
+            Path.home() / ".triton"
+        )  # Explicit cache directory
+        env["CUDA_LAUNCH_BLOCKING"] = "0"  # Allow asynchronous CUDA launches
+        env["TORCH_CUDA_ARCH_LIST"] = ""  # Let it auto-detect
 
         # Debug: Print Triton-related environment
-        logger.info("Triton cache dir: %s", env.get('TRITON_CACHE_DIR'))
-        logger.info("CUDA_LAUNCH_BLOCKING: %s", env.get('CUDA_LAUNCH_BLOCKING'))
+        logger.info("Triton cache dir: %s", env.get("TRITON_CACHE_DIR"))
+        logger.info("CUDA_LAUNCH_BLOCKING: %s", env.get("CUDA_LAUNCH_BLOCKING"))
 
         # Check if we're in a subprocess already (for debugging nested subprocess issues)
-        if 'SUBPROCESS_LEVEL' in os.environ:
-            env['SUBPROCESS_LEVEL'] = str(int(os.environ['SUBPROCESS_LEVEL']) + 1)
+        if "SUBPROCESS_LEVEL" in os.environ:
+            env["SUBPROCESS_LEVEL"] = str(int(os.environ["SUBPROCESS_LEVEL"]) + 1)
         else:
-            env['SUBPROCESS_LEVEL'] = '1'
-        logger.info("Subprocess level: %s", env['SUBPROCESS_LEVEL'])
+            env["SUBPROCESS_LEVEL"] = "1"
+        logger.info("Subprocess level: %s", env["SUBPROCESS_LEVEL"])
 
         if no_capture:
             # Run without output capture (like direct execution) for debugging
@@ -281,7 +287,7 @@ def run_kernel_benchmark(
                     cmd,
                     env=env,
                     cwd=current_dir,
-                    timeout=7200  # 2 hour timeout
+                    timeout=7200,  # 2 hour timeout
                 )
                 end_time = time.time()
 
@@ -307,7 +313,7 @@ def run_kernel_benchmark(
                 bufsize=0,  # Unbuffered for immediate output
                 universal_newlines=True,
                 env=env,  # Explicitly pass environment
-                cwd=current_dir  # Ensure same working directory
+                cwd=current_dir,  # Ensure same working directory
             )
 
             # Capture output while displaying progress
@@ -315,7 +321,9 @@ def run_kernel_benchmark(
             stderr_lines = []
 
             timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] 🚀 Starting benchmark for {kernel_name} (hidden_size={hidden_size})...")
+            print(
+                f"[{timestamp}] 🚀 Starting benchmark for {kernel_name} (hidden_size={hidden_size})..."
+            )
             print("=" * 60)
 
             try:
@@ -327,11 +335,29 @@ def run_kernel_benchmark(
                         timestamp = datetime.now().strftime("%H:%M:%S")
 
                         # Display progress indicators with timestamps
-                        if any(keyword in line.lower() for keyword in ['iteration', 'warmup', 'benchmark', 'ms', 'speedup', 'verifying', 'correctness', 'shape']):
+                        if any(
+                            keyword in line.lower()
+                            for keyword in [
+                                "iteration",
+                                "warmup",
+                                "benchmark",
+                                "ms",
+                                "speedup",
+                                "verifying",
+                                "correctness",
+                                "shape",
+                            ]
+                        ):
                             print(f"[{timestamp}] 📊 {line}")
-                        elif any(keyword in line.lower() for keyword in ['error', 'failed', 'exception']):
+                        elif any(
+                            keyword in line.lower()
+                            for keyword in ["error", "failed", "exception"]
+                        ):
                             print(f"[{timestamp}] ❌ {line}")
-                        elif any(keyword in line.lower() for keyword in ['completed', 'success', 'done']):
+                        elif any(
+                            keyword in line.lower()
+                            for keyword in ["completed", "success", "done"]
+                        ):
                             print(f"[{timestamp}] ✅ {line}")
                         else:
                             print(f"[{timestamp}]    {line}")
@@ -355,8 +381,8 @@ def run_kernel_benchmark(
 
             result = MockResult(
                 returncode=return_code,
-                stdout='\n'.join(stdout_lines),
-                stderr='\n'.join(stderr_lines)
+                stdout="\n".join(stdout_lines),
+                stderr="\n".join(stderr_lines),
             )
 
         end_time = time.time()
@@ -366,7 +392,9 @@ def run_kernel_benchmark(
         if result.returncode == 0:
             timestamp = datetime.now().strftime("%H:%M:%S")
             print("=" * 60)
-            print(f"[{timestamp}] ✅ Benchmark COMPLETED for {kernel_name} (hidden_size={hidden_size}) in {duration:.2f}s")
+            print(
+                f"[{timestamp}] ✅ Benchmark COMPLETED for {kernel_name} (hidden_size={hidden_size}) in {duration:.2f}s"
+            )
             print("=" * 60)
             logger.info("✓ Benchmark completed for %s (%.2fs)", kernel_name, duration)
 
@@ -395,27 +423,40 @@ def run_kernel_benchmark(
 
                 if json_files:
                     try:
-                        with open(json_files[0], 'r') as f:
+                        with open(json_files[0]) as f:
                             json_data = json.load(f)
 
                         results = json_data.get("results", [])
                         if results:
                             # Calculate performance statistics from JSON data
-                            baseline_times = [r["baseline_time_ms"] for r in results if "baseline_time_ms" in r]
-                            helion_times = [r["helion_time_ms"] for r in results if "helion_time_ms" in r]
+                            baseline_times = [
+                                r["baseline_time_ms"]
+                                for r in results
+                                if "baseline_time_ms" in r
+                            ]
+                            helion_times = [
+                                r["helion_time_ms"]
+                                for r in results
+                                if "helion_time_ms" in r
+                            ]
                             speedups = [r["speedup"] for r in results if "speedup" in r]
 
                             if baseline_times and helion_times and speedups:
                                 perf_data = {
-                                    "baseline_avg_time_ms": statistics.mean(baseline_times),
+                                    "baseline_avg_time_ms": statistics.mean(
+                                        baseline_times
+                                    ),
                                     "helion_avg_time_ms": statistics.mean(helion_times),
                                     "speedup_average": statistics.mean(speedups),
                                     "speedup_median": statistics.median(speedups),
                                     "speedup_min": min(speedups),
                                     "speedup_max": max(speedups),
-                                    "total_configurations": len(results)
+                                    "total_configurations": len(results),
                                 }
-                                logger.debug("Parsed performance data from JSON: %d configurations", len(results))
+                                logger.debug(
+                                    "Parsed performance data from JSON: %d configurations",
+                                    len(results),
+                                )
 
                     except Exception as e:
                         logger.warning("Failed to parse JSON performance data: %s", e)
@@ -432,10 +473,12 @@ def run_kernel_benchmark(
                         clean_line = line.strip()
 
                         # Remove timestamp pattern [HH:MM:SS]
-                        clean_line = re.sub(r'^\[\d{2}:\d{2}:\d{2}\]\s*', '', clean_line)
+                        clean_line = re.sub(
+                            r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", clean_line
+                        )
 
                         # Remove emoji prefixes (📊, ❌, ✅, etc.)
-                        clean_line = re.sub(r'^[📊❌✅⏰🚀]\s*', '', clean_line)
+                        clean_line = re.sub(r"^[📊❌✅⏰🚀]\s*", "", clean_line)
 
                         # Remove extra whitespace
                         clean_line = clean_line.strip()
@@ -451,19 +494,31 @@ def run_kernel_benchmark(
                         if summary_section:
                             # Parse speedup statistics
                             if "Average:" in clean_line and "x" in clean_line:
-                                avg_match = re.search(r"Average:\s*(\d+\.?\d*)x", clean_line)
+                                avg_match = re.search(
+                                    r"Average:\s*(\d+\.?\d*)x", clean_line
+                                )
                                 if avg_match:
-                                    perf_data["speedup_average"] = float(avg_match.group(1))
+                                    perf_data["speedup_average"] = float(
+                                        avg_match.group(1)
+                                    )
                             elif "Median:" in clean_line and "x" in clean_line:
-                                med_match = re.search(r"Median:\s*(\d+\.?\d*)x", clean_line)
+                                med_match = re.search(
+                                    r"Median:\s*(\d+\.?\d*)x", clean_line
+                                )
                                 if med_match:
-                                    perf_data["speedup_median"] = float(med_match.group(1))
+                                    perf_data["speedup_median"] = float(
+                                        med_match.group(1)
+                                    )
                             elif "Min:" in clean_line and "x" in clean_line:
-                                min_match = re.search(r"Min:\s*(\d+\.?\d*)x", clean_line)
+                                min_match = re.search(
+                                    r"Min:\s*(\d+\.?\d*)x", clean_line
+                                )
                                 if min_match:
                                     perf_data["speedup_min"] = float(min_match.group(1))
                             elif "Max:" in clean_line and "x" in clean_line:
-                                max_match = re.search(r"Max:\s*(\d+\.?\d*)x", clean_line)
+                                max_match = re.search(
+                                    r"Max:\s*(\d+\.?\d*)x", clean_line
+                                )
                                 if max_match:
                                     perf_data["speedup_max"] = float(max_match.group(1))
 
@@ -501,7 +556,9 @@ def run_kernel_benchmark(
                             "Helion   - Avg:" in clean_line
                             and "helion_avg_time_ms" not in perf_data
                         ):
-                            helion_match = re.search(r"Helion\s+- Avg:\s*(\d+\.?\d*)", clean_line)
+                            helion_match = re.search(
+                                r"Helion\s+- Avg:\s*(\d+\.?\d*)", clean_line
+                            )
                             if helion_match:
                                 perf_data["helion_avg_time_ms"] = float(
                                     helion_match.group(1)
@@ -533,7 +590,9 @@ def run_kernel_benchmark(
         else:
             timestamp = datetime.now().strftime("%H:%M:%S")
             print("=" * 60)
-            print(f"[{timestamp}] ❌ Benchmark FAILED for {kernel_name} (hidden_size={hidden_size}) after {duration:.2f}s")
+            print(
+                f"[{timestamp}] ❌ Benchmark FAILED for {kernel_name} (hidden_size={hidden_size}) after {duration:.2f}s"
+            )
             print(f"[{timestamp}]    Return code: {result.returncode}")
             print("=" * 60)
             logger.error(
@@ -566,7 +625,9 @@ def run_kernel_benchmark(
     except subprocess.TimeoutExpired:
         timestamp = datetime.now().strftime("%H:%M:%S")
         print("=" * 60)
-        print(f"[{timestamp}] ⏰ Benchmark TIMED OUT for {kernel_name} (hidden_size={hidden_size}) after 2 hours")
+        print(
+            f"[{timestamp}] ⏰ Benchmark TIMED OUT for {kernel_name} (hidden_size={hidden_size}) after 2 hours"
+        )
         print("=" * 60)
         logger.error("Benchmark timed out for %s after 2 hours", kernel_name)
         return False, None
@@ -831,9 +892,9 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     parser.add_argument(
-        "--no-capture",
+        "--capture",
         action="store_true",
-        help="Run benchmarks without capturing output (for debugging hangs)"
+        help="Capture benchmark output (default: no-capture for debugging hangs)",
     )
 
     args = parser.parse_args()
@@ -960,7 +1021,7 @@ def main():
                     hidden_size,
                     args.iterations,
                     args.warmup,
-                    args.no_capture,
+                    not args.capture,
                 )
 
                 kernel_results[hidden_size] = result

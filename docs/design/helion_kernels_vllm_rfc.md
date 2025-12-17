@@ -364,50 +364,41 @@ Autotuning parameters:
 - Full Helion autotuning mode
 - Autotuned for 4 different representative `hidden_size`: 2048, 4096, 5120, 8192
 
-Autotuning/Benchmarking script: scripts/comprehensive_helion_benchmark.py
+Benchmark input shapes:
+- Each kernel define their own benchmark input shapes
+- We do not filter benchmark inputs shapes according to **Hidden size used for autotuning**. This means a Helion kernel autotuned for hidden size 2048 can still get an input with hidden size of 8192. This is to mimick the worst case situations like:a kernel author decides to use just one config or no exact match found for hidden size for a kernel.
 
-### NVIDIA H200 Results
+Autotuning/Benchmarking script:
+- scripts/comprehensive_helion_benchmark.py
 
-| Kernel | Autotuned for Hidden Size | Helion Avg (ms) | Baseline Avg (ms) | GeoMean Speedup | Median Speedup | Min-Max Speedup |
-|--------|---------------------------|-----------------|-------------------|-------------|----------------|-----------------|
-| **silu_mul_fp8** | 2048 | 0.0129 | 0.0163 | **1.27x** | 1.24x | 0.88x - 2.48x |
-| | 4096 | 0.0130 | 0.0164 | **0.99x** | 1.14x | 0.19x - 3.33x |
-| | 5120 | 0.0122 | 0.0163 | **1.28x** | 1.23x | 0.85x - 2.42x |
-| | 8192 | 0.0181 | 0.0165 | **1.04x** | 0.98x | 0.66x - 2.08x |
-| **rms_norm_fp8** | 2048 | 0.0050 | 0.0057 | **1.08x** | 1.00x | 0.66x - 2.12x |
-| | 4096 | 0.0050 | 0.0059 | **1.11x** | 1.00x | 0.66x - 2.69x |
-| | 5120 | 0.0050 | 0.0057 | **1.08x** | 1.00x | 0.66x - 2.14x |
-| | 8192 | 0.0054 | 0.0056 | **1.03x** | 1.00x | 0.41x - 1.94x |
-| **allreduce_add_rmsnorm** | 2048 | 0.1365 | 0.1283 | **0.92x** | 0.86x | 0.81x - 2.29x |
-| | 4096 | 0.1297 | 0.1256 | **0.94x** | 0.88x | 0.83x - 2.46x |
-| | 5120 | 0.1338 | 0.1276 | **0.93x** | 0.87x | 0.82x - 2.40x |
-| | 8192 | 0.1350 | 0.1274 | **0.92x** | 0.86x | 0.81x - 2.42x |
+### Performance Results by Kernel
 
-### NVIDIA B200 Results
+| Kernel | Platform | Helion Autotuned for Hidden Size | Speedup (avg) | Min-Max Speedup |
+|--------|----------|----------------------------------|---------------|-----------------|
+| **silu_mul_fp8** | H200 | 2048 | **2.34x** | 0.88x - 5.16x |
+| | | 4096 | **1.33x** | 0.15x - 4.28x |
+| | | 5120 | **2.37x** | 0.93x - 4.83x |
+| | | 8192 | **1.98x** | 0.64x - 4.94x |
+| | B200 | 2048 | **2.86x** | 1.71x - 4.77x |
+| | | 4096 | **2.26x** | 1.53x - 4.28x |
+| | | 5120 | **2.48x** | 1.21x - 3.95x |
+| | | 8192 | **2.72x** | 1.68x - 4.32x |
+| **rms_norm_fp8** | H200 | 2048 | **1.29x** | 0.96x - 2.29x |
+| | | 4096 | **1.65x** | 1.39x - 2.89x |
+| | | 5120 | **1.30x** | 0.98x - 2.29x |
+| | | 8192 | **1.55x** | 0.36x - 2.18x |
+| | B200 | 2048 | **0.96x** | 0.51x - 2.24x |
+| | | 4096 | **1.56x** | 0.82x - 1.88x |
+| | | 5120 | **1.19x** | 0.97x - 1.77x |
+| | | 8192 | **1.39x** | 0.63x - 1.93x |
+| **allreduce_add_rmsnorm** | H200 | 2048 | **0.96x** | 0.73x - 2.60x |
+| | | 4096 | **0.95x** | 0.73x - 2.54x |
+| | | 5120 | **0.95x** | 0.75x - 2.55x |
+| | | 8192 | **0.95x** | 0.74x - 2.58x |
+| | B200 | 2048 | **1.38x** | 0.52x - 6.68x |
+| | | 4096 | **1.37x** | 0.53x - 6.45x |
+| | | 5120 | **1.37x** | 0.51x - 6.59x |
+| | | 8192 | **1.37x** | 0.51x - 6.42x |
 
-| Kernel | Autotuned for Hidden Size | Helion Avg (ms) | Baseline Avg (ms) | GeoMean Speedup | Median Speedup | Min-Max Speedup |
-|--------|---------------------------|-----------------|-------------------|-------------|----------------|-----------------|
-| **silu_mul_fp8** | 2048 | 0.0069 | 0.0160 | **2.12x** | 2.00x | 1.26x - 3.73x |
-| | 4096 | 0.0064 | 0.0160 | **2.21x** | 2.01x | 1.26x - 3.70x |
-| | 5120 | 0.0065 | 0.0160 | **2.21x** | 2.00x | 1.26x - 3.78x |
-| | 8192 | 0.0063 | 0.0160 | **2.14x** | 2.00x | 1.02x - 3.73x |
-| **rms_norm_fp8** | 2048 | 0.0045 | 0.0054 | **1.20x** | 1.26x | 0.68x - 1.72x |
-| | 4096 | 0.0041 | 0.0053 | **1.26x** | 1.27x | 1.00x - 1.90x |
-| | 5120 | 0.0038 | 0.0052 | **1.32x** | 1.24x | 0.98x - 2.00x |
-| | 8192 | 0.0043 | 0.0052 | **1.27x** | 1.26x | 0.44x - 1.90x |
-| **allreduce_add_rmsnorm** | 2048 | 0.0986 | 0.1276 | **1.05x** | 0.73x | 0.59x - 6.41x |
-| | 4096 | 0.0987 | 0.1275 | **1.05x** | 0.73x | 0.55x - 6.50x |
-| | 5120 | 0.0979 | 0.1266 | **1.04x** | 0.73x | 0.57x - 6.70x |
-| | 8192 | - | - | - | - | - |
 
-*Note: allreduce_add_rmsnorm hidden size 8192 failed during B200 benchmarking, so no results yet*
-
-### Performance Summary
-
-**Overall Geometric Mean Speedups (across all configurations):**
-
-| Platform | **silu_mul_fp8** | **rms_norm_fp8** | **allreduce_add_rmsnorm** | **Overall** |
-|----------|------------------|------------------|--------------------------|-------------|
-| **H200** | **1.14x** | **1.07x** | **0.93x** (slowdown) | **1.04x** |
-| **B200** | **2.17x** | **1.26x** | **1.05x** | **1.49x** |
-| **B200 Advantage** | +90.5% | +17.4% | +12.8% | **+42.7%** |
+Note: Helion implmentation for allreduce_add_rmsnorm does not have optimization for comms yet, its support is WIP
