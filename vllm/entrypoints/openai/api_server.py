@@ -25,12 +25,7 @@ import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.openapi.docs import (
-    get_swagger_ui_html,
-    get_swagger_ui_oauth2_redirect_html,
-)
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -962,38 +957,6 @@ def _log_non_streaming_response(response_body: list) -> None:
         logger.info("response_body={<binary_data>}")
 
 
-def _setup_offline_docs(app: FastAPI) -> None:
-    """Setup offline FastAPI documentation with vendored static assets."""
-    import pathlib
-
-    static_dir = pathlib.Path(__file__).parent / "static"
-
-    if not static_dir.exists():
-        logger.warning(
-            "Static directory not found at %s. Offline docs will not be available.",
-            static_dir,
-        )
-        return
-
-    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-    @app.get("/docs", include_in_schema=False)
-    async def custom_swagger_ui_html():
-        return get_swagger_ui_html(
-            openapi_url=app.openapi_url,
-            title=app.title + " - Swagger UI",
-            oauth2_redirect_url=app.swagger_ui_oauth2_redirect_url,
-            swagger_js_url="/static/swagger-ui-bundle.js",
-            swagger_css_url="/static/swagger-ui.css",
-        )
-
-    @app.get(app.swagger_ui_oauth2_redirect_url, include_in_schema=False)
-    async def swagger_ui_redirect():
-        return get_swagger_ui_oauth2_redirect_html()
-
-    logger.info("Offline documentation enabled with vendored static assets")
-
-
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(
@@ -1001,7 +964,11 @@ def build_app(args: Namespace) -> FastAPI:
         )
     elif args.enable_offline_docs:
         app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
-        _setup_offline_docs(app)
+        from vllm.entrypoints.serve.instrumentator.offline_docs import (
+            setup_offline_docs,
+        )
+
+        setup_offline_docs(app)
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
