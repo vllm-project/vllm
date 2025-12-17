@@ -15,14 +15,14 @@ configs=(
 
 run_tests() {
   local label=$1
-  local extra_env=$2
+  local extra_args=$2
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
-    echo "-> Running with ${cfg} ${extra_env:+and ${extra_env}}"
+    echo "-> Running with ${cfg} ${extra_args:+and ${extra_args}}"
     # Use 'env' to safely set variables without eval
-    if ! env ${extra_env} ${cfg} bash "${SCRIPT}"; then
-      echo "❌ Test failed for config: ${cfg} ${extra_env:+(${extra_env})}"
+    if ! env ${cfg} bash "${SCRIPT}" ${extra_args}; then
+      echo "❌ Test failed for config: ${cfg} ${extra_args:+(${extra_args})}"
       exit 1
     fi
   done
@@ -34,8 +34,8 @@ run_tests "default backend" ""
 
 # Check if FLASHINFER is set (non-empty)
 if [[ -n "${FLASHINFER:-}" ]]; then
-  echo "FLASHINFER is set, rerunning with VLLM_ATTENTION_BACKEND=FLASHINFER"
-  run_tests "FLASHINFER backend" "VLLM_ATTENTION_BACKEND=FLASHINFER"
+  echo "FLASHINFER is set, rerunning with --attention-backend FLASHINFER"
+  run_tests "FLASHINFER backend" "--attention-backend FLASHINFER"
 else
   echo "FLASHINFER not set, skipping FLASHINFER runs."
 fi

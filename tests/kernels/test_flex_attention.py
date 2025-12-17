@@ -37,7 +37,7 @@ def set_seed(seed):
     not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
     reason="CUDA not available or PyTorch version < 2.7",
 )
-def test_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
+def test_flex_attention_vs_default_backend(vllm_runner):
     """Test that FlexAttention produces the same outputs as the default backend.
 
     This test compares the outputs from the FlexAttention backend with
@@ -54,35 +54,32 @@ def test_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
     ]
 
     # Run with flex attention
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-
-        set_seed(seed)
-        with vllm_runner(
-            model_name,
-            runner="generate",
-            tensor_parallel_size=1,
-            num_gpu_blocks_override=128,
-            enforce_eager=True,
-        ) as llm_flex:
-            output_flex = llm_flex.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs
-            )
+    set_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=True,
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_flex:
+        output_flex = llm_flex.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
 
     # Run with default backend
-    with monkeypatch.context() as m:
-        set_seed(seed)
-        with vllm_runner(
-            model_name,
-            runner="generate",
-            tensor_parallel_size=1,
-            num_gpu_blocks_override=128,
-            enforce_eager=True,
-            gpu_memory_utilization=0.85,
-        ) as llm_default:
-            output_default = llm_default.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs
-            )
+    set_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=True,
+        gpu_memory_utilization=0.85,
+    ) as llm_default:
+        output_default = llm_default.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
 
     check_logprobs_close(
         outputs_0_lst=output_flex,
@@ -96,7 +93,7 @@ def test_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
     not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
     reason="CUDA not available or PyTorch version < 2.7",
 )
-def test_encoder_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
+def test_encoder_flex_attention_vs_default_backend(vllm_runner):
     """Test that FlexAttention produces the same outputs as the default backend.
 
     This test compares the outputs from the FlexAttention backend with
@@ -110,30 +107,26 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner, monkeypatch):
     ]
 
     # Run with flex attention
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-        with vllm_runner(
-            model_name,
-            runner="pooling",
-            dtype=torch.bfloat16,
-            tensor_parallel_size=1,
-            max_model_len=100,
-            enforce_eager=True,
-        ) as llm_flex:
-            flex_outputs = llm_flex.embed(prompts)
+    with vllm_runner(
+        model_name,
+        runner="pooling",
+        dtype=torch.bfloat16,
+        tensor_parallel_size=1,
+        max_model_len=100,
+        enforce_eager=True,
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_flex:
+        flex_outputs = llm_flex.embed(prompts)
 
     # Run with default backend
-    with (
-        monkeypatch.context() as m,
-        vllm_runner(
-            model_name,
-            runner="pooling",
-            dtype=torch.bfloat16,
-            tensor_parallel_size=1,
-            max_model_len=100,
-            enforce_eager=True,
-        ) as llm_default,
-    ):
+    with vllm_runner(
+        model_name,
+        runner="pooling",
+        dtype=torch.bfloat16,
+        tensor_parallel_size=1,
+        max_model_len=100,
+        enforce_eager=True,
+    ) as llm_default:
         default_outputs = llm_default.embed(prompts)
 
     check_embeddings_close(

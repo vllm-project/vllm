@@ -76,15 +76,10 @@ def default_server_args(with_tool_parser: bool):
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(
-    monkeypatch_module: pytest.MonkeyPatch, default_server_args: list[str]
-):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-        with RemoteOpenAIServer(
-            GPT_OSS_MODEL_NAME, default_server_args
-        ) as remote_server:
-            yield remote_server
+def gptoss_server(default_server_args: list[str]):
+    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture

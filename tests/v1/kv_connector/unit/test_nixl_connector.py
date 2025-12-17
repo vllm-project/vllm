@@ -1132,7 +1132,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         "TRITON_ATTN",
     ],
 )
-def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
+def test_register_kv_caches(dist_init, attn_backend):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
@@ -1144,9 +1144,7 @@ def test_register_kv_caches(dist_init, attn_backend, monkeypatch):
        block layout info
     """
 
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(attention_backend=attn_backend)
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
