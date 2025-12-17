@@ -34,9 +34,9 @@ Runtime environment variables:
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
-For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
-For Arm® Neoverse™, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
->
+> For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
+> For Arm® Neoverse™, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
+
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:
