@@ -933,7 +933,6 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    # Batch invariant matmuls are no longer needed after cublas overrides
     if (
         current_platform.is_device_capability_family(100)
         or current_platform.is_device_capability(80)
