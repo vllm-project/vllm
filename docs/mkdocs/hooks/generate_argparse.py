@@ -223,7 +223,9 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
         # Benchmark CLI
         "bench_latency": create_parser(bench_latency.add_cli_args),
-        "bench_multimodal_processor": create_parser(bench_multimodal_processor.add_cli_args),
+        "bench_multimodal_processor": create_parser(
+            bench_multimodal_processor.add_cli_args
+        ),
         "bench_serve": create_parser(bench_serve.add_cli_args),
         "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
         "bench_sweep_plot_pareto": create_parser(bench_sweep_plot_pareto.add_cli_args),

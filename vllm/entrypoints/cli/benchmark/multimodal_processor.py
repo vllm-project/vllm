@@ -19,4 +19,3 @@ class BenchmarkMultimodalProcessorSubcommand(BenchmarkSubcommandBase):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         main(args)
-

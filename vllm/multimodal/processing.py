@@ -25,7 +25,6 @@ import regex as re
 import torch
 from typing_extensions import TypeVar, assert_never
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -126,7 +125,9 @@ class MultiModalProcessorTimingStats:
         }
 
 
-def get_timing_stats_from_engine_client(engine_client: Any) -> dict[str, dict[str, float]]:
+def get_timing_stats_from_engine_client(
+    engine_client: Any,
+) -> dict[str, dict[str, float]]:
     """
     Get all timing stats from the context associated with the engine client.
 
@@ -2334,11 +2335,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if request_id is not None:
             self.info.ctx.create_timing_stats(request_id)
 
-        stats = (
-            self.info.ctx.get_timing_stats(request_id)
-            if request_id is not None
-            else None
-        )
         mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:

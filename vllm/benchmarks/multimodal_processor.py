@@ -86,7 +86,8 @@ def collect_mm_processor_stats(
 
     if debug and not any(stats_by_stage.values()):
         print(
-            "Warning: No MM processor stats found. Ensure --enable-mm-processor-stats is set."
+            "Warning: No MM processor stats found. "
+            "Ensure --enable-mm-processor-stats is set."
         )
 
     return stats_by_stage
@@ -136,28 +137,27 @@ def generate_random_multimodal_prompts(
 ) -> tuple[list[list[dict]], list[int]]:
     """
     Generate random multimodal prompts with synthetic images and text tokens.
-    
+
     Returns:
         tuple: (prompts, expected_output_lens)
             - prompts: List of OpenAI chat format messages with text and images
             - expected_output_lens: List of expected output lengths
     """
     from PIL import Image
+
     from vllm.benchmarks.datasets import process_image
-    
+
     rng = np.random.default_rng(seed)
-    
+
     prompts = []
     expected_output_lens = []
-    
+
     for i in range(num_prompts):
         vocab_size = tokenizer.vocab_size
-        prompt_token_ids = rng.integers(
-            0, vocab_size, size=input_len
-        ).tolist()
-        
+        prompt_token_ids = rng.integers(0, vocab_size, size=input_len).tolist()
+
         text_prompt = tokenizer.decode(prompt_token_ids)
-        
+
         mm_items = []
         for _ in range(num_images):
             # Generate random RGB image
@@ -168,13 +168,13 @@ def generate_random_multimodal_prompts(
             # Process to OpenAI format
             mm_item = process_image(image)
             mm_items.append(mm_item)
-        
+
         # Create chat format: text + images
         content = [{"type": "text", "text": text_prompt}]
         content.extend(mm_items)
         prompts.append([{"role": "user", "content": content}])
         expected_output_lens.append(output_len)
-    
+
     return prompts, expected_output_lens
 
 
@@ -382,7 +382,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
 
 def main(args: argparse.Namespace) -> None:
     """Main entry point for the multimodal processor benchmark."""
-    from datetime import datetime
 
     print("Starting multimodal processor benchmark...")
     result = benchmark_multimodal_processor(args)
