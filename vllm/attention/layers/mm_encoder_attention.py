@@ -98,6 +98,10 @@ class MMEncoderAttention(CustomOp):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
+        )
+
         self._fa_version = (
             get_flash_attn_version() if self.is_flash_attn_backend else None
         )
