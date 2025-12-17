@@ -23,8 +23,7 @@ bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 
 Runtime environment variables:
 
-- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
-- `ON_ARM64_CPU`: set the value to '1' on Arm® Neoverse™. Default value is 0.
+- `ON_CPU`: set the value to '1' on Intel® Xeon® and Arm® Neoverse™ Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
