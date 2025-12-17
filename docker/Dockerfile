@@ -622,6 +622,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         uv pip install --system -r /tmp/kv_connectors.txt || true; \
+        if [ "$CUDA_MAJOR" -ge 13]; then \
+            uv pip install --system nixl-cu13 || true; \
+        fi \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
