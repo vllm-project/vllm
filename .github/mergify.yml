@@ -356,7 +356,7 @@ pull_request_rules:
     - -closed
     - -draft
     - -conflict
-    - -label=ready
+    - label=ready
     - "#approved-reviews-by >= 1"
   actions:
     rebase: {}
