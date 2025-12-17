@@ -890,8 +890,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         self.rocm_aiter_moe_enabled = False
 
-        # self.mk =
-
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
