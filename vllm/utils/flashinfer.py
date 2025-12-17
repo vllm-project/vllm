@@ -578,5 +578,5 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
-    "nvfp4_quantize",
+    "flashinfer_quant_nvfp4_8x4_sf_layout",
 ]

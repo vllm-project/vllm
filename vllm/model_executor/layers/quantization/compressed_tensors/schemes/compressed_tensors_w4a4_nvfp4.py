@@ -194,11 +194,11 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
 
         if self.backend == "flashinfer-trtllm_8x4_sf_layout":
-            x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(x, layer.input_scale_inv)
+            x_fp4, x_blockscale = flashinfer_quant_nvfp4_8x4_sf_layout(x, layer.input_global_scale)
             x_blockscale = x_blockscale.view(torch.float8_e4m3fn)
         else:
             # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
+            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
 
         mm_args = (
             x_fp4,
