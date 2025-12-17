@@ -1061,13 +1061,31 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         assert config is not None
         assert self.kernel is not None
         self.moe_quant_config = config
+        from vllm.model_executor.layers.fused_moe import (
+            FlashInferExperts,
+            TritonOrDeepGemmExperts,
+        )
         from vllm.model_executor.layers.fused_moe.prepare_finalize import (
             MoEPrepareAndFinalizeNoEP,
         )
 
-        self.fn = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(), self.kernel(self.moe_quant_config)
-        )
+        if isinstance(self.kernel, FlashInferExperts):
+            kernel = self.kernel(
+                out_dtype=torch.get_default_dtype(),
+                quant_config=self.moe_quant_config,
+                ep_rank=self.moe.ep_rank,
+                ep_size=self.moe.ep_size,
+                tp_rank=self.moe.tp_rank,
+                tp_size=self.moe.tp_size,
+                use_dp=self.moe.dp_size > 1,
+                use_deepseek_fp8_block_scale=self.block_quant,
+            )
+        elif isinstance(self.kernel, TritonOrDeepGemmExperts):
+            kernel = self.kernel(quant_config=self.moe_quant_config)
+        else:
+            raise NotImplementedError
+
+        self.fn = mk.FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), kernel)
 
     def maybe_make_prepare_finalize(
         self,
