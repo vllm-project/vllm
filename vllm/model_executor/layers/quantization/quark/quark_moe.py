@@ -678,7 +678,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         return out
 
 
-class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
+class QuarkW4MXFp4MoEMethodBase(QuarkMoEMethod):
     def __init__(
         self,
         weight_config: dict[str, Any],
@@ -688,17 +688,90 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
+        self.weight_qscheme = self.weight_quant.get("qscheme")
+        self.input_qscheme = self.input_quant.get("qscheme")
+        self.static_input_scales = not self.input_quant.get("is_dynamic")
 
-        weight_qscheme = self.weight_quant.get("qscheme")
-        input_qscheme = self.input_quant.get("qscheme")
-        if not (weight_qscheme == "per_group" and input_qscheme == "per_group"):
+    def create_common_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        weight_scale: torch.dtype,
+        weight_scale_dtype: torch.dtype,
+        weight_scale_block_size: int,
+        **extra_weight_attrs,
+    ):
+        # WEIGHTS
+        # Fused gate_up_proj (column parallel)
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // 2,
+                dtype=weight_scale,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // weight_scale_block_size,
+                dtype=weight_scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+
+        # down_proj (row parallel)
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // 2,
+                dtype=weight_scale,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # WEIGHT_SCALES
+        w2_weight_scale = torch.nn.Parameter(
+            torch.ones(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // weight_scale_block_size,
+                dtype=weight_scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+
+
+class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(weight_config, input_config, moe)
+        if not (
+            self.weight_qscheme == "per_group" and self.input_qscheme == "per_group"
+        ):
             raise ValueError(
                 "For MX(FP4) Fused MoE layers, only per-group scales "
                 "for weights and activations are supported. Found "
-                f"{weight_qscheme}, {input_qscheme}"
+                f"{self.weight_qscheme}, {self.input_qscheme}"
             )  # noqa E501
-
-        self.static_input_scales = not self.input_quant.get("is_dynamic")
 
         if self.static_input_scales:
             raise NotImplementedError(
@@ -720,7 +793,6 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
                 "layers computed in high precision."
             )
         else:
-            self.emulate = False
             logger.info_once("The current mode supports native MoE MXFP4 computation")
 
     def create_weights(
@@ -737,60 +809,15 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
         )
-
-        params_dtype = torch.uint8
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size // 2,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
+        self.create_common_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            torch.uint8,
+            torch.uint8,
+            OCP_MX_BLOCK_SIZE,
         )
-        layer.register_parameter("w13_weight", w13_weight)
-
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition // 2,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # WEIGHT_SCALES
-        w13_weight_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size // OCP_MX_BLOCK_SIZE,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        w2_weight_scale = torch.nn.Parameter(
-            torch.ones(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition // OCP_MX_BLOCK_SIZE,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
     def process_weights_after_loading(self, layer):
         if self.emulate:
@@ -903,29 +930,25 @@ class QuarkW4MXFp4MoEMethod(QuarkMoEMethod):
         return out
 
 
-class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
+class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
     def __init__(
         self,
         weight_config: dict[str, Any],
         input_config: dict[str, Any],
         moe: FusedMoEConfig,
     ):
-        super().__init__(moe)
-        self.weight_quant = weight_config
-        self.input_quant = input_config
+        super().__init__(weight_config, input_config, moe)
 
-        weight_qscheme = self.weight_quant.get("qscheme")
-        input_qscheme = self.input_quant.get("qscheme")
-        if not (weight_qscheme == "per_group"):
+        if not (self.weight_qscheme == "per_group"):
             raise ValueError(
                 "For MX(FP4) Fused MoE layers, only per-group scales "
                 "for weights and activations are supported. Found "
-                f"{weight_qscheme}, {input_qscheme}"
+                f"{self.weight_qscheme}, {self.input_qscheme}"
             )  # noqa E501
 
         self.static_input_scales = not self.input_quant.get("is_dynamic")
-        if not current_platform.supports_mx():
-            self.emulate = True
+        self.emulate = not current_platform.supports_mx()
+        if self.emulate:
             logger.warning_once(
                 "The current platform does not support native MXFP4 "
                 "computation. Simulated weight dequantization and activation "
@@ -933,7 +956,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                 "layers computed in high precision."
             )
         else:
-            self.emulate = True
             logger.warning_once(
                 "The current platform supports native MXFP4 "
                 "computation, but kernels are not yet integrated in vLLM. "
@@ -979,30 +1001,16 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         self.intermediate_pad = (
             intermediate_size_per_partition_after_pad - intermediate_size_per_partition
         )
-        # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                2 * intermediate_size_per_partition_after_pad,
-                hidden_size // 2,
-                dtype=weight_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w13_weight_scale = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                2 * intermediate_size_per_partition_after_pad,
-                hidden_size // mxfp4_block,
-                dtype=weight_scale_dtype,
-            ),
-            requires_grad=False,
+        self.create_common_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition_after_pad,
+            weight_dtype,
+            weight_scale_dtype,
+            mxfp4_block,
         )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
         w13_bias = torch.nn.Parameter(
             torch.zeros(
@@ -1015,31 +1023,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         layer.register_parameter("w13_bias", w13_bias)
         set_weight_attrs(w13_bias, extra_weight_attrs)
 
-        # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition_after_pad // 2,
-                dtype=weight_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        w2_weight_scale = torch.nn.Parameter(
-            torch.zeros(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition_after_pad // mxfp4_block,
-                dtype=weight_scale_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
         w2_bias = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
@@ -1050,6 +1033,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         )
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
+
         if self.static_input_scales:
             w13_input_scale = torch.nn.Parameter(
                 torch.zeros(
@@ -1060,6 +1044,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
             )
             layer.register_parameter("w13_input_scale", w13_input_scale)
             set_weight_attrs(w13_input_scale, extra_weight_attrs)
+
             w2_input_scale = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
@@ -1288,10 +1273,10 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
 
         else:
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
-                triton_kernel_moe_forward,
+                triton_kernel_moe_oss_forward,
             )
 
-            return triton_kernel_moe_forward(
+            return triton_kernel_moe_oss_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
                 w2=self.w2_weight_triton_tensor,

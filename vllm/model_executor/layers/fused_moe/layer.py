@@ -341,7 +341,7 @@ class FusedMoE(CustomOp):
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
         topk_group: int | None = None,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: QuantizationConfig = None,
         tp_size: int | None = None,
         ep_size: int | None = None,
         dp_size: int | None = None,
@@ -1121,7 +1121,7 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self._is_mxfp4 and self.quant_config is not None:
+        if self._is_mxfp4:
             if self.quant_config.get_name() == "mxfp4":
                 # (FIXME) for gpt-oss all experts are combined
                 if "bias" in weight_name:
@@ -1148,21 +1148,13 @@ class FusedMoE(CustomOp):
                     loaded_weight = loaded_weight.narrow(
                         shard_dim, shard_size * self.tp_rank, shard_size
                     )
-                    if "bias" in weight_name:
-                        dim1 = loaded_weight.shape[0]
-                        expert_data.data[:dim1].copy_(loaded_weight)
-                    else:
-                        dim1 = loaded_weight.shape[0]
-                        dim2 = loaded_weight.shape[1]
-                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
-                elif shard_id is None:
-                    if "bias" in weight_name:
-                        dim1 = loaded_weight.shape[0]
-                        expert_data.data[:dim1].copy_(loaded_weight)
-                    else:
-                        dim1 = loaded_weight.shape[0]
-                        dim2 = loaded_weight.shape[1]
-                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[0]
+                    expert_data.data[:dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[0]
+                    dim2 = loaded_weight.shape[1]
+                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
