@@ -169,6 +169,7 @@ class BenchmarkConfig:
     enable_trace: bool = True
     trace_iterations: int = 5
     trace_output_dir: str = "/tmp"
+    use_triton_timing: bool = True
 
 
 @dataclass
@@ -267,11 +268,13 @@ class KernelBenchmark(ABC):
         warmup: int = 10,
         use_cudagraph: bool = False,
         distributed: bool = False,
+        use_triton_timing: bool = True,
     ) -> float:
         """
         Time a kernel function and return average execution time.
 
-        Uses manual CUDA graph capture for compatibility with distributed operations.
+        Uses Triton's optimized timing for single-GPU CUDA graph scenarios,
+        with fallback to manual CUDA graph capture for distributed operations.
 
         Args:
             kernel_fn: Callable that executes the kernel
@@ -279,9 +282,58 @@ class KernelBenchmark(ABC):
             warmup: Number of warmup iterations
             use_cudagraph: Whether to use CUDAGraph for timing
             distributed: Whether to use distributed barriers for multi-GPU synchronization
+            use_triton_timing: Whether to use Triton's do_bench_cudagraph when possible
 
         Returns:
             Average execution time in milliseconds
+        """
+        # Use Triton ONLY for single-GPU CUDA graph scenarios
+        if (use_triton_timing and
+            use_cudagraph and
+            not distributed):
+
+            try:
+                import triton.testing
+
+                # Separate warmup (Triton does its own, but be explicit for consistency)
+                for _ in range(warmup):
+                    kernel_fn()
+                    torch.cuda.synchronize()
+
+                # Use Triton's optimized CUDA graph timing
+                return triton.testing.do_bench_cudagraph(
+                    kernel_fn,
+                    rep=num_iterations,
+                    return_mode='mean'
+                )
+
+            except (ImportError, RuntimeError, torch.AcceleratorError) as e:
+                # Log warning and fall back to manual implementation
+                logger.warning(
+                    f"Triton timing failed ({type(e).__name__}: {e}), "
+                    "falling back to manual CUDA timing"
+                )
+
+        # Fallback to manual implementation for:
+        # - Multi-GPU scenarios (distributed=True)
+        # - Non-CUDA graph timing
+        # - When Triton fails or is disabled
+        return KernelBenchmark._manual_time_kernel(
+            kernel_fn, num_iterations, warmup, use_cudagraph, distributed
+        )
+
+    @staticmethod
+    def _manual_time_kernel(
+        kernel_fn: Callable,
+        num_iterations: int,
+        warmup: int,
+        use_cudagraph: bool,
+        distributed: bool,
+    ) -> float:
+        """
+        Manual CUDA timing implementation for distributed scenarios and fallback.
+
+        This is the original implementation extracted as a separate method.
         """
         import torch.distributed as dist
 
@@ -534,6 +586,7 @@ class KernelBenchmark(ABC):
             num_iterations=config.num_iterations,
             warmup=config.warmup,
             use_cudagraph=config.use_cudagraph,
+            use_triton_timing=config.use_triton_timing,
         )
 
         # Capture trace for baseline if enabled (after warmup)
@@ -554,6 +607,7 @@ class KernelBenchmark(ABC):
             num_iterations=config.num_iterations,
             warmup=config.warmup,
             use_cudagraph=config.use_cudagraph,
+            use_triton_timing=config.use_triton_timing,
         )
 
         # Capture trace for Helion if enabled (after warmup)
@@ -587,6 +641,7 @@ class KernelBenchmark(ABC):
         enable_trace: bool = True,
         trace_iterations: int = 5,
         trace_output_dir: str = "/tmp",
+        use_triton_timing: bool = True,
     ) -> list[BenchmarkResult]:
         """
         Run all benchmark configurations for the given mode.
@@ -605,6 +660,7 @@ class KernelBenchmark(ABC):
             enable_trace: Whether to capture GPU execution traces
             trace_iterations: Number of iterations to trace for each kernel
             trace_output_dir: Directory to save trace files
+            use_triton_timing: Whether to use Triton's optimized timing when possible
 
         Returns:
             List of BenchmarkResult objects (excluding failed verifications)
@@ -638,6 +694,7 @@ class KernelBenchmark(ABC):
                     enable_trace=enable_trace,
                     trace_iterations=trace_iterations,
                     trace_output_dir=trace_output_dir,
+                    use_triton_timing=use_triton_timing,
                 )
                 result = self.run_benchmark(config)
                 if result is not None:
@@ -717,6 +774,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
         enable_trace: bool = True,
         trace_iterations: int = 5,
         trace_output_dir: str = "/tmp",
+        use_triton_timing: bool = True,
     ) -> list[BenchmarkResult]:
         """
         Run distributed benchmark using torch.multiprocessing.spawn.
@@ -780,6 +838,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
                                 enable_trace=enable_trace,
                                 trace_iterations=trace_iterations,
                                 trace_output_dir=trace_output_dir,
+                                use_triton_timing=use_triton_timing,
                             )
                         )
                 else:
@@ -797,6 +856,7 @@ class DistributedKernelBenchmark(KernelBenchmark):
                             enable_trace=enable_trace,
                             trace_iterations=trace_iterations,
                             trace_output_dir=trace_output_dir,
+                            use_triton_timing=use_triton_timing,
                         )
                     )
 
