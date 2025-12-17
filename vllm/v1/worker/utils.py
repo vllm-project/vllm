@@ -260,7 +260,7 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     if init_snapshot.free_memory < requested_memory:
         GiB = lambda b: round(b / GiB_bytes, 2)
         raise ValueError(
-            f"Free memory on device {init_snapshot._device} "
+            f"Free memory on device {init_snapshot.device_} "
             f"({GiB(init_snapshot.free_memory)}/"
             f"{GiB(init_snapshot.total_memory)} GiB) on startup "
             f"is less than desired GPU memory utilization "

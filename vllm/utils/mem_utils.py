@@ -76,9 +76,9 @@ class MemorySnapshot:
 
             device_fn = current_platform.current_device
             assert device_fn is not None
-            self._device = torch.device(device_fn())
+            self.device_ = torch.device(device_fn())
         else:
-            self._device = torch.device(self.device)
+            self.device_ = torch.device(self.device)
 
         if self.auto_measure:
             self.measure()
@@ -86,7 +86,7 @@ class MemorySnapshot:
     def measure(self) -> None:
         from vllm.platforms import current_platform
 
-        device = self._device
+        device = self.device_
 
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
@@ -128,10 +128,10 @@ class MemorySnapshot:
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
-        if self._device != other._device:
+        if self.device_ != other.device_:
             raise ValueError(
                 "The two snapshots should be from the same device! "
-                f"Found: {self._device} vs. {other._device}"
+                f"Found: {self.device_} vs. {other.device_}"
             )
 
         return MemorySnapshot(
@@ -142,7 +142,7 @@ class MemorySnapshot:
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
             timestamp=self.timestamp - other.timestamp,
-            device=self._device,
+            device=self.device_,
             auto_measure=False,
         )
 
