@@ -43,6 +43,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - tests/tool_use
   - tests/entrypoints/sleep
   - tests/entrypoints/instrumentator
   - tests/entrypoints/rpc
@@ -51,6 +52,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s entrypoints/instrumentator
   - pytest -v -s entrypoints/sleep
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration (Pooling)
   timeout_in_minutes: 50

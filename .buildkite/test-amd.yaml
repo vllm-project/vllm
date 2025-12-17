@@ -177,9 +177,11 @@ steps:
   - vllm/
   - tests/entrypoints/sleep
   - tests/entrypoints/rpc
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/sleep
+  - pytest -v -s tool_use
   - PYTHONPATH=/vllm-workspace  pytest -v -s entrypoints/rpc
 
 - label: Entrypoints Integration Test (Pooling)
@@ -767,17 +769,6 @@ steps:
   # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
   - pytest -s entrypoints/openai/correctness/
 
-- label: OpenAI-Compatible Tool Use # 23 min
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  fast_check: false
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  commands:
-    - pytest -v -s tool_use
 
 #####  models test  #####
 

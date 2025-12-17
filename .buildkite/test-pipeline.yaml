@@ -157,10 +157,12 @@ steps:
   - vllm/
   - tests/entrypoints/sleep
   - tests/entrypoints/rpc
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/sleep
   - PYTHONPATH=/vllm-workspace  pytest -v -s entrypoints/rpc
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration Test (Pooling)
   timeout_in_minutes: 50
@@ -679,16 +681,6 @@ steps:
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
   - pytest -s entrypoints/openai/correctness/
-
-- label: OpenAI-Compatible Tool Use # 23 min
-  timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
-  fast_check: false
-  source_file_dependencies:
-    - vllm/
-    - tests/tool_use
-  commands:
-    - pytest -v -s tool_use
 
 #####  models test  #####
 
