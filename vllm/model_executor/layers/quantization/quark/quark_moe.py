@@ -817,6 +817,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
             torch.uint8,
             torch.uint8,
             OCP_MX_BLOCK_SIZE,
+            **extra_weight_attrs,
         )
 
     def process_weights_after_loading(self, layer):
@@ -1010,6 +1011,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             weight_dtype,
             weight_scale_dtype,
             mxfp4_block,
+            **extra_weight_attrs,
         )
 
         w13_bias = torch.nn.Parameter(
@@ -1270,7 +1272,6 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 BLOCKM,  # block_size
             )
             return moe_out
-
         else:
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_oss_forward,
