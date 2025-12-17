@@ -354,8 +354,7 @@ async def get_kv_cache_status(request: Request):
     # Calculate hit rate
     if response["prefix_cache_queries_total"] > 0:
         response["prefix_cache_hit_rate"] = (
-            response["prefix_cache_hits_total"]
-            / response["prefix_cache_queries_total"]
+            response["prefix_cache_hits_total"] / response["prefix_cache_queries_total"]
         )
 
     return JSONResponse(content=response)
