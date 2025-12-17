@@ -71,14 +71,22 @@ class MemorySnapshot:
     auto_measure: bool = True
 
     def __post_init__(self) -> None:
+        if self.device is None:
+            from vllm.platforms import current_platform
+
+            device_fn = current_platform.current_device
+            assert device_fn is not None
+            self.device_ = torch.device(device_fn())
+        else:
+            self.device_ = torch.device(self.device)
+
         if self.auto_measure:
             self.measure()
 
     def measure(self) -> None:
         from vllm.platforms import current_platform
 
-        device = self.device
-        device_id = 0 if device is None else torch.device(device).index
+        device = self.device_
 
         # we measure the torch peak memory usage via allocated_bytes,
         # rather than `torch.cuda.memory_reserved()` .
@@ -93,7 +101,7 @@ class MemorySnapshot:
         shared_sysmem_device_mem_sms = ((8, 7), (11, 0), (12, 1))  # Orin, Thor, Spark
         if (
             current_platform.is_cuda()
-            and current_platform.get_device_capability(device_id)
+            and current_platform.get_device_capability(device.index)
             in shared_sysmem_device_mem_sms
         ):
             # On UMA (Orin, Thor and Spark) platform,
@@ -120,10 +128,10 @@ class MemorySnapshot:
         self.timestamp = time.time()
 
     def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
-        if self.device != other.device:
+        if self.device_ != other.device_:
             raise ValueError(
                 "The two snapshots should be from the same device! "
-                f"Found: {self.device} vs. {other.device}"
+                f"Found: {self.device_} vs. {other.device_}"
             )
 
         return MemorySnapshot(
@@ -134,7 +142,7 @@ class MemorySnapshot:
             torch_memory=self.torch_memory - other.torch_memory,
             non_torch_memory=self.non_torch_memory - other.non_torch_memory,
             timestamp=self.timestamp - other.timestamp,
-            device=self.device,
+            device=self.device_,
             auto_measure=False,
         )
 

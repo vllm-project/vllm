@@ -4,10 +4,12 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
+from typing_extensions import deprecated
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -18,6 +20,8 @@ from vllm.utils.mem_utils import MemorySnapshot
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+
+logger = init_logger(__name__)
 
 
 class MultiModalBudget:
@@ -200,6 +204,7 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
+@deprecated("`scatter_mm_placeholders` is deprecated and will be removed in v0.15.0.")
 def scatter_mm_placeholders(
     embeds: torch.Tensor,
     is_embed: torch.Tensor | None,
@@ -228,6 +233,7 @@ def scatter_mm_placeholders(
     return placeholders
 
 
+@deprecated("`gather_mm_placeholders` is deprecated and will be removed in v0.15.0.")
 def gather_mm_placeholders(
     placeholders: torch.Tensor,
     is_embed: torch.Tensor | None,
@@ -244,10 +250,7 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def check_enough_init_memory(
-    init_snapshot: MemorySnapshot,
-    cache_config: CacheConfig,
-) -> float:
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> float:
     """
     Calculate the amount of memory required by vLLM, then validate
     that the current amount of free memory is sufficient for that.
@@ -257,7 +260,7 @@ def check_enough_init_memory(
     if init_snapshot.free_memory < requested_memory:
         GiB = lambda b: round(b / GiB_bytes, 2)
         raise ValueError(
-            f"Free memory on device {init_snapshot.device} "
+            f"Free memory on device {init_snapshot.device_} "
             f"({GiB(init_snapshot.free_memory)}/"
             f"{GiB(init_snapshot.total_memory)} GiB) on startup "
             f"is less than desired GPU memory utilization "
