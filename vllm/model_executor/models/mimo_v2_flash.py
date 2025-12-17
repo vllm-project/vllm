@@ -166,9 +166,6 @@ class MiMoV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        # TODO: FusedMoE in vllm doesn't support grouped_topk yet
-        # For now, use standard FusedMoE and note that grouped_topk
-        # feature from sglang needs to be implemented separately
         self.experts = FusedMoE(
             num_experts=self.n_routed_experts,
             top_k=config.num_experts_per_tok,
