@@ -154,6 +154,21 @@ class DeepSeekV32ToolParser(ToolParser):
                         and "type" in param_config[param_name]
                     ):
                         return param_config[param_name]["type"]
+            # Responses API: tool.name, tool.parameters (FunctionTool)
+            elif (
+                hasattr(tool, "name")
+                and tool.name == tool_name
+                and hasattr(tool, "parameters")
+            ):
+                params = tool.parameters
+                if isinstance(params, dict) and "properties" in params:
+                    param_config = params["properties"]
+                    if (
+                        param_name in param_config
+                        and isinstance(param_config[param_name], dict)
+                        and "type" in param_config[param_name]
+                    ):
+                        return param_config[param_name]["type"]
         return "unknown"
 
     def _parse_invoke_params(
