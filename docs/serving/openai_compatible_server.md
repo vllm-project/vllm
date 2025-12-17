@@ -240,13 +240,22 @@ Code example: [examples/online_serving/openai_responses_client_with_tools.py](..
 
 #### Extra parameters
 
-The following extra parameters are supported:
+The following extra parameters in the request object are supported:
 
 ??? code
 
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:responses-extra-params"
     ```
+
+The following extra parameters in the response object are supported:
+
+??? code
+
+    ```python
+    --8<-- "vllm/entrypoints/openai/protocol.py:responses-response-extra-params"
+    ```
+
 ### Embeddings API
 
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
