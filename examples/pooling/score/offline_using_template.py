@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
+from pathlib import Path
+
 from vllm import LLM
 
 model_name = "nvidia/llama-nemotron-rerank-1b-v2"
+
+# Path to template file
+template_path = Path(__file__).parent / "template" / "nemotron-rerank.jinja"
+chat_template = template_path.read_text()
 
 llm = LLM(model=model_name, runner="pooling", trust_remote_code=True)
 
@@ -14,7 +20,7 @@ documents = [
     "Calorie intake should not fall below 1,200 a day in women or 1,500 a day in men, except under the supervision of a health professional.",
 ]
 
-outputs = llm.score(query, documents)
+outputs = llm.score(query, documents, chat_template=chat_template)
 
 print("-" * 30)
 print([output.outputs.score for output in outputs])
