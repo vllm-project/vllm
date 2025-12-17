@@ -122,6 +122,8 @@ class MinimaxM2ToolParser(ToolParser):
         self.streaming_request = None
         # Clear previous tool call history to avoid state pollution
         self.prev_tool_call_arr.clear()
+        # Reset streamed args tracking
+        self.streamed_args_for_tool.clear()
 
     def _extract_name(self, name_str: str) -> str:
         """Extract name from quoted string."""
@@ -421,9 +423,12 @@ class MinimaxM2ToolParser(ToolParser):
                         self.prev_tool_call_arr.append(
                             {
                                 "name": self.current_function_name,
-                                "arguments": "{}",  # Placeholder, will be updated later
+                                "arguments": {},  # Placeholder, will be updated later
                             }
                         )
+                        # Initialize streamed_args_for_tool for this tool call
+                        if len(self.streamed_args_for_tool) <= self.current_tool_index:
+                            self.streamed_args_for_tool.append("")
 
                     # Send header with function info
                     return DeltaMessage(
@@ -445,6 +450,9 @@ class MinimaxM2ToolParser(ToolParser):
             # Send opening brace if not sent yet
             if self.in_function and not self.json_started:
                 self.json_started = True
+                # Update streamed_args_for_tool for opening brace
+                if self.current_tool_index < len(self.streamed_args_for_tool):
+                    self.streamed_args_for_tool[self.current_tool_index] += "{"
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -493,7 +501,7 @@ class MinimaxM2ToolParser(ToolParser):
                                 args = parsed_tool.function.arguments
                                 self.prev_tool_call_arr[self.current_tool_index][
                                     "arguments"
-                                ] = args
+                                ] = json.loads(args)
                         except Exception:
                             pass  # Ignore parsing errors during streaming
 
@@ -505,7 +513,9 @@ class MinimaxM2ToolParser(ToolParser):
                             )
                         ]
                     )
-
+                    # Update streamed_args_for_tool for closing brace
+                    if self.current_tool_index < len(self.streamed_args_for_tool):
+                        self.streamed_args_for_tool[self.current_tool_index] += "}"
                     # Reset state for next tool
                     self.json_closed = True
                     self.in_function = False
@@ -630,7 +640,11 @@ class MinimaxM2ToolParser(ToolParser):
                             )
 
                         self.param_count += 1
-
+                        # Update streamed_args_for_tool for this tool call
+                        if self.current_tool_index < len(self.streamed_args_for_tool):
+                            self.streamed_args_for_tool[self.current_tool_index] += (
+                                json_fragment
+                            )
                         return DeltaMessage(
                             tool_calls=[
                                 DeltaToolCall(
