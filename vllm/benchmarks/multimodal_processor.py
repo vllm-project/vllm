@@ -160,16 +160,13 @@ def generate_random_multimodal_prompts(
 
         mm_items = []
         for _ in range(num_images):
-            # Generate random RGB image
             random_pixels = rng.integers(
                 0, 256, (image_height, image_width, 3), dtype=np.uint8
             )
             image = Image.fromarray(random_pixels)
-            # Process to OpenAI format
             mm_item = process_image(image)
             mm_items.append(mm_item)
 
-        # Create chat format: text + images
         content = [{"type": "text", "text": text_prompt}]
         content.extend(mm_items)
         prompts.append([{"role": "user", "content": content}])
@@ -189,7 +186,6 @@ def benchmark_multimodal_processor(
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    # Validate max_model_len
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (
@@ -197,7 +193,6 @@ def benchmark_multimodal_processor(
         "the sum of input_len and output_len."
     )
 
-    # Generate random multimodal prompts
     seed = getattr(args, "seed", 0)
     tokenizer = llm.get_tokenizer()
     prompts, expected_output_lens = generate_random_multimodal_prompts(
@@ -211,11 +206,10 @@ def benchmark_multimodal_processor(
         seed=seed,
     )
 
-    # Create sampling params
     sampling_params = [
         SamplingParams(
             n=1,
-            temperature=0.0,  # Greedy sampling for deterministic speed benchmarks
+            temperature=0.0,
             max_tokens=output_len,
             detokenize=True,
         )
@@ -227,9 +221,6 @@ def benchmark_multimodal_processor(
     ]
 
     freeze_gc_heap()
-
-    # MM processor stats are automatically enabled via set_defaults
-    # No need to check or raise error
 
     debug = getattr(args, "debug_mm_stats", False)
 
@@ -312,13 +303,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
     from vllm.engine.arg_utils import EngineArgs
 
-    # Add EngineArgs (no conflict since we removed dataset parser)
     EngineArgs.add_cli_args(parser)
 
-    # Automatically enable MM processor stats (required for this benchmark)
     parser.set_defaults(enable_mm_processor_stats=True)
 
-    # Random generation arguments (similar to latency.py)
     parser.add_argument(
         "--num-prompts",
         type=int,

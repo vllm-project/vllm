@@ -74,7 +74,6 @@ logger = init_logger(__name__)
 
 _S = TypeVar("_S", str, list[int])
 
-# Context variable to store the current request_id during preprocessing
 _request_id_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_request_id_context", default=None
 )
