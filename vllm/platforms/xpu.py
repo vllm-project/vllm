@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 
@@ -162,64 +161,6 @@ class XPUPlatform(Platform):
         parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
-
-        if parallel_config.distributed_executor_backend is None:
-            if parallel_config.world_size > 1:
-                parallel_config.distributed_executor_backend = "ray"
-            else:
-                parallel_config.distributed_executor_backend = "uni"
-        elif parallel_config.distributed_executor_backend == "mp":
-            # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':`
-            # fork is not supported for xpu start new process.
-            if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
-                os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-                logger.warning(
-                    "Please use spawn as start method if you want to use mp."
-                )
-        elif (
-            parallel_config.distributed_executor_backend != "ray"
-            and parallel_config.distributed_executor_backend != "uni"
-            and parallel_config.distributed_executor_backend != "external_launcher"
-        ):
-            # Check if it's a custom MultiprocExecutor subclass
-            backend = parallel_config.distributed_executor_backend
-            is_multiproc = False
-
-            backend_class_to_check = None
-            if isinstance(backend, type):
-                backend_class_to_check = backend
-            elif isinstance(backend, str):
-                try:
-                    # Try to import from string, e.g. "my_module.MyExecutor"
-                    import importlib
-
-                    module_path, class_name = backend.rsplit(".", 1)
-                    module = importlib.import_module(module_path)
-                    backend_class_to_check = getattr(module, class_name)
-                except (ImportError, ValueError, AttributeError):
-                    # Fallback for simple string check for backward compatibility
-                    # and cases where it's not a full import path.
-                    if "MultiprocExecutor" in backend:
-                        is_multiproc = True
-
-            if backend_class_to_check and not is_multiproc:
-                try:
-                    # Use lazy import to avoid circular dependency
-                    from vllm.v1.executor.multiproc_executor import MultiprocExecutor
-
-                    is_multiproc = issubclass(backend_class_to_check, MultiprocExecutor)
-                except (ImportError, TypeError):
-                    # Not a class or import failed
-                    pass
-
-            if not is_multiproc:
-                logger.warning(
-                    "%s is not supported on XPU, fallback to ray distributed"
-                    " executor backend.",
-                    parallel_config.distributed_executor_backend,
-                )
-                parallel_config.distributed_executor_backend = "ray"
 
         if model_config and model_config.use_mla:
             logger.info(
