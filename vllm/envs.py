@@ -1582,6 +1582,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_KV_CACHE_DUMP_MAX_TOKENS": lambda: int(
         os.getenv("VLLM_KV_CACHE_DUMP_MAX_TOKENS", "0")
     ),
+    # Experimental: rank-based key compression before caching (decode only).
+    "VLLM_KV_KEY_COMPRESS_ENABLED": lambda: bool(
+        int(os.getenv("VLLM_KV_KEY_COMPRESS_ENABLED", "0"))
+    ),
+    # Energy threshold for selecting rank (e.g., 0.995).
+    "VLLM_KV_KEY_COMPRESS_ENERGY": lambda: float(
+        os.getenv("VLLM_KV_KEY_COMPRESS_ENERGY", "0.995")
+    ),
+    # Optional hard cap on rank (<=0 => auto).
+    "VLLM_KV_KEY_COMPRESS_MAX_RANK": lambda: int(
+        os.getenv("VLLM_KV_KEY_COMPRESS_MAX_RANK", "0")
+    ),
+    # Tokens to accumulate before first SVD.
+    "VLLM_KV_KEY_COMPRESS_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_KV_KEY_COMPRESS_MIN_TOKENS", "16")
+    ),
+    # Recompute PCA basis every N tokens.
+    "VLLM_KV_KEY_COMPRESS_RECOMPUTE_EVERY": lambda: int(
+        os.getenv("VLLM_KV_KEY_COMPRESS_RECOMPUTE_EVERY", "8")
+    ),
+    # Logging cadence for per-head ranks.
+    "VLLM_KV_KEY_COMPRESS_LOG_EVERY": lambda: int(
+        os.getenv("VLLM_KV_KEY_COMPRESS_LOG_EVERY", "64")
+    ),
+    # Layers to compress: comma-separated list or "early,mid,late".
+    "VLLM_KV_KEY_COMPRESS_LAYERS": lambda: os.getenv(
+        "VLLM_KV_KEY_COMPRESS_LAYERS", ""
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

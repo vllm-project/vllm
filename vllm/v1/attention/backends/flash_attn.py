@@ -646,10 +646,15 @@ class FlashAttentionImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
-            # KV cache dump hook (no-op when disabled)
-            from vllm.v1.kv_cache_dump.hook import maybe_dump_kv_decode
+            # Optional rank-based K compression + KV dump (decode only).
+            if attn_metadata.max_query_len == 1:
+                from vllm.v1.kv_cache_compression import maybe_compress_kv_decode
+                from vllm.v1.kv_cache_dump.hook import maybe_dump_kv_decode
 
-            maybe_dump_kv_decode(key, value, layer.layer_name, attn_metadata)
+                key = maybe_compress_kv_decode(
+                    key, layer.layer_name, num_actual_tokens
+                )
+                maybe_dump_kv_decode(key, value, layer.layer_name, attn_metadata)
 
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.

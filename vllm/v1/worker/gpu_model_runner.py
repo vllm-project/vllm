@@ -423,6 +423,19 @@ class GPUModelRunner(
             model_config=model_config,
             parallel_config=parallel_config,
         )
+
+        # Optional: rank-compress K before caching for quality experiments.
+        from vllm.v1.kv_cache_compression import (
+            init_kv_compression_config,
+            reset_kv_compression_state,
+        )
+
+        self.kv_compression_config = init_kv_compression_config(
+            num_layers=model_config.get_num_layers(parallel_config),
+            model_config=model_config,
+            parallel_config=parallel_config,
+        )
+        reset_kv_compression_state()
         self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
