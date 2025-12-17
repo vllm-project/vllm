@@ -264,7 +264,7 @@ class LoggingStatLogger(StatLoggerBase):
         if self.cudagraph_logging is not None:
             self.cudagraph_logging.log(log_fn=log_fn)
         if self._enable_perf_stats():
-            self.perf_metrics_logging.log(log_fn=log_fn)
+            self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:

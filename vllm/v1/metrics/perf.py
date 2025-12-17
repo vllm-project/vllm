@@ -1123,7 +1123,7 @@ class PerfMetricsDebugLogging:
             for key, val in src.items():
                 dst[key] = dst.get(key, 0) + val
 
-    def log(self, log_fn, delta_time: float):
+    def log(self, log_fn, log_prefix: str, delta_time: float):
         # pretty print breakdowns
         total_num_flops_per_gpu_breakdown = {
             k: f"{v / 1e12:.1f}TF"
@@ -1139,7 +1139,8 @@ class PerfMetricsDebugLogging:
         }
 
         logger.debug(
-            "MFU details: %s",
+            "%sMFU details: %s",
+            log_prefix,
             json.dumps(
                 {
                     "prefill_reqs": self.total_num_prefill_requests,
@@ -1189,7 +1190,7 @@ class PerfMetricsLogging:
             assert perf_stats.debug_stats is not None
             self.debug_logging.observe(perf_stats.debug_stats)
 
-    def log(self, log_fn=logger.info):
+    def log(self, log_fn=logger.info, log_prefix: str = "") -> None:
         if not (
             self.total_num_flops_per_gpu
             or self.total_read_bytes_per_gpu
@@ -1199,23 +1200,27 @@ class PerfMetricsLogging:
 
         now = time.monotonic()
         delta_time = now - self.last_log_time
-        delta_time_per_gpu = delta_time / self.pp_size
 
-        avg_tflops_per_gpu = self.total_num_flops_per_gpu / delta_time_per_gpu / 1e12
-        avg_gbps_per_gpu = (
-            (self.total_read_bytes_per_gpu + self.total_write_bytes_per_gpu)
-            / delta_time_per_gpu
-            / 1e9
-        )
+        if delta_time <= 0.0:
+            avg_tflops_per_gpu = 0.0
+            avg_gbps_per_gpu = 0.0
+        else:
+            avg_tflops_per_gpu = self.total_num_flops_per_gpu / delta_time / 1e12
+            avg_gbps_per_gpu = (
+                (self.total_read_bytes_per_gpu + self.total_write_bytes_per_gpu)
+                / delta_time
+                / 1e9
+            )
 
         log_fn(
-            "MFU: %.1f TF/s/GPU %.1f GB/s/GPU",
+            "%sMFU: %.1f TF/s/GPU %.1f GB/s/GPU",
+            log_prefix,
             avg_tflops_per_gpu,
             avg_gbps_per_gpu,
         )
 
         if self.debug_logging:
-            self.debug_logging.log(log_fn, delta_time)
+            self.debug_logging.log(log_fn, log_prefix, delta_time)
 
         self.reset()
 
