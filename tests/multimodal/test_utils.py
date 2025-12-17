@@ -9,6 +9,7 @@ from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image, ImageChops
 
 from vllm.multimodal.image import convert_image_mode
@@ -408,6 +409,97 @@ def test_argsort_mm_positions(case):
     modality_idxs = argsort_mm_positions(mm_positions)
 
     assert modality_idxs == expected_modality_idxs
+
+
+@pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, 5),
+        (torch.tensor([True, True, True, True, True]), 5),
+        (torch.tensor([False, False, False, False, False]), 0),
+        (torch.tensor([True, False, True, False, True]), 3),
+        (torch.tensor([True]), 1),
+    ],
+)
+def test_placeholder_range_get_num_embeds(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_num_embeds == expected
+
+
+@pytest.mark.parametrize(
+    "is_embed,expected",
+    [
+        (None, None),
+        (
+            torch.tensor([False, True, False, True, True]),
+            torch.tensor([0, 1, 1, 2, 3]),
+        ),
+        (torch.tensor([True, True, True]), torch.tensor([1, 2, 3])),
+    ],
+)
+def test_placeholder_range_embeds_cumsum(is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+
+    if expected is None:
+        assert pr.embeds_cumsum is None
+        return
+
+    assert torch.equal(pr.embeds_cumsum, expected)
+    # cached_property should return the same object on repeated access
+    assert pr.embeds_cumsum is pr.embeds_cumsum
+
+
+@pytest.mark.parametrize(
+    "is_embed,start_idx,end_idx,expected",
+    [
+        (None, 2, 4, (2, 4)),
+        (
+            torch.tensor([False, True, False, True, True]),
+            3,
+            5,
+            (1, 3),
+        ),
+        (
+            torch.tensor([False, True, False, True, True]),
+            0,
+            2,
+            (0, 1),
+        ),
+        (
+            torch.tensor([True, False, True, False]),
+            2,
+            2,
+            (1, 1),
+        ),
+    ],
+)
+def test_placeholder_range_get_embeds_indices_in_range(
+    is_embed, start_idx, end_idx, expected
+):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
+    assert pr.get_embeds_indices_in_range(start_idx, end_idx) == expected
+
+
+@pytest.mark.parametrize(
+    "offset,is_embed,expected",
+    [
+        (0, None, [(0, 4)]),
+        (
+            2,
+            torch.tensor([False, True, False, True, True]),
+            [(3, 3), (5, 6)],
+        ),
+        (0, torch.tensor([True, True, True, True]), [(0, 3)]),
+        (0, torch.tensor([False, False, False, False]), []),
+    ],
+)
+def test_placeholder_range_extract_embeds_range(offset, is_embed, expected):
+    length = len(is_embed) if is_embed is not None else 5
+    pr = PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+    assert pr.extract_embeds_range() == expected
 
 
 @pytest.mark.asyncio

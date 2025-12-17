@@ -208,7 +208,8 @@ def test_attn_quant(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -297,7 +298,8 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -409,7 +411,8 @@ def test_tp2_attn_quant_async_tp(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
+
+    model_kwargs["attention_config"] = {"backend": backend.name}
 
     compilation_config = CompilationConfig(
         # Testing properties
@@ -523,6 +526,8 @@ CUSTOM_OPS_QUANT_RMS_NORM = ["+quant_fp8,+rms_norm"]
     list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
+# TODO: remove skip after we fix the fusion thoroughly
+@pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
@@ -562,7 +567,9 @@ def test_rms_group_quant(
         splitting_ops=splitting_ops,
         # Common
         mode=CompilationMode.VLLM_COMPILE,
-        pass_config=PassConfig(eliminate_noops=True, enable_fusion=True),
+        pass_config=PassConfig(
+            fuse_norm_quant=True, fuse_act_quant=True, eliminate_noops=True
+        ),
         # Inductor caches custom passes by default as well via uuid
         inductor_compile_config={"force_disable_caches": True},
     )

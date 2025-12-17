@@ -11,14 +11,12 @@ def pytest_addoption(parser):
         default="configs/models-small.txt",
         help="File containing list of config files to test",
     )
-    parser.addoption("--tp-size", default=1, type=int, help="Tensor parallel size")
 
 
 def pytest_generate_tests(metafunc):
     """Generate test parameters from config files."""
     if "config_filename" in metafunc.fixturenames:
         config_list_file = metafunc.config.getoption("--config-list-file")
-        tp_size = metafunc.config.getoption("--tp-size")
 
         # Handle both relative and absolute paths
         config_list_path = Path(config_list_file)
@@ -55,9 +53,9 @@ def pytest_generate_tests(metafunc):
         # Generate test parameters
         if config_files:
             metafunc.parametrize(
-                ["config_filename", "tp_size"],
-                [(config_file, int(tp_size)) for config_file in config_files],
-                ids=[f"{config_file.stem}-tp{tp_size}" for config_file in config_files],
+                "config_filename",
+                config_files,
+                ids=[config_file.stem for config_file in config_files],
             )
         else:
             print("No config files found, test will be skipped")

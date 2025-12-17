@@ -50,6 +50,8 @@ class DeepseekV32Tokenizer(CachedHfTokenizer):
         **kwargs,
     ) -> str | list[int]:
         thinking = kwargs.get("thinking", False)
+        enable_thinking = kwargs.get("enable_thinking", False)
+        thinking = thinking or enable_thinking
         thinking_mode = "thinking"
         if not thinking:
             thinking_mode = "chat"

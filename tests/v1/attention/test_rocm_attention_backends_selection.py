@@ -94,26 +94,20 @@ def mock_on_gfx9():
             None,
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
-        # Test Case 9: VLLM_V1_USE_PREFILL_DECODE_ATTENTION=1
-        (
-            {"VLLM_V1_USE_PREFILL_DECODE_ATTENTION": "1"},
-            None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
-        ),
-        # Test Case 10: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
+        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_ATTN",
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
-        # Test Case 11: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
+        # Test Case 10: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
         # (explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
-        # Test Case 12: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
+        # Test Case 11: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",

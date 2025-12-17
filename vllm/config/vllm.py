@@ -870,9 +870,12 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-        if self.parallel_config.enable_dbo:
+        if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+            assert a2a_backend in [
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            ], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
                 "supported. To fix use --all2all-backend=deepep_low_latency or "
