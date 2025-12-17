@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Adapted from https://huggingface.co/nvidia/NVIDIA-Nemotron-Parse-v1.1/blob/main/hf_nemotron_parse_modeling.py
+#
+# Bart classes based on old vLLM codebase:
+# https://github.com/vllm-project/vllm/blob/v0.10.2/vllm/model_executor/models/bart.py
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
