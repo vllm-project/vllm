@@ -17,7 +17,6 @@ import jinja2.meta
 import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
-import pybase64
 import transformers.utils.chat_template_utils as hf_chat_utils
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
@@ -1521,15 +1520,9 @@ def _parse_chat_message_content_part(
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
     elif part_type == "video_frames":
-        str_content = "data:video/jpeg;base64,"
+        str_content = "data:video/jpeg;files,"
         list_content = cast(list[str], content)
-        base64_list = []
-        for content in list_content:
-            with open(content, "rb") as f:
-                data = f.read()
-                base64_list.append(pybase64.b64encode(data).decode("utf-8"))
-        str_content += ",".join(base64_list)
-
+        str_content += ",".join(list_content)
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
     else:
