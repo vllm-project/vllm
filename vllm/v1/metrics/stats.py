@@ -173,6 +173,10 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
 
+    # KV cache block information
+    num_total_blocks: int = 0
+    num_free_blocks: int = 0
+
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 

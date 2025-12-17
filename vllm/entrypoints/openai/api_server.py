@@ -297,6 +297,70 @@ async def get_server_load_metrics(request: Request):
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
 
 
+@router.get("/v1/kv_cache/status")
+async def get_kv_cache_status(request: Request):
+    """Returns detailed KV cache status information.
+
+    Response includes:
+    - kv_cache_usage: Current KV cache utilization (0.0-1.0)
+    - num_total_blocks: Total number of KV cache blocks available
+    - num_free_blocks: Number of free KV cache blocks
+    - num_used_blocks: Number of used KV cache blocks (computed)
+    - num_running_requests: Number of currently running requests
+    - num_waiting_requests: Number of requests waiting in queue
+    - prefix_cache_hit_rate: Prefix cache hit rate (0.0-1.0)
+    - prefix_cache_queries_total: Total number of prefix cache queries
+    - prefix_cache_hits_total: Total number of prefix cache hits
+    """
+    from vllm.v1.metrics.reader import Counter, Gauge, get_metrics_snapshot
+
+    metrics = get_metrics_snapshot()
+
+    response = {
+        "kv_cache_usage": 0.0,
+        "num_total_blocks": 0,
+        "num_free_blocks": 0,
+        "num_used_blocks": 0,
+        "num_running_requests": 0,
+        "num_waiting_requests": 0,
+        "prefix_cache_hit_rate": 0.0,
+        "prefix_cache_queries_total": 0,
+        "prefix_cache_hits_total": 0,
+    }
+
+    metric_mapping = {
+        "vllm:kv_cache_usage_perc": "kv_cache_usage",
+        "vllm:num_kv_cache_blocks_total": "num_total_blocks",
+        "vllm:num_kv_cache_blocks_free": "num_free_blocks",
+        "vllm:num_requests_running": "num_running_requests",
+        "vllm:num_requests_waiting": "num_waiting_requests",
+        "vllm:prefix_cache_queries": "prefix_cache_queries_total",
+        "vllm:prefix_cache_hits": "prefix_cache_hits_total",
+    }
+
+    for metric in metrics:
+        if metric.name in metric_mapping:
+            field_name = metric_mapping[metric.name]
+            if isinstance(metric, Gauge):
+                response[field_name] = float(metric.value)
+            elif isinstance(metric, Counter):
+                response[field_name] = int(metric.value)
+
+    # Calculate derived metrics
+    response["num_used_blocks"] = int(
+        response["num_total_blocks"] - response["num_free_blocks"]
+    )
+
+    # Calculate hit rate
+    if response["prefix_cache_queries_total"] > 0:
+        response["prefix_cache_hit_rate"] = (
+            response["prefix_cache_hits_total"]
+            / response["prefix_cache_queries_total"]
+        )
+
+    return JSONResponse(content=response)
+
+
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)

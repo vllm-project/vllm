@@ -467,6 +467,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, engine_indexes, model_name
         )
 
+        gauge_num_kv_cache_blocks_total = self._gauge_cls(
+            name="vllm:num_kv_cache_blocks_total",
+            documentation="Total number of KV cache blocks available.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_num_kv_cache_blocks_total = make_per_engine(
+            gauge_num_kv_cache_blocks_total, engine_indexes, model_name
+        )
+
+        gauge_num_kv_cache_blocks_free = self._gauge_cls(
+            name="vllm:num_kv_cache_blocks_free",
+            documentation="Number of free KV cache blocks.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_num_kv_cache_blocks_free = make_per_engine(
+            gauge_num_kv_cache_blocks_free, engine_indexes, model_name
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1024,6 +1044,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_num_kv_cache_blocks_total[engine_idx].set(
+                scheduler_stats.num_total_blocks
+            )
+            self.gauge_num_kv_cache_blocks_free[engine_idx].set(
+                scheduler_stats.num_free_blocks
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

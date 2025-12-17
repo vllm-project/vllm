@@ -1500,10 +1500,18 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+
+        # Get block information from block_pool
+        block_pool = self.kv_cache_manager.block_pool
+        num_total_blocks = block_pool.num_gpu_blocks - 1  # Exclude null block
+        num_free_blocks = block_pool.get_num_free_blocks()
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            num_total_blocks=num_total_blocks,
+            num_free_blocks=num_free_blocks,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
