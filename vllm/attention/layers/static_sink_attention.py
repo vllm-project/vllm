@@ -66,19 +66,12 @@ def create_static_sink_attention_backend(
             common_attn_metadata.seq_lens[:] = (
                 common_attn_metadata.seq_lens + self.sink_len
             )
+            common_attn_metadata.seq_lens[
+                common_attn_metadata.seq_lens == self.sink_len
+            ] = 0
             common_attn_metadata.max_seq_len = (
                 common_attn_metadata.max_seq_len + self.sink_len
             )
-
-            blk_table_tensor = common_attn_metadata.block_table_tensor
-            sink_block_table = self.sink_block_table[None, :].expand(
-                blk_table_tensor.shape[0], -1
-            )
-            blk_table_tensor_clone = blk_table_tensor.clone()
-            blk_table_tensor[:, self.num_sink_blocks :] = blk_table_tensor_clone[
-                :, : -self.num_sink_blocks
-            ]
-            blk_table_tensor[:, : self.num_sink_blocks] = sink_block_table
 
             return super().build(common_prefix_len, common_attn_metadata, fast_build)
 

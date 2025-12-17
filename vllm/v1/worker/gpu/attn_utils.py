@@ -101,7 +101,10 @@ def _reshape_kv_cache(
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             attn_backend = attn_backends[layer_name]
-            if hasattr(kv_cache_spec, "head_size_v"):
+            if (
+                getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
+                != kv_cache_spec.head_size
+            ):
                 kwargs = {"head_size_v": kv_cache_spec.head_size_v}
                 stride_kwargs = {"diff_kv": True}
             else:
