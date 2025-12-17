@@ -158,8 +158,6 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        if observability_config is None:
-            observability_config = ObservabilityConfig()
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
@@ -189,8 +187,6 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        if observability_config is None:
-            observability_config = ObservabilityConfig()
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
@@ -299,8 +295,6 @@ class MultiModalRegistry:
 
         The model is identified by `model_config`.
         """
-        if observability_config is None:
-            observability_config = ObservabilityConfig()
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )
@@ -337,8 +331,6 @@ class MultiModalRegistry:
 
         The model is identified by `model_config`.
         """
-        if observability_config is None:
-            observability_config = ObservabilityConfig()
         processor = self.create_processor(
             model_config, observability_config, cache=cache
         )

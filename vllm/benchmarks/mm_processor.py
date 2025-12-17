@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark multimodal processor latency.
 
-This benchmark measures the latency of the multimodal processor module
+This benchmark measures the latency of the mm processor module
 using randomly generated multimodal prompts with synthetic images.
 MM processor stats are automatically enabled.
 
 Run:
-    vllm bench multimodal-processor \
+    vllm bench mm-processor \
         --model <your_model> \
         --num-prompts 10 \
         --input-len 1024 \
@@ -55,7 +55,6 @@ class MultimodalProcessorBenchmarkMetrics:
 
 def collect_mm_processor_stats(
     llm_engine: Any,
-    debug: bool = False,
 ) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
@@ -83,12 +82,6 @@ def collect_mm_processor_stats(
             stats_dict.get("prompt_update_time", 0.0)
         )
         stats_by_stage["total_time"].append(stats_dict.get("total_time", 0.0))
-
-    if debug and not any(stats_by_stage.values()):
-        print(
-            "Warning: No MM processor stats found. "
-            "Ensure --enable-mm-processor-stats is set."
-        )
 
     return stats_by_stage
 
@@ -160,16 +153,13 @@ def generate_random_multimodal_prompts(
 
         mm_items = []
         for _ in range(num_images):
-            # Generate random RGB image
             random_pixels = rng.integers(
                 0, 256, (image_height, image_width, 3), dtype=np.uint8
             )
             image = Image.fromarray(random_pixels)
-            # Process to OpenAI format
             mm_item = process_image(image)
             mm_items.append(mm_item)
 
-        # Create chat format: text + images
         content = [{"type": "text", "text": text_prompt}]
         content.extend(mm_items)
         prompts.append([{"role": "user", "content": content}])
@@ -189,7 +179,6 @@ def benchmark_multimodal_processor(
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    # Validate max_model_len
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (
@@ -197,7 +186,6 @@ def benchmark_multimodal_processor(
         "the sum of input_len and output_len."
     )
 
-    # Generate random multimodal prompts
     seed = getattr(args, "seed", 0)
     tokenizer = llm.get_tokenizer()
     prompts, expected_output_lens = generate_random_multimodal_prompts(
@@ -211,11 +199,10 @@ def benchmark_multimodal_processor(
         seed=seed,
     )
 
-    # Create sampling params
     sampling_params = [
         SamplingParams(
             n=1,
-            temperature=0.0,  # Greedy sampling for deterministic speed benchmarks
+            temperature=0.0,
             max_tokens=output_len,
             detokenize=True,
         )
@@ -227,11 +214,6 @@ def benchmark_multimodal_processor(
     ]
 
     freeze_gc_heap()
-
-    # MM processor stats are automatically enabled via set_defaults
-    # No need to check or raise error
-
-    debug = getattr(args, "debug_mm_stats", False)
 
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()
@@ -245,7 +227,6 @@ def benchmark_multimodal_processor(
 
     mm_stats_by_stage = collect_mm_processor_stats(
         llm.llm_engine,
-        debug=debug,
     )
 
     if not any(mm_stats_by_stage.values()):
@@ -312,13 +293,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
     """Add CLI arguments for the multimodal processor benchmark."""
     from vllm.engine.arg_utils import EngineArgs
 
-    # Add EngineArgs (no conflict since we removed dataset parser)
     EngineArgs.add_cli_args(parser)
 
-    # Automatically enable MM processor stats (required for this benchmark)
     parser.set_defaults(enable_mm_processor_stats=True)
 
-    # Random generation arguments (similar to latency.py)
     parser.add_argument(
         "--num-prompts",
         type=int,
@@ -361,11 +339,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default=None,
         help="Path to save the benchmark results in JSON format.",
-    )
-    parser.add_argument(
-        "--debug-mm-stats",
-        action="store_true",
-        help="Enable debug logging for MM processor stats collection.",
     )
     parser.add_argument(
         "--metric-percentiles",
@@ -456,7 +429,7 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Benchmark multimodal processor latency"
+        description="Benchmark mm processor latency"
     )
     add_cli_args(parser)
     args = parser.parse_args()

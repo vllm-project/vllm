@@ -74,7 +74,6 @@ logger = init_logger(__name__)
 
 _S = TypeVar("_S", str, list[int])
 
-# Context variable to store the current request_id during preprocessing
 _request_id_context: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "_request_id_context", default=None
 )
@@ -193,6 +192,7 @@ def _timed_operation(ctx: "InputProcessingContext", stage_name: str):
             stats.cache_lookup_time += elapsed
         elif stage_name == "prompt_update":
             stats.prompt_update_time += elapsed
+        stats.total_time += elapsed
 
 
 PromptSeq: TypeAlias = str | list[int]

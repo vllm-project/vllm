@@ -1041,10 +1041,6 @@ class EngineArgs:
             "--enable-layerwise-nvtx-tracing",
             **observability_kwargs["enable_layerwise_nvtx_tracing"],
         )
-        observability_group.add_argument(
-            "--enable-mm-processor-stats",
-            **observability_kwargs["enable_mm_processor_stats"],
-        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)

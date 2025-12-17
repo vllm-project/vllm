@@ -66,8 +66,8 @@ class ObservabilityConfig:
 
     enable_mm_processor_stats: bool = False
     """Enable collection of timing statistics for multimodal processor operations.
-    This can be useful for performance analysis and debugging. Defaults to `False`
-    (disabled)."""
+    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
+    argument."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:
