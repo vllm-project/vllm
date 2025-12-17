@@ -6,10 +6,10 @@ from vllm.benchmarks.multimodal_processor import add_cli_args, main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 
 
-class BenchmarkMultimodalProcessorSubcommand(BenchmarkSubcommandBase):
-    """The `multimodal-processor` subcommand for `vllm bench`."""
+class BenchmarkMMProcessorSubcommand(BenchmarkSubcommandBase):
+    """The `mm-processor` subcommand for `vllm bench`."""
 
-    name = "multimodal-processor"
+    name = "mm-processor"
     help = "Benchmark multimodal processor latency across different configurations."
 
     @classmethod
