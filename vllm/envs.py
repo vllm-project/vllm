@@ -1565,6 +1565,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
+    # KV cache dumping for decode-only rank analysis.
+    # If set to 1, enables KV cache dumping during decode phase.
+    "VLLM_KV_CACHE_DUMP_ENABLED": lambda: bool(
+        int(os.getenv("VLLM_KV_CACHE_DUMP_ENABLED", "0"))
+    ),
+    # Output directory for KV cache dump files (safetensors format).
+    "VLLM_KV_CACHE_DUMP_OUTPUT_DIR": lambda: os.getenv(
+        "VLLM_KV_CACHE_DUMP_OUTPUT_DIR", "/tmp/vllm_kv_dump"
+    ),
+    # Layers to dump KV cache for. Comma-separated list of layer indices
+    # (e.g., "0,15,31") or "early,mid,late" for automatic selection.
+    "VLLM_KV_CACHE_DUMP_LAYERS": lambda: os.getenv("VLLM_KV_CACHE_DUMP_LAYERS", ""),
+    # Maximum number of decode tokens to dump per request (0 = unlimited).
+    # Useful for capping memory usage during long generations.
+    "VLLM_KV_CACHE_DUMP_MAX_TOKENS": lambda: int(
+        os.getenv("VLLM_KV_CACHE_DUMP_MAX_TOKENS", "0")
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

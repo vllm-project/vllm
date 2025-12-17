@@ -414,6 +414,15 @@ class GPUModelRunner(
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
+
+        # KV cache dumping for decode-only rank analysis.
+        from vllm.v1.kv_cache_dump.config import init_kv_dump_config
+
+        self.kv_dump_config = init_kv_dump_config(
+            num_layers=model_config.get_num_layers(parallel_config),
+            model_config=model_config,
+            parallel_config=parallel_config,
+        )
         self.comm_stream = torch.cuda.Stream()
 
         # Input Batch
@@ -760,6 +769,17 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # Save KV dumps for finished requests before removing them.
+        if self.kv_dump_config.enabled and scheduler_output.finished_req_ids:
+            from vllm.v1.kv_cache_dump.accumulator import get_accumulator_manager
+            from vllm.v1.kv_cache_dump.dumper import save_request_kv
+
+            manager = get_accumulator_manager()
+            for req_id in scheduler_output.finished_req_ids:
+                acc = manager.finish_request(req_id)
+                if acc is not None:
+                    save_request_kv(acc, self.kv_dump_config)
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -838,6 +858,17 @@ class GPUModelRunner(
                 lora_request=new_req_data.lora_request,
             )
             self.requests[req_id] = req_state
+
+            # Start KV dump tracking for new request
+            if self.kv_dump_config.enabled:
+                from vllm.v1.kv_cache_dump.accumulator import get_accumulator_manager
+
+                prompt_tokens = new_req_data.prompt_token_ids or []
+                get_accumulator_manager().start_request(
+                    req_id,
+                    prompt_tokens,
+                    len(prompt_tokens),
+                )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3129,6 +3160,13 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+
+        # Set KV dump request context for single-request batches
+        if self.kv_dump_config.enabled and num_reqs == 1:
+            from vllm.v1.kv_cache_dump.hook import set_request_context
+
+            set_request_context(self.input_batch.req_ids[0])
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -3149,6 +3187,12 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        # Clear KV dump request context after forward
+        if self.kv_dump_config.enabled:
+            from vllm.v1.kv_cache_dump.hook import set_request_context
+
+            set_request_context(None)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3344,6 +3388,22 @@ class GPUModelRunner(
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
+
+        # Track decode tokens for KV dump (only during decode phase)
+        if self.kv_dump_config.enabled and valid_sampled_token_ids:
+            from vllm.v1.kv_cache_dump.accumulator import get_accumulator_manager
+
+            manager = get_accumulator_manager()
+            for i, req_id in enumerate(req_ids_output_copy):
+                if i < len(valid_sampled_token_ids):
+                    # Only track tokens during decode (num_scheduled_tokens == 1)
+                    # Prefill generates a token but we skip it since no KV is captured
+                    num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                    if num_scheduled != 1:
+                        continue
+                    tokens = valid_sampled_token_ids[i]
+                    for token_id in tokens:
+                        manager.add_decode_token(req_id, token_id)
 
         if (
             self.speculative_config

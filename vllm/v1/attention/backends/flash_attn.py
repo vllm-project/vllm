@@ -646,6 +646,11 @@ class FlashAttentionImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
+            # KV cache dump hook (no-op when disabled)
+            from vllm.v1.kv_cache_dump.hook import maybe_dump_kv_decode
+
+            maybe_dump_kv_decode(key, value, layer.layer_name, attn_metadata)
+
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping is
