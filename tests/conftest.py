@@ -58,7 +58,6 @@ from vllm.distributed import (
     initialize_model_parallel,
 )
 from vllm.logger import init_logger
-from vllm.logprobs import LogprobsOnePosition
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -70,6 +69,7 @@ from torch._inductor.utils import fresh_cache
 
 
 if TYPE_CHECKING:
+    from vllm.logprobs import LogprobsOnePosition
     from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
     from transformers.generation.utils import GenerateOutput
 
