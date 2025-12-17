@@ -132,37 +132,34 @@ class LogprobsProcessor:
 
         token_ids, logprobs, ranks = prompt_logprobs_tensors
 
-        # Detokenize non-incrementally.
-        # Output is flat: [num_tok, num_lps] -> [num_tok * num_lps]
-        decoded_tokens = (
-            None
-            if self.tokenizer is None
-            else (
-                convert_ids_list_to_tokens(self.tokenizer, token_ids.flatten().tolist())
-            )
-        )
-
         # Recover shapes.
         num_prompt_tokens, num_logprobs = logprobs.shape
 
         # Pythonize the torch tensors.
         prompt_token_ranks = ranks.tolist()
         prompt_logprobs = logprobs.tolist()
-        token_ids = token_ids.tolist()
+        token_ids_list = token_ids.tolist()
 
         # Make Logprob for each position.
         for pos in range(num_prompt_tokens):
-            # Handle flattening.
-            offset = pos * num_logprobs
-            offset_end = offset + num_logprobs
-            decoded_tokens_for_pos = (
-                NONES if decoded_tokens is None else decoded_tokens[offset:offset_end]
-            )
+            # Detokenize for this position
+            token_ids_for_pos = token_ids_list[pos]
+            decoded_tokens_for_pos: list[str] | Iterable[None]
+            if self.tokenizer is None:
+                decoded_tokens_for_pos = NONES
+            else:
+                decoded_tokens_list = convert_ids_list_to_tokens(
+                    self.tokenizer, token_ids_for_pos
+                )
+                # Apply UTF-8 correction for this position
+                decoded_tokens_for_pos = self._verify_tokens(
+                    decoded_tokens_list=decoded_tokens_list, tokens=token_ids_for_pos
+                )
 
             # Update with the Logprob container for this pos.
             append_logprobs_for_next_position(
                 self.prompt_logprobs,
-                token_ids[pos],
+                token_ids_list[pos],
                 prompt_logprobs[pos],
                 decoded_tokens_for_pos,
                 prompt_token_ranks[pos],
