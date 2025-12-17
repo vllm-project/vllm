@@ -42,7 +42,7 @@ from vllm.v1.worker.utils import MultiModalBudget
 logger = init_logger(__name__)
 
 T = TypeVar("T")
-DEFAULT_WRAPPER_KEY = "__default__"
+DEFAULT_WRAPPER_KEY = "language_model"
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -112,15 +112,15 @@ class LoRAModelManager:
     def _init_punica_wrapper(
         self, max_num_batched_tokens: int, vllm_config: VllmConfig
     ) -> None:
-        self.punica_wrapper = get_punica_wrapper(
+        llm_punica_wrapper = get_punica_wrapper(
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
             device=self.device,
             max_loras=self.lora_config.max_loras,
         )
-
+        # NOTE This assumes the existence of a language model LoRA
         self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {
-            DEFAULT_WRAPPER_KEY: self.punica_wrapper
+            DEFAULT_WRAPPER_KEY: llm_punica_wrapper
         }
 
         self._maybe_init_mm(vllm_config)
@@ -163,8 +163,8 @@ class LoRAModelManager:
             mm_budget.get_encoder_budget()
         )
 
-        self.punica_wrapper_mapping = {}
-
+        # Only one language model can be included in the model.
+        assert len(self.mm_mapping.language_model == 1)
         # Tower wrappers
         for name in self.mm_mapping.tower_model:
             self.punica_wrapper_mapping[name] = get_punica_wrapper(
@@ -173,12 +173,6 @@ class LoRAModelManager:
                 device=self.device,
                 max_loras=self.lora_config.max_loras,
             )
-
-        # Language wrapper
-        self.punica_wrapper_mapping[self.mm_mapping.language_model[0]] = (
-            self.punica_wrapper
-        )
-
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
             if hasattr(self.info, "get_num_mm_connector_tokens"):
