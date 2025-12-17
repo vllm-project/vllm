@@ -1320,6 +1320,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
         elif self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM:
+            # TODO(rob): convert this to MK.
             from vllm.model_executor.layers.fused_moe import fused_experts
 
             result = fused_experts(
