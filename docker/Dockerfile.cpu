@@ -56,9 +56,12 @@ ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
+
+# Copy requirements files for installation
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cpu.txt requirements/cpu.txt
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=requirements/common.txt \
-    --mount=type=bind,src=requirements/cpu.txt,target=requirements/cpu.txt \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/cpu.txt
 
@@ -108,18 +111,19 @@ ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 
 WORKDIR /workspace/vllm
 
+# Copy build requirements
+COPY requirements/cpu-build.txt requirements/build.txt
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/cpu-build.txt,target=requirements/build.txt \
     uv pip install -r requirements/build.txt
 
 COPY . .
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+
+RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
@@ -127,9 +131,11 @@ FROM base AS vllm-test-deps
 
 WORKDIR /workspace/vllm
 
+# Copy test requirements
+COPY requirements/test.in requirements/test.in
+
 # TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
-RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
-    cp requirements/test.in requirements/cpu-test.in && \
+RUN cp requirements/test.in requirements/cpu-test.in && \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \
       case "$(uname -m)" in \

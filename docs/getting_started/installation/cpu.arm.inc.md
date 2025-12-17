@@ -158,8 +158,14 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}-arm64-
 # --8<-- [start:build-image-from-source]
 ```bash
 docker build -f docker/Dockerfile.cpu \
+        --platform=linux/arm64 \
         --tag vllm-cpu-env .
+```
 
+!!! note
+    The `--platform=linux/arm64` flag is required to build ARM64 Linux images, especially when building on macOS ARM systems.
+
+```bash
 # Launching OpenAI server
 docker run --rm \
             --privileged=true \
