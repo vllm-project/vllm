@@ -115,7 +115,7 @@ __all__ = [
     "CompressedTensorsWNA16MoEMethod",
     "CompressedTensorsW4A4Nvfp4MoEMethod",
     "CompressedTensorsW4A8Int8MoEMethod",
-    "CompressedTensorsW4A16NVfp4MoeMethod",
+    "CompressedTensorsW4A16Nvfp4MoeMethod",
 ]
 
 
@@ -198,7 +198,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4Nvfp4MoEMethod(layer.moe_config, layer_name)
         elif quant_config._is_fp4a16_nvfp4(weight_quant, input_quant):
-            return CompressedTensorsW4A16NVfp4MoeMethod(layer.moe_config, layer_name)
+            return CompressedTensorsW4A16Nvfp4MoeMethod(layer.moe_config, layer_name)
         elif (
             quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
             or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)
@@ -664,7 +664,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             ).to(x.dtype)
 
 
-class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
+class CompressedTensorsW4A16Nvfp4MoeMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe: FusedMoEConfig, layer_name: str | None = None):
         super().__init__(moe)
         ## TODO: support Flashinfer kernels
@@ -675,7 +675,7 @@ class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
         self.marlin_input_dtype = (
             get_marlin_input_dtype(layer_name) if self.use_marlin else None
         )
-        logger.info_once("Using Marlin for CompressedTensorsW4A16NVfp4MoeMethod.")
+        logger.info_once("Using Marlin for CompressedTensorsW4A16Nvfp4MoeMethod.")
 
     def create_weights(
         self,
@@ -801,7 +801,7 @@ class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
             prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         else:
             raise NotImplementedError(
-                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+                "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
@@ -809,7 +809,7 @@ class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
             return None
         else:
             raise NotImplementedError(
-                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+                "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
     def get_fused_moe_quant_config(
@@ -819,7 +819,7 @@ class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
             return None
         else:
             raise NotImplementedError(
-                "CompressedTensorsW4A16NVfp4MoeMethod only supports use_marlin=True."
+                "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
     def apply(
@@ -858,8 +858,7 @@ class CompressedTensorsW4A16NVfp4MoeMethod(CompressedTensorsMoEMethod):
             )
         else:
             raise NotImplementedError(
-                "CompressedTensorsW4A16NVfp4MoeMethod only \
-                supports use_marlin=True"
+                "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True"
             )
 
 
