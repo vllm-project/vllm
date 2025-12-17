@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -211,7 +212,7 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_blocks += num_new_blocks
 
-    def update_block_ids(
+    def append_block_ids(
         self,
         new_block_ids: list[int],
     ):
@@ -629,6 +630,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             into account.
         """
         tracker = self._get_or_create_request_tracker(request)
+        # TODO: support loading KV for preempted requests in the future
+        if request.status == RequestStatus.PREEMPTED:
+            return 0, False
 
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id, convert_block_hashes_to_bytes(request.block_hashes)
@@ -685,7 +689,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         # No matter we need to retrieve or not, we need to update
         # the block ids into the tracker
-        tracker.update_block_ids(block_ids)
+        tracker.append_block_ids(block_ids)
 
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
@@ -868,7 +872,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
             # Update block ids
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            request_tracker.update_block_ids(new_block_ids)
+            if request_id not in cached_reqs.resumed_req_ids:
+                request_tracker.append_block_ids(new_block_ids)
 
             # Update new scheduled tokens
             num_new_tokens = cached_reqs.num_computed_tokens[idx]
@@ -891,6 +896,21 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self, request: "Request"
     ) -> LMCacheMPRequestTracker:
         request_id = request.request_id
+        # Remove the old trackers that is created before the preemption
+        if (
+            request.status == RequestStatus.PREEMPTED
+            and request_id in self.request_trackers
+        ):
+            tracker = self.request_trackers[request_id]
+
+            # NOTE: since this function may be called multiple times
+            # for a single request (because get_num_new_matched_tokens
+            # may be called multiple times) for the same request, we
+            # will only do the remove if the tracker is not in the "fresh"
+            # state, i.e., PREFETCHING
+            if tracker.state != LMCacheMPRequestState.PREFETCHING:
+                self.request_trackers.pop(request_id)
+
         if request_id not in self.request_trackers:
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
