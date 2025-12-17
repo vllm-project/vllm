@@ -1035,31 +1035,6 @@ class ModelConfig:
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
 
-        # Compute num_redundant_experts if not specified
-        if parallel_config.eplb_config.num_redundant_experts is None:
-            if parallel_config.enable_eplb:
-                num_logical_experts = self.get_num_experts()
-                # EP size is TP * DP for EPLB
-                ep_size = (
-                    parallel_config.tensor_parallel_size
-                    * parallel_config.data_parallel_size
-                )
-                # Ensure (num_logical_experts + num_redundant_experts) is
-                # divisible by ep_size, supporting non-standard ep_size values
-                min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
-                parallel_config.eplb_config.num_redundant_experts = min_redundant
-                logger.info(
-                    "EPLB num_redundant_experts not specified, "
-                    "defaulting to minimum valid value: %d "
-                    "(num_logical_experts=%d, ep_size=%d)",
-                    min_redundant,
-                    num_logical_experts,
-                    ep_size,
-                )
-            else:
-                # EPLB disabled, default to 0
-                parallel_config.eplb_config.num_redundant_experts = 0
-
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
             self.architectures, self

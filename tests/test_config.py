@@ -1133,28 +1133,91 @@ def test_eplb_num_redundant_experts_default():
         )
 
 
-@pytest.mark.parametrize("num_experts,ep_size,expected", [
-    (8, 8, 0),    # Divisible: 8 % 8 = 0
-    (8, 16, 8),   # ep_size > experts: (16 - 8%16) % 16 = 8
-    (8, 6, 4),    # Non-divisible: (6 - 8%6) % 6 = (6-2)%6 = 4
-    (16, 8, 0),   # Divisible: 16 % 8 = 0
-    (10, 8, 6),   # Non-divisible: (8 - 10%8) % 8 = (8-2)%8 = 6
-    (7, 4, 1),    # Non-divisible: (4 - 7%4) % 4 = (4-3)%4 = 1
-    (1, 4, 3),    # Single expert: (4 - 1%4) % 4 = 3
-])
-def test_eplb_num_redundant_experts_auto_computation(num_experts, ep_size, expected):
-    """Test the formula: (ep_size - num_experts % ep_size) % ep_size.
+@pytest.mark.parametrize(
+    "num_experts,tp_size,dp_size,expected",
+    [
+        (8, 8, 1, 0),  # ep_size=8, divisible: 8 % 8 = 0
+        (8, 8, 2, 8),  # ep_size=16, ep_size > experts: need 8 redundant
+        (8, 2, 3, 4),  # ep_size=6, non-divisible: need 4 redundant
+        (16, 4, 2, 0),  # ep_size=8, divisible: 16 % 8 = 0
+        (10, 4, 2, 6),  # ep_size=8, non-divisible: need 6 redundant
+        (7, 2, 2, 1),  # ep_size=4, non-divisible: need 1 redundant
+        (1, 2, 2, 3),  # ep_size=4, single expert: need 3 redundant
+    ],
+)
+def test_eplb_num_redundant_experts_auto_computation(
+    num_experts, tp_size, dp_size, expected
+):
+    """Test that num_redundant_experts is correctly computed by ParallelConfig.
 
-    This ensures (num_logical_experts + num_redundant_experts) is divisible
-    by ep_size, supporting non-standard ep_size values.
+    The computation ensures (num_logical_experts + num_redundant_experts)
+    is divisible by ep_size (= tp_size * dp_size).
     """
-    # Compute using the actual formula from model.py
-    result = (ep_size - num_experts % ep_size) % ep_size
-    assert result == expected, (
-        f"Formula failed for experts={num_experts}, ep_size={ep_size}: "
-        f"got {result}, expected {expected}"
+    from vllm.config.parallel import ParallelConfig
+
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=tp_size,
+        data_parallel_size=dp_size,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    # num_redundant_experts should be None before computation
+    assert parallel_config.eplb_config.num_redundant_experts is None
+
+    # Call the computation method
+    parallel_config.compute_eplb_num_redundant_experts(num_experts)
+
+    # Verify the computed value matches expected
+    assert parallel_config.eplb_config.num_redundant_experts == expected, (
+        f"Expected num_redundant_experts={expected} for "
+        f"num_experts={num_experts}, ep_size={tp_size * dp_size}, "
+        f"got {parallel_config.eplb_config.num_redundant_experts}"
     )
     # Verify divisibility constraint
-    assert (num_experts + result) % ep_size == 0, (
-        f"Divisibility check failed: ({num_experts} + {result}) % {ep_size} != 0"
+    ep_size = tp_size * dp_size
+    total = num_experts + parallel_config.eplb_config.num_redundant_experts
+    assert total % ep_size == 0, (
+        f"Divisibility check failed: ({num_experts} + "
+        f"{parallel_config.eplb_config.num_redundant_experts}) % {ep_size} != 0"
     )
+
+
+def test_eplb_num_redundant_experts_disabled():
+    """Test that num_redundant_experts defaults to 0 when EPLB is disabled."""
+    from vllm.config.parallel import ParallelConfig
+
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        data_parallel_size=1,
+        enable_expert_parallel=False,
+        enable_eplb=False,
+    )
+    # num_redundant_experts should be None before computation
+    assert parallel_config.eplb_config.num_redundant_experts is None
+
+    # Call the computation method
+    parallel_config.compute_eplb_num_redundant_experts(num_logical_experts=8)
+
+    # When EPLB is disabled, should default to 0
+    assert parallel_config.eplb_config.num_redundant_experts == 0
+
+
+def test_eplb_num_redundant_experts_explicit_value_preserved():
+    """Test that explicitly set num_redundant_experts is not overwritten."""
+    from vllm.config.parallel import EPLBConfig, ParallelConfig
+
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(num_redundant_experts=10),
+    )
+    # num_redundant_experts is explicitly set
+    assert parallel_config.eplb_config.num_redundant_experts == 10
+
+    # Call the computation method - should not override
+    parallel_config.compute_eplb_num_redundant_experts(num_logical_experts=8)
+
+    # Should still be the explicit value
+    assert parallel_config.eplb_config.num_redundant_experts == 10
