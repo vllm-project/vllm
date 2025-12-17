@@ -19,12 +19,14 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.model_executor.layers.fused_moe import (
+    FlashInferExperts,
     FusedMoE,
     FusedMoEActivationFormat,
     FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
+    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
@@ -32,8 +34,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+    FlashInferAllGatherMoEPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -685,28 +693,6 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
 
-def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute | None:
-    from vllm.model_executor.layers.fused_moe import (
-        FlashInferExperts,
-        TritonOrDeepGemmExperts,
-    )
-
-    _BACKEND_TO_KERNEL = {
-        Fp8MoeBackend.FLASHINFER_CUTLASS: FlashInferExperts,
-        Fp8MoeBackend.DEEPGEMM: TritonOrDeepGemmExperts,
-        Fp8MoeBackend.TRITON: TritonOrDeepGemmExperts,
-    }
-
-    if (
-        backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-        or backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
-        or backend == Fp8MoeBackend.MARLIN
-    ):
-        return None
-
-    return _BACKEND_TO_KERNEL[backend]
-
-
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
@@ -729,7 +715,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.fp8_backend = get_fp8_moe_backend(
             self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
         )
-        self.kernel = get_kernel(self.fp8_backend)
+
+        # NOTE(rob): in progress migrating all into this format.
+        self.kernel_cls: mk.FusedMoEPermuteExpertsUnpermute | None = None
+        if (
+            self.fp8_backend == Fp8MoEMethod.DEEPGEMM
+            or self.fp8_backend == Fp8MoEMethod.TRITON
+        ):
+            self.kernel_cls = TritonOrDeepGemmExperts
+        elif self.fp8_backend == Fp8MoEMethod.FLASHINFER_CUTLASS:
+            self.kernel_cls = FlashInferExperts
 
         self.marlin_input_dtype = None
         self.use_marlin = self.fp8_backend == Fp8MoeBackend.MARLIN
@@ -1067,22 +1062,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Initialize quant config.
         # TODO: make this a standard part of the lifecycle
         # after process_weights_after_loading
-        if self.kernel is None:
+        if self.kernel_cls is None:
             pass
         else:
             config = self.get_fused_moe_quant_config(layer)
             assert config is not None
             self.moe_quant_config = config
-            from vllm.model_executor.layers.fused_moe import (
-                FlashInferExperts,
-                TritonOrDeepGemmExperts,
-            )
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-                FlashInferAllGatherMoEPrepareAndFinalize,
-            )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
-            )
 
             if self.kernel is FlashInferExperts:
                 use_dp = self.moe.dp_size > 1
