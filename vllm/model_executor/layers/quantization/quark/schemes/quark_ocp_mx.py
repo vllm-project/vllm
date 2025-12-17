@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from fractions import Fraction
 from functools import cache, partial
-from typing import Any
+from typing import Any, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +28,8 @@ from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMPa
 from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
+from quark.torch.quantization.utils import even_round
+from quark.torch.utils.pack import Pack_fp4
 
 logger = init_logger(__name__)
 
@@ -168,6 +170,7 @@ class QuarkOCP_MX(QuarkScheme):
         self.qscheme = "per_group"
         self.weight_quant_spec = weight_quant_spec
         self.input_quant_spec = input_quant_spec
+        self.is_online_quant = is_online_quant
 
         self.weight_dtype = weight_quant_spec["dtype"].replace("fp", "mxfp")
         self.input_dtype = input_quant_spec["dtype"].replace("fp", "mxfp")
@@ -254,7 +257,22 @@ class QuarkOCP_MX(QuarkScheme):
     def get_min_capability(cls) -> int:
         return 70
 
+    def quant_to_ocp_mxfp4(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert weight.size(1) % OCP_MX_BLOCK_SIZE == 0
+        grouped_weight = weight.view(weight.size(0), weight.size(1) // OCP_MX_BLOCK_SIZE, OCP_MX_BLOCK_SIZE)
+        amax = abs(grouped_weight).max(dim=-1).values.unsqueeze(-1)
+        scale_float = even_round(max_abs=amax, dtype="fp4")
+        scale = (torch.log2(scale_float).round().to(torch.int16).clamp(-127, 127) + 127).to(torch.uint8)
+        pack_method = Pack_fp4(None, "fp4")
+        packed_weight = pack_method.pack(grouped_weight / scale_float, False).view(weight.size(0), -1)
+        return packed_weight, scale
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.is_online_quant:
+            quanted_weight, scale = self.quant_to_ocp_mxfp4(layer.weight.data)
+            layer.weight.data = quanted_weight
+            layer.weight_scale.data = scale
+        
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.emulate:
@@ -302,8 +320,8 @@ class QuarkOCP_MX(QuarkScheme):
         weight = PackedvLLMParameter(
             data=torch.empty(
                 output_size_per_partition,
-                self.get_packed_dim(input_size_per_partition, self.weight_dtype),
-                dtype=torch.uint8,
+                input_size_per_partition if self.is_online_quant else self.get_packed_dim(input_size_per_partition, self.weight_dtype),
+                dtype=params_dtype if self.is_online_quant else torch.uint8,
             ),
             input_dim=1,
             output_dim=0,
