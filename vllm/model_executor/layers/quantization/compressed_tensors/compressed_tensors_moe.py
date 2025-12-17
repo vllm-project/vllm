@@ -791,7 +791,7 @@ class CompressedTensorsW4A16Nvfp4MoeMethod(CompressedTensorsMoEMethod):
                 "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
-    def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(self) -> None:
         if self.use_marlin:
             return None
         else:
@@ -799,9 +799,7 @@ class CompressedTensorsW4A16Nvfp4MoeMethod(CompressedTensorsMoEMethod):
                 "CompressedTensorsW4A16Nvfp4MoeMethod only supports use_marlin=True."
             )
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> None:
         if self.use_marlin:
             return None
         else:
