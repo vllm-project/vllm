@@ -700,6 +700,7 @@ def get_kernel(backend: Fp8MoeBackend) -> FusedMoEPermuteExpertsUnpermute | None
     if (
         backend == Fp8MoeBackend.FLASHINFER_TRTLLM
         or backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
+        or backend == Fp8MoeBackend.MARLIN
     ):
         return None
 
