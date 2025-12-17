@@ -295,7 +295,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.exclude_log_deltas and not args.enable_log_outputs:
-        raise TypeError("Error: --exclude_log_deltas requires --enable-log-outputs")
+        raise TypeError("Error: --exclude-log-deltas requires --enable-log-outputs")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
