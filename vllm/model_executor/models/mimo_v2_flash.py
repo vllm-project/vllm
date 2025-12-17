@@ -94,7 +94,6 @@ class MiMoV2MLP(nn.Module):
 
 
 class MiMoV2MoE(nn.Module):
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -187,9 +186,7 @@ class MiMoV2MoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert hidden_states.dim() <= 2, (
-            "MiMoV2MoE only supports 1D or 2D inputs"
-        )
+        assert hidden_states.dim() <= 2, "MiMoV2MoE only supports 1D or 2D inputs"
         is_input_1d = hidden_states.dim() == 1
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -213,7 +210,6 @@ class MiMoV2MoE(nn.Module):
             final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.squeeze(0) if is_input_1d else final_hidden_states
-
 
 
 class MiMoV2Attention(nn.Module):
@@ -255,12 +251,12 @@ class MiMoV2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.k_size = self.num_kv_heads * self.head_dim
         self.v_size = self.num_kv_heads * self.v_head_dim
-        
+
         self.v_scale = v_scale
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -330,21 +326,18 @@ class MiMoV2Attention(nn.Module):
             v = v * self.v_scale
 
         v = v.view(-1, self.num_kv_heads, self.v_head_dim)
-        v = torch.nn.functional.pad(
-            v,
-            [0, self.head_dim - self.v_head_dim],
-            value=0
-        )
+        v = torch.nn.functional.pad(v, [0, self.head_dim - self.v_head_dim], value=0)
         v = v.view(-1, self.num_kv_heads * self.head_dim)
 
         attn_output = self.attn(q, k, v)
 
         attn_output = attn_output.view(-1, self.num_heads, self.head_dim)[
-            ..., :self.v_head_dim
+            ..., : self.v_head_dim
         ].reshape(-1, self.num_heads * self.v_head_dim)
 
         output, _ = self.o_proj(attn_output)
         return output
+
 
 class MiMoV2FlashDecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -416,9 +409,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 prefix=f"{prefix}.mlp",
             )
 
-        self.input_layernorm = RMSNorm(
-            config.hidden_size, eps=config.layernorm_epsilon
-        )
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.layernorm_epsilon
         )
@@ -440,9 +431,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -596,9 +585,9 @@ class MiMoV2Model(nn.Module):
                 if is_pp_missing_parameter(name_rewritten, self):
                     continue
 
-                if (name_rewritten.endswith(".bias")
-                        or name_rewritten.endswith("_bias")) \
-                        and name_rewritten not in params_dict:
+                if (
+                    name_rewritten.endswith(".bias") or name_rewritten.endswith("_bias")
+                ) and name_rewritten not in params_dict:
                     continue
 
                 if name_rewritten not in params_dict:
@@ -627,8 +616,9 @@ class MiMoV2Model(nn.Module):
                     continue
                 name_rewritten = name.replace(weight_name, param_name)
 
-                if (name_rewritten.endswith(".bias")
-                        and name_rewritten not in params_dict
+                if (
+                    name_rewritten.endswith(".bias")
+                    and name_rewritten not in params_dict
                 ):
                     continue
 
@@ -679,7 +669,6 @@ class MiMoV2Model(nn.Module):
 
 
 class MiMoV2FlashForCausalLM(nn.Module):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -687,9 +676,7 @@ class MiMoV2FlashForCausalLM(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.model = MiMoV2Model(
-            vllm_config=vllm_config, prefix=f"{prefix}.model"
-        )
+        self.model = MiMoV2Model(vllm_config=vllm_config, prefix=f"{prefix}.model")
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
@@ -728,7 +715,6 @@ class MiMoV2FlashForCausalLM(nn.Module):
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return hidden_states
-
 
     def compute_logits(
         self,
