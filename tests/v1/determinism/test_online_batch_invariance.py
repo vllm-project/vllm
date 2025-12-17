@@ -136,11 +136,9 @@ def _compare_bs1_vs_bsn_single_process(
 @skip_unsupported
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
-    backend: str, monkeypatch: pytest.MonkeyPatch
+    backend: str,
 ) -> None:
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    # Override backend for this test (and the RemoteOpenAIServer child process).
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
     model_name = resolve_model_name(backend)
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
@@ -156,6 +154,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     server_args: list[str] = [
         "--max-model-len=8192",
         "--max-num-seqs=32",
+        f"--attention-backend={backend}",
     ]
     if tp_size:
         server_args += ["-tp", tp_size]
