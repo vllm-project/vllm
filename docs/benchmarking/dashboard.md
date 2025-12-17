@@ -11,7 +11,6 @@ Use [vllm-ci-test-repo images](https://gallery.ecr.aws/q9t5s3a7/vllm-ci-test-rep
 For x86 CPU environment, please use the image with "-cpu" postfix. For AArch64 CPU environment, please use the image with "-arm64-cpu" postfix.
 
 Here is an example for docker run command for CPU. For GPUs skip setting the `ON_CPU` env var.
-> For AArch64 CPUs please append `-arm64-cpu` to the ECR URL instead of `-cpu`.
 
 ```bash
 export VLLM_COMMIT=1da94e673c257373280026f75ceb4effac80e892 # use full commit hash from the main branch
