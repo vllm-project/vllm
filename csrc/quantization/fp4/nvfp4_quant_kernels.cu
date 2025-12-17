@@ -55,7 +55,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
-  // SF layout parameter is constant for entire kernel.
+  // Precompute SF layout parameter (constant for entire kernel).
   int32_t const numKTiles = (numCols + 63) / 64;
 
   int sf_m = round_up<int>(numRows, 128);
