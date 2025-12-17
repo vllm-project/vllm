@@ -1064,7 +1064,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             if self.kernel_cls is FlashInferExperts:
-                self.mk = mk.FusedMoEModularKernel(
+                self.kernel = mk.FusedMoEModularKernel(
                     FlashInferAllGatherMoEPrepareAndFinalize(
                         use_dp=(self.moe.dp_size > 1),
                         use_deepseek_fp8_block_scale=self.block_quant,
@@ -1083,7 +1083,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 self.use_inplace = False
 
             elif self.kernel_cls is TritonOrDeepGemmExperts:
-                self.mk = mk.FusedMoEModularKernel(
+                self.kernel = mk.FusedMoEModularKernel(
                     MoEPrepareAndFinalizeNoEP(),
                     self.kernel_cls(
                         quant_config=self.moe_quant_config,
@@ -1320,7 +1320,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
         else:
-            result = self.mk(
+            result = self.kernel(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
