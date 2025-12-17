@@ -1319,6 +1319,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 input_dtype=self.marlin_input_dtype,
                 workspace=layer.workspace,
             )
+        elif self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+
+            result = fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+                quant_config=self.moe_quant_config,
+                allow_deep_gemm=False,
+                allow_cutlass_block_scaled_grouped_gemm=True,
+            )
         else:
             result = self.kernel(
                 x,
