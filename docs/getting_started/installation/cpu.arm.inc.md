@@ -39,6 +39,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
 
     # add them to LD_PRELOAD
     export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+    ```
 
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
 
@@ -130,6 +131,7 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 
     # add them to LD_PRELOAD
     export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+    ```
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
