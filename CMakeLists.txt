@@ -56,8 +56,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.9.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.9.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.9.1")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.9.1")
 
 #
 # Try to find python package with an executable that exactly matches
