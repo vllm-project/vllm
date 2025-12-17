@@ -502,10 +502,10 @@ class VllmConfig:
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
             kv_gb_per_rank = kv_offloading_size / num_kv_ranks
-            self.kv_transfer_config.kv_connector_extra_config = {
+            self.kv_transfer_config.kv_connector_extra_config.update({
                 "lmcache.local_cpu": True,
                 "lmcache.max_local_cpu_size": kv_gb_per_rank,
-            }
+            })
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
