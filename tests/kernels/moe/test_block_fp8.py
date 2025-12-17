@@ -137,7 +137,7 @@ def setup_cuda():
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(
-    M, N, K, E, topk, block_size, dtype, seed, monkeypatch
+    M, N, K, E, topk, block_size, dtype, seed, monkeypatch, workspace_init
 ):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
