@@ -308,12 +308,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         if cache_config.mamba_block_size is None:
             cache_config.mamba_block_size = model_config.max_model_len
 
-        # TODO(tdoublep): remove once cascade attention is supported
-        logger.info(
-            "Disabling cascade attention since it is not supported for hybrid models."
-        )
-        model_config.disable_cascade_attn = True
-
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
