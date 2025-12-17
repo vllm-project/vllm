@@ -84,11 +84,13 @@ class ExecutionContext:
     """
 
     # Prefill phase statistics
+    num_prefill_requests: int = 0
     prefill_num_tokens: int = 0  # sum of num_tokens for prefill requests
     prefill_context_len: int = 0  # sum of context_len for prefill requests
     prefill_token_context_product: int = 0  # sum of (num_tokens * context_len)
 
     # Decode phase statistics
+    num_decode_requests: int = 0
     decode_num_tokens: int = 0  # sum of num_tokens for decode requests
     decode_context_len: int = 0  # sum of context_len for decode requests
     decode_token_context_product: int = 0  # sum of (num_tokens * context_len)
@@ -96,10 +98,12 @@ class ExecutionContext:
     def add(self, num_tokens: int, context_len: int, is_prefill: bool) -> None:
         """Add a single request's statistics to this batch context."""
         if is_prefill:
+            self.num_prefill_requests += 1
             self.prefill_num_tokens += num_tokens
             self.prefill_context_len += context_len
             self.prefill_token_context_product += num_tokens * context_len
         else:
+            self.num_decode_requests += 1
             self.decode_num_tokens += num_tokens
             self.decode_context_len += context_len
             self.decode_token_context_product += num_tokens * context_len
@@ -1039,8 +1043,6 @@ class ModelMetrics:
 
         # Build a single batch context
         ctx = ExecutionContext()
-        num_prefill_requests = 0
-        num_decode_requests = 0
 
         # Process new requests (these are in prefill phase)
         for new_req in scheduler_output.scheduled_new_reqs:
@@ -1053,7 +1055,6 @@ class ModelMetrics:
             # num_computed_tokens represents previously computed tokens in the sequence
             context_len = new_req.num_computed_tokens + num_tokens
             ctx.add(num_tokens, context_len, is_prefill=True)
-            num_prefill_requests += 1
 
         # Process cached requests (continuing requests)
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1070,10 +1071,6 @@ class ModelMetrics:
             # unless they're doing chunked prefill (num_tokens > 1)
             is_prefill = num_tokens > 1
             ctx.add(num_tokens, context_len, is_prefill)
-            if is_prefill:
-                num_prefill_requests += 1
-            else:
-                num_decode_requests += 1
 
         if log_verbose(self.vllm_config):
             num_flops_breakdown = self.get_num_flops_breakdown(ctx, True)
@@ -1084,8 +1081,8 @@ class ModelMetrics:
                 sum(read_bytes_breakdown.values()),
                 sum(write_bytes_breakdown.values()),
                 time.monotonic() - t0,
-                num_prefill_requests,
-                num_decode_requests,
+                ctx.num_prefill_requests,
+                ctx.num_decode_requests,
                 asdict(ctx),
                 num_flops_breakdown,
                 read_bytes_breakdown,
