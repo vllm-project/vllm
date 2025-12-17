@@ -1193,11 +1193,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             pad_k_bytes = getattr(layer, "execution_padding_k_bytes", 0)
             output_shape = [x.shape[0], layer.output_size_per_partition]
 
-            logger.info(
-                f"[FP4_DEBUG] Pre-Pad: x_fp4={x_fp4.shape}, "
-                f"x_blockscale={x_blockscale.shape}, pad_k_bytes={pad_k_bytes}"
-            )
-
             x_fp4 = torch.nn.functional.pad(x_fp4, (0, pad_k_bytes)).contiguous()
 
             # If we pad x_fp4 so we maybe need to add pad x_block scale as well
@@ -1213,18 +1208,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
             if original_scale_blocks < required_scale_blocks:
                 pad_scales = required_scale_blocks - original_scale_blocks
-                logger.info(
-                    f"[FP4_DEBUG] Padding Scales: original={original_scale_blocks}, "
-                    f"required={required_scale_blocks}, pad={pad_scales}"
-                )
                 x_blockscale = torch.nn.functional.pad(
                     x_blockscale, (0, pad_scales), value=0.0
                 ).contiguous()
 
-            logger.info(
-                f"[FP4_DEBUG] Final: x_fp4={x_fp4.shape}, "
-                f"x_blockscale={x_blockscale.shape}"
-            )
 
             mm_args = (
                 x_fp4,
