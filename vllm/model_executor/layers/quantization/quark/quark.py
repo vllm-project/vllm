@@ -43,7 +43,7 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
-quant_scheme_quant_config_map = {
+quant_scheme_quant_config_map = {  # TODO: hangy move it into Quark
     "quark_online_fp8_ptpc": {
         "is_online_quant": True,
         "algo_config": None,

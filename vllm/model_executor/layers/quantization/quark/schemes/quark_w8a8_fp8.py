@@ -55,7 +55,7 @@ class QuarkW8A8Fp8(QuarkScheme):
         # lovelace and up
         return 89
     
-    def quant_per_tensor(
+    def quant_per_tensor(  # TODO: hangy use vllm kernels
         self, weight: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         splited_weights = weight.split(self.output_partition_sizes, dim=0)

@@ -258,6 +258,9 @@ class QuarkOCP_MX(QuarkScheme):
         return 70
 
     def quant_to_ocp_mxfp4(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO: hangy use quark api
+        # TODO: haoyang perf of online quant and inference and accuracy test result
+        
         assert weight.size(1) % OCP_MX_BLOCK_SIZE == 0
         grouped_weight = weight.view(weight.size(0), weight.size(1) // OCP_MX_BLOCK_SIZE, OCP_MX_BLOCK_SIZE)
         amax = abs(grouped_weight).max(dim=-1).values.unsqueeze(-1)
@@ -265,7 +268,7 @@ class QuarkOCP_MX(QuarkScheme):
         scale = (torch.log2(scale_float).round().to(torch.int16).clamp(-127, 127) + 127).to(torch.uint8)
         pack_method = Pack_fp4(None, "fp4")
         packed_weight = pack_method.pack(grouped_weight / scale_float, False).view(weight.size(0), -1)
-        return packed_weight, scale
+        return packed_weight, scale.squeeze(-1)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.is_online_quant:

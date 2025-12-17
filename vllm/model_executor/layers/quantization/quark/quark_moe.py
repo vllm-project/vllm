@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import Any, Tuple
 
 import torch
 
@@ -37,6 +37,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from quark.torch.quantization.utils import even_round
+from quark.torch.utils.pack import Pack_fp4
 
 logger = init_logger(__name__)
 
@@ -65,9 +67,9 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         input_config = layer_quant_config.get("input_tensors")
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
+            return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config, quant_config.quant_config.get("is_online_quant", False))
         elif quant_config._is_ocp_mx(weight_config, input_config):
-            return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
+            return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config, quant_config.quant_config.get("is_online_quant", False))
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
@@ -78,6 +80,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         input_config: dict[str, Any],
         moe: FusedMoEConfig,
+        is_online_quant: bool = False
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
@@ -402,10 +405,12 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         weight_config: dict[str, Any],
         input_config: dict[str, Any],
         moe: FusedMoEConfig,
+        is_online_quant: bool = False
     ):
         super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
+        self.is_online_quant = is_online_quant
 
         weight_qscheme = self.weight_quant.get("qscheme")
         input_qscheme = self.input_quant.get("qscheme")
@@ -476,15 +481,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
         )
 
-        params_dtype = torch.uint8
-
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                self.get_packed_dim(hidden_size, self.weight_dtype),
-                dtype=params_dtype,
+                hidden_size if self.is_online_quant else self.get_packed_dim(hidden_size, self.weight_dtype),
+                dtype=params_dtype if self.is_online_quant else torch.uint8,
             ),
             requires_grad=False,
         )
@@ -496,8 +499,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             torch.empty(
                 num_experts,
                 hidden_size,
-                self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
-                dtype=params_dtype,
+                intermediate_size_per_partition if self.is_online_quant else self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
+                dtype=params_dtype if self.is_online_quant else torch.uint8,
             ),
             requires_grad=False,
         )
@@ -511,7 +514,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // OCP_MX_BLOCK_SIZE,
-                dtype=params_dtype,
+                dtype=torch.uint8,
             ),
             requires_grad=False,
         )
@@ -520,7 +523,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // OCP_MX_BLOCK_SIZE,
-                dtype=params_dtype,
+                dtype=torch.uint8,
             ),
             requires_grad=False,
         )
@@ -530,7 +533,26 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
+    def quant_to_ocp_mx(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        sizes = weight.shape
+        assert sizes[-1] % OCP_MX_BLOCK_SIZE == 0
+        assert self.weight_dtype == "mxfp4", f"Online mx quantization only supports mxfp4 for now"
+        grouped_weight = weight.view(sizes[0], sizes[1], sizes[2] // OCP_MX_BLOCK_SIZE, OCP_MX_BLOCK_SIZE)
+        amax = abs(grouped_weight).max(dim=-1).values.unsqueeze(-1)
+        scale_float = even_round(max_abs=amax, dtype="fp4")
+        scale = (torch.log2(scale_float).round().to(torch.int16).clamp(-127, 127) + 127).to(torch.uint8)
+        pack_method = Pack_fp4(None, "fp4")
+        packed_weight = pack_method.pack(grouped_weight / scale_float, False).view(sizes[0], sizes[1], -1)
+        return packed_weight, scale.squeeze(-1)
+
     def process_weights_after_loading(self, layer):
+        if self.is_online_quant:
+            w13_weight, w13_weight_scale = self.quant_to_ocp_mx(layer.w13_weight.data)
+            layer.w13_weight.data = w13_weight
+            layer.w13_weight_scale.data = w13_weight_scale
+            w2_weight, w2_weight_scale = self.quant_to_ocp_mx(layer.w2_weight.data)
+            layer.w2_weight.data = w2_weight
+            layer.w2_weight_scale.data = w2_weight_scale
         if self.emulate:
             return
 
