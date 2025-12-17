@@ -32,15 +32,28 @@ class DeepGemmQuantScaleFMT(Enum):
     # element contains 4 scale values.
     UE8M0 = 2
 
-    @staticmethod
-    def from_oracle() -> "DeepGemmQuantScaleFMT":
+    _oracle_cache: "DeepGemmQuantScaleFMT | None" = None
+
+    @classmethod
+    def init_oracle_cache(cls) -> "DeepGemmQuantScaleFMT":
+        """Initialize the oracle decision and store it in the class cache"""
+
         if not is_deep_gemm_e8m0_used():
-            return DeepGemmQuantScaleFMT.FLOAT32
-        return (
-            DeepGemmQuantScaleFMT.UE8M0
+            cls._oracle_cache = cls.FLOAT32  # type: ignore
+            return cls._oracle_cache
+
+        cls._oracle_cache = (  # type: ignore
+            cls.UE8M0
             if current_platform.is_device_capability_family(100)
-            else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+            else cls.FLOAT32_CEIL_UE8M0
         )
+        return cls._oracle_cache
+
+    @classmethod
+    def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
+        """Return the pre-initialized oracle decision"""
+        assert cls._oracle_cache is not None
+        return cls._oracle_cache
 
 
 @functools.cache
@@ -149,6 +162,7 @@ def _lazy_init() -> None:
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
     )
+    DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
 def get_num_sms() -> int:
