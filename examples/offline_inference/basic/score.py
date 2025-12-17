@@ -4,7 +4,10 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.config import AttentionConfig
+from vllm.platforms import current_platform
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():
@@ -20,6 +23,11 @@ def parse_args():
 
 
 def main(args: Namespace):
+    if current_platform.is_rocm():
+        args.attention_config = AttentionConfig(
+            backend=AttentionBackendEnum.FLEX_ATTENTION
+        )
+
     # Sample prompts.
     text_1 = "What is the capital of France?"
     texts_2 = [

@@ -2,20 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
-from dataclasses import dataclass, fields
-from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
-                    Protocol, Set, Tuple, Type, TypeVar)
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
-from vllm.multimodal import MultiModalPlaceholderMap
-
 if TYPE_CHECKING:
-    from vllm.worker.model_runner_base import (ModelRunnerBase,
-                                               ModelRunnerInputBase,
-                                               ModelRunnerInputBuilderBase)
+    from vllm.config.cache import CacheDType
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 
 class AttentionType:
@@ -23,22 +19,37 @@ class AttentionType:
     Attention type.
     Use string to be compatible with `torch.compile`.
     """
-    # Decoder attention between previous layer Q/K/V
+
     DECODER = "decoder"
-    # Encoder attention between previous layer Q/K/V for encoder-decoder
+    """Decoder attention between previous layer Q/K/V."""
     ENCODER = "encoder"
-    # Encoder attention between previous layer Q/K/V
+    """Encoder attention between previous layer Q/K/V for encoder-decoder."""
     ENCODER_ONLY = "encoder_only"
-    # Attention between dec. Q and enc. K/V for encoder-decoder
+    """Encoder attention between previous layer Q/K/V."""
     ENCODER_DECODER = "encoder_decoder"
+    """Attention between dec. Q and enc. K/V for encoder-decoder."""
+
+
+class MultipleOf:
+    base: int
+
+    def __init__(self, base: int):
+        self.base = base
 
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
+
     # For some attention backends, we allocate an output tensor before
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(1)]
 
     @staticmethod
     @abstractmethod
@@ -47,26 +58,12 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_impl_cls() -> Type["AttentionImpl"]:
+    def get_impl_cls() -> type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> Type["AttentionMetadata"]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_state_cls() -> Type["AttentionState"]:
-        raise NotImplementedError
-
-    @classmethod
-    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
-        return cls.get_metadata_cls()(*args, **kwargs)
-
-    @staticmethod
-    @abstractmethod
-    def get_builder_cls() -> Type["AttentionMetadataBuilder"]:
+    def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 
     @staticmethod
@@ -76,167 +73,204 @@ class AttentionBackend(ABC):
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[int, ...]:
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> Tuple[int, ...]:
-        raise NotImplementedError
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        """
+        Get the physical (memory layout) ordering of the kv cache dimensions.
+        e.g. if the KV cache shape is
+        [2, num_blocks, block_size, num_heads, head_size],
+        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
+        ordering of dimensions is
+        [num_blocks, num_heads, 2, block_size, head_size].
 
-    @staticmethod
-    @abstractmethod
-    def swap_blocks(
-        src_kv_cache: torch.Tensor,
-        dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        raise NotImplementedError
+        If this function is unimplemented / raises NotImplementedError,
+        the physical layout of the KV cache will match the logical shape.
 
-    @staticmethod
-    @abstractmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
+        Args:
+            include_num_layers_dimension: if True, includes an additional
+                num_layers dimension, which is assumed to be prepended
+                to the logical KV cache shape.
+                With the above example, a return value (2, 4, 0, 1, 3, 5)
+                corresponds to
+                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
+
+                If an additional dimension is NOT included in the returned
+                tuple, the physical layout will not include a layers dimension.
+
+        Returns:
+            A tuple of ints which is a permutation of range(len(shape)).
+        """
         raise NotImplementedError
 
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
 
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
-@dataclass
+    @classmethod
+    def supports_head_size(cls, head_size: int) -> bool:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def supports_dtype(cls, dtype: torch.dtype) -> bool:
+        return dtype in cls.supported_dtypes
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
+        if kv_cache_dtype is None:
+            return True
+        return (not cls.supported_kv_cache_dtypes) or (
+            kv_cache_dtype in cls.supported_kv_cache_dtypes
+        )
+
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        from vllm.config.cache import BlockSize
+
+        if block_size is None:
+            return True
+
+        valid_sizes = get_args(BlockSize)
+        if block_size not in valid_sizes:
+            return False
+
+        supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_kernel_block_sizes:
+            return True
+
+        for supported_size in supported_kernel_block_sizes:
+            if isinstance(supported_size, MultipleOf):
+                supported_size = supported_size.base
+            # With hybrid_blocks feature, the framework-level block size
+            # only needs to be a multiple of the kernel's requirement,
+            # even if the kernel requires a fixed block_size.
+            if block_size % supported_size == 0:
+                return True
+        return False
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return False
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """Check if backend supports a given attention type.
+
+        By default, only supports decoder attention.
+        Backends should override this to support other attention types.
+        """
+        return attn_type == AttentionType.DECODER
+
+    @classmethod
+    def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
+        return True
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: "DeviceCapability",
+    ) -> str | None:
+        return None
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: "CacheDType | None",
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: "DeviceCapability",
+        attn_type: str,
+    ) -> list[str]:
+        invalid_reasons = []
+        if not cls.supports_head_size(head_size):
+            invalid_reasons.append("head_size not supported")
+        if not cls.supports_dtype(dtype):
+            invalid_reasons.append("dtype not supported")
+        if not cls.supports_kv_cache_dtype(kv_cache_dtype):
+            invalid_reasons.append("kv_cache_dtype not supported")
+        if not cls.supports_block_size(block_size):
+            invalid_reasons.append("block_size not supported")
+        if use_mm_prefix and not cls.supports_mm_prefix():
+            invalid_reasons.append(
+                "partial multimodal token full attention not supported"
+            )
+        if use_mla != cls.is_mla():
+            if use_mla:
+                invalid_reasons.append("MLA not supported")
+            else:
+                invalid_reasons.append("non-MLA not supported")
+        if has_sink and not cls.supports_sink():
+            invalid_reasons.append("sink setting not supported")
+        if use_sparse != cls.is_sparse():
+            if use_sparse:
+                invalid_reasons.append("sparse not supported")
+            else:
+                invalid_reasons.append("non-sparse not supported")
+        if not cls.supports_compute_capability(device_capability):
+            invalid_reasons.append("compute capability not supported")
+        if not cls.supports_attn_type(attn_type):
+            invalid_reasons.append(f"attention type {attn_type} not supported")
+        combination_reason = cls.supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            device_capability,
+        )
+        if combination_reason is not None:
+            invalid_reasons.append(combination_reason)
+        return invalid_reasons
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return None
+
+
 class AttentionMetadata:
-    """Attention metadata for prefill and decode batched together."""
-    # Total number of prefill requests.
-    num_prefills: int
-    # Number of prefill tokens.
-    num_prefill_tokens: int
-    # Number of decode tokens. Note that it is equivalent to the number of
-    # decode requests.
-    num_decode_tokens: int
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
-
-    # The index maps that relate multi-modal embeddings to the corresponding
-    # placeholders.
-    #
-    # N.B. These aren't really related to attention and don't belong on this
-    # type -- this is just a temporary solution to make them available to
-    # `model_executable`.
-    multi_modal_placeholder_index_maps: Optional[Dict[
-        str, MultiModalPlaceholderMap.IndexMap]]
-
-    # Enable/disable KV scales calculation. This is so that we can disable the
-    # calculation until after prefill and cuda graph capture.
-    enable_kv_scales_calculation: bool
-
-    @property
-    @abstractmethod
-    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
-        """Return the attention metadata that's required to run prefill
-        attention."""
-        pass
-
-    @property
-    @abstractmethod
-    def decode_metadata(self) -> Optional["AttentionMetadata"]:
-        """Return the attention metadata that's required to run decode
-        attention."""
-        pass
-
-    def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
-                        ) -> Dict[str, Any]:
-        """Similar to dataclasses.asdict, but avoids deepcopying."""
-        if skip_fields is None:
-            skip_fields = set()
-        # Note that if we add dataclasses as fields, they will need
-        # similar handling.
-        return {
-            field.name: getattr(self, field.name)
-            for field in fields(self) if field.name not in skip_fields
-        }
+    pass
 
 
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-class AttentionState(ABC, Generic[T]):
-    """Holds attention backend-specific objects reused during the
-    lifetime of the model runner."""
-
-    @abstractmethod
-    def __init__(self, runner: "ModelRunnerBase"):
-        ...
-
-    @abstractmethod
-    @contextmanager
-    def graph_capture(self, max_batch_size: int):
-        """Context manager used when capturing CUDA graphs."""
-        yield
-
-    @abstractmethod
-    def graph_clone(self, batch_size: int) -> "AttentionState[T]":
-        """Clone attention state to save in CUDA graph metadata."""
-        ...
-
-    @abstractmethod
-    def graph_capture_get_metadata_for_batch(
-            self,
-            batch_size: int,
-            is_encoder_decoder_model: bool = False) -> T:
-        """Get attention metadata for CUDA graph capture of batch_size."""
-        ...
-
-    @abstractmethod
-    def get_graph_input_buffers(
-            self,
-            attn_metadata: T,
-            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
-        """Get attention-specific input buffers for CUDA graph capture."""
-        ...
-
-    @abstractmethod
-    def prepare_graph_input_buffers(
-            self,
-            input_buffers: Dict[str, Any],
-            attn_metadata: T,
-            is_encoder_decoder_model: bool = False) -> None:
-        """In-place modify input buffers dict for CUDA graph replay."""
-        ...
-
-    @abstractmethod
-    def begin_forward(self, model_input: "ModelRunnerInputBase") -> None:
-        """Prepare state for forward pass."""
-        ...
-
-
-class AttentionMetadataBuilder(ABC, Generic[T]):
-    """Abstract class for attention metadata builders."""
-
-    @abstractmethod
-    def __init__(self, input_builder: "ModelRunnerInputBuilderBase") -> None:
-        """Create the builder, remember some configuration and parameters."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def prepare(self) -> None:
-        """Prepare for one batch."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> T:
-        """Build attention metadata with on-device tensors."""
-        raise NotImplementedError
-
-
 class AttentionLayer(Protocol):
-
     _q_scale: torch.Tensor
     _k_scale: torch.Tensor
     _v_scale: torch.Tensor
@@ -252,36 +286,69 @@ class AttentionLayer(Protocol):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
 
 class AttentionImpl(ABC, Generic[T]):
-
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
+
+    # Whether the attention impl supports Prefill Context Parallelism.
+    supports_pcp: bool = False
+    # Whether the attention impl(or ops) supports MTP
+    # when cp_kv_cache_interleave_size > 1
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = False
 
     # some attention backends might not always want to return lse
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
 
+    # Whether this attention implementation supports pre-quantized query input.
+    # When True, the attention layer will quantize queries before passing them
+    # to this backend, allowing torch.compile to fuse the quantization with
+    # previous operations. This is typically supported when using FP8 KV cache
+    # with compatible attention kernels (e.g., TRT-LLM).
+    # Subclasses should set this in __init__.
+    # TODO add support to more backends:
+    # https://github.com/vllm-project/vllm/issues/25584
+    supports_quant_query_input: bool = False
+
     dcp_world_size: int
     dcp_rank: int
+
+    pcp_world_size: int
+    pcp_rank: int
+
+    total_cp_world_size: int
+    total_cp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
         self = super().__new__(cls)
         try:
             from vllm.distributed.parallel_state import get_dcp_group
+
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.need_to_return_lse_for_decode = self.dcp_world_size > 1 \
-            and self.can_return_lse_for_decode
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
+        self.need_to_return_lse_for_decode = (
+            self.dcp_world_size > 1 and self.can_return_lse_for_decode
+        )
         return self
 
     @abstractmethod
@@ -290,13 +357,13 @@ class AttentionImpl(ABC, Generic[T]):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int | None = None,
+        alibi_slopes: list[float] | None = None,
+        sliding_window: int | None = None,
         kv_cache_dtype: str = "auto",
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -309,13 +376,13 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -326,8 +393,35 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        pass
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+    @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: "ColumnParallelLinear",
+        indexer: object | None = None,
+    ) -> None:
+        raise NotImplementedError
 
     @abstractmethod
     def forward(
@@ -338,9 +432,9 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         k_pe: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

@@ -34,7 +34,7 @@ llm = LLM(
     model=model_id,
     dtype=torch.bfloat16,
     trust_remote_code=True,
-    quantization="bitblas"
+    quantization="bitblas",
 )
 ```
 
@@ -53,6 +53,6 @@ llm = LLM(
         dtype=torch.float16,
         trust_remote_code=True,
         quantization="bitblas",
-        max_model_len=1024
+        max_model_len=1024,
     )
     ```

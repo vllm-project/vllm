@@ -1,243 +1,145 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-from contextlib import contextmanager
-from dataclasses import dataclass
 from functools import cache
-from typing import Generator, Optional, Union
+from typing import NamedTuple, cast, get_args
 
 import torch
 
-import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
+from vllm.attention.backends.registry import (
+    MAMBA_TYPE_TO_BACKEND_MAP,
+    MambaAttentionBackendEnum,
+)
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.platforms import _Backend, current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
 
-def backend_name_to_enum(backend_name: str) -> Optional[_Backend]:
-    """
-    Convert a string backend name to a _Backend enum value.
+class AttentionSelectorConfig(NamedTuple):
+    head_size: int
+    dtype: torch.dtype
+    kv_cache_dtype: CacheDType | None
+    block_size: int | None
+    use_mla: bool = False
+    has_sink: bool = False
+    use_sparse: bool = False
+    use_mm_prefix: bool = False
+    attn_type: str = AttentionType.DECODER
 
-    Returns:
-    * _Backend: enum value if backend_name is a valid in-tree type
-    * None: otherwise it's an invalid in-tree type or an out-of-tree platform is
-            loaded.
-    """
-    assert backend_name is not None
-    return _Backend[backend_name] if backend_name in _Backend.__members__ else \
-          None
-
-
-def get_env_variable_attn_backend() -> Optional[_Backend]:
-    '''
-    Get the backend override specified by the vLLM attention
-    backend environment variable, if one is specified.
-
-    Returns:
-
-    * _Backend enum value if an override is specified
-    * None otherwise
-    '''
-    backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return (None
-            if backend_name is None else backend_name_to_enum(backend_name))
-
-
-# Global state allows a particular choice of backend
-# to be forced, overriding the logic which auto-selects
-# a backend based on system & workload configuration
-# (default behavior if this variable is None)
-#
-# THIS SELECTION TAKES PRECEDENCE OVER THE
-# VLLM_ATTENTION_BACKEND ENVIRONMENT VARIABLE
-forced_attn_backend: Optional[_Backend] = None
-
-
-def global_force_attn_backend(attn_backend: Optional[_Backend]) -> None:
-    '''
-    Force all attention operations to use a specified backend.
-
-    Passing `None` for the argument re-enables automatic
-    backend selection.,
-
-    Arguments:
-
-    * attn_backend: backend selection (None to revert to auto)
-    '''
-    global forced_attn_backend
-    forced_attn_backend = attn_backend
-
-
-def get_global_forced_attn_backend() -> Optional[_Backend]:
-    '''
-    Get the currently-forced choice of attention backend,
-    or None if auto-selection is currently enabled.
-    '''
-    return forced_attn_backend
-
-
-@dataclass(frozen=True)
-class _IsSupported:
-    can_import: bool
-    head_size: bool
-    dtype: bool
-
-    def __bool__(self) -> bool:
-        return self.can_import and self.head_size and self.dtype
-
-
-def is_attn_backend_supported(
-    attn_backend: Union[str, type[AttentionBackend]],
-    head_size: int,
-    dtype: torch.dtype,
-    *,
-    allow_import_error: bool = True,
-) -> _IsSupported:
-    if isinstance(attn_backend, str):
-        try:
-            attn_backend = resolve_obj_by_qualname(attn_backend)
-        except ImportError:
-            if not allow_import_error:
-                raise
-
-            return _IsSupported(can_import=False, head_size=False, dtype=False)
-
-    assert isinstance(attn_backend, type)
-
-    # TODO: Update the interface once V0 is removed
-    if get_supported_head_sizes := getattr(attn_backend,
-                                           "get_supported_head_sizes", None):
-        is_head_size_supported = head_size in get_supported_head_sizes()
-    elif validate_head_size := getattr(attn_backend, "validate_head_size",
-                                       None):
-        try:
-            validate_head_size(head_size)
-            is_head_size_supported = True
-        except Exception:
-            is_head_size_supported = False
-    else:
-        raise NotImplementedError(f"{attn_backend.__name__} does not support "
-                                  "head size validation")
-
-    if get_supported_dtypes := getattr(attn_backend, "get_supported_dtypes",
-                                       None):
-        is_dtype_supported = dtype in get_supported_dtypes()
-    else:
-        raise NotImplementedError(f"{attn_backend.__name__} does not support "
-                                  "dtype validation")
-
-    return _IsSupported(
-        can_import=True,
-        head_size=is_head_size_supported,
-        dtype=is_dtype_supported,
-    )
+    def __repr__(self):
+        return (
+            f"AttentionSelectorConfig(head_size={self.head_size}, "
+            f"dtype={self.dtype}, "
+            f"kv_cache_dtype={self.kv_cache_dtype}, "
+            f"block_size={self.block_size}, "
+            f"use_mla={self.use_mla}, "
+            f"has_sink={self.has_sink}, "
+            f"use_sparse={self.use_sparse}, "
+            f"use_mm_prefix={self.use_mm_prefix}, "
+            f"attn_type={self.attn_type})"
+        )
 
 
 def get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: Optional[str],
-    block_size: int,
-    is_attention_free: bool = False,
+    kv_cache_dtype: str | None,
+    block_size: int | None,
     use_mla: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
+    use_mm_prefix: bool = False,
+    attn_type: str | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-    # Accessing envs.* behind an @lru_cache decorator can cause the wrong
-    # value to be returned from the cache if the value changes between calls.
-    # To avoid this, we read envs.VLLM_USE_V1 here and pass it explicitly to the
-    # private function.
-    return _cached_get_attn_backend(
+
+    if kv_cache_dtype is not None:
+        valid_cache_dtypes = get_args(CacheDType)
+        assert kv_cache_dtype in valid_cache_dtypes, (
+            f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
+            f"Valid values are: {valid_cache_dtypes}"
+        )
+
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    backend_enum = vllm_config.attention_config.backend
+
+    attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype=cast(CacheDType | None, kv_cache_dtype),
         block_size=block_size,
-        is_attention_free=is_attention_free,
-        use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
         has_sink=has_sink,
+        use_sparse=use_sparse,
+        use_mm_prefix=use_mm_prefix,
+        attn_type=attn_type or AttentionType.DECODER,
+    )
+
+    return _cached_get_attn_backend(
+        backend=backend_enum,
+        attn_selector_config=attn_selector_config,
     )
 
 
 @cache
 def _cached_get_attn_backend(
-    head_size: int,
-    dtype: torch.dtype,
-    kv_cache_dtype: Optional[str],
-    block_size: int,
-    is_attention_free: bool,
-    use_v1: bool = False,
-    use_mla: bool = False,
-    has_sink: bool = False,
+    backend,
+    attn_selector_config: AttentionSelectorConfig,
 ) -> type[AttentionBackend]:
-    # If there are no attention layers (e.g. we are running Mamba),
-    # use the placeholder NO_ATTENTION
-    if is_attention_free:
-        from vllm.attention.backends.placeholder_attn import (
-            PlaceholderAttentionBackend)
-        return PlaceholderAttentionBackend
+    from vllm.platforms import current_platform
 
-    # Check whether a particular choice of backend was
-    # previously forced.
-    #
-    # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
-    # ENVIRONMENT VARIABLE.
-    selected_backend = None
-    backend_by_global_setting: Optional[_Backend] = (
-        get_global_forced_attn_backend())
-    if backend_by_global_setting is not None:
-        selected_backend = backend_by_global_setting
-    else:
-        # Check the environment variable and override if specified
-        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
-        if backend_by_env_var is not None:
-            selected_backend = backend_name_to_enum(backend_by_env_var)
-            if selected_backend is None:
-                raise ValueError(
-                    f"Invalid attention backend: '{backend_by_env_var}'. "
-                    f"Valid backends are: {list(_Backend.__members__.keys())}")
-
-    # get device-specific attn_backend
     attention_cls = current_platform.get_attn_backend_cls(
-        selected_backend, head_size, dtype, kv_cache_dtype, block_size, use_v1,
-        use_mla, has_sink)
+        backend,
+        attn_selector_config=attn_selector_config,
+    )
     if not attention_cls:
         raise ValueError(
-            f"Invalid attention backend for {current_platform.device_name}")
-    return resolve_obj_by_qualname(attention_cls)
+            f"Invalid attention backend for {current_platform.device_name}"
+        )
+    backend = resolve_obj_by_qualname(attention_cls)
+
+    # Adjust kv cache layout if the selected backend requires a specific one
+    required_layout = backend.get_required_kv_cache_layout()
+    if required_layout is not None:
+        from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+        set_kv_cache_layout(required_layout)
+        logger.info(
+            "Using %s KV cache layout for %s backend.",
+            required_layout,
+            backend.get_name(),
+        )
+
+    return backend
 
 
-@contextmanager
-def global_force_attn_backend_context_manager(
-        attn_backend: _Backend) -> Generator[None, None, None]:
-    '''
-    Globally force a vLLM attention backend override within a
-    context manager, reverting the global attention backend
-    override to its prior state upon exiting the context
-    manager.
+def get_mamba_attn_backend(
+    mamba_type: str,
+) -> type[AttentionBackend]:
+    """Select which mamba attention backend to use and lazily import it."""
+    return _cached_get_mamba_attn_backend(mamba_type)
 
-    Arguments:
 
-    * attn_backend: attention backend to force
+@cache
+def _cached_get_mamba_attn_backend(
+    mamba_type: str,
+) -> type[AttentionBackend]:
+    assert mamba_type and isinstance(mamba_type, str)
 
-    Returns:
-
-    * Generator
-    '''
-
-    # Save the current state of the global backend override (if any)
-    original_value = get_global_forced_attn_backend()
-
-    # Globally force the new backend override
-    global_force_attn_backend(attn_backend)
-
-    # Yield control back to the enclosed code block
+    selected_backend = None
     try:
-        yield
-    finally:
-        # Revert the original global backend override, if any
-        global_force_attn_backend(original_value)
+        backend_name = MAMBA_TYPE_TO_BACKEND_MAP[mamba_type]
+        selected_backend = MambaAttentionBackendEnum[backend_name]
+    except KeyError as e:
+        raise ValueError(
+            f"Invalid mamba attention backend type: '{backend_name}'. Valid "
+            f"backends are: {list(MambaAttentionBackendEnum.__members__.keys())}"
+        ) from e
+
+    mamba_attn_backend = selected_backend.get_class()
+    return mamba_attn_backend

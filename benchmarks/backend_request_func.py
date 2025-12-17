@@ -8,7 +8,6 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional, Union
 
 import aiohttp
 import huggingface_hub.constants
@@ -28,13 +27,13 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
-    model_name: Optional[str] = None
-    logprobs: Optional[int] = None
-    extra_body: Optional[dict] = None
-    multi_modal_content: Optional[dict | list[dict]] = None
+    model_name: str | None = None
+    logprobs: int | None = None
+    extra_body: dict | None = None
+    multi_modal_content: dict | list[dict] | None = None
     ignore_eos: bool = False
-    language: Optional[str] = None
-    request_id: Optional[str] = None
+    language: str | None = None
+    request_id: str | None = None
 
 
 @dataclass
@@ -52,7 +51,7 @@ class RequestFuncOutput:
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -133,7 +132,7 @@ async def async_request_tgi(
 
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -204,7 +203,7 @@ async def async_request_trt_llm(
 
 async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -267,7 +266,7 @@ async def async_request_deepspeed_mii(
 
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -367,7 +366,7 @@ async def async_request_openai_completions(
 
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("chat/completions", "profile")), (
@@ -476,7 +475,7 @@ async def async_request_openai_chat_completions(
 
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
-    pbar: Optional[tqdm] = None,
+    pbar: tqdm | None = None,
 ) -> RequestFuncOutput:
     # Lazy import without PlaceholderModule to avoid vllm dep.
     import soundfile
@@ -610,7 +609,7 @@ def get_tokenizer(
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     **kwargs,
-) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+) -> PreTrainedTokenizer | PreTrainedTokenizerFast:
     if pretrained_model_name_or_path is not None and not os.path.exists(
         pretrained_model_name_or_path
     ):
@@ -621,7 +620,7 @@ def get_tokenizer(
         kwargs["use_fast"] = False
     if tokenizer_mode == "mistral":
         try:
-            from vllm.transformers_utils.tokenizer import MistralTokenizer
+            from vllm.tokenizers.mistral import MistralTokenizer
         except ImportError as e:
             raise ImportError(
                 "MistralTokenizer requires vllm package.\n"

@@ -37,17 +37,12 @@ class XPUModelRunner(GPUModelRunner):
 
 @contextmanager
 def _torch_cuda_wrapper():
-
-    class _EventPlaceholder:
-
-        def __init__(self, *args, **kwargs) -> None:
-            self.record = lambda: None
-            self.synchronize = lambda: None
-
     try:
-        # replace cuda Event with xpu Event, this should work by default
-        torch.cuda.Event = torch.xpu.Event
+        # replace cuda APIs with xpu APIs, this should work by default
+        torch.cuda.Stream = torch.xpu.Stream
+        torch.cuda.default_stream = torch.xpu.current_stream
+        torch.cuda.current_stream = torch.xpu.current_stream
+        torch.cuda.stream = torch.xpu.stream
         yield
     finally:
-        # if anything goes wrong, just patch it with a placeholder
-        torch.cuda.Event = _EventPlaceholder
+        pass

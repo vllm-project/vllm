@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def create_parser():
@@ -87,6 +87,7 @@ def main(args: dict):
             use_tqdm=False,
             chat_template=chat_template,
         )
+        print_outputs(outputs)
 
 
 if __name__ == "__main__":

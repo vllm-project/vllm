@@ -1,6 +1,6 @@
 # Automatic Prefix Caching
 
-Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations. The core idea is simple – we cache the kv-cache blocks of processed requests, and reuse these blocks when a new request comes in with the same prefix as previous requests. Since prefix caching is almost a free lunch and won’t change model outputs, it has been widely used by many public endpoints (e.g., OpenAI, Anthropic, etc) and most open source LLM inference frameworks (e.g., SGLang).
+Prefix caching kv-cache blocks is a popular optimization in LLM inference to avoid redundant prompt computations. The core idea is simple – we cache the kv-cache blocks of processed requests, and reuse these blocks when a new request comes in with the same prefix as previous requests. Since prefix caching is almost a free lunch and won’t change model outputs, it has been widely used by many public endpoints (e.g., OpenAI, Anthropic, etc.) and most open source LLM inference frameworks (e.g., SGLang).
 
 While there are many ways to implement prefix caching, vLLM chooses a hash-based approach. Specifically, we hash each kv-cache block by the tokens in the block and the tokens in the prefix before the block:
 
@@ -22,8 +22,8 @@ In the example above, the KV cache in the first block can be uniquely identified
     We only cache full blocks.
 
 !!! note "Note 2"
-    The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we advise to use SHA256** as hash function instead of the default builtin hash.
-    SHA256 is supported since vLLM v0.8.3 and must be enabled with a command line argument. It comes with a performance impact of about 100-200ns per token (~6ms for 50k tokens of context).
+    The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we use SHA256** as hash function instead of the builtin hash.
+    SHA256 is supported since vLLM v0.8.3 and the default since v0.10.2. It comes with a negligible performance impact of about 75ns per token (<4ms for 50k tokens of context).
 
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
@@ -94,9 +94,6 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
-!!! note
-    Cache isolation is not supported in engine V0.
-
 ## Data Structure
 
 The prefix caching in vLLM v1 is implemented in the KV cache manager. The basic building block is the “Block” data class (simplified):
@@ -112,8 +109,8 @@ class KVCacheBlock:
     ref_cnt: int
 
     # The pointers to form a doubly linked list for the free queue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 ```
 
 There are two design points to highlight:
@@ -213,22 +210,22 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 
 ![Example Time 1](../assets/design/prefix_caching/example-time-1.png)
 
-**Time 3: Request 0 makes the block 3 full and asks for a new block to keep decoding.** We cache block 3 and allocate block 4.
+**Time 2: Request 0 makes the block 3 full and asks for a new block to keep decoding.** We cache block 3 and allocate block 4.
 
-![Example Time 3](../assets/design/prefix_caching/example-time-3.png)
+![Example Time 2](../assets/design/prefix_caching/example-time-3.png)
 
-**Time 4: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
+**Time 3: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
 
-![Example Time 4](../assets/design/prefix_caching/example-time-4.png)
+![Example Time 3](../assets/design/prefix_caching/example-time-4.png)
 
-**Time 5: Request 0 is finished and free.** Blocks 2, 3 and 4 are added to the free queue in the reverse order (but block 2 and 3 are still cached). Block 0 and 1 are not added to the free queue because they are being used by Request 1.
+**Time 4: Request 0 is finished and free.** Blocks 2, 3 and 4 are added to the free queue in the reverse order (but block 2 and 3 are still cached). Block 0 and 1 are not added to the free queue because they are being used by Request 1.
 
-![Example Time 5](../assets/design/prefix_caching/example-time-5.png)
+![Example Time 4](../assets/design/prefix_caching/example-time-5.png)
 
-**Time 6: Request 1 is finished and free.**
+**Time 5: Request 1 is finished and free.**
 
-![Example Time 6](../assets/design/prefix_caching/example-time-6.png)
+![Example Time 5](../assets/design/prefix_caching/example-time-6.png)
 
-**Time 7: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
+**Time 6: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
-![Example Time 7](../assets/design/prefix_caching/example-time-7.png)
+![Example Time 6](../assets/design/prefix_caching/example-time-7.png)

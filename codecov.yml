@@ -1,0 +1,12 @@
+codecov:
+  require_ci_to_pass: false
+
+fixes:
+  # Map source code paths to repository root paths
+  # Wildcards match any Python version (python3.*)
+  - "/vllm-workspace/src/vllm/::vllm/"
+  - "/vllm-workspace/vllm/::vllm/"
+  - "/usr/local/lib/python3.*/dist-packages/vllm/::vllm/"
+  - "/usr/local/lib/python3.*/site-packages/vllm/::vllm/"
+  - "/usr/lib/python3.*/dist-packages/vllm/::vllm/"
+  - "/usr/lib/python3.*/site-packages/vllm/::vllm/"

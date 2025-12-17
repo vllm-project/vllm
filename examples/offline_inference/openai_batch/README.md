@@ -152,7 +152,9 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
     """
     try:
         url = s3_client.generate_presigned_url(
-            ClientMethod=client_method, Params=method_parameters, ExpiresIn=expires_in
+            ClientMethod=client_method,
+            Params=method_parameters,
+            ExpiresIn=expires_in,
         )
     except ClientError:
         raise
@@ -161,10 +163,16 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
 
 s3_client = boto3.client("s3")
 input_url = generate_presigned_url(
-    s3_client, "get_object", {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "get_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 output_url = generate_presigned_url(
-    s3_client, "put_object", {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "put_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 print(f"{input_url=}")
 print(f"{output_url=}")

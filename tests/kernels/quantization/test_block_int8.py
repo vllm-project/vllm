@@ -10,16 +10,14 @@ import torch
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
-    w8a8_block_int8_matmul)
+    w8a8_block_int8_matmul,
+)
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (7, 0):
-    pytest.skip("INT8 Triton requires CUDA 7.0 or higher",
-                allow_module_level=True)
+    pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 DTYPES = [torch.half, torch.bfloat16]
 M = [1, 33, 64, 222]
@@ -36,8 +34,10 @@ def setup_cuda():
     torch.set_default_device("cuda")
 
 
-@pytest.mark.parametrize("M,N,K,block_size,out_dtype,seed",
-                         itertools.product(M, N, K, BLOCK_SIZE, DTYPES, SEEDS))
+@pytest.mark.parametrize(
+    "M,N,K,block_size,out_dtype,seed",
+    itertools.product(M, N, K, BLOCK_SIZE, DTYPES, SEEDS),
+)
 @torch.inference_mode()
 def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
@@ -58,11 +58,10 @@ def test_w8a8_block_int8_matmul(M, N, K, block_size, out_dtype, seed):
     As = torch.rand(M, k_tiles, dtype=torch.float32) * factor_for_scale
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
 
-    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
-                                       out_dtype)
+    ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
     out = w8a8_block_int8_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001

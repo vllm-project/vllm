@@ -7,9 +7,10 @@ As a result, in this test, we just confirm that the top selected tokens of the
 bitblas/GPTQ models are in the top 3 selections of each other.
 
 Note: bitblas internally uses locks to synchronize the threads. This can
-result in very slight nondeterminism for bitblas. As a result, we re-run the 
+result in very slight nondeterminism for bitblas. As a result, we re-run the
 test up to 3 times to see if we pass.
 """
+
 from dataclasses import dataclass
 
 import pytest
@@ -24,8 +25,10 @@ class ModelPair:
 
 
 model_pairs = [
-    ModelPair(model_bitblas="hxbgsyxh/opt-125m-4bit-128g-bitblas",
-              model_gptq="hxbgsyxh/opt-125m-4bit-128g"),
+    ModelPair(
+        model_bitblas="hxbgsyxh/opt-125m-4bit-128g-bitblas",
+        model_gptq="hxbgsyxh/opt-125m-4bit-128g",
+    ),
 ]
 
 
@@ -43,16 +46,19 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model_pair.model_bitblas,
-                     dtype=dtype,
-                     quantization="bitblas") as bitblas_model:
+    with vllm_runner(
+        model_pair.model_bitblas, dtype=dtype, quantization="bitblas"
+    ) as bitblas_model:
         bitblas_outputs = bitblas_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
 
-    with vllm_runner(model_pair.model_gptq, dtype=dtype,
-                     quantization="gptq") as gptq_model:
+    with vllm_runner(
+        model_pair.model_gptq, dtype=dtype, quantization="gptq"
+    ) as gptq_model:
         gptq_outputs = gptq_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
 
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
