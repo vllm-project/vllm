@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, Final
+from typing import Final
 
 import jinja2
 import partial_json_parser
@@ -1804,10 +1804,18 @@ class OpenAIServingChat(OpenAIServing):
             **(request.chat_template_kwargs or {}),
         }
         allowed_keys = {
-            "model_identity", "reasoning_effort", "start_date", "browser_description",
-            "python_description", "container_description", "instructions", "with_custom_tools"
+            "model_identity",
+            "reasoning_effort",
+            "start_date",
+            "browser_description",
+            "python_description",
+            "container_description",
+            "instructions",
+            "with_custom_tools",
         }
-        sys_msg = get_system_message(**{k: v for k, v in sys_msg_kwargs.items() if k in allowed_keys})
+        sys_msg = get_system_message(
+            **{k: v for k, v in sys_msg_kwargs.items() if k in allowed_keys}
+        )
         messages.append(sys_msg)
 
         # Add developer message.
