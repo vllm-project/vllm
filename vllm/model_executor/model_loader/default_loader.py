@@ -242,7 +242,7 @@ class DefaultModelLoader(BaseModelLoader):
                 )
 
         if current_platform.is_tpu():
-            from vllm.platforms.tpu import USE_TPU_INFERENCE
+            pass
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
