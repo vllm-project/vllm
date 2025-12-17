@@ -86,7 +86,6 @@ def get_attn_backend(
     )
 
 
-@cache
 def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,

@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
+from vllm.attention.selector import get_attn_backend
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
@@ -16,7 +16,7 @@ from vllm.platforms.rocm import RocmPlatform
 @pytest.fixture(autouse=True)
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
-    _cached_get_attn_backend.cache_clear()
+    pass
 
 
 # Define MLA and non-MLA backends separately

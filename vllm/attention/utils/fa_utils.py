@@ -11,6 +11,12 @@ if current_platform.is_cuda():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
+    from vllm.vllm_flash_attn.flash_attn_interface import (
+        FA2_AVAILABLE,
+        FA2_UNAVAILABLE_REASON,
+        FA3_AVAILABLE,
+        FA3_UNAVAILABLE_REASON,
+    )
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops as ops
 
@@ -27,6 +33,60 @@ elif current_platform.is_rocm():
         ) from e
 
 
+# Functions copied from vllm/vllm_flash_attn/flash_attn_interface.py
+# Modified to use current_platform.get_device_capability() instead of
+# torch.cuda.get_device_capability(device) because
+# current_platform.get_device_capability() does not initialize CUDA.
+def _is_fa2_supported(device=None) -> tuple[bool, str | None]:
+    if not FA2_AVAILABLE:
+        return False, f"FA2 is unavaible due to: {FA2_UNAVAILABLE_REASON}"
+    device_capability = current_platform.get_device_capability()
+    if device_capability.major < 8:
+        return (
+            False,
+            "FA2 is only supported on devices with compute capability >= 8",
+        )
+    return True, None
+
+
+def _is_fa3_supported(device=None) -> tuple[bool, str | None]:
+    if not FA3_AVAILABLE:
+        return False, f"FA3 is unavaible due to: {FA3_UNAVAILABLE_REASON}"
+    device_capability = current_platform.get_device_capability()
+    if (
+        device_capability.major < 8
+        or device_capability.major >= 10
+        or device_capability == (8, 6)
+        or device_capability == (8, 9)
+    ):
+        return (
+            False,
+            "FA3 is only supported on devices with compute capability >= 8"
+            " excluding 8.6 and 8.9 and Blackwell archs (>=10)",
+        )
+    return True, None
+
+
+def is_fa_version_supported(fa_version: int, device=None) -> bool:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[0]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[0]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
+
+
+def fa_version_unsupported_reason(fa_version: int, device=None) -> str | None:
+    assert fa_version in [2, 3], f"Unsupported FA version: {fa_version}"
+    if fa_version == 2:
+        return _is_fa2_supported(device)[1]
+    elif fa_version == 3:
+        return _is_fa3_supported(device)[1]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
+
+
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
     # import here to avoid circular dependencies
     from vllm.platforms import current_platform
@@ -34,11 +94,6 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
     if current_platform.is_xpu():
         return 2
     try:
-        from vllm.vllm_flash_attn.flash_attn_interface import (
-            fa_version_unsupported_reason,
-            is_fa_version_supported,
-        )
-
         device_capability = current_platform.get_device_capability()
 
         assert device_capability is not None
