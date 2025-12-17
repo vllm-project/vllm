@@ -12,6 +12,19 @@ SYSTEM=${SYSTEM:-"TPU"}
 TP=${TP:-1}
 DOWNLOAD_DIR=${DOWNLOAD_DIR:-""}
 INPUT_LEN=${INPUT_LEN:-4000}
+
+cleanup() {
+    local pid=$(lsof -t -i :8004 2>/dev/null)
+    if [[ -n "$pid" ]]; then
+        echo "Stopping existing vllm serve process on port 8004 (PID: $pid)"
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+}
+
 OUTPUT_LEN=${OUTPUT_LEN:-16}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
 MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
@@ -21,12 +34,16 @@ NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
 HOSTNAME=$(hostname)
 if [[ -z "$HOSTNAME" ]]; then
     echo "Error: Failed to determine hostname." >&2
+    cleanup
     exit 1
 fi
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
 PROFILE_PATH="$LOG_FOLDER/profile"
+
+# Set up cleanup trap to ensure processes are stopped on exit
+trap cleanup EXIT INT TERM
 
 echo "====================== AUTO TUNE PARAMETERS ===================="
 echo "SCRIPT_DIR=$SCRIPT_DIR"
@@ -63,6 +80,7 @@ TOTAL_LEN=$((INPUT_LEN + OUTPUT_LEN))
 RED='\033[0;31m'
 if (( TOTAL_LEN > MAX_MODEL_LEN )); then
     echo -e "${RED}FAILED: INPUT_LEN($INPUT_LEN) + OUTPUT_LEN($OUTPUT_LEN) = $TOTAL_LEN, which is > MAX_MODEL_LEN = $MAX_MODEL_LEN.\033[0m" >&2
+    cleanup
     exit 1
 fi
 
@@ -79,7 +97,8 @@ start_server() {
     local vllm_log=$4
     local profile_dir=$5
 
-    pkill -if "vllm serve" || true
+    # Stop any existing vllm serve process on port 8004
+    cleanup
 
     # Define the common arguments as a bash array.
     # Each argument and its value are separate elements.
@@ -146,7 +165,6 @@ run_benchmark() {
     echo "vllm_log: $vllm_log"
     echo
     rm -f $vllm_log
-    pkill -if "vllm serve" || true
 
     echo "starting server..."
     # Call start_server without a profile_dir to avoid profiling overhead
@@ -241,8 +259,6 @@ run_benchmark() {
 
     echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput"
 
-    pkill -if "vllm serve" || true
-    sleep 10
     echo "===================="
     return 0
 }
@@ -269,6 +285,7 @@ if [[ "$find_gpu_memory_utilization" -eq 1 ]]; then
     echo "Using gpu_memory_utilization=$gpu_memory_utilization to serve model."
 else
     echo "Cannot find a proper gpu_memory_utilization over 0.9 to serve the model, please check logs in $LOG_FOLDER."
+    cleanup
     exit 1
 fi
 
@@ -318,6 +335,8 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
 else
     echo "No configuration met the latency requirements. Skipping final profiling run."
 fi
-pkill -if "vllm serve" || true
+cleanup
+
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
+
