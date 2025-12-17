@@ -541,7 +541,6 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
@@ -640,10 +639,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 		libcusolver-dev-${CUDA_VERSION_DASH} && \
         rm -rf /var/lib/apt/lists/* && \
 	ls /usr/local/cuda/include/ && \
-	uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation ; \
+	uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation || true; \
     fi
 
-# uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation \ #|| true; \
 ENV VLLM_USAGE_SOURCE production-docker-image
 
 # define sagemaker first, so it is not default from `docker build`
