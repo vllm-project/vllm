@@ -18,7 +18,7 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t, typename fp8_type, int VEC_SIZE>
+template <typename scalar_t, typename fp8_type, int BLOCK_SIZE, int VEC_SIZE>
 __global__ void rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,          // [..., hidden_size]
     const scalar_t* __restrict__ input,  // [..., hidden_size]
@@ -45,7 +45,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   vllm::vectorize_read_with_alignment<VEC_SIZE>(
       input_row, hidden_size, threadIdx.x, blockDim.x, vec_op, scalar_op);
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
+  using BlockReduce = cub::BlockReduce<float, BLOCK_SIZE>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
@@ -76,7 +76,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
-template <typename scalar_t, int width, typename fp8_type>
+template <typename scalar_t, int block_size, int width, typename fp8_type>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
@@ -113,7 +113,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     residual_v[id] = temp;
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
+  using BlockReduce = cub::BlockReduce<float, block_size>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
@@ -141,7 +141,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
-template <typename scalar_t, int width, typename fp8_type>
+template <typename scalar_t, int block_size, int width, typename fp8_type>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
@@ -162,7 +162,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     residual[blockIdx.x * hidden_size + idx] = z;
   }
 
-  using BlockReduce = cub::BlockReduce<float, 1024>;
+  using BlockReduce = cub::BlockReduce<float, block_size>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
@@ -209,32 +209,51 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                   std::min(hidden_size / calculated_vec_size, max_block_size);
               dim3 block(block_size);
               VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
-                vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
-                                                       vec_size>
-                    <<<grid, block, 0, stream>>>(
-                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                        input_stride, weight.data_ptr<scalar_t>(),
-                        scale.data_ptr<float>(), epsilon, num_tokens,
-                        hidden_size);
+                if (max_block_size == 256) {
+                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 256,
+                                                         vec_size>
+                      <<<grid, block, 0, stream>>>(
+                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                          input_stride, weight.data_ptr<scalar_t>(),
+                          scale.data_ptr<float>(), epsilon, num_tokens,
+                          hidden_size);
+                } else {
+                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 1024,
+                                                         vec_size>
+                      <<<grid, block, 0, stream>>>(
+                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                          input_stride, weight.data_ptr<scalar_t>(),
+                          scale.data_ptr<float>(), epsilon, num_tokens,
+                          hidden_size);
+                }
               });
             });
       });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
-  VLLM_DISPATCH_FLOATING_TYPES(                                              \
-      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
-        VLLM_DISPATCH_FP8_TYPES(                                             \
-            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
-              vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t,     \
-                                                               width, fp8_t> \
-                  <<<grid, block, 0, stream>>>(                              \
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual.data_ptr<scalar_t>(),           \
-                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
-            });                                                              \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {      \
+        VLLM_DISPATCH_FP8_TYPES(                                               \
+            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {     \
+              if (max_block_size == 256) {                                     \
+                vllm::fused_add_rms_norm_static_fp8_quant_kernel<              \
+                    scalar_t, 256, width, fp8_t><<<grid, block, 0, stream>>>(  \
+                    out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),         \
+                    input_stride, residual.data_ptr<scalar_t>(),               \
+                    weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),      \
+                    epsilon, num_tokens, hidden_size);                         \
+              } else {                                                         \
+                vllm::fused_add_rms_norm_static_fp8_quant_kernel<              \
+                    scalar_t, 1024, width, fp8_t><<<grid, block, 0, stream>>>( \
+                    out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),         \
+                    input_stride, residual.data_ptr<scalar_t>(),               \
+                    weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),      \
+                    epsilon, num_tokens, hidden_size);                         \
+              }                                                                \
+            });                                                                \
       });
+
 void fused_add_rms_norm_static_fp8_quant(
     torch::Tensor& out,       // [..., hidden_size],
     torch::Tensor& input,     // [..., hidden_size]
