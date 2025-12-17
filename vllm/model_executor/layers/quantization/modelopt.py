@@ -1572,15 +1572,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             self.allow_flashinfer
             and self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
-            packed_tensor, _, _ = layer.select_experts(
+            topk_weights, topk_ids, _ = layer.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
-                packed=True
             )
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
                 x=x,
-                packed_tensor=packed_tensor,
+                topk_ids=topk_ids,
+                topk_weights=topk_weights,
                 top_k=layer.top_k,
                 global_num_experts=layer.global_num_experts,
             )
