@@ -188,7 +188,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        # enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
