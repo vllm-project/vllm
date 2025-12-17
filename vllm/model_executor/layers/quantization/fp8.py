@@ -1065,10 +1065,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.moe_quant_config = config
 
             if self.kernel_cls is FlashInferExperts:
-                use_dp = self.moe.dp_size > 1
                 self.fn = mk.FusedMoEModularKernel(
                     FlashInferAllGatherMoEPrepareAndFinalize(
-                        use_dp=use_dp, use_deepseek_fp8_block_scale=self.block_quant
+                        use_dp=(self.moe.dp_size > 1),
+                        use_deepseek_fp8_block_scale=self.block_quant,
                     ),
                     self.kernel_cls(
                         out_dtype=torch.get_default_dtype(),
@@ -1077,7 +1077,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         ep_size=self.moe.ep_size,
                         tp_rank=self.moe.tp_rank,
                         tp_size=self.moe.tp_size,
-                        use_dp=use_dp,
+                        use_dp=(self.moe.dp_size > 1),
                         use_deepseek_fp8_block_scale=self.block_quant,
                     ),
                 )
