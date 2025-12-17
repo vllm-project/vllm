@@ -68,20 +68,17 @@ class VideoLoader:
         cap,
         frame_indices: list[int],
         total_frames: int,
-        frame_recovery: bool = False,
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
         """
-        Read frames with optional dynamic window forward-scan recovery.
+        Read frames with dynamic window forward-scan recovery.
 
-        When frame_recovery is enabled and a target frame fails to load,
-        the next successfully grabbed frame (before the next target frame)
-        will be used to recover the failed frame.
+        When a target frame fails to load, the next successfully grabbed
+        frame (before the next target frame) will be used to recover it.
 
         Args:
             cap: OpenCV VideoCapture object
             frame_indices: Sorted list of target frame indices to load
             total_frames: Total number of frames in the video
-            frame_recovery: If True, enable forward-scan recovery
 
         Returns:
             Tuple of (frames_array, valid_frame_indices, recovered_map)
@@ -122,7 +119,7 @@ class VideoLoader:
             is_target_frame = idx in frame_idx_set
 
             # 1. Manage abandonment: if oldest failed frame's window is exceeded
-            if frame_recovery and failed_frames_idx:
+            if failed_frames_idx:
                 oldest_failed = failed_frames_idx[0]
                 limit = next_target_map.get(oldest_failed, total_frames)
                 if idx >= limit:
@@ -143,8 +140,7 @@ class VideoLoader:
                         "This frame will be skipped.",
                         idx,
                     )
-                    if frame_recovery:
-                        failed_frames_idx.append(idx)
+                    failed_frames_idx.append(idx)
                 continue
 
             # 3. Determine if we should retrieve this frame
@@ -153,7 +149,7 @@ class VideoLoader:
 
             if is_target_frame:
                 should_retrieve = True
-            elif frame_recovery and failed_frames_idx:
+            elif failed_frames_idx:
                 # Check if this frame is within the recovery window
                 oldest_failed = failed_frames_idx[0]
                 limit = next_target_map.get(oldest_failed, total_frames)
@@ -194,8 +190,7 @@ class VideoLoader:
                             "This frame will be skipped.",
                             idx,
                         )
-                        if frame_recovery:
-                            failed_frames_idx.append(idx)
+                        failed_frames_idx.append(idx)
 
         # Log any remaining failed frames
         for failed_idx in failed_frames_idx:
@@ -344,7 +339,7 @@ class OpenCVVideoBackend(VideoLoader):
         # Use recovery-enabled method or legacy method
         if frame_recovery:
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
-                cap, frame_idx, total_frames_num, frame_recovery=True
+                cap, frame_idx, total_frames_num
             )
             valid_num_frames = len(valid_frame_indices)
 
@@ -443,7 +438,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         # Use recovery-enabled method or legacy method
         if frame_recovery:
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
-                cap, frame_indices_list, total_frames_num, frame_recovery=True
+                cap, frame_indices_list, total_frames_num
             )
             valid_num_frames = len(valid_frame_indices)
 
