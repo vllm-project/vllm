@@ -93,8 +93,6 @@ class RadioConfig(PretrainedConfig):
             list(norm_std) if isinstance(norm_std, (tuple, list)) else norm_std
         )
         self.register_multiple = register_multiple
-        if teachers is None:
-            teachers = []
-        self.teachers = teachers
+        self.teachers = teachers if teachers is not None else []
         self.cls_token_per_teacher = cls_token_per_teacher
         super().__init__(**kwargs)
