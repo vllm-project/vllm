@@ -65,7 +65,7 @@ class EagleCudaGraphManager:
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_metadata_builders: list[AttentionMetadataBuilder | None],
         kv_cache_config: KVCacheConfig,
     ) -> None:
         num_reqs = min(num_tokens, self.max_num_reqs)
@@ -96,7 +96,7 @@ class EagleCudaGraphManager:
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_metadata_builders: list[AttentionMetadataBuilder | None],
         kv_cache_config: KVCacheConfig,
     ) -> None:
         capture_graphs(
