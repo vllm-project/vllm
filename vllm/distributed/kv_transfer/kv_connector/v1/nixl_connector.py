@@ -758,10 +758,9 @@ class NixlConnectorScheduler:
             # Also include the case of a P/D Prefill request with immediate
             # block free (eg abort). Stop tracking this request.
             self._reqs_not_processed.add(request.request_id)
+            # Clear _reqs_need_save if a request is aborted as partial prefill.
+            self._reqs_need_save.pop(request.request_id, None)
             return False, None
-
-        # Clear _reqs_need_save if a request is aborted as partial prefill.
-        self._reqs_need_save.pop(request.request_id, None)
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
