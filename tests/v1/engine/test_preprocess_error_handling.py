@@ -5,18 +5,19 @@
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
+from vllm.envs import disable_envs_cache
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-
-if not current_platform.is_cuda():
-    pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
+
+    # Ensure fork is used so that monkeypatch will propagate to engine core subprocess.
+    disable_envs_cache()
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
     # Store original method to call for non-failing requests
     original_preprocess = EngineCore.preprocess_add_request
