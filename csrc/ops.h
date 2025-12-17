@@ -336,7 +336,9 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
 void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
-                             torch::Tensor const& scale);
+                             torch::Tensor const& scale,
+                             std::optional<int64_t> group_m = std::nullopt,
+                             std::optional<int64_t> group_n = std::nullopt);
 
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scale);
