@@ -353,7 +353,6 @@ pull_request_rules:
   conditions:
     - base = main
     - "#commits-behind >= 10"
-    - created-at<=-1 day
     - -closed
     - -draft
     - -conflict
