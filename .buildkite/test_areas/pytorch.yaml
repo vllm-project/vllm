@@ -13,7 +13,9 @@ steps:
   # tests covered elsewhere.
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\;"
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Smoke Test
   timeout_in_minutes: 30
