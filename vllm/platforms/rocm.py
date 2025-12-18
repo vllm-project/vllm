@@ -655,16 +655,16 @@ class RocmPlatform(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
-    def current_stream(cls)：
+    def current_stream(cls):
         return torch.cuda.current_stream()
 
-     @classmethod
+    @classmethod
     def synchronize(cls):
         return torch.cuda.synchronize()
 
     @classmethod
     def empty_cache(cls):
-        return torch.xpu.empty_cache()
+        return torch.cuda.empty_cache()
 
     @classmethod
     def mem_get_info(cls):
