@@ -1092,11 +1092,11 @@ def run_cutlass_moe_block_scaled_fp8(
     # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     # act_out = _resize_cache(workspace2, (M * topk, N))
     # mm2_out = _resize_cache(workspace2, (M * topk, K))
-    mm1_out = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
-    mm2_out = torch.empty((M * topk, K), dtype=out_dtype, device=device)
+    c1 = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
+    c2 = torch.empty((M * topk, K), dtype=out_dtype, device=device)
 
     ops.cutlass_blockwise_scaled_grouped_mm(
-        mm1_out,
+        c1,
         rep_a_q,
         w1_q,
         rep_a1_scales,
@@ -1106,18 +1106,18 @@ def run_cutlass_moe_block_scaled_fp8(
     )
 
     # activation_callable(act_out, mm1_out)
-    act_out = torch.empty((M * topk, N), dtype=out_dtype, device=device)
-    torch.ops._C.silu_and_mul(act_out, mm1_out)
+    intermediate = torch.empty((M * topk, N), dtype=out_dtype, device=device)
+    torch.ops._C.silu_and_mul(intermediate, c1)
 
-    a2q, a2q_scale = _fp8_quantize(
-        act_out, A_scale=None, per_act_token=False, block_shape=[128, 128]
+    intermediate_q, a2_scale = _fp8_quantize(
+        intermediate, A_scale=None, per_act_token=False, block_shape=[128, 128]
     )
 
     ops.cutlass_blockwise_scaled_grouped_mm(
-        mm2_out,
-        a2q,
+        c2,
+        intermediate_q,
         w2_q,
-        a2q_scale,
+        a2_scale,
         w2_scale,
         problem_sizes2,
         expert_offsets[:-1],
@@ -1125,7 +1125,7 @@ def run_cutlass_moe_block_scaled_fp8(
 
     # TODO: swap with MoE unpermute.
     return (
-        mm2_out[c_map].view(M, topk, K) * topk_weights.view(M, topk, 1).to(out_dtype)
+        c2[c_map].view(M, topk, K) * topk_weights.view(M, topk, 1).to(out_dtype)
     ).sum(dim=1)
 
 
