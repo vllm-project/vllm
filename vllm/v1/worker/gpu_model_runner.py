@@ -3705,8 +3705,9 @@ class GPUModelRunner(
                 scheduler_output, clear_metadata=clear_kv_metadata
             ) as kv_connector_output,
         ):
-            logger.info(f"input_ids: {input_ids.shape}")
-            if inputs_embeds:
+            if input_ids is not None:
+                logger.info(f"input_ids: {input_ids.shape}")
+            if inputs_embeds is not None:
                 logger.info(f"inputs_embeds: {inputs_embeds.shape}")
             model_output = self._model_forward(
                 input_ids=input_ids,
