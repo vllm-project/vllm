@@ -157,8 +157,8 @@ def prepare_fp8_layer_for_marlin(
                 f"Sum of logical_widths ({sum(logical_widths)}) must be equal "
                 f"to part_size_n ({part_size_n})"
             )
-            scales = scales.view(1, -1)
-            scales = scales.repeat_interleave(torch.tensor(logical_widths), 1)
+            lw_tensor = scales.new_tensor(logical_widths, dtype=torch.int64)
+            scales = scales.view(1, -1).repeat_interleave(lw_tensor, dim=1)
         elif scales.nelement() > 1 and scales.nelement() != part_size_n:
             assert part_size_n % scales.nelement() == 0
             s_size = scales.nelement()
