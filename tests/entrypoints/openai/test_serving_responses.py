@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import AsyncExitStack
-from unittest.mock import MagicMock
+from contextlib import AsyncExitStack, suppress
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -13,8 +15,10 @@ from openai.types.responses.tool import (
     Tool,
 )
 
+from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.serving_responses import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
@@ -22,6 +26,58 @@ from vllm.entrypoints.openai.serving_responses import (
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.tokenizers import get_tokenizer
+from vllm.v1.engine.async_llm import AsyncLLM
+
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+BASE_MODEL_PATHS = [
+    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
+]
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
+class MockModelConfig:
+    task = "generate"
+    runner_type = "generate"
+    tokenizer = MODEL_NAME
+    trust_remote_code = False
+    tokenizer_mode = "auto"
+    max_model_len = 100
+    tokenizer_revision = None
+    multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
+    logits_processors: list[str] | None = None
+    logits_processor_pattern = None
+    diff_sampling_param: dict | None = None
+    allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
+    encoder_config = None
+    generation_config: str = "auto"
+    media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    skip_tokenizer_init = False
+
+    def get_diff_sampling_param(self):
+        return self.diff_sampling_param or {}
+
+
+@dataclass
+class MockSchedulerConfig:
+    """Mock scheduler configuration for testing priority validation."""
+
+    policy: str = "fcfs"
+
+
+@dataclass
+class MockVllmConfig:
+    """Mock vLLM configuration for testing."""
+
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
 
 
 class MockConversationContext(ConversationContext):
@@ -350,3 +406,110 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service_tier,explicit_priority,expected_priority",
+    [
+        # Test service tier mappings with no explicit priority
+        ("auto", 0, 0),
+        ("default", 0, 0),
+        ("flex", 0, 2),
+        ("scale", 0, -1),
+        ("priority", 0, -2),
+        # Test explicit priority overrides service_tier
+        ("flex", 10, 10),  # Explicit priority takes precedence
+        ("priority", 5, 5),  # Explicit priority takes precedence
+        ("scale", -10, -10),  # Explicit priority takes precedence
+    ],
+    ids=[
+        "service_tier_auto",
+        "service_tier_default",
+        "service_tier_flex",
+        "service_tier_scale",
+        "service_tier_priority",
+        "explicit_overrides_flex",
+        "explicit_overrides_priority",
+        "explicit_overrides_scale",
+    ],
+)
+async def test_responses_request_service_tier_priority_mapping(
+    service_tier: str | None,
+    explicit_priority: int,
+    expected_priority: int,
+):
+    """Test that service_tier is correctly mapped to priority and passed to engine.
+
+    This test verifies:
+    1. Service tier values map to correct priority values
+    2. Explicit priority overrides service_tier when non-zero
+    3. Priority is correctly passed through to engine.generate()
+    """
+    # Setup mock engine
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
+    # Mock vllm_config with priority scheduler to avoid validation errors
+    mock_vllm_config = MockVllmConfig(
+        scheduler_config=MockSchedulerConfig(policy="priority")
+    )
+    mock_engine.vllm_config = mock_vllm_config
+
+    # Mock the generate method to return an async generator
+    async def mock_generate(*args, **kwargs):
+        yield RequestOutput(
+            request_id="test-request",
+            prompt="test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="test response",
+                    token_ids=[4, 5, 6],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    mock_engine.generate = AsyncMock(side_effect=mock_generate)
+
+    # Create OpenAIServingResponses instance
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    serving_responses = OpenAIServingResponses(
+        mock_engine,
+        models,
+        request_logger=None,
+        chat_template="test template",
+        chat_template_content_format="auto",
+    )
+
+    # Create request with service_tier and/or explicit priority
+    req = ResponsesRequest(
+        input="test input",
+        service_tier=service_tier,
+        priority=explicit_priority,
+    )
+
+    # Verify effective_priority property
+    assert req.effective_priority == expected_priority
+
+    # Call create_responses and verify priority is passed to engine
+    with suppress(Exception):
+        await serving_responses.create_responses(req)
+
+    # Verify priority was passed to engine.generate()
+    assert "priority" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["priority"] == expected_priority

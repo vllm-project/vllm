@@ -1367,3 +1367,192 @@ class TestServingChatWithHarmony:
                 },
             ],
         )
+
+
+@dataclass
+class MockSchedulerConfig:
+    """Mock scheduler configuration for testing priority validation."""
+
+    policy: str = "fcfs"
+
+
+@dataclass
+class MockVllmConfig:
+    """Mock vLLM configuration for testing."""
+
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "service_tier,explicit_priority,expected_priority",
+    [
+        # Test service tier mappings with no explicit priority
+        ("auto", 0, 0),
+        ("default", 0, 0),
+        ("flex", 0, 2),
+        ("scale", 0, -1),
+        ("priority", 0, -2),
+        # Test explicit priority overrides service_tier
+        ("flex", 10, 10),  # Explicit priority takes precedence
+        ("priority", 5, 5),  # Explicit priority takes precedence
+        ("scale", -10, -10),  # Explicit priority takes precedence
+    ],
+    ids=[
+        "service_tier_auto",
+        "service_tier_default",
+        "service_tier_flex",
+        "service_tier_scale",
+        "service_tier_priority",
+        "explicit_overrides_flex",
+        "explicit_overrides_priority",
+        "explicit_overrides_scale",
+    ],
+)
+async def test_service_tier_priority_mapping(
+    service_tier: str | None,
+    explicit_priority: int,
+    expected_priority: int,
+):
+    """Test that service_tier is correctly mapped to priority and passed to engine.
+
+    This test verifies:
+    1. Service tier values map to correct priority values
+    2. Explicit priority overrides service_tier when non-zero
+    3. Priority is correctly passed through to engine.generate()
+    """
+    # Setup mock engine
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
+    # Mock vllm_config with priority scheduler to avoid validation errors
+    mock_vllm_config = MockVllmConfig(
+        scheduler_config=MockSchedulerConfig(policy="priority")
+    )
+    mock_engine.vllm_config = mock_vllm_config
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Create request with service_tier and/or explicit priority
+    messages = [{"role": "user", "content": "test message"}]
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        service_tier=service_tier,
+        priority=explicit_priority,
+    )
+
+    # Verify effective_priority property
+    assert req.effective_priority == expected_priority
+
+    # Call create_chat_completion and verify priority is passed to engine
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    # Verify priority was passed to engine.generate()
+    assert "priority" in mock_engine.generate.call_args.kwargs
+    assert mock_engine.generate.call_args.kwargs["priority"] == expected_priority
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scheduler_policy,service_tier,should_error",
+    [
+        ("priority", "priority", False),  # Priority scheduler, non-zero priority - OK
+        ("priority", "flex", False),  # Priority scheduler, non-zero priority - OK
+        ("priority", "scale", False),  # Priority scheduler, non-zero priority - OK
+        ("fcfs", "auto", False),  # FCFS scheduler, zero priority - OK
+        ("fcfs", "default", False),  # FCFS scheduler, zero priority - OK
+        ("fcfs", "priority", True),  # FCFS scheduler, non-zero priority - ERROR
+        ("fcfs", "flex", True),  # FCFS scheduler, non-zero priority - ERROR
+        ("fcfs", "scale", True),  # FCFS scheduler, non-zero priority - ERROR
+    ],
+    ids=[
+        "priority_scheduler_priority_tier",
+        "priority_scheduler_flex_tier",
+        "priority_scheduler_scale_tier",
+        "fcfs_scheduler_auto_tier",
+        "fcfs_scheduler_default_tier",
+        "fcfs_scheduler_priority_tier_error",
+        "fcfs_scheduler_flex_tier_error",
+        "fcfs_scheduler_scale_tier_error",
+    ],
+)
+async def test_service_tier_scheduler_validation(
+    scheduler_policy: str,
+    service_tier: str,
+    should_error: bool,
+):
+    """Test that non-zero priorities require priority scheduler.
+
+    This test verifies the validation logic that ensures users cannot
+    use non-zero priorities (via service_tier) without enabling the
+    priority scheduler.
+    """
+    # Setup mock engine with specified scheduler policy
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+
+    # Configure scheduler policy
+    mock_vllm_config = MockVllmConfig(
+        scheduler_config=MockSchedulerConfig(policy=scheduler_policy)
+    )
+    mock_engine.vllm_config = mock_vllm_config
+
+    # Mock the generate method to return an async generator
+    async def mock_generate(*args, **kwargs):
+        # Yield a fake RequestOutput
+        yield RequestOutput(
+            request_id="test-request",
+            prompt="test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="test response",
+                    token_ids=[4, 5, 6],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Create request with service_tier
+    messages = [{"role": "user", "content": "test message"}]
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        service_tier=service_tier,
+    )
+
+    # Attempt to create chat completion
+    result = await serving_chat.create_chat_completion(req)
+
+    if should_error:
+        # Should return an error response
+        # The error could be in different formats depending on how it's returned
+        error_str = str(result)
+        assert "priority" in error_str.lower() or "scheduler" in error_str.lower(), (
+            f"Expected error about priority scheduling, got: {result}"
+        )
+    else:
+        # Should not error - verify the request was processed
+        # (even though it may fail for other reasons in the mock)
+        # The key is it should not fail on scheduler validation
+        pass

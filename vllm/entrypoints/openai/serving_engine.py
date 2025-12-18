@@ -798,6 +798,21 @@ class OpenAIServing:
             status_code=e.status_code,
         )
 
+    def _validate_priority_scheduling(self, priority: int) -> ErrorResponse | None:
+        """Validate that priority scheduling is enabled when priority is non-zero."""
+        if priority != 0:
+            # Access scheduler config through engine client's vllm_config
+            scheduler_policy = self.engine_client.vllm_config.scheduler_config.policy
+
+            if scheduler_policy != "priority":
+                return self.create_error_response(
+                    f"Non-zero priority ({priority}) requires priority scheduling."
+                    f" Current scheduler policy: {scheduler_policy}."
+                    f" Please set --scheduler-policy=priority when starting the server."
+                )
+
+        return None
+
     async def _check_model(
         self,
         request: AnyRequest,
