@@ -759,8 +759,8 @@ class Scheduler(SchedulerInterface):
 
         if len(num_scheduled_tokens) < self.slowdown_threshold:
             logger.warning(
-                "%d requests are scheduled, which is less than the slowdown"
-                "threshold %d. Sleeping for 10 seconds...",
+                "%d requests are scheduled, which is less than the slowdown "
+                "threshold of %d. Sleeping for 10 seconds...",
                 len(num_scheduled_tokens),
                 self.slowdown_threshold,
             )

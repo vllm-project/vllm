@@ -215,6 +215,9 @@ class EngineCoreClient(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    async def set_slowdown_threshold_async(self, threshold: int) -> None:
+        raise NotImplementedError
+
     async def sleep_async(self, level: int = 1) -> None:
         raise NotImplementedError
 
@@ -297,6 +300,9 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.reset_prefix_cache(
             reset_running_requests, reset_connector
         )
+
+    def set_slowdown_threshold(self, threshold: int) -> None:
+        self.engine_core.set_slowdown_threshold(threshold)
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
@@ -973,6 +979,9 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "reset_prefix_cache", reset_running_requests, reset_connector
         )
+
+    async def set_slowdown_threshold_async(self, threshold: int) -> None:
+        await self.call_utility_async("set_slowdown_threshold", threshold)
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
