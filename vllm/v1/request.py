@@ -135,11 +135,6 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
-        # SLA tier metadata (for scheduler prioritization); defaults to "batch".
-        self.sla_tier = (
-            sampling_params.sla_tier if sampling_params is not None else "batch"
-        )
-
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
     @classmethod
@@ -214,10 +209,10 @@ class Request:
     def get_finished_reason(self) -> FinishReason | None:
         return RequestStatus.get_finished_reason(self.status)
 
-    def get_num_encoder_tokens(self, input_id: int) -> int:
+    def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self.mm_features)
-        num_tokens = self.mm_features[input_id].mm_position.length
-        return num_tokens
+        num_embeds = self.mm_features[input_id].mm_position.get_num_embeds
+        return num_embeds
 
     def record_event(
         self,
@@ -260,6 +255,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = enum.auto()
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
+    FINISHED_ERROR = enum.auto()
 
     def __str__(self):
         return self.name
@@ -282,4 +278,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
 }

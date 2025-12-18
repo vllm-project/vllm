@@ -122,10 +122,12 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
-    disable_hybrid_kv_cache_manager: bool = False
+    disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
+    If set to None, the default value will be determined based on the environment
+    and starting configuration.
     """
 
     async_scheduling: bool = False
@@ -140,16 +142,6 @@ class SchedulerConfig:
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
-
-    # SLA-tiered scheduling (opt-in).
-    sla_tier_enabled: bool = False
-    """Enable SLA-tiered scheduling for requests."""
-
-    max_interactive_batch_tokens: int = Field(default=0, ge=0)
-    """Cap on tokens from 'interactive' tier per scheduling step.
-
-    If 0, defaults to max_num_batched_tokens.
-    """
 
     @staticmethod
     def default_factory(**kwargs):
@@ -233,9 +225,6 @@ class SchedulerConfig:
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
-
-        if self.max_interactive_batch_tokens == 0:
-            self.max_interactive_batch_tokens = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
             logger.info(
