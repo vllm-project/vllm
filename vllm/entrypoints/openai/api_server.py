@@ -1082,6 +1082,9 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
+    # Warm up chat template processing to avoid first-request latency
+    if state.openai_serving_chat is not None:
+        await state.openai_serving_chat.warmup()
     state.openai_serving_completion = (
         OpenAIServingCompletion(
             engine_client,
