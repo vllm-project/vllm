@@ -3373,6 +3373,38 @@ class GPUModelRunner(
             )
         return afd_metadata
 
+    def _build_afd_metadata(
+        self, ubatch_slices: UBatchSlices | None, num_tokens_unpadded: int
+    ):
+        afd_metadata = None
+        if self.afd_config:
+            # For prefill, compute tokens per stage based on actual token
+            # counts
+            afd_tokens_start_loc = [0]
+            afd_tokens_lens = []
+            if ubatch_slices and len(ubatch_slices) > 1:
+                afd_tokens_start_loc = [ub.token_slice.start for ub in ubatch_slices]
+                afd_reqs_start_loc = [ub.request_slice.start for ub in ubatch_slices]
+                logger.info(
+                    f"afd_tokens_start_loc: {afd_tokens_start_loc} "
+                    f"afd_reqs_start_loc: {afd_reqs_start_loc} "
+                    f"ubatch_slices: {ubatch_slices}"
+                )
+                afd_tokens_lens = [ub.num_tokens for ub in ubatch_slices]
+            else:
+                afd_tokens_start_loc = [0]
+                afd_reqs_start_loc = [0]
+                afd_tokens_lens = [num_tokens_unpadded]
+            afd_metadata = AFDMetadata(
+                afd_tokens_start_loc=afd_tokens_start_loc,
+                afd_reqs_start_loc=afd_reqs_start_loc,
+                afd_stage_idx=0,
+                afd_connector=self.afd_connector,
+                afd_tokens_lens=afd_tokens_lens,
+                num_of_stages=len(ubatch_slices) if ubatch_slices else 1,
+            )
+        return afd_metadata
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -6200,6 +6232,11 @@ class GPUModelRunner(
                     _capturer.capture(_layer_id, topk_ids)
 
                 module.router.set_capture_fn(_capture_fn)
+
+    def initialize_afd_connector(self) -> None:
+        """Initialize AFD connector if available."""
+        if hasattr(self, "afd_connector") and self.afd_connector:
+            self.afd_connector.init_afd_connector()
 
     def initialize_afd_connector(self) -> None:
         """Initialize AFD connector if available."""
