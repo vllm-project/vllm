@@ -59,7 +59,6 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -102,8 +101,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.deepseekv32 import DeepseekV32Tokenizer
+from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,

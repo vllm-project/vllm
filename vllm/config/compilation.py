@@ -8,7 +8,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -96,7 +96,7 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -251,7 +251,7 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -290,7 +290,7 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -437,14 +437,14 @@ class CompilationConfig:
 
     compile_ranges_split_points: list[int] | None = None
     """Split points that represent compile ranges for inductor.
-    The compile ranges are 
-    [1, split_points[0]], 
-    [split_points[0] + 1, split_points[1]], ..., 
+    The compile ranges are
+    [1, split_points[0]],
+    [split_points[0] + 1, split_points[1]], ...,
     [split_points[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
-    
-    If a range overlaps with the compile size, graph for compile size 
+
+    If a range overlaps with the compile size, graph for compile size
     will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
     graph for compile size 4 will be compiled and used instead of the graph
     for range [1, 8].
@@ -937,7 +937,7 @@ class CompilationConfig:
                     or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
                 ):
                     logger.warning_once(
-                        "Using piecewise compilation with empty splitting_ops"
+                        "Using piecewise cudagraph with empty splitting_ops"
                     )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
