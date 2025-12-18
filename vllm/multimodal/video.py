@@ -6,11 +6,14 @@ from abc import abstractmethod
 from functools import partial
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from PIL import Image
+
+if TYPE_CHECKING:
+    import cv2
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -79,7 +82,7 @@ class VideoLoader:
 
     @staticmethod
     def _read_frames_with_recovery(
-        cap,
+        cap: "cv2.VideoCapture",
         frame_indices: list[int],
         total_frames: int,
     ) -> tuple[npt.NDArray, list[int], dict[int, int]]:
