@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import itertools
 from typing import Any, Callable
@@ -66,23 +67,60 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
 
 
 @dataclass
-class CopySpec:
-    block_idx_offset_func: Callable[[int], int]
-    data_offset_func: Callable[[torch.Tensor, int], int]
-    num_elements_func: Callable[[torch.Tensor, int], int]
+class MambaCopySpec(ABC):
 
+    @staticmethod
+    @abstractmethod
+    def block_idx_offset_func(accept_token_bias: int) -> int:
+        """
+        Return the offset of the source block idx which needs to be copied.
+        """
+        pass
 
-conv_copy = CopySpec(
-    block_idx_offset_func=lambda bias: 0,
-    data_offset_func=lambda state, bias: bias * state.stride(0),
-    num_elements_func=lambda state, bias: state.numel() - bias * state.stride(0),
-)
+    @staticmethod
+    @abstractmethod 
+    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        """
+        Return the offset of the data in the source block which needs to be copied.
+        """
+        pass
 
-full_copy = CopySpec(
-    block_idx_offset_func=lambda bias: bias,
-    data_offset_func=lambda state, bias: 0,
-    num_elements_func=lambda state, bias: state.numel(),
-)
+    @staticmethod
+    @abstractmethod 
+    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        """
+        Return the number of elements to be copied.
+        """
+        pass
+
+class MambaFullCopySpec(MambaCopySpec):
+
+    @staticmethod
+    def block_idx_offset_func(accept_token_bias: int) -> int:
+        return accept_token_bias
+
+    @staticmethod
+    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        return 0
+    
+    @staticmethod
+    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        return state.numel()
+
+class MambaConvCopySpec(MambaCopySpec):
+
+    @staticmethod
+    def block_idx_offset_func(accept_token_bias: int) -> int:
+        return accept_token_bias
+    
+    @staticmethod
+    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        return accept_token_bias * state.stride(0)
+    
+    @staticmethod
+    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        return state.numel() - accept_token_bias * state.stride(0)
+
 
 def mamba_copy_block_for_qwen_next(
     kv_cache_config: KVCacheConfig,
@@ -106,7 +144,7 @@ def mamba_copy_block_for_qwen_next(
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
-            copy_specs = [conv_copy, full_copy]
+            copy_specs: list[type[MambaCopySpec]] = [MambaConvCopySpec, MambaFullCopySpec]
             for state, copy_spec in zip(kv_caches, copy_specs):
                 src_block_id = block_ids[src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)]
                 data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
