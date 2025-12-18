@@ -4955,7 +4955,9 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
-            afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
+            afd_metadata = self._build_afd_metadata(
+                ubatch_slices_padded, num_tokens_unpadded
+            )
 
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
