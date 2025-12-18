@@ -944,10 +944,10 @@ class EplbState:
 
         target_device = model_state.physical_to_logical_map.device
         new_physical = model_state.new_physical_to_logical_map
+        # In order to avoid race condition with async eplb worker,
+        # we need to copy blocking in case of updated EP size.
         if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
-            model_state.physical_to_logical_map = new_physical.to(
-                target_device, non_blocking=True
-            )
+            model_state.physical_to_logical_map = new_physical.to(target_device)
         else:
             model_state.physical_to_logical_map[layer].copy_(
                 new_physical[layer].to(target_device, non_blocking=True)
