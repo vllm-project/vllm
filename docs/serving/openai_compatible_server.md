@@ -673,14 +673,16 @@ Code example: [examples/pooling/score/openai_cross_encoder_score.py](../../examp
 
 Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](#chat-template)).
 
-The template should use `{{ messages[0]["content"] }}` and `{{ messages[1]["content"] }}` to represent the query and document text, respectively.
+Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
 
-Here is an example template file (`examples/template_score_basic.jinja`):
+Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 
-```jinja2
-Query: {{ messages[0]["content"] }}
-Document: {{ messages[1]["content"] }}
-```
+- **Query**: `{{ (messages | selectattr("role", "eq", "query") | first).content }}`
+- **Document**: `{{ (messages | selectattr("role", "eq", "document") | first).content }}`
+
+This approach is more robust than index-based access (`messages[0]`, `messages[1]`) because it selects messages by their semantic role. It also avoids assumptions about message ordering if additional message types are added to `messages` in the future.
+
+Example template file: [examples/pooling/score/template/nemotron-rerank.jinja](../../examples/pooling/score/template/nemotron-rerank.jinja)
 
 #### Single inference
 
