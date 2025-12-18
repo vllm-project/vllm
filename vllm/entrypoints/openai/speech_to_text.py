@@ -303,6 +303,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _get_verbose_segments(
         self,
         tokens: tuple,
+        log_probs: list,
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
@@ -315,7 +316,7 @@ class OpenAISpeechToText(OpenAIServing):
         If the tokens do not include timestamp information,
         the segments may not be generated correctly.
 
-        Note: Fields like avg_logprob, compression_ratio,
+        Note: Fields like compression_ratio,
         and no_speech_prob are not supported
         in this implementation and will be None. See docs for details.
         """
@@ -330,6 +331,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         if tokens_with_start[-2] < init_token and tokens_with_start[-1] >= init_token:
             tokens_with_start = tokens_with_start + (tokens_with_start[-1],)
+        avg_logprob = 0
         for idx, token in enumerate(tokens_with_start):
             # Timestamp tokens (e.g., <|0.00|>) are assumed to be sorted.
             # If the ordering is violated, this slicing may produce incorrect results.
@@ -352,10 +354,14 @@ class OpenAISpeechToText(OpenAIServing):
                         temperature=request.temperature,
                         text=self.tokenizer.decode(sliced_timestamp_tokens[1:-1]),
                         tokens=sliced_timestamp_tokens[1:-1],
+                        avg_logprob=avg_logprob / (idx - last_timestamp_start),
                     ),
                 )
                 segments.append(casting_segment)
                 last_timestamp_start = idx
+                avg_logprob = 0
+            elif idx != 0:
+                avg_logprob += log_probs[idx - 1].get(token).logprob
         return segments
 
     async def _create_speech_to_text(
@@ -429,6 +435,8 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
+            if request.response_format == "verbose_json":
+                sampling_params.logprobs = 1
 
             self._log_inputs(
                 request_id,
@@ -475,6 +483,7 @@ class OpenAISpeechToText(OpenAIServing):
                                 segment_class=segment_class,
                                 request=request,
                                 start_time=idx * self.asr_config.max_audio_clip_s,
+                                log_probs=op.outputs[0].logprobs,
                             )
                         )
 
