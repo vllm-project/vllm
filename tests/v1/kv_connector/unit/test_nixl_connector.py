@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnectorWorker,
     NixlHandshakePayload,
     NixlKVConnectorStats,
+    ReqState,
     compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -1618,7 +1619,8 @@ def test_aborted_request_removed_from_worker_in_batch(dist_init):
     kv_meta = sched_out.kv_connector_metadata
     assert kv_meta is not None
     assert isinstance(kv_meta, NixlConnectorMetadata)
-    assert req.request_id in kv_meta.reqs_in_batch
+    assert req.request_id in kv_meta.reqs_to_send
+    assert kv_meta.reqs_to_send[req.request_id] == ReqState.SCHEDULED
 
     #### Model Runner start ####
     # Bind scheduler-produced metadata and start worker processing.
@@ -1643,7 +1645,8 @@ def test_aborted_request_removed_from_worker_in_batch(dist_init):
     kv_meta2 = sched_out2.kv_connector_metadata
     assert kv_meta2 is not None
     assert isinstance(kv_meta2, NixlConnectorMetadata)
-    assert req.request_id not in kv_meta2.reqs_in_batch
+    assert req.request_id in kv_meta2.reqs_to_send
+    assert kv_meta2.reqs_to_send[req.request_id] == ReqState.ABORTED
 
     # Bind empty/abort metadata and run worker step
     #### Model Runner start ####
