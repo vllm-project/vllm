@@ -254,8 +254,8 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
-            # Some blocks may be null blocks when enabling sparse attention or sliding
-            # window attention. We skip null blocks here.
+            # Some blocks may be null blocks when enabling sparse attention like
+            # sliding window attention. We skip null blocks here.
             if blk.is_null:
                 continue
             assert blk.block_hash is None
