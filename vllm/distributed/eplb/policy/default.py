@@ -15,7 +15,6 @@ on how the EPLB algorithm works.
 import numpy as np
 import torch
 
-from typing import Optional
 from .abstract import AbstractEplbPolicy
 
 

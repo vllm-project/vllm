@@ -743,6 +743,7 @@ def generate_layered_experts(
         layers.append(layer_shuffled.reshape(layer_shape))
     return torch.stack(layers, dim=0)
 
+
 def warmup_flashlb():
     """
     Warm up Numba JIT-compiled FlashLB functions with test data

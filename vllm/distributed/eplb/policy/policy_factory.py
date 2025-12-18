@@ -19,6 +19,7 @@ EPLB_POLICIES: dict[EPLBPolicyOption, type[AbstractEplbPolicy]] = {
 # Ensure that the EPLB_POLICIES keys match the EPLBPolicyOption values
 assert set(EPLB_POLICIES.keys()) == set(get_args(EPLBPolicyOption))
 
+
 class EplbPolicyFactory:
     """
     EPLB Policy Factory Class: Unified creation of different policy instances
@@ -29,6 +30,7 @@ class EplbPolicyFactory:
     2. Automatically adapt to thread-isolated instantiation of stateful policies.
     3. Provide policy registration mechanism to support extending new policies.
     """
+
     # Policy registry (aligned with EPLB_POLICIES, dynamically extensible)
     _POLICY_REGISTRY = EPLB_POLICIES
 
