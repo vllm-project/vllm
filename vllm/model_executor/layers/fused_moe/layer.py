@@ -1726,9 +1726,10 @@ class FusedMoE(CustomOp):
             return states
 
         if self.shared_experts is None:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 fused_output = self.forward_impl(hidden_states, router_logits)
                 assert not isinstance(fused_output, tuple)
             else:
@@ -1744,9 +1745,10 @@ class FusedMoE(CustomOp):
             else:
                 return reduce_output(fused_output)[..., :og_hidden_states]
         else:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 shared_output, fused_output = self.forward_impl(
                     hidden_states, router_logits
                 )
