@@ -162,6 +162,55 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
+    async def warmup(self) -> None:
+        """
+        Warm up the chat template processing to avoid first-request latency.
+
+        This method triggers Jinja2 template compilation and content format
+        detection that would otherwise happen on the first real request,
+        causing increased latency on the first request.
+        """
+        logger.info("Warming up chat template processing...")
+        start_time = time.perf_counter()
+
+        try:
+            # Get the tokenizer from the engine
+            tokenizer = await self.engine_client.get_tokenizer()
+
+            # Create a minimal dummy request
+            dummy_request = ChatCompletionRequest(
+                messages=[{"role": "user", "content": "warmup"}],
+                model=None,
+                max_completion_tokens=1,
+            )
+
+            # Call _preprocess_chat to trigger template compilation
+            # This forces:
+            # 1. Chat template content format detection
+            # 2. Jinja2 template compilation
+            # 3. Tokenizer initialization for chat
+            await self._preprocess_chat(
+                dummy_request,
+                tokenizer,
+                dummy_request.messages,
+                chat_template=self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                add_generation_prompt=True,
+                continue_final_message=False,
+                tool_dicts=None,
+                documents=None,
+                chat_template_kwargs=None,
+                tool_parser=None,
+                add_special_tokens=False,
+            )
+
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info("Chat template warmup completed in %.1fms", elapsed)
+
+        except Exception:
+            # Log but don't fail server startup if warmup fails
+            logger.exception("Chat template warmup failed")
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
