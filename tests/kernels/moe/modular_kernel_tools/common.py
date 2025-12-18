@@ -61,6 +61,8 @@ class Config:
 
     fused_moe_chunk_size: int | None
     world_size: int
+    verbose: bool = False
+    exit_first: bool = False
 
     torch_trace_dir_path: str | None = None
 
@@ -142,9 +144,9 @@ class Config:
         }
 
         backend = self.all2all_backend()
-        vllm_config.parallel_config.all2all_backend = backend
         if backend is not None:
             env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
+            vllm_config.parallel_config.all2all_backend = backend
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
@@ -293,12 +295,12 @@ class WeightTensors:
     def describe(self):
         s = ""
         s += "== Weight Tensors: \n"
-        s += f" - {_describe_tensor(self.w1, 'w1')} \n"
-        s += f" - {_describe_tensor(self.w2, 'w2')} \n"
-        s += f" - {_describe_tensor(self.w1_scale, 'w1_scale')} \n"
-        s += f" - {_describe_tensor(self.w2_scale, 'w2_scale')} \n"
-        s += f" - {_describe_tensor(self.w1_gs, 'w1_gs')} \n"
-        s += f" - {_describe_tensor(self.w2_gs, 'w2_gs')} \n"
+        s += f" - {_describe_tensor(self.w1, 'w1')}\n"
+        s += f" - {_describe_tensor(self.w2, 'w2')}\n"
+        s += f" - {_describe_tensor(self.w1_scale, 'w1_scale')}\n"
+        s += f" - {_describe_tensor(self.w2_scale, 'w2_scale')}\n"
+        s += f" - {_describe_tensor(self.w1_gs, 'w1_gs')}\n"
+        s += f" - {_describe_tensor(self.w2_gs, 'w2_gs')}\n"
         return s
 
     def is_quantized(self) -> bool:
@@ -365,11 +367,11 @@ class RankTensors:
     def describe(self):
         s = ""
         s += "== Rank Tensors: \n"
-        s += f" - {_describe_tensor(self.hidden_states, 'HS')} \n"
-        s += f" - {_describe_tensor(self.hidden_states_scale, 'HS_scale')} \n"
-        s += f" - {_describe_tensor(self.topk_weights, 'topk_weights')} \n"
-        s += f" - {_describe_tensor(self.topk_ids, 'topk_ids')} \n"
-        s += f" - {_describe_tensor(self.expert_map, 'expert_map')} \n"
+        s += f" - {_describe_tensor(self.hidden_states, 'HS')}\n"
+        s += f" - {_describe_tensor(self.hidden_states_scale, 'HS_scale')}\n"
+        s += f" - {_describe_tensor(self.topk_weights, 'topk_weights')}\n"
+        s += f" - {_describe_tensor(self.topk_ids, 'topk_ids')}\n"
+        s += f" - {_describe_tensor(self.expert_map, 'expert_map')}\n"
         return s
 
     @staticmethod
@@ -415,6 +417,7 @@ class RankTensors:
         score = torch.randn((m, global_num_experts), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk, False)
 
+        # TODO(bnell): force all ids to a single rank to test edge cases.
         # distribute topk_ids evenly
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
@@ -555,12 +558,12 @@ def make_modular_kernel(
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEModularKernel:
-    def next_power_of_2(x):
+    def next_power_of_2(x) -> int:
         import math
 
         if x == 0:
             return 1
-        return 2 ** math.ceil(math.log2(x))
+        return int(2 ** math.ceil(math.log2(x)))
 
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
@@ -570,6 +573,12 @@ def make_modular_kernel(
         vllm_parallel_config=vllm_config.parallel_config,
     )
 
+    # Hybrid DeepEP needs a minimum of 128 tokens.
+    if config.prepare_finalize_type.__name__ == "DeepEPHybridPrepareFinalize":
+        min_num_tokens = 128
+    else:
+        min_num_tokens = 1
+
     moe = FusedMoEConfig(
         num_experts=config.E,
         experts_per_token=config.topk,
@@ -577,7 +586,7 @@ def make_modular_kernel(
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
-        max_num_tokens=next_power_of_2(config.M),
+        max_num_tokens=max(min_num_tokens, next_power_of_2(config.M)),
     )
 
     # make modular kernel

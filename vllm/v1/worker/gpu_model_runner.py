@@ -2867,8 +2867,11 @@ class GPUModelRunner(
             # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
             # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
             # decoder.
+            # Note: DeepEP Hybrid kernels require DP padding whether we are using CUDA
+            # graphs or not.
             allow_dp_padding = (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                or self.parallel_config.all2all_backend == "deepep_hybrid"
             )
 
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
