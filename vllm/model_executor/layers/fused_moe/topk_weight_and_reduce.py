@@ -4,7 +4,6 @@
 
 import torch
 
-import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 
@@ -89,31 +88,32 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
-        m, num_topk = topk_ids.size()
-        k = fused_expert_output.size(-1)
-        if fused_expert_output.ndim == 2:
-            fused_expert_output = fused_expert_output.view(m, num_topk, k)
-
-        assert fused_expert_output.size() == (m, num_topk, k), (
-            f"Expected fused_expert_output size {(m, num_topk, k)}. But got "
-            f"{fused_expert_output.size()}"
-        )
-
-        if not apply_router_weight_on_input:
-            fused_expert_output.mul_(topk_weights.view(m, -1, 1))
-
-        if output is None:
-            output = torch.empty(
-                (m, k),
-                device=fused_expert_output.device,
-                dtype=fused_expert_output.dtype,
-            )
-        assert output.size() == (m, k), (
-            f"Expected output size {(m, k)}. But got {output.size()}"
-        )
-
-        ops.moe_sum(fused_expert_output, output)
         return output
+        # m, num_topk = topk_ids.size()
+        # k = fused_expert_output.size(-1)
+        # if fused_expert_output.ndim == 2:
+        #     fused_expert_output = fused_expert_output.view(m, num_topk, k)
+
+        # assert fused_expert_output.size() == (m, num_topk, k), (
+        #     f"Expected fused_expert_output size {(m, num_topk, k)}. But got "
+        #     f"{fused_expert_output.size()}"
+        # )
+
+        # if not apply_router_weight_on_input:
+        #     fused_expert_output.mul_(topk_weights.view(m, -1, 1))
+
+        # if output is None:
+        #     output = torch.empty(
+        #         (m, k),
+        #         device=fused_expert_output.device,
+        #         dtype=fused_expert_output.dtype,
+        #     )
+        # assert output.size() == (m, k), (
+        #     f"Expected output size {(m, k)}. But got {output.size()}"
+        # )
+
+        # ops.moe_sum(fused_expert_output, output)
+        # return output
 
 
 class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):

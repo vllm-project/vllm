@@ -954,6 +954,72 @@ def _valid_cutlass_block_scaled_grouped_gemm(
     return True
 
 
+def cutlass_moe_fp8_blockscale(
+    a: torch.Tensor,
+    w1_q: torch.Tensor,
+    w2_q: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    activation: str = "silu",
+    expert_map: torch.Tensor | None = None,
+    apply_router_weight_on_input: bool = False,
+    global_num_experts: int = -1,
+) -> torch.Tensor:
+    """
+    This function computes a a8w8-quantized Mixture of Experts (MoE) layer
+    using two sets of quantized weights, w1_q and w2_q, and top-k gating
+    mechanism. The matrix multiplications are implemented with CUTLASS
+    grouped gemm.
+
+    Parameters:
+    - a (torch.Tensor): The input tensor to the MoE layer.
+        Shape: [M, K]
+    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
+        Shape: [num_experts, K, 2N] (the weights are passed transposed)
+    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
+        Shape: [num_experts, N, K] (the weights are passed transposed)
+    - topk_weights (torch.Tensor): The weights of each token->expert mapping.
+    - topk_ids (torch.Tensor): The token->expert mappings.
+    - expert_map (Optional[torch.Tensor]): In the case of Expert parallel,
+        every Rank is responsible for a subset of experts. expert_map is a
+        mapping from global expert-id to local expert-id. When expert_map[i]
+        is -1, it means that this Rank is not responsible for global
+        expert-id i.
+    - apply_router_weight_on_input (bool): When true, the topk weights are
+        applied directly on the inputs. This is only applicable when topk is 1.
+    - global_num_experts (int): The total number of experts.
+
+    Returns:
+    - torch.Tensor: The fp16 output tensor after applying the MoE layer.
+    """
+    assert quant_config is not None
+    assert expert_map is None
+    assert not apply_router_weight_on_input
+
+    num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
+
+    fn = mk.FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        CutlassExpertsBlockScaleFp8(
+            quant_config=quant_config,
+            out_dtype=a.dtype,
+        ),
+    )
+
+    return fn(
+        a,
+        w1_q,
+        w2_q,
+        topk_weights,
+        topk_ids,
+        activation=activation,
+        global_num_experts=num_experts,
+        expert_map=expert_map,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
+
+
 # TODO(bnell): would be nice combine/integrate with regular cutlass_fp8.
 def run_cutlass_moe_block_scaled_fp8(
     hidden_states: torch.Tensor,
@@ -961,12 +1027,16 @@ def run_cutlass_moe_block_scaled_fp8(
     w2: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    a1q_scale: torch.Tensor,
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     activation_callable: Callable,
+    out_dtype: torch.dtype,
 ) -> torch.Tensor:
+    a1q = hidden_states
+
     w1_q = w1.transpose(1, 2)
     w2_q = w2.transpose(1, 2)
     w1_scale = w1_scale.transpose(1, 2)
@@ -978,25 +1048,20 @@ def run_cutlass_moe_block_scaled_fp8(
     )
     assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
     assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
-    assert hidden_states.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
+    assert a1q.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
     assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
     assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
     assert w1_q.shape[0] == w1_scale.shape[0], "w1_scale expert number mismatch"
     assert w1_q.shape[0] == w2_scale.shape[0], "w2_scale expert number mismatch"
-    assert hidden_states.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
-    out_dtype = hidden_states.dtype
     num_experts = w1_q.size(0)
-    m = hidden_states.size(0)
-    k = w1_q.size(1)
-    n = w2_q.size(1)
-
+    M = a1q.size(0)
+    K = w1_q.size(1)
+    N = w2_q.size(1)
     topk = topk_ids.size(1)
 
-    a_q, a1_scale = _fp8_quantize(
-        hidden_states, A_scale=None, per_act_token=False, block_shape=[128, 128]
-    )
-    device = a_q.device
+    device = a1q.device
 
     expert_offsets = torch.empty((num_experts + 1,), dtype=torch.int32, device=device)
     problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
@@ -1013,16 +1078,16 @@ def run_cutlass_moe_block_scaled_fp8(
         a_map,
         c_map,
         num_experts,
-        n,
-        k,
+        N,
+        K,
     )
 
-    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
-    rep_a1_scales = a1_scale[a_map]
+    rep_a_q = a1q.view(dtype=torch.uint8)[a_map].view(dtype=a1q.dtype)
+    rep_a1_scales = a1q_scale[a_map]
 
-    mm1_out = _resize_cache(workspace13, (m * topk, n * 2))
-    act_out = _resize_cache(workspace2, (m * topk, n))
-    mm2_out = _resize_cache(workspace2, (m * topk, k))
+    mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
+    act_out = _resize_cache(workspace2, (M * topk, N))
+    mm2_out = _resize_cache(workspace2, (M * topk, K))
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         mm1_out,
@@ -1052,27 +1117,20 @@ def run_cutlass_moe_block_scaled_fp8(
 
     # TODO: swap with MoE unpermute.
     return (
-        mm2_out[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)
+        mm2_out[c_map].view(M, topk, K) * topk_weights.view(M, topk, 1).to(out_dtype)
     ).sum(dim=1)
 
 
-class CutlassBlockScaleExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsBlockScaleFp8(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype | None,
-        ab_strides1: torch.Tensor,
-        ab_strides2: torch.Tensor,
-        c_strides1: torch.Tensor,
-        c_strides2: torch.Tensor,
+        out_dtype: torch.dtype,
         quant_config: FusedMoEQuantConfig,
     ):
         assert quant_config.use_fp8_w8a8
-        super().__init__(quant_config)
+        assert quant_config.is_block_quantized
         self.out_dtype = out_dtype
-        self.ab_strides1 = ab_strides1
-        self.ab_strides2 = ab_strides2
-        self.c_strides1 = c_strides1
-        self.c_strides2 = c_strides2
+        super().__init__(quant_config)
 
     @property
     def activation_formats(
@@ -1142,11 +1200,13 @@ class CutlassBlockScaleExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
             w2=w2,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
+            a1q_scale=a1q_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             topk_ids=topk_ids,
             topk_weights=topk_weights,
             activation_callable=activation_callable,
+            out_dtype=self.out_dtype,
         )
 
 

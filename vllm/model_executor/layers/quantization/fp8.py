@@ -1277,6 +1277,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
+        elif self.allow_cutlass_block_scaled_grouped_gemm:
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                cutlass_moe_fp8_blockscale,  # noqa: E501
+            )
+
+            result = cutlass_moe_fp8_blockscale(
+                a=x,
+                w1_q=layer.w13_weight,
+                w2_q=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                quant_config=self.moe_quant_config,
+                activation=layer.activation,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+            )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
