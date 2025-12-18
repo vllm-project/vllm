@@ -11,7 +11,7 @@ from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
-    is_second_ubatch_empty,
+    is_last_ubatch_empty,
 )
 
 logger = init_logger(__name__)
@@ -56,7 +56,7 @@ def _run_ar(
     return tensor
 
 
-def _post_process_ubatch(tensor: torch.Tensor) -> bool:
+def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     orig_num_tokens_tensor = tensor[0, :]
     padded_num_tokens_tensor = tensor[1, :]
 
@@ -68,7 +68,7 @@ def _post_process_ubatch(tensor: torch.Tensor) -> bool:
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
-    if is_second_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens):
+    if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens, num_ubatches):
         logger.debug(
             "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
         )
@@ -146,7 +146,7 @@ def _synchronize_dp_ranks(
     assert should_attempt_dp_padding == should_dp_pad
 
     # Check conditions for microbatching
-    should_ubatch = _post_process_ubatch(tensor)
+    should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
     if should_ubatch and not should_dp_pad:
         logger.debug_once(
