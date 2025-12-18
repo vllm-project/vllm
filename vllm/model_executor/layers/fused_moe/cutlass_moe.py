@@ -1189,7 +1189,6 @@ class CutlassExpertsBlockScaleFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-        assert a1q_scale is None, "CUTLASS MoE Block only supports dynamic quant"
         assert a2_scale is None, "CUTLASS MoE Block only supports dynamic quant"
 
         activation_callable = lambda o, i: self.activation(activation, o, i)
