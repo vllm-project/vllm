@@ -5162,6 +5162,24 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def _get_lora_capture_cases(self) -> list[tuple[bool, int]]:
+        """
+        Returns list of (has_lora, num_active_loras) tuples for CUDA graph capture.
+
+        Returns cases for each num_active_loras from 1 to max_loras.
+        If cudagraph_specialize_lora is True, also includes the no-lora case.
+        """
+        if not self.lora_config:
+            return [(False, 0)]
+
+        max_loras = self.lora_config.max_loras
+        # Capture for each num_active_loras from 1 to max_loras
+        lora_cases = [(True, n) for n in range(1, max_loras + 1)]
+        # Also capture the no-lora case if cudagraph_specialize_lora is True
+        if self.compilation_config.cudagraph_specialize_lora:
+            lora_cases.append((False, 0))
+        return lora_cases
+
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
