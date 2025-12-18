@@ -219,18 +219,13 @@ class SJFRequestQueue(RequestHeap):
     """A Shortest Job First (SJF) queue where requests are ordered by weighted score.
     Requests with higher weighted scores (shorter jobs) are processed first."""
 
-    def _request_to_heap(self, request: Request) -> tuple[WeightedScoreSorter, Request]:
-        """Convert request to (weighted_score, request) tuple for heap."""
-        assert request.prompt_token_ids is not None
-        return (
-            WeightedScoreSorter(len(request.prompt_token_ids), request.arrival_time),
-            request,
-        )
+    def _request_to_heap(self, request: Request) -> WeightedScoreSorter:
+        """Convert request to `WeightedScoreSorter` for heap."""
+        return WeightedScoreSorter(request)
 
-    def _heap_to_request(self, element: tuple[WeightedScoreSorter, Request]) -> Request:
-        """Extract request from the (score, request) tuple with type checking."""
-        _, request = element
-        return request
+    def _heap_to_request(self, element: WeightedScoreSorter) -> Request:
+        """Extract request from the `WeightedScoreSorter`."""
+        return element.request
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
