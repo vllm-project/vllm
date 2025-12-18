@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
 
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
+
+logger = init_logger(__name__)
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
@@ -415,6 +419,7 @@ def _fused_moe_lora(
     max_lora_rank: int,
     top_k_num: int,
     lora_ids: torch.Tensor,
+    num_active_loras: int,
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
@@ -566,6 +571,7 @@ def _fused_moe_lora_fake(
     max_lora_rank: int,
     top_k_num: int,
     lora_ids: torch.Tensor,
+    num_active_loras: int,
     adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
