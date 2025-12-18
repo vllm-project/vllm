@@ -574,6 +574,7 @@ async def test_engine_core_client_util_method_nested_structures(
             client.shutdown()
 
 
+@create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],

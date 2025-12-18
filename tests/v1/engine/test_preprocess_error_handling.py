@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test that we handle errors in request preprocessing gracefully."""
 
 import pytest
+import torch.cuda
 
 from vllm import LLM, SamplingParams
-from vllm.envs import disable_envs_cache
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 
@@ -15,9 +14,10 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     """Test that preprocessing errors are handled gracefully."""
 
-    # Ensure fork is used so that monkeypatch will propagate to engine core subprocess.
-    disable_envs_cache()
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+    assert not torch.cuda.is_initialized(), (
+        "fork needs to be used for the engine "
+        "core process and this isn't possible if cuda is already initialized"
+    )
 
     # Store original method to call for non-failing requests
     original_preprocess = EngineCore.preprocess_add_request
@@ -25,7 +25,7 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     # Monkeypatch to make preprocess_add_request raise an exception
     # only for requests with "FAIL" in the first token
     def conditional_failing_preprocess(self, request: EngineCoreRequest):
-        # Fail if the first token is very large (we'll use a special prompt for this)
+        # Fail if the first token id is 333
         if request.prompt_token_ids and request.prompt_token_ids[0] == 333:
             raise ValueError("Simulated preprocessing error!")
         return original_preprocess(self, request)
@@ -41,7 +41,8 @@ def test_preprocess_error_handling(monkeypatch: pytest.MonkeyPatch):
     from vllm.inputs import TokensPrompt
 
     # This should raise an exception due to the preprocessing failure
-    failing_prompt = TokensPrompt(prompt_token_ids=[333])  # Invalid large token
+    # Special token id to trigger the failure
+    failing_prompt = TokensPrompt(prompt_token_ids=[333])
     outputs = llm.generate(failing_prompt, SamplingParams(max_tokens=10))  # type: ignore
     assert len(outputs) == 1
     assert len(outputs[0].outputs[0].token_ids) == 0
