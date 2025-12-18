@@ -292,18 +292,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
-
-        if get_tensor_model_parallel_rank() == 0:
-            print(
-                "SMOR: ****************************************************************"
-            )
-            print("SMOR ************** NEMOTRON H MTP FORWARD CALLED ************** ")
-            print(f"SMOR: input_ids: {input_ids}")
-            print(f"SMOR: positions: {positions}")
-            print(f"SMOR: hidden_states.shape: {hidden_states.shape}")
-            print(f"SMOR: inputs_embeds.shape: {inputs_embeds.shape}")
-            print(f"SMOR: spec_step_idx: {spec_step_idx}")
-            print("\n")
         if spec_step_idx >= self.num_mtp_layers:
             spec_step_idx = self.num_mtp_layers - 1
 
@@ -312,10 +300,6 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         residual = None
 
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: NEMOTRON H MTP FORWARD start_idx: {start_idx}")
-            print(f"SMOR: NEMOTRON H MTP FORWARD end_idx: {end_idx}")
-            print("\n")
         for i in range(start_idx, end_idx):
             hidden_states, residual = self.layers[str(i)](
                 inputs_embeds=inputs_embeds,

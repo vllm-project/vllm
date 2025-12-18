@@ -232,19 +232,6 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-
-        if get_tensor_model_parallel_rank() == 0:
-            print(
-                "SMOR: ****************************************************************"
-            )
-            print("SMOR ************** PROPOSE CALLED ************** ")
-            print(f"SMOR: target_token_ids: {target_token_ids}")
-            print(f"SMOR: target_positions: {target_positions}")
-            print(f"SMOR: target_hidden_states.shape: {target_hidden_states.shape}")
-            print(f"SMOR: next_token_ids: {next_token_ids}")
-            print(f"SMOR: last_token_indices: {last_token_indices}")
-            print("\n")
 
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
