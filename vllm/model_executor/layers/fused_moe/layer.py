@@ -1605,8 +1605,7 @@ class FusedMoE(CustomOp):
                 topk_group=self.topk_group,
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
-                e_score_correction_bias=self.e_score_correction_bias,
-                packed=packed
+                e_score_correction_bias=self.e_score_correction_bias
             )
         elif self.e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
