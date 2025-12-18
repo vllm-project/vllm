@@ -111,8 +111,13 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
+    expert_parallel_size: int = 1
+    """Number of expert parallel groups. MoE layers will be sharded across
+    this many devices. Must equal tensor_parallel_size * data_parallel_size
+    when greater than 1."""
     enable_expert_parallel: bool = False
-    """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    """Use expert parallelism instead of tensor parallelism for MoE layers.
+    Deprecated: use expert_parallel_size instead."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
@@ -295,6 +300,23 @@ class ParallelConfig:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
+
+        # Validate expert_parallel_size
+        expected_ep_size = self.tensor_parallel_size * self.data_parallel_size
+        if self.expert_parallel_size > 1:
+            if self.expert_parallel_size != expected_ep_size:
+                raise ValueError(
+                    f"expert_parallel_size ({self.expert_parallel_size}) must equal "
+                    f"tensor_parallel_size * data_parallel_size "
+                    f"({self.tensor_parallel_size} * {self.data_parallel_size} = "
+                    f"{expected_ep_size})"
+                )
+            # Derive enable_expert_parallel from expert_parallel_size
+            object.__setattr__(self, "enable_expert_parallel", True)
+        elif self.enable_expert_parallel:
+            # Legacy path: enable_expert_parallel was set directly
+            # Set expert_parallel_size to TP * DP
+            object.__setattr__(self, "expert_parallel_size", expected_ep_size)
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike():

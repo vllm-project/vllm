@@ -382,3 +382,49 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_ep_size", "expected_enable_ep"),
+    [
+        # -ep shorthand sets expert_parallel_size
+        (["-ep", "4"], 4, False),
+        # --expert-parallel-size long form
+        (["--expert-parallel-size", "8"], 8, False),
+        # --enable-expert-parallel (legacy) sets enable_expert_parallel
+        (["--enable-expert-parallel"], 1, True),
+        # default values
+        ([], 1, False),
+    ],
+)
+def test_expert_parallel_size(args, expected_ep_size, expected_enable_ep):
+    """Test expert_parallel_size CLI argument parsing."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.expert_parallel_size == expected_ep_size
+    assert parsed_args.enable_expert_parallel == expected_enable_ep
+
+
+def test_expert_parallel_size_validation():
+    """Test that expert_parallel_size must equal TP * DP."""
+    from vllm.config.parallel import ParallelConfig
+
+    # Valid: EP = TP * DP
+    pc = ParallelConfig(
+        tensor_parallel_size=2, data_parallel_size=2, expert_parallel_size=4
+    )
+    assert pc.expert_parallel_size == 4
+    assert pc.enable_expert_parallel is True
+
+    # Valid: legacy enable_expert_parallel sets EP = TP * DP
+    pc2 = ParallelConfig(
+        tensor_parallel_size=2, data_parallel_size=2, enable_expert_parallel=True
+    )
+    assert pc2.expert_parallel_size == 4
+    assert pc2.enable_expert_parallel is True
+
+    # Invalid: EP != TP * DP should raise ValueError
+    with pytest.raises(ValueError, match="expert_parallel_size .* must equal"):
+        ParallelConfig(
+            tensor_parallel_size=2, data_parallel_size=2, expert_parallel_size=8
+        )
