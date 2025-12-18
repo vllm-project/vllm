@@ -235,7 +235,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     generator = self.engine_client.generate(
                         engine_request,
                         sampling_params,
-                        engine_request.request_id,
+                        request_id_item,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,

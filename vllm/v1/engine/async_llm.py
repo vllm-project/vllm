@@ -316,6 +316,8 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        self.input_processor.assign_request_id(request)
+
         # Create a new output collector for the request.
         queue = RequestOutputCollector(params.output_kind, request.request_id)
 

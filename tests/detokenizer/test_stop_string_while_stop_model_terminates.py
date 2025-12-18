@@ -31,7 +31,6 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
     # Keep other fields minimal for unit test purposes.
     req = EngineCoreRequest(
         request_id="test",
-        external_req_id="test-ext",
         prompt_token_ids=[],
         mm_features=None,
         sampling_params=params,

@@ -1712,7 +1712,7 @@ class LLM:
         )
 
         self.llm_engine.add_request(
-            engine_request.request_id,
+            request_id,
             engine_request,
             params,
             lora_request=lora_request,

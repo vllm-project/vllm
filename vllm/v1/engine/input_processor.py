@@ -403,14 +403,19 @@ class InputProcessor:
                 if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
                 else 1
             )
-            mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
+            # request_id is externally provided, add randomness to ensure uniqueness
+            mm_uuids[modality] = [
+                f"{request_id}-{modality}-{random_uuid():.8}-{i}" for i in range(n)
+            ]
         return mm_uuids
 
-    def _generate_request_id(self, request_id: str):
-        """Construct an internal request ID by adding 8 random characters
-        to the supplied request ID in order to ensure uniquness.
+    def assign_request_id(self, request: EngineCoreRequest):
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniquness.
         """
-        return f"{request_id}-{random_uuid():.8}"
+        assert request.external_req_id is None
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
     def process_inputs(
         self,
@@ -438,9 +443,6 @@ class InputProcessor:
 
         if arrival_time is None:
             arrival_time = time.time()
-
-        external_req_id = request_id
-        request_id = self._generate_request_id(request_id)
 
         # Optionally generate multimodal hash overrides to avoid hashing
         # multimodal data items by their content as their identifiers.
@@ -542,7 +544,6 @@ class InputProcessor:
 
         return EngineCoreRequest(
             request_id=request_id,
-            external_req_id=external_req_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
             mm_features=mm_features,

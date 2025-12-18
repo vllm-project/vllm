@@ -201,12 +201,12 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     assert set(mm_uuids.keys()) == {"image", "video"}
     assert len(mm_uuids["image"]) == 2
     assert len(mm_uuids["video"]) == 1
-    assert mm_uuids["image"][0].startswith(f"{request_id}-") and mm_uuids["image"][
-        0
-    ].endswith("-image-0")
-    assert mm_uuids["image"][1].startswith(f"{request_id}-") and mm_uuids["image"][
-        1
-    ].endswith("-image-1")
-    assert mm_uuids["video"][0].startswith(f"{request_id}-") and mm_uuids["video"][
-        0
-    ].endswith("-video-0")
+    assert mm_uuids["image"][0].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][0].endswith("-0")
+    assert mm_uuids["image"][1].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][1].endswith("-1")
+    assert mm_uuids["video"][0].startswith(f"{request_id}-video-") and mm_uuids[
+        "video"
+    ][0].endswith("-0")

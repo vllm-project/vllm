@@ -180,6 +180,7 @@ class RequestState:
             assert request.pooling_params is not None
             output_kind = request.pooling_params.output_kind
 
+        assert request.external_req_id is not None
         return cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,

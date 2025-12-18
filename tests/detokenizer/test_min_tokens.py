@@ -35,7 +35,6 @@ def test_min_tokens_with_stop(min_tokens: int, stop: str, truth: str):
     )
     request = EngineCoreRequest(
         request_id="",
-        external_req_id="",
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
         sampling_params=params,

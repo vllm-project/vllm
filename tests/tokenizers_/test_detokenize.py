@@ -62,7 +62,6 @@ def _run_incremental_decode(
     )
     request = EngineCoreRequest(
         request_id="",
-        external_req_id="",
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
         sampling_params=params,

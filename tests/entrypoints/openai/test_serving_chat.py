@@ -397,9 +397,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         trace_headers,
         priority,
     ):
-        mock_request = MagicMock()
-        mock_request.request_id = request_id
-        return mock_request, {}
+        return dict(engine_prompt), {}
 
     serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
     return serving_chat
@@ -671,11 +669,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
-
-    mock_request = MagicMock()
-    mock_request.request_id = "test-request-internal"
     mock_engine.input_processor = MagicMock()
-    mock_engine.input_processor.process_inputs.return_value = mock_request
     mock_engine.io_processor = MagicMock()
 
     # Mock the generate method to return an async generator
@@ -702,9 +696,7 @@ async def test_serving_chat_data_parallel_rank_extraction():
             finished=True,
         )
 
-    mock_engine.generate = MagicMock(
-        side_effect=lambda *args, **kwargs: mock_generate()
-    )
+    mock_engine.generate = AsyncMock(side_effect=mock_generate)
 
     serving_chat = _build_serving_chat(mock_engine)
 

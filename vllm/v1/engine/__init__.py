@@ -52,7 +52,6 @@ class EngineCoreRequest(
     gc=False,
 ):  # type: ignore[call-arg]
     request_id: str
-    external_req_id: str
     prompt_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
@@ -75,6 +74,10 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+
+    # The user-provided request ID, to support abort(req_id, internal=False)
+    # See InputProcessor.assign_request_id()
+    external_req_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

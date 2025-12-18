@@ -33,8 +33,12 @@ class ParentRequest:
     cached_child_sampling_params: SamplingParams | None
 
     def __init__(
-        self, request_id: str, external_req_id: str, sampling_params: SamplingParams
+        self,
+        request_id: str,
+        external_req_id: str | None,
+        sampling_params: SamplingParams,
     ) -> None:
+        assert external_req_id is not None
         self.request_id = request_id
         self.external_req_id = external_req_id
         self.sampling_params = sampling_params
