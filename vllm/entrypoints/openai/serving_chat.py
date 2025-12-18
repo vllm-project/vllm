@@ -1858,12 +1858,9 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        if should_include_tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None
-            )
-        else:
-            dev_msg = get_developer_message()
+        dev_msg = get_developer_message(
+            tools=request.tools if should_include_tools else None
+        )
         messages.append(dev_msg)
 
         # Add user message.
