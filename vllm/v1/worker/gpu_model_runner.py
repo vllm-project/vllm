@@ -4628,9 +4628,9 @@ class GPUModelRunner(
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         """Initialize a minimal KV cache for CUDA graph memory profiling.
 
-        This creates a small KV cache (1 block) just to enable attention
-        metadata building during graph profiling. The actual KV cache will
-        be allocated later with the correct size.
+        This creates a small KV cache just to enable attention metadata
+        building during graph profiling. The actual KV cache will be
+        allocated later with the correct size.
         """
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
@@ -4640,13 +4640,15 @@ class GPUModelRunner(
         kv_cache_spec = self.get_kv_cache_spec()
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
 
-        # Use minimal memory to get 1 block. The function calculates
-        # num_blocks = available_memory // page_size // group_size, so we need
-        # to pass page_size * group_size to get exactly 1 block.
+        # Allocate enough blocks to support the largest batch size that will
+        # be used during profiling. This is necessary for models with
+        # Mamba-style conv state (e.g., Qwen3-next) which require one cache
+        # line per sequence in the batch.
+        min_blocks = self.cudagraph_batch_sizes[-1] if self.cudagraph_batch_sizes else 1
         if kv_cache_groups:
             page_size = kv_cache_groups[0].kv_cache_spec.page_size_bytes
             group_size = max(len(g.layer_names) for g in kv_cache_groups)
-            available_memory = page_size * group_size
+            available_memory = min_blocks * page_size * group_size
         else:
             available_memory = 1  # Attention-free model
 
