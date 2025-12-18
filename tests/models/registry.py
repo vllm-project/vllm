@@ -295,7 +295,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm3-8b-instruct", trust_remote_code=True
     ),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
-    "Jais2CausalLM": _HfExamplesInfo("inceptionai/Jais-2-8B-Chat"),
+    "Jais2ForCausalLM": _HfExamplesInfo("inceptionai/Jais-2-8B-Chat"),
     "JambaForCausalLM": _HfExamplesInfo(
         "ai21labs/AI21-Jamba-1.5-Mini",
         extras={
