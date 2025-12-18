@@ -86,6 +86,9 @@ def kernel_unified_attention_2d(
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    USE_MM_PREFIX: tl.constexpr,  # bool
+    MAX_MM_RANGES: tl.constexpr,  # int
+    mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -270,7 +273,38 @@ def kernel_unified_attention_2d(
         else:
             V = V_load
 
-        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+        # Compute attention mask: causal by default (key <= query)
+        query_abs_pos = context_len + query_pos[:, None]
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+
+        # Apply sliding window to base mask BEFORE mm_prefix OR.
+        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
+        if SLIDING_WINDOW > 0:
+            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
+        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
+        if USE_MM_PREFIX:
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+
+                is_valid = range_start < range_end
+                q_in_range = (
+                    (query_abs_pos >= range_start)
+                    & (query_abs_pos <= range_end)
+                    & is_valid
+                )
+                k_in_range = (
+                    (seq_offset[None, :] >= range_start)
+                    & (seq_offset[None, :] <= range_end)
+                    & is_valid
+                )
+                seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -283,13 +317,6 @@ def kernel_unified_attention_2d(
         S = tl.where(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
-
-        if SLIDING_WINDOW > 0:
-            S = tl.where(
-                (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
-                S,
-                float("-inf"),
-            )
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -398,6 +425,9 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,  # int
+    USE_MM_PREFIX: tl.constexpr,  # bool
+    MAX_MM_RANGES: tl.constexpr,  # int
+    mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -559,7 +589,38 @@ def kernel_unified_attention_3d(
         else:
             V = V_load
 
-        seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+        # Compute attention mask: causal by default (key <= query)
+        query_abs_pos = context_len + query_pos[:, None]
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+
+        # Apply sliding window to base mask BEFORE mm_prefix OR.
+        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
+        if SLIDING_WINDOW > 0:
+            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+
+        # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
+        # Applied AFTER sliding window so mm_prefix ranges override SW restriction.
+        if USE_MM_PREFIX:
+            for i in range(MAX_MM_RANGES):
+                range_start = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
+                )
+                range_end = tl.load(
+                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
+                )
+
+                is_valid = range_start < range_end
+                q_in_range = (
+                    (query_abs_pos >= range_start)
+                    & (query_abs_pos <= range_end)
+                    & is_valid
+                )
+                k_in_range = (
+                    (seq_offset[None, :] >= range_start)
+                    & (seq_offset[None, :] <= range_end)
+                    & is_valid
+                )
+                seq_mask |= q_in_range & k_in_range
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -571,13 +632,6 @@ def kernel_unified_attention_3d(
         S = tl.where(
             query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
         )
-
-        if SLIDING_WINDOW > 0:
-            S = tl.where(
-                (context_len + query_pos[:, None] - seq_offset) < SLIDING_WINDOW,
-                S,
-                float("-inf"),
-            )
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
@@ -732,6 +786,43 @@ def reduce_segments(
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
 
+def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
+    """Detect Gemma3 models via unique (head_size, sliding_window) signature.
+
+    Gemma3 models are the only ones using sliding_window=1024 with
+    head_size 128 (27B) or 256 (1B, 4B, 12B). Other SWA models use
+    different window sizes (Mistral=4096, Phi-3=2047).
+    """
+    return sliding_window == 1024 and head_size in (128, 256)
+
+
+def _get_tile_size(
+    head_size: int,
+    sliding_window: int,
+    element_size: int,
+    is_mm_prefix: bool,
+    is_prefill: bool,
+) -> int:
+    """Select tile size with Gemma3-specific optimization.
+
+    For Gemma3, use 32 for both prefill and decode to better utilize
+    the larger head dimension (128/256). For other models, use
+    the default vLLM behavior.
+    """
+    if is_mm_prefix:
+        # Multimodal bidirectional attention needs a larger tile size
+        return 64
+
+    if _is_gemma3_attention(head_size, sliding_window):
+        # Gemma3: use 32 for decode (default is 16)
+        return 32
+
+    # Default behavior
+    if is_prefill:
+        return 32
+    return 16 if element_size >= 2 else 32
+
+
 def unified_attention(
     q,
     k,
@@ -759,12 +850,25 @@ def unified_attention(
     qq_bias=None,
     # Optional tensor for sinks
     sinks=None,
+    # Optional tensor for prefix lengths (PrefixLM support)
+    mm_prefix_range=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+
+    use_mm_prefix = False
+    max_mm_ranges = 0
+    if mm_prefix_range is not None:
+        if mm_prefix_range.ndim == 3:
+            use_mm_prefix = True
+            max_mm_ranges = mm_prefix_range.shape[1]
+        else:
+            raise ValueError(
+                f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
+            )
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -792,11 +896,23 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    # Assigning default tile sizes for prefill and decode.
-    # Note: each tile size must be at least 32 for "fp8" (q.element_size() == 1)
-    # and at least 16 for all other data types.
-    TILE_SIZE_PREFILL = 32
-    TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
+    # Tile sizes for prefill and decode. Gemma3 models use optimized values.
+    # Note: tile size must be at least 32 for fp8 (element_size == 1).
+    sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+    TILE_SIZE_PREFILL = _get_tile_size(
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_mm_prefix=use_mm_prefix,
+        is_prefill=True,
+    )
+    TILE_SIZE_DECODE = _get_tile_size(
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_mm_prefix=use_mm_prefix,
+        is_prefill=False,
+    )
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
@@ -847,6 +963,9 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
+            mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
@@ -895,6 +1014,9 @@ def unified_attention(
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
+            mm_prefix_range_ptr=mm_prefix_range,
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
