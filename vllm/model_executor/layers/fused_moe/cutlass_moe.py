@@ -1044,7 +1044,7 @@ def run_cutlass_moe_block_scaled_fp8(
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert a.shape[0] == topk_ids.shape[0], (
-        " hidden_states and topk_ids must have the same batch size"
+        "a and topk_ids must have the same batch size"
     )
     assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
     assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
