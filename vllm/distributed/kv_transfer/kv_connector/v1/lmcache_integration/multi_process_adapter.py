@@ -138,8 +138,6 @@ class LMCacheMPSchedulerAdapter:
 
         result = future.result()
         num_chunks = sum(result)
-        # clean up the lookup future
-        self._cleanup_lookup_result(request_id)
         return num_chunks * self.chunk_size
 
     def num_blocks_per_chunk(self) -> int:
