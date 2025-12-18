@@ -1057,9 +1057,10 @@ def run_cutlass_moe_block_scaled_fp8(
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
     num_experts = w1_q.size(0)
-    M = a1q.size(0)
-    K = w1_q.size(1)
-    N = w2_q.size(1)
+    m = a.size(0)
+    k = w1_q.size(1)
+    n = w2_q.size(1)
+
     topk = topk_ids.size(1)
 
     a_q, a1_scale = _fp8_quantize(
@@ -1082,15 +1083,15 @@ def run_cutlass_moe_block_scaled_fp8(
         a_map,
         c_map,
         num_experts,
-        N,
-        K,
+        n,
+        k,
     )
 
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a1_scales = a1_scale[a_map]
 
-    c1 = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
-    c2 = torch.empty((M * topk, K), dtype=out_dtype, device=device)
+    c1 = torch.empty((m * topk, n * 2), dtype=out_dtype, device=device)
+    c2 = torch.empty((m * topk, k), dtype=out_dtype, device=device)
 
     # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     # act_out = _resize_cache(workspace2, (M * topk, N))
@@ -1107,7 +1108,7 @@ def run_cutlass_moe_block_scaled_fp8(
     )
 
     # activation_callable(act_out, mm1_out)
-    intermediate = torch.empty((M * topk, N), dtype=out_dtype, device=device)
+    intermediate = torch.empty((m * topk, n), dtype=out_dtype, device=device)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
     intermediate_q, a2_scale = _fp8_quantize(
@@ -1126,7 +1127,7 @@ def run_cutlass_moe_block_scaled_fp8(
 
     # TODO: swap with MoE unpermute.
     return (
-        c2[c_map].view(M, topk, K) * topk_weights.view(M, topk, 1).to(out_dtype)
+        c2[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)
     ).sum(dim=1)
 
 
