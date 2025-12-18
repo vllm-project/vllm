@@ -7,15 +7,15 @@ import torch
 
 
 class AbstractEplbPolicy(ABC):
-    @classmethod
     @abstractmethod
     def rebalance_experts(
-        cls,
+        self,
         weight: torch.Tensor,
         num_replicas: int,
         num_groups: int,
         num_nodes: int,
         num_ranks: int,
+        old_global_expert_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
