@@ -1357,7 +1357,7 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+    packed_tensor = (topk_ids_flatten.to(torch.int32) << 16) | topk_weights.to(
         torch.bfloat16
     ).view(torch.int16)
     return packed_tensor
