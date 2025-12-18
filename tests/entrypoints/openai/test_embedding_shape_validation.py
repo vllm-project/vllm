@@ -461,4 +461,3 @@ def model_config():
         seed=0,
         enable_prompt_embeds=True,
     )
-
