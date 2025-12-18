@@ -241,9 +241,6 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.pt_load_map_location,
                 )
 
-        if current_platform.is_tpu():
-            pass
-
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
