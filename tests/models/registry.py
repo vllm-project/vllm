@@ -173,10 +173,7 @@ class _HfExamplesInfo:
 
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
-    "AfmoeForCausalLM": _HfExamplesInfo(
-        "arcee-ai/Trinity-Nano",
-        is_available_online=False,
-    ),
+    "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
@@ -211,10 +208,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "CohereForCausalLM": _HfExamplesInfo(
-        "CohereForAI/c4ai-command-r-v01", trust_remote_code=True
+        "CohereLabs/c4ai-command-r-v01", trust_remote_code=True
     ),
     "Cohere2ForCausalLM": _HfExamplesInfo(
-        "CohereForAI/c4ai-command-r7b-12-2024",
+        "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
@@ -298,6 +295,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm3-8b-instruct", trust_remote_code=True
     ),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
+    "Jais2ForCausalLM": _HfExamplesInfo(
+        "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
+    ),
     "JambaForCausalLM": _HfExamplesInfo(
         "ai21labs/AI21-Jamba-1.5-Mini",
         extras={
@@ -359,7 +359,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
-        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4", is_available_online=False
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -416,7 +416,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Qwen2ForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen2-0.5B-Instruct", extras={"2.5": "Qwen/Qwen2.5-0.5B-Instruct"}
+        "Qwen/Qwen2-0.5B-Instruct",
+        extras={
+            "2.5": "Qwen/Qwen2.5-0.5B-Instruct",
+            "2.5-1.5B": "Qwen/Qwen2.5-1.5B-Instruct",
+        },
     ),
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
@@ -572,12 +576,17 @@ _AUTOMATIC_CONVERTED_MODELS = {
     "Qwen3ForSequenceClassification": _HfExamplesInfo(
         "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
     ),
+    "Qwen3ForTokenClassification": _HfExamplesInfo("bd2lcco/Qwen3-0.6B-finetuned"),
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
-    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereForAI/aya-vision-8b"),
+    "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0.dev"
+    ),
+    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
+    "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
@@ -634,7 +643,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
-        is_available_online=False,
+        hf_overrides={"num_experts": 0},
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -667,10 +676,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},
         trust_remote_code=True,
+        max_transformers_version="4.53.3",
+        transformers_version_reason="HF model uses deprecated transformers API "
+        "(PytorchGELUTanh, DynamicCache.seen_tokens, and more). See: "
+        "https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/discussions/31",
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
-        "lightonai/LightOnOCR-1B",
-        is_available_online=False,
+        "lightonai/LightOnOCR-1B-1025"
     ),
     "Llama4ForConditionalGeneration": _HfExamplesInfo(
         "meta-llama/Llama-4-Scout-17B-16E-Instruct",
@@ -767,10 +779,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
     ),
-    "Phi4MultimodalForCausalLM": _HfExamplesInfo(
-        "microsoft/Phi-4-multimodal-instruct",
-        revision="refs/pr/70",
-    ),
     "PixtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Pixtral-12B-2409",
         extras={
@@ -778,8 +786,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "ministral-3": "mistralai/Ministral-3-3B-Instruct-2512",
         },
         tokenizer_mode="mistral",
-        # TODO: revert once Mistral-Large-3 and Ministral-3 are publicly available.
-        is_available_online=False,
     ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
@@ -842,7 +848,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
-    "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),
+    "WhisperForConditionalGeneration": _HfExamplesInfo(
+        "openai/whisper-large-v3-turbo",
+        extras={"v3": "openai/whisper-large-v3"},
+    ),
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),
 }
@@ -885,6 +894,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
+        # TODO: revert once figuring out OOM in CI
         is_available_online=False,
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(

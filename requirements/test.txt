@@ -965,11 +965,11 @@ rsa==4.9.1
     # via google-auth
 rtree==1.4.0
     # via torchgeo
-runai-model-streamer==0.15.0
+runai-model-streamer==0.15.3
     # via -r requirements/test.in
-runai-model-streamer-gcs==0.15.0
+runai-model-streamer-gcs==0.15.3
     # via runai-model-streamer
-runai-model-streamer-s3==0.15.0
+runai-model-streamer-s3==0.15.3
     # via runai-model-streamer
 s3transfer==0.10.3
     # via boto3
@@ -1123,7 +1123,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.9.0+cu129
+torch==2.9.1+cu129
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -1152,7 +1152,7 @@ torch==2.9.0+cu129
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.9.0+cu129
+torchaudio==2.9.1+cu129
     # via
     #   -r requirements/test.in
     #   encodec
@@ -1165,7 +1165,7 @@ torchmetrics==1.7.4
     #   pytorch-lightning
     #   terratorch
     #   torchgeo
-torchvision==0.24.0+cu129
+torchvision==0.24.1+cu129
     # via
     #   -r requirements/test.in
     #   lightly
@@ -1206,7 +1206,7 @@ transformers==4.57.3
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
-triton==3.5.0
+triton==3.5.1
     # via torch
 tritonclient==2.51.0
     # via

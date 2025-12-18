@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from transformers import BatchFeature
 
 from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import MultiModalConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
@@ -62,6 +62,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ImageSize,
+    ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
@@ -231,7 +232,7 @@ class HunYuanVisionAttention(nn.Module):
         )
 
         self.scale = self.hidden_size_per_attention_head**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_attention_heads_per_partition,
             self.hidden_size_per_attention_head,
             self.scale,
@@ -501,6 +502,7 @@ class HunYuanVisionTransformer(nn.Module):
         cu_seqlens: list = [0]
 
         hidden_states = x.to(device=self.device, dtype=self.dtype)
+        # embeddings = patch_embeds + patch_pos_embed
         hidden_states = self.embeddings(hidden_states, grid_thw)
 
         for t, h, w in grid_thw:
@@ -514,8 +516,14 @@ class HunYuanVisionTransformer(nn.Module):
 
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(0)
-        for layer_num, layer in enumerate(self.layers):
-            hidden_states = layer(hidden_states)
+
+        # build per-image lengths once
+        split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
+        for layer in self.layers:
+            # hidden_states: (1, T_total, D)
+            parts = hidden_states.split(split_lengths, dim=1)  # list of (1, L_i, D)
+            parts = [layer(p) for p in parts]
+            hidden_states = torch.cat(parts, dim=1)
 
         # adapter
         split_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -562,7 +570,7 @@ def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
     )
 
 
@@ -570,7 +578,7 @@ class HunYuanVLMultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
-    ):
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -785,8 +793,6 @@ class HunYuanVLForConditionalGeneration(
     SupportsQuant,
     SupportsXDRoPE,
 ):
-    multimodal_cpu_fields = {"image_grid_thw"}
-
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

@@ -28,7 +28,7 @@ def _dummy_elem(modality: str, key: str, size: int):
         modality=modality,
         key=key,
         data=torch.empty((size,), dtype=torch.int8),
-        field=MultiModalSharedField(1),
+        field=MultiModalSharedField(batch_size=1),
     )
 
 
