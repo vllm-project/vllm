@@ -569,7 +569,6 @@ class FusedMoE(CustomOp):
             self.emulate_quant,
             is_lora_enabled=self.vllm_config.lora_config is not None,
         )
-        print(f"is_rounded_hidden_size is {is_rounded_hidden_size}")
 
         if is_rounded_hidden_size:
             self.hidden_size = hidden_size
@@ -751,7 +750,7 @@ class FusedMoE(CustomOp):
         if quant_config:
             if quant_config.get_name() == "mxfp4":
                 return True, False
-            elif quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.input_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2:
+            elif quant_config.get_name() == "quark" and quant_method.weight_dtype == "mxfp4" and quant_method.fp4_dtype == torch.float4_e2m1fn_x2:
                 return True, quant_method.emulate
         return False, False
     
@@ -992,39 +991,21 @@ class FusedMoE(CustomOp):
                     dim2 = loaded_weight.shape[2]
                     param.data[:, :dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
-            elif self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss" and quark_loading:
-                # TODO (Xuebin): this is for gpt-oss, need to refactor
+            
+            elif self.quant_config.get_name() == "quark" and self.model_type == "gpt_oss":
+                # TODO (xuebwang-amd): this is for gpt-oss, how to unify?
                 expert_data = param.data[expert_id]
                 if "input_scale" in weight_name:
                     assert loaded_weight.numel() == 1
                     expert_data.data.copy_(loaded_weight)
                     return True if return_success else None
 
-                shard_dim = 0 if shard_id in (
-                    "w1", "w3") or "bias" in weight_name else 1
-                if shard_id == "w2":
-                    shard_size = loaded_weight.shape[shard_dim] // self.tp_size
-                    loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * self.tp_rank, shard_size)
-                    if "bias" in weight_name:
-                        dim1 = loaded_weight.shape[0]
-                        expert_data.data[:dim1].copy_(loaded_weight)
-                    else:
-                        dim1 = loaded_weight.shape[0]
-                        dim2 = loaded_weight.shape[1]
-                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
-                elif shard_id is None:
-                    if "bias" in weight_name:
-                        try:
-                            dim1 = loaded_weight.shape[0]
-                            expert_data.data[:dim1].copy_(loaded_weight)
-                        except:
-                            print(f"exception happens at {weight_name}, dim1: {dim1}, data shape: {expert_data.data.shape}")
-                            raise
-                    else:
-                        dim1 = loaded_weight.shape[0]
-                        dim2 = loaded_weight.shape[1]
-                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
+                dim1 = loaded_weight.shape[0]
+                if "bias" in weight_name:
+                    expert_data.data[:dim1].copy_(loaded_weight)
+                else:
+                    dim2 = loaded_weight.shape[1]
+                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
                 return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__

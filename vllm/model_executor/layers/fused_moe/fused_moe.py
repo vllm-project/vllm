@@ -49,7 +49,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
+)
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1671,7 +1673,7 @@ GELU_NO_MUL: str = activation_without_mul("gelu")
 RELU2_NO_MUL: str = activation_without_mul("relu2")
 
 
-def _get_config_quant_dtype(
+def _get_input_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
     ocp_mx_scheme: str | None,
@@ -1693,6 +1695,11 @@ def _get_config_quant_dtype(
         return "mxfp6_e3m2"
     elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
         return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
+        return torch.bfloat16
+    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
+        return torch.float8_e4m3fn
+
     return None
 
 
@@ -1727,17 +1734,10 @@ def fused_experts_impl(
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {
-            "w_mxfp4_a_mxfp4",
-            "w_mxfp4_a_mxfp6_e3m2",
-            "w_mxfp4_a_mxfp6_e2m3",
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {
-            "w_mxfp6_e3m2_a_mxfp6_e3m2",
-            "w_mxfp6_e2m3_a_mxfp6_e2m3",
-        }:
+        elif ocp_mx_scheme.startswith("w_mxfp6"):
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
                 "hidden size mismatch"
             )
@@ -1775,7 +1775,7 @@ def fused_experts_impl(
 
     # Note: for use_int8_w8a16 or use_int4_w4a16, the activations are
     # quantized prior to calling fused_experts.
-    quant_dtype = _get_config_quant_dtype(
+    input_quant_dtype = _get_input_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         ocp_mx_scheme=ocp_mx_scheme,
@@ -1825,17 +1825,13 @@ def fused_experts_impl(
         # TODO: On platforms for which `current_platform.supports_mx()` is True
         # and for which we have a native OCP mx fused MOE kernel,
         # this dequantization step should not be done.
-        if ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-        }:
+        if ocp_mx_scheme.startswith("w_mxfp4"):
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None
             w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
@@ -1844,7 +1840,7 @@ def fused_experts_impl(
                 w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
             )
             w2_scale = None
-        elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3:
+        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
             w1 = dequant_mxfp6(
                 w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
             )
@@ -1881,10 +1877,28 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
+
+        if ocp_mx_scheme is not None:
+            if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
+                pass
+            elif ocp_mx_scheme.endswith("a_fp8"):
+                # perform QDQ (quantize and dequantize) on activation for emulation purpose, 
+                # because of no native kernel for weight in ocp_mx_scheme and activation in FP8.
+                qcurr_hidden_states, a1q_scale = ops.scaled_fp8_quant(
+                    curr_hidden_states, a1_scale, use_per_token_if_dynamic=False
+                )
+                curr_hidden_states = per_tensor_dequantize(
+                    qcurr_hidden_states, a1q_scale
+                ).to(curr_hidden_states.dtype)
+                input_quant_dtype = None
+            else:
+                # TODO: @felix for ocp_mx_scheme.endswith("fp6_e3m2"), ocp_mx_scheme.endswith("fp6_e2m3")
+                raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+
         qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
             A=curr_hidden_states,
             A_scale=a1_scale,
-            quant_dtype=quant_dtype,
+            quant_dtype=input_quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )
@@ -1941,10 +1955,27 @@ def fused_experts_impl(
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}.")
 
+        if ocp_mx_scheme is not None:
+            if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
+                pass
+            elif ocp_mx_scheme.endswith("a_fp8"):
+                # perform QDQ (quantize and dequantize) on activation for emulation purpose,
+                # because of no native kernel for weight in ocp_mx_scheme and activation in FP8.
+                qintermediate_cache2, a2q_scale = ops.scaled_fp8_quant(
+                    intermediate_cache2, a2_scale, use_per_token_if_dynamic=False
+                )
+                intermediate_cache2 = per_tensor_dequantize(
+                    qintermediate_cache2, a2q_scale
+                ).to(intermediate_cache2.dtype)
+                input_quant_dtype = None
+            else:
+                # TODO: @felix for ocp_mx_scheme.endswith("fp6_e3m2"), ocp_mx_scheme.endswith("fp6_e2m3")
+                raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
+
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
             A=intermediate_cache2,
             A_scale=a2_scale,
-            quant_dtype=quant_dtype,
+            quant_dtype=input_quant_dtype,
             per_act_token_quant=per_channel_quant,
             block_shape=block_shape,
         )

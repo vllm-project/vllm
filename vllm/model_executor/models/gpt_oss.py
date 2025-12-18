@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
-from typing import Optional
 from collections.abc import Callable, Iterable
-from pprint import pprint
 
 import torch
 import torch.distributed as dist
@@ -314,14 +312,14 @@ class GptOssModel(nn.Module):
         if len(aux_hidden_states) > 0:
             return x, aux_hidden_states
         return x
-    
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, weight scales, activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="w1", #"gate_proj",
-            ckpt_down_proj_name="w2", #"down_proj",
-            ckpt_up_proj_name="w3", #"up_proj",
+            ckpt_gate_proj_name="w1",  # "gate_proj",
+            ckpt_down_proj_name="w2",  # "down_proj",
+            ckpt_up_proj_name="w3",  # "up_proj",
             num_experts=self.config.num_local_experts,
             num_redundant_experts=0,
         )
@@ -352,7 +350,9 @@ class GptOssModel(nn.Module):
         intermediate_size = self.config.intermediate_size
         intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
         per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
-        per_rank_intermediate_size = per_rank_intermediate_size_block * OCP_MX_BLOCK_SIZE
+        per_rank_intermediate_size = (
+            per_rank_intermediate_size_block * OCP_MX_BLOCK_SIZE
+        )
 
         # Calculate common slicing bounds for current rank
         tp_rank_start = tp_rank * per_rank_intermediate_size
@@ -387,7 +387,9 @@ class GptOssModel(nn.Module):
                     narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = weight[
-                        ..., tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end // OCP_MX_BLOCK_SIZE
+                        ...,
+                        tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
+                        // OCP_MX_BLOCK_SIZE,
                     ]
 
                 param = params_dict[name]
@@ -538,31 +540,62 @@ class GptOssModel(nn.Module):
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-
             layer_id, expert_id, fused_name = None, None, None
             moe_quant_method = None
             if "experts" in name:
                 parts = name.split(".")
                 ids = [s for s in parts if s.isdigit()]
                 layer_id, expert_id = int(ids[0]), int(ids[-1])
-                parts.pop((len(parts) - 1 - parts[::-1].index(str(expert_id))))
+                parts.pop(len(parts) - 1 - parts[::-1].index(str(expert_id)))
                 fused_name = ".".join(parts)
 
                 pair = (
-                    self.layers[layer_id].mlp.experts.quant_method.weight_dtype, 
-                    self.layers[layer_id].mlp.experts.quant_method.input_dtype
+                    self.layers[layer_id].mlp.experts.quant_method.weight_dtype,
+                    self.layers[layer_id].mlp.experts.quant_method.input_dtype,
                 )
+
+                # TODO (xuebwang-amd): simplify because loading concept is for weight only
                 moe_quant_method = {
+                    ("mxfp4", None): "mxfp4",
+                    ("mxfp4", "fp8"): "mxfp4",
                     ("mxfp4", "mxfp4"): "mxfp4",
+                    ("mxfp4", "mxfp6"): "mxfp4",
                     ("mxfp6", "mxfp6"): "mxfp6",
-                    ("fp8",   "fp8"):   "fp8",
+                    ("mxfp6", None): "mxfp6",
+                    ("fp8", "fp8"): "fp8",
+                    ("fp8", None): "fp8",
                 }.get(pair, "bf16")
+
+            load_kv_cache_scale_completed, loaded_params = kv_cache_scale_loader(
+                self.quant_config,
+                name,
+                params_dict,
+                loaded_weight,
+                default_weight_loader,
+                loaded_params,
+            )
+            if load_kv_cache_scale_completed:
+                continue
 
             if "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
                 narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
                 param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
+
+            # mapping to convert individual experts input_scale into fused_moe.
+            elif "input_scale" in name and "mlp.experts" in name:
+                param = params_dict[fused_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -576,16 +609,15 @@ class GptOssModel(nn.Module):
                     narrow_weight = loaded_weight[
                         2 * tp_rank_start : 2 * tp_rank_end, ...
                     ]
-                
+
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(
                     param,
-                    loaded_weight,
+                    narrow_weight,
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
                 continue
@@ -595,7 +627,9 @@ class GptOssModel(nn.Module):
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     narrow_weight = loaded_weight[
-                        ..., tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end // OCP_MX_BLOCK_SIZE
+                        ...,
+                        tp_rank_start // OCP_MX_BLOCK_SIZE : tp_rank_end
+                        // OCP_MX_BLOCK_SIZE,
                     ]
 
                 param = params_dict[fused_name]
@@ -606,7 +640,6 @@ class GptOssModel(nn.Module):
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
                 continue
@@ -629,12 +662,11 @@ class GptOssModel(nn.Module):
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
                 continue
 
-            elif name.endswith(".w2_weight"):
+            elif name.endswith(".w2_weight") and moe_quant_method == "mxfp4":
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
@@ -650,7 +682,6 @@ class GptOssModel(nn.Module):
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
 
@@ -670,7 +701,6 @@ class GptOssModel(nn.Module):
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
 
@@ -683,7 +713,7 @@ class GptOssModel(nn.Module):
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
                         loaded_weight.zero_()
-                
+
                 assert fused_name is not None
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -693,7 +723,6 @@ class GptOssModel(nn.Module):
                     weight_name=fused_name,
                     shard_id=None,
                     expert_id=expert_id,
-                    quark_loading=True,
                 )
                 loaded_params.add(fused_name)
                 continue
@@ -715,17 +744,6 @@ class GptOssModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                load_kv_cache_scale_completed, loaded_params = kv_cache_scale_loader(
-                    self.quant_config,
-                    name,
-                    params_dict,
-                    loaded_weight,
-                    default_weight_loader,
-                    loaded_params,
-                )
-                if load_kv_cache_scale_completed:
-                    continue
-
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
@@ -745,14 +763,16 @@ class GptOssModel(nn.Module):
                     is_expert_weight = True
 
                     param_name, weight_name, expert_id, shard_id = mapping
-                    weight_name = weight_name[:-1] if weight_name.endswith(".") else weight_name
+                    weight_name = (
+                        weight_name[:-1] if weight_name.endswith(".") else weight_name
+                    )
 
                     if weight_name not in name:
                         continue
 
                     if is_pp_missing_parameter(fused_name, self):
                         continue
-                    
+
                     param = params_dict[fused_name]
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
@@ -777,7 +797,7 @@ class GptOssModel(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                
+
                 loaded_params.add(name)
         return loaded_params
 
