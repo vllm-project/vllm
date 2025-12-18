@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike
-from .registry import TokenizerRegistry
 
 if TYPE_CHECKING:
     from mistral_common.protocol.instruct.request import (
@@ -14,9 +15,6 @@ if TYPE_CHECKING:
     )
     from mistral_common.tokens.tokenizers.tekken import Tekkenizer
     from transformers import BatchEncoding
-
-    from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-    from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
     try:
         # Transformers v5
@@ -201,7 +199,6 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
         return tokenizer.unk_id
 
 
-@TokenizerRegistry.register("mistral")
 class MistralTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
@@ -308,6 +305,9 @@ class MistralTokenizer(TokenizerLike):
             self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
             for i in all_special_ids
         ]
+
+    def num_special_tokens_to_add(self) -> int:
+        return len(self.encode(""))
 
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
@@ -421,6 +421,7 @@ class MistralTokenizer(TokenizerLike):
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
         continue_final_message = kwargs.get("continue_final_message", False)
+        tokenize = kwargs.get("tokenize", True)
         padding = kwargs.get("padding", False)
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
@@ -433,7 +434,7 @@ class MistralTokenizer(TokenizerLike):
             conversation=messages,
             tools=tools,
             continue_final_message=continue_final_message,
-            tokenize=True,
+            tokenize=tokenize,
             padding=padding,
             truncation=truncation,
             max_length=max_length,
