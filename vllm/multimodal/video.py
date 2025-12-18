@@ -64,6 +64,20 @@ class VideoLoader:
         raise NotImplementedError
 
     @staticmethod
+    def _can_use_for_recovery(
+        idx: int,
+        failed_frames: list[int],
+        next_target_map: dict[int, int],
+        total_frames: int,
+    ) -> bool:
+        """Check if current frame can recover the oldest failed frame."""
+        if not failed_frames:
+            return False
+        oldest_failed = failed_frames[0]
+        limit = next_target_map.get(oldest_failed, total_frames)
+        return idx < limit
+
+    @staticmethod
     def _read_frames_with_recovery(
         cap,
         frame_indices: list[int],
@@ -98,7 +112,7 @@ class VideoLoader:
         max_frame_idx = frame_indices[-1] if frame_indices else 0
 
         # Build map: target_idx -> next_target_idx (for recovery window)
-        next_target_map = {}
+        next_target_map: dict[int, int] = {}
         for k in range(len(frame_indices) - 1):
             next_target_map[frame_indices[k]] = frame_indices[k + 1]
         next_target_map[frame_indices[-1]] = total_frames
@@ -108,66 +122,38 @@ class VideoLoader:
         failed_frames_idx: list[int] = []
         recovered_map: dict[int, int] = {}
 
-        # Scan limit with buffer for recovery attempts
-        scan_limit = min(int(total_frames * 1.1) + 100, total_frames + 50)
-
-        for idx in range(scan_limit):
-            # Stop if we've passed the last target and have no pending recovery
-            if idx > max_frame_idx and not failed_frames_idx:
-                break
-
+        i = 0
+        for idx in range(max_frame_idx + 1):
             is_target_frame = idx in frame_idx_set
 
-            # 1. Manage abandonment: if oldest failed frame's window is exceeded
-            if failed_frames_idx:
-                oldest_failed = failed_frames_idx[0]
-                limit = next_target_map.get(oldest_failed, total_frames)
-                if idx >= limit:
-                    abandoned = failed_frames_idx.pop(0)
-                    logger.warning(
-                        "Frame %d: ABANDONED (reached next target at %d)",
-                        abandoned,
-                        idx,
-                    )
+            # Attempt to grab the current frame
+            ok = cap.grab()
 
-            # 2. Attempt to grab the current frame
-            grab_success = cap.grab()
-
-            if not grab_success:
+            if not ok:
                 if is_target_frame:
                     logger.warning(
-                        "Failed to grab frame %d during video loading. "
-                        "This frame will be skipped.",
+                        "Failed to grab frame %d during video loading.",
                         idx,
                     )
                     failed_frames_idx.append(idx)
                 continue
 
-            # 3. Determine if we should retrieve this frame
-            should_retrieve = False
-            is_recovery_usage = False
+            # Check if we should retrieve: target frame OR can recover a failed one
+            can_recover = VideoLoader._can_use_for_recovery(
+                idx, failed_frames_idx, next_target_map, total_frames
+            )
 
-            if is_target_frame:
-                should_retrieve = True
-            elif failed_frames_idx:
-                # Check if this frame is within the recovery window
-                oldest_failed = failed_frames_idx[0]
-                limit = next_target_map.get(oldest_failed, total_frames)
-                if idx < limit:
-                    should_retrieve = True
-                    is_recovery_usage = True
-
-            if should_retrieve:
+            if is_target_frame or can_recover:
                 ret, frame = cap.retrieve()
 
                 if ret and frame is not None and frame.size > 0:
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frames_list.append(rgb_frame)
+                    valid_frame_indices.append(idx)
+                    i += 1
 
-                    # Use this frame for recovery first
-                    if is_recovery_usage:
+                    if can_recover:
                         recovered_idx = failed_frames_idx.pop(0)
-                        frames_list.append(rgb_frame)
-                        valid_frame_indices.append(recovered_idx)
                         recovered_map[recovered_idx] = idx
                         logger.info(
                             "Recovered frame %d using frame %d (delay: %d)",
@@ -175,22 +161,12 @@ class VideoLoader:
                             idx,
                             idx - recovered_idx,
                         )
-
-                    # Also save for current target (if applicable)
-                    if is_target_frame:
-                        frames_list.append(rgb_frame)
-                        valid_frame_indices.append(idx)
-                        # Remove from failed list if it was there
-                        if idx in failed_frames_idx:
-                            failed_frames_idx.remove(idx)
-                else:
-                    if is_target_frame:
-                        logger.warning(
-                            "Failed to retrieve frame %d during video loading. "
-                            "This frame will be skipped.",
-                            idx,
-                        )
-                        failed_frames_idx.append(idx)
+                elif is_target_frame:
+                    logger.warning(
+                        "Failed to retrieve frame %d during video loading.",
+                        idx,
+                    )
+                    failed_frames_idx.append(idx)
 
         # Log any remaining failed frames
         for failed_idx in failed_frames_idx:
@@ -199,13 +175,9 @@ class VideoLoader:
                 failed_idx,
             )
 
-        # Stack frames and sort by index
+        # Stack frames
         if frames_list:
             frames = np.stack(frames_list)
-            # Sort by frame index to maintain temporal order
-            sorted_order = np.argsort(valid_frame_indices)
-            frames = frames[sorted_order]
-            valid_frame_indices = [valid_frame_indices[i] for i in sorted_order]
         else:
             frames = np.empty((0, height, width, 3), dtype=np.uint8)
 
