@@ -128,7 +128,6 @@ class InputBatch:
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
         self.num_computed_tokens_cpu_tensor = torch.zeros(
@@ -340,9 +339,6 @@ class InputBatch:
             self.req_prompt_embeds[req_index] = request.prompt_embeds
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
-        # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
-        # NOTE(woosuk): This may include spec decode tokens.
-        self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
@@ -522,10 +518,6 @@ class InputBatch:
             self.req_id_to_index[old_id_i2],
             self.req_id_to_index[old_id_i1],
         )
-        self.num_tokens[i1], self.num_tokens[i2] = (
-            self.num_tokens[i2],
-            self.num_tokens[i1],
-        )
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] = (
             self.num_tokens_no_spec[i2],
             self.num_tokens_no_spec[i1],
@@ -661,17 +653,16 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            if last_req_index != empty_index:
-                (
-                    self.spec_token_ids[last_req_index],
-                    self.spec_token_ids[empty_index],
-                ) = (
-                    self.spec_token_ids[empty_index],
-                    self.spec_token_ids[last_req_index],
-                )
-                self.spec_token_ids[last_req_index].clear()
+            num_tokens = self.num_tokens_no_spec[last_req_index] + len(
+                self.spec_token_ids[last_req_index]
+            )
 
-            num_tokens = self.num_tokens[last_req_index]
+            (self.spec_token_ids[last_req_index], self.spec_token_ids[empty_index]) = (
+                self.spec_token_ids[empty_index],
+                self.spec_token_ids[last_req_index],
+            )
+            self.spec_token_ids[last_req_index].clear()
+
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
@@ -682,7 +673,6 @@ class InputBatch:
                 self.req_prompt_embeds[empty_index] = self.req_prompt_embeds.pop(
                     last_req_index
                 )
-            self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]
