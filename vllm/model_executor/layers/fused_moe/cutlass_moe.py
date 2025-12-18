@@ -956,7 +956,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(
 
 # TODO(bnell): would be nice combine/integrate with regular cutlass_fp8.
 def run_cutlass_moe_block_scaled_fp8(
-    a: torch.Tensor,
+    hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     w1_scale: torch.Tensor,
@@ -965,6 +965,7 @@ def run_cutlass_moe_block_scaled_fp8(
     workspace2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    activation_callable: Callable,
 ) -> torch.Tensor:
     w1_q = w1.transpose(1, 2)
     w2_q = w2.transpose(1, 2)
@@ -972,28 +973,28 @@ def run_cutlass_moe_block_scaled_fp8(
     w2_scale = w2_scale.transpose(1, 2)
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert a.shape[0] == topk_ids.shape[0], (
-        "a and topk_ids must have the same batch size"
+    assert hidden_states.shape[0] == topk_ids.shape[0], (
+        " hidden_states and topk_ids must have the same batch size"
     )
     assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
     assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
-    assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
+    assert hidden_states.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
     assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
     assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
     assert w1_q.shape[0] == w1_scale.shape[0], "w1_scale expert number mismatch"
     assert w1_q.shape[0] == w2_scale.shape[0], "w2_scale expert number mismatch"
-    assert a.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+    assert hidden_states.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
-    out_dtype = a.dtype
+    out_dtype = hidden_states.dtype
     num_experts = w1_q.size(0)
-    m = a.size(0)
+    m = hidden_states.size(0)
     k = w1_q.size(1)
     n = w2_q.size(1)
 
     topk = topk_ids.size(1)
 
     a_q, a1_scale = _fp8_quantize(
-        a, A_scale=None, per_act_token=False, block_shape=[128, 128]
+        hidden_states, A_scale=None, per_act_token=False, block_shape=[128, 128]
     )
     device = a_q.device
 
@@ -1033,7 +1034,7 @@ def run_cutlass_moe_block_scaled_fp8(
         expert_offsets[:-1],
     )
 
-    torch.ops._C.silu_and_mul(act_out, mm1_out)
+    activation_callable(act_out, mm1_out)
 
     a2q, a2q_scale = _fp8_quantize(
         act_out, A_scale=None, per_act_token=False, block_shape=[128, 128]
@@ -1049,6 +1050,7 @@ def run_cutlass_moe_block_scaled_fp8(
         expert_offsets[:-1],
     )
 
+    # TODO: swap with MoE unpermute.
     return (
         mm2_out[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)
     ).sum(dim=1)
@@ -1085,7 +1087,7 @@ class CutlassBlockScaleExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def supports_expert_map(self) -> bool:
-        return True
+        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # topk weights and reduction are fused in moe_unpermute cuda kernel
@@ -1129,43 +1131,22 @@ class CutlassBlockScaleExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
-
-        expert_num_tokens = None
-        if expert_tokens_meta is not None:
-            expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        assert a1q_scale is None, "CUTLASS MoE Block only supports dynamic quant"
+        assert a2_scale is None, "CUTLASS MoE Block only supports dynamic quant"
 
         activation_callable = lambda o, i: self.activation(activation, o, i)
 
-        use_batched_format = (
-            self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
-        )
-
-        in_dtype = hidden_states.dtype
-        run_cutlass_moe_fp8(
-            output,
-            hidden_states,
-            w1,
-            w2,
-            topk_ids,
-            activation_callable,
-            global_num_experts,
-            expert_map,
-            self.w1_scale,
-            self.w2_scale,
-            a1q_scale,
-            a2_scale,
-            self.ab_strides1,
-            self.ab_strides2,
-            self.c_strides1,
-            self.c_strides2,
-            workspace13,
-            workspace2,
-            expert_num_tokens,
-            self.out_dtype if self.out_dtype is not None else in_dtype,
-            self.per_act_token_quant,
-            self.per_out_ch_quant,
-            use_batched_format,
-            topk_weights,
+        run_cutlass_moe_block_scaled_fp8(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            w1_scale=self.w1_scale,
+            w2_scale=self.w2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            activation_callable=activation_callable,
         )
 
 
