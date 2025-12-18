@@ -14,7 +14,7 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
