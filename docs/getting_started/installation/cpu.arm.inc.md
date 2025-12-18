@@ -19,12 +19,26 @@ Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels c
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index
 ```
 
 ??? console "pip"
     ```bash
     pip install vllm==${VLLM_VERSION}+cpu --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu
+    ```
+
+!!! warning "set `LD_PRELOAD`"
+    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+    ```bash
+    # install TCMalloc
+    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+
+    # manually find the path
+    sudo find / -iname *libtcmalloc_minimal.so.4
+    TC_PATH=...
+
+    # add them to LD_PRELOAD
+    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
     ```
 
 The `uv` approach works for vLLM `v0.6.6` and later. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
@@ -37,7 +51,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 
 To install from nightly index, run:
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index
 ```
 
 ??? console "pip (there's a caveat)"
@@ -56,7 +70,7 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```bash
 export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index
 ```
 
 # --8<-- [end:pre-built-wheels]
@@ -104,6 +118,20 @@ VLLM_TARGET_DEVICE=cpu uv pip install -e . --no-build-isolation
 ```
 
 Testing has been conducted on AWS Graviton3 instances for compatibility.
+
+!!! warning "set `LD_PRELOAD`"
+    Before use vLLM CPU installed via wheels, make sure TCMalloc is installed and added to `LD_PRELOAD`:
+    ```bash
+    # install TCMalloc
+    sudo apt-get install -y --no-install-recommends libtcmalloc-minimal4
+
+    # manually find the path
+    sudo find / -iname *libtcmalloc_minimal.so.4
+    TC_PATH=...
+
+    # add them to LD_PRELOAD
+    export LD_PRELOAD="$TC_PATH:$LD_PRELOAD"
+    ```
 
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
