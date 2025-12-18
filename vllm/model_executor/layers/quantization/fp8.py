@@ -118,7 +118,6 @@ class Fp8MoeBackend(Enum):
     FLASHINFER_TRTLLM = 1
     FLASHINFER_CUTLASS = 2
     DEEPGEMM = 3
-    CUTLASS_BLOCK_SCALED_GROUPED_GEMM = 4
     MARLIN = 5
     TRITON = 6
 
@@ -190,17 +189,6 @@ def get_fp8_moe_backend(
         elif is_deep_gemm_supported():
             logger.info_once("Using DeepGEMM backend for FP8 MoE", scope="local")
             return Fp8MoeBackend.DEEPGEMM
-
-    # CUTLASS BlockScaled GroupedGemm on SM100 with block-quantized weights
-    if (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-        and block_quant
-    ):
-        logger.info_once(
-            "Using Cutlass BlockScaled GroupedGemm backend for FP8 MoE", scope="local"
-        )
-        return Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
 
     # default to Triton
     logger.info_once("Using Triton backend for FP8 MoE")
