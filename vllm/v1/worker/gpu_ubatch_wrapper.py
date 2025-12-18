@@ -131,10 +131,6 @@ class UBatchWrapper:
             vllm_config.parallel_config.enable_expert_parallel
             and not vllm_config.afd_config
         ):
-        if (
-            vllm_config.parallel_config.enable_expert_parallel
-            and not vllm_config.afd_config
-        ):
             # Currently only DeepEP highthroughput supports SM control so this
             # only affects that case.
             ep_group = get_ep_group()
