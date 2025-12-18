@@ -2838,7 +2838,7 @@ class GPUModelRunner(
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens,
             self.uniform_decode_query_len,
-            num_tokens_padded,
+            num_tokens_unpadded,
             num_reqs,
         )
 
