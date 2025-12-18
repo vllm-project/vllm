@@ -1035,7 +1035,6 @@ def run_cutlass_moe_block_scaled_fp8(
     activation_callable: Callable,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    a1q = hidden_states
     a = hidden_states
 
     w1_q = w1.transpose(1, 2)
@@ -1044,18 +1043,19 @@ def run_cutlass_moe_block_scaled_fp8(
     w2_scale = w2_scale.transpose(1, 2)
 
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert hidden_states.shape[0] == topk_ids.shape[0], (
+    assert a.shape[0] == topk_ids.shape[0], (
         " hidden_states and topk_ids must have the same batch size"
     )
     assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
     assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
-    assert a1q.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
+    assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
     assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
     assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
     assert w1_q.shape[0] == w1_scale.shape[0], "w1_scale expert number mismatch"
     assert w1_q.shape[0] == w2_scale.shape[0], "w2_scale expert number mismatch"
-    assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
+    assert a.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
 
+    out_dtype = a.dtype
     num_experts = w1_q.size(0)
     m = a.size(0)
     k = w1_q.size(1)
@@ -1092,10 +1092,6 @@ def run_cutlass_moe_block_scaled_fp8(
 
     c1 = torch.empty((m * topk, n * 2), dtype=out_dtype, device=device)
     c2 = torch.empty((m * topk, k), dtype=out_dtype, device=device)
-
-    # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
-    # act_out = _resize_cache(workspace2, (M * topk, N))
-    # mm2_out = _resize_cache(workspace2, (M * topk, K))
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         c1,
