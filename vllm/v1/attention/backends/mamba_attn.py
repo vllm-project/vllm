@@ -43,7 +43,7 @@ class BaseMambaAttentionMetadata:
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
-    
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
