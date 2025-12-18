@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-EPLBPolicyOption = Literal["default","flashlb","swift_balancer"]
+EPLBPolicyOption = Literal["default", "flashlb", "swift_balancer"]
 
 
 @config
@@ -156,6 +156,8 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+    ubatch_size: int = 0
+    """Number of ubatch size."""
 
     dbo_decode_token_threshold: int = 32
     """The threshold for dual batch overlap for batches only containing decodes.
@@ -324,6 +326,14 @@ class ParallelConfig:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
         including data parallelism."""
         return self.world_size * self.data_parallel_size
+
+    @property
+    def use_ubatching(self) -> bool:
+        return self.enable_dbo or self.ubatch_size > 1
+
+    @property
+    def num_ubatches(self) -> int:
+        return 2 if self.enable_dbo else self.ubatch_size
 
     def get_next_dp_init_port(self) -> int:
         """

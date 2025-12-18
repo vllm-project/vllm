@@ -15,6 +15,7 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
@@ -123,8 +124,6 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    from vllm._aiter_ops import rocm_aiter_ops
-
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
@@ -140,7 +139,6 @@ def use_rocm_custom_paged_attention(
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-            and not (rocm_aiter_ops.is_pa_attn_enabled())
             and sinks is None
         )
 
@@ -190,21 +188,16 @@ class RocmPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink,
-        use_sparse,
-        use_mm_prefix,
-        attn_type: str | None = None,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if use_sparse:
-            if kv_cache_dtype.startswith("fp8"):
+        block_size = attn_selector_config.block_size
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+
+        if attn_selector_config.use_sparse:
+            if kv_cache_dtype and kv_cache_dtype.startswith("fp8"):
                 raise ValueError(
                     "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                 )
@@ -214,7 +207,7 @@ class RocmPlatform(Platform):
             logger.info_once("Using Sparse MLA backend on V1 engine.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
-        if use_mla:
+        if attn_selector_config.use_mla:
             if selected_backend is None:
                 selected_backend = (
                     AttentionBackendEnum.ROCM_AITER_MLA

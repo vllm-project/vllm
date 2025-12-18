@@ -23,14 +23,6 @@ class TestParameterSweepItem:
                 {"compilation_config.use_inductor_graph_partition": True},
                 "--compilation-config.use_inductor_graph_partition=true",
             ),
-            (
-                {"compilation_config.use_inductor": False},
-                "--compilation-config.use_inductor=false",
-            ),
-            (
-                {"compilation_config.use_inductor": True},
-                "--compilation-config.use_inductor=true",
-            ),
         ],
     )
     def test_nested_boolean_params(self, input_dict, expected):

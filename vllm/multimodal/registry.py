@@ -164,7 +164,7 @@ class MultiModalRegistry:
             profiler.get_mm_limits() if profiler_limits is None else profiler_limits
         )
 
-        return profiler.get_mm_max_contiguous_tokens(
+        return profiler.get_mm_max_tokens(
             seq_len,
             {modality: 1 for modality, limit in profiler_limits.items() if limit > 0},
         )
