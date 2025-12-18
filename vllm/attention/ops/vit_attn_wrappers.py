@@ -26,7 +26,7 @@ def flash_attn_maxseqlen_wrapper(
     v: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    fa_version: int,
+    fa_version: int | None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
@@ -36,7 +36,8 @@ def flash_attn_maxseqlen_wrapper(
     else:
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
-        kwargs["fa_version"] = fa_version
+        if not current_platform.is_rocm() and fa_version is not None:
+            kwargs["fa_version"] = fa_version
 
     q_len = q.size(1)
     if cu_seqlens is None:
@@ -70,7 +71,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    fa_version: int,
+    fa_version: int | None,
 ) -> torch.Tensor:
     return torch.empty_like(q)
 
@@ -88,7 +89,7 @@ def vit_flash_attn_wrapper(
     v: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    fa_version: int,
+    fa_version: int | None,
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
