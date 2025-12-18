@@ -67,7 +67,7 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
     rocm_aiter_grouped_topk,
 )
@@ -1594,19 +1594,26 @@ class FusedMoE(CustomOp):
                 grouped_topk_impl = partial(
                     rocm_aiter_grouped_topk,
                     num_fused_shared_experts=self.num_fused_shared_experts,
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
                 )
             else:
-                grouped_topk_impl = grouped_topk
+                grouped_topk_impl = GroupedTopk(
+                    topk=self.top_k,
+                    renormalize=self.renormalize,
+                    num_expert_group=self.num_expert_group,
+                    topk_group=self.topk_group,
+                    scoring_func=self.scoring_func,
+                    routed_scaling_factor=self.routed_scaling_factor,
+                )
 
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
-                topk=self.top_k,
-                renormalize=self.renormalize,
-                num_expert_group=self.num_expert_group,
-                topk_group=self.topk_group,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
                 e_score_correction_bias=self.e_score_correction_bias,
             )
         elif self.e_score_correction_bias is not None:
@@ -1719,9 +1726,10 @@ class FusedMoE(CustomOp):
             return states
 
         if self.shared_experts is None:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 fused_output = self.forward_impl(hidden_states, router_logits)
                 assert not isinstance(fused_output, tuple)
             else:
@@ -1737,9 +1745,10 @@ class FusedMoE(CustomOp):
             else:
                 return reduce_output(fused_output)[..., :og_hidden_states]
         else:
-            if current_platform.is_tpu():
+            if current_platform.is_tpu() or current_platform.is_cpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
+                # Note: CPU doesn't require wrapped forward_impl.
                 shared_output, fused_output = self.forward_impl(
                     hidden_states, router_logits
                 )
