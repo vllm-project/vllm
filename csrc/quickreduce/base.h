@@ -19,7 +19,7 @@ using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 
 // Setup acquire-release semantics for vector memory reads (mubuf instruction)
 // as per architecture.
-#if defined(__gfx942__)
+#if defined(__gfx942__) || defined(__gfx950__)
 // CDNA3: Scope bits sc0, sc1
   #define MUBUF_ACQUIRE 16
   #define MUBUF_RELEASE 16
@@ -88,7 +88,7 @@ __quickreduce_device_inline__ static void buffer_store_dwordx4(
     int32_t aux) __asm("llvm.amdgcn.raw.buffer.store.v4i32");
 
 __quickreduce_device_inline__ static void set_fp16_ovfl(bool const value) {
-#if defined(__gfx942__)
+#if defined(__gfx942__) || defined(__gfx950__)
   if (value) {
     asm volatile("s_setreg_imm32_b32 0xdc1, 1;" ::);
   } else {
