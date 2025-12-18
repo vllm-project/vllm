@@ -516,35 +516,68 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-        state_indices_tensor_p = attn_metadata.state_indices_tensor_p
-        block_idx_last_computed_token_d = attn_metadata.block_idx_last_computed_token_d
-        block_idx_last_scheduled_token_d = (
-            attn_metadata.block_idx_last_scheduled_token_d
-        )
+        # TODO: check if we need both non_spec_state_indices_tensor and state_indices_tensor
+        state_indices_tensor = attn_metadata.state_indices_tensor
+        block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
+        block_idx_last_computed_token = attn_metadata.block_idx_last_computed_token
         block_idx_first_scheduled_token_p = (
             attn_metadata.block_idx_first_scheduled_token_p
         )
-        block_idx_last_computed_token_p = attn_metadata.block_idx_last_computed_token_p
-        block_idx_last_scheduled_token_p = (
-            attn_metadata.block_idx_last_scheduled_token_p
-        )
+        num_computed_tokens_p = attn_metadata.num_computed_tokens_p
+        block_size = attn_metadata.block_size
+        chunk_size = attn_metadata.chunk_size
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
 
+        start_non_spec_prefill = num_decodes
+        end_non_spec_prefill = start_non_spec_prefill + num_prefills
+
+        # APC is enabled if pointers are available to the blocks, the last computed token (the cache position),
+        # and the block to which the state for each request should be written after the forward.
         prefix_caching_enabled = bool(
-            (
-                state_indices_tensor_d is not None
-                and block_idx_last_scheduled_token_d is not None
-            )
-            or (
-                state_indices_tensor_p is not None
-                and block_idx_last_scheduled_token_p is not None
-            )
+            state_indices_tensor is not None
+            and block_idx_last_scheduled_token is not None
+            and block_idx_last_computed_token is not None
         )
+        # Set up auxiliary P/D tensors for prefix caching logic
+        state_indices_tensor_d: torch.Tensor | None = None
+        state_indices_tensor_p: torch.Tensor | None = None
+        block_idx_last_computed_token_d: torch.Tensor | None = None
+        block_idx_last_computed_token_p: torch.Tensor | None = None
+        block_idx_last_scheduled_token_d: torch.Tensor | None = None
+        block_idx_last_scheduled_token_p: torch.Tensor | None = None
+        if state_indices_tensor is not None:
+            # TODO: Possibly do this instead:
+            # if state_indices_tensor.dim() != 1:
+            if prefix_caching_enabled:
+                state_indices_tensor_d, state_indices_tensor_p = torch.split(
+                    state_indices_tensor,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+                (
+                    block_idx_last_computed_token_d,
+                    block_idx_last_computed_token_p,
+                ) = torch.split(
+                    block_idx_last_computed_token, [num_decodes, num_prefills], dim=0
+                )
+                (
+                    block_idx_last_scheduled_token_d,
+                    block_idx_last_scheduled_token_p,
+                ) = torch.split(
+                    block_idx_last_scheduled_token, [num_decodes, num_prefills], dim=0
+                )
+            else:
+                state_indices_tensor_d, state_indices_tensor_p = (
+                    state_indices_tensor[:start_non_spec_prefill],
+                    state_indices_tensor[start_non_spec_prefill:end_non_spec_prefill],
+                )
+
         non_spec_state_indices_runtime = non_spec_state_indices_tensor
         state_indices_decode: torch.Tensor | None = None
         state_indices_prefill: torch.Tensor | None = None
@@ -552,6 +585,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         start_non_spec_prefill = attn_metadata.num_decodes
         end_non_spec_prefill = start_non_spec_prefill + attn_metadata.num_prefills
 
+        # TODO: if prefix caching is enabled, we have the entire state history in the state_indices_tensor,
+        # and we don't support speciculative decoding enaywasy, so we should be able to simplify this here to disregard non_spec_state_indices_tensor etc.
         if (
             prefix_caching_enabled
             and non_spec_state_indices_tensor is not None
@@ -561,7 +596,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             # into the attention metadata shared across microbatches.
             non_spec_state_indices_runtime = non_spec_state_indices_tensor.clone()
 
-            num_decodes = attn_metadata.num_decodes
             if (
                 num_decodes > 0
                 and state_indices_tensor_d is not None
@@ -636,9 +670,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 and block_idx_last_computed_token_p is not None
                 and block_idx_last_scheduled_token_p is not None
             ):
-                start = attn_metadata.num_decodes
-                end = start + num_prefills
-                base_prefill_slots = non_spec_state_indices_tensor[start:end]
+                base_prefill_slots = non_spec_state_indices_tensor[
+                    start_non_spec_prefill:end_non_spec_prefill
+                ]
                 gathered_last_computed = (
                     block_idx_last_computed_token_p[:num_prefills]
                     .clamp(min=0)
@@ -696,7 +730,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     slot_out,
                     base_prefill_slots,
                 )
-                non_spec_state_indices_runtime[start:end] = updated_prefill_slots
+                non_spec_state_indices_runtime[
+                    start_non_spec_prefill:end_non_spec_prefill
+                ] = updated_prefill_slots
                 state_indices_prefill = updated_prefill_slots
 
         if state_indices_decode is None and non_spec_state_indices_tensor is not None:
@@ -709,10 +745,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 start_non_spec_prefill:end_non_spec_prefill
             ]
 
-        if attn_metadata.num_decodes > 0:
+        if num_decodes > 0:
             assert state_indices_decode is not None
-
-        if attn_metadata.num_prefills > 0:
+        if num_prefills > 0:
             assert state_indices_prefill is not None
             assert non_spec_state_indices_runtime is not None
 
@@ -726,7 +761,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         )
 
         if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+            if num_prefills == 0 and num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
                 mixed_qkv_non_spec = None
             else:
@@ -828,7 +863,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             core_attn_out_spec, last_recurrent_state = None, None
 
         # 2.2: Process the remaining part
-        if attn_metadata.num_prefills > 0:
+        if num_prefills > 0:
             chunk_state_indices = non_spec_state_indices_runtime[:end_non_spec_prefill]
             initial_state = ssm_state.new_zeros(
                 (chunk_state_indices.shape[0], *ssm_state.shape[1:])
@@ -900,9 +935,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 and block_idx_last_scheduled_token_p is not None
                 and state_indices_tensor_p is not None
                 and attn_metadata.last_chunk_indices_p is not None
-                and attn_metadata.num_computed_tokens_p is not None
-                and attn_metadata.chunk_size is not None
-                and attn_metadata.block_size is not None
+                and num_computed_tokens_p is not None
+                and chunk_size is not None
+                and block_size is not None
             ):
                 block_history = block_state_history.to(ssm_state.dtype)
                 total_chunks = block_history.shape[0]
@@ -921,14 +956,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     # The block history contains recurrent states per chunk; we
                     # replay it into the persistent cache blocks owned by each
                     # sequence so future steps can hit the prefix cache.
-                    chunk_size = attn_metadata.chunk_size
-                    block_size = attn_metadata.block_size
                     chunk_stride = block_size // chunk_size
                     last_chunk_indices = attn_metadata.last_chunk_indices_p
                     last_chunk_indices_long = last_chunk_indices.to(torch.long)
-                    num_computed_tokens_p = attn_metadata.num_computed_tokens_p
 
-                    for seq_idx in range(attn_metadata.num_prefills):
+                    for seq_idx in range(num_prefills):
                         block_first = int(
                             block_idx_first_scheduled_token_p[seq_idx].item()
                         )
@@ -980,7 +1012,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             ),
                         )
                         ssm_state.index_copy_(0, final_slot_ids, final_states)
-        elif attn_metadata.num_decodes > 0:
+        elif num_decodes > 0:
             assert state_indices_decode is not None
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_recurrent_gated_delta_rule(
@@ -991,9 +1023,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     beta=beta_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
+                    cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
                     ssm_state_indices=state_indices_decode,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -1085,12 +1115,14 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": self.dual_chunk_attention_config,
-            }
-            if self.dual_chunk_attention_config
-            else {},
+            **(
+                {
+                    "layer_idx": extract_layer_index(prefix),
+                    "dual_chunk_attention_config": self.dual_chunk_attention_config,
+                }
+                if self.dual_chunk_attention_config
+                else {}
+            ),
         )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
