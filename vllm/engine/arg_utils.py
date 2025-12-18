@@ -410,7 +410,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    all2all_backend: str | None = ParallelConfig.all2all_backend
+    all2all_backend: str = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
