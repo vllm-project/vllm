@@ -32,8 +32,8 @@ def cal_diff(
 
 
 CUTLASS_MLA_UNSUPPORTED_REASON = (
-    "Cutlass MLA Requires compute capability of 10 or above."
-    if not current_platform.is_device_capability(100)
+    "Cutlass MLA Requires compute capability of 100 or above."
+    if not current_platform.is_device_capability_family(100)
     else "Cutlass MLA is supported"
 )
 

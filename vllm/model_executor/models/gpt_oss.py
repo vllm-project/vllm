@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 import typing
+from collections.abc import Iterable
 
 import torch
 import torch.distributed as dist
@@ -68,7 +68,6 @@ class OAIAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
             dtype=torch.float32,
             rope_parameters={
@@ -506,14 +505,12 @@ class GptOssModel(nn.Module):
         weights: Iterable[tuple[str, torch.Tensor]],
         stacked_params_mapping: list[tuple[str, ...]],
     ) -> set[str]:
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
         mxfp4_block = 32
         use_ep = self.parallel_config.enable_expert_parallel
-        if use_ep:
-            assert False, "Expert parallelism is not support for quark MoE"
+        assert not use_ep, "Expert parallelism is not support for quark MoE"
 
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
@@ -522,16 +519,13 @@ class GptOssModel(nn.Module):
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
         # Calculate common slicing bounds for current rank
         tp_rank_start = tp_rank * per_rank_intermediate_size
-        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size,
-                          intermediate_size)
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-
             if "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
-                narrow_weight = loaded_weight.narrow(0, head_start,
-                                                     heads_per_rank)
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
                 param.data.copy_(narrow_weight)
                 loaded_params.add(name)
                 continue
@@ -543,13 +537,14 @@ class GptOssModel(nn.Module):
                 name = ".".join(parts[:-2] + parts[-1:])
                 param = params_dict[name]
 
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -561,16 +556,19 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end, ...]
+                    narrow_weight = loaded_weight[
+                        2 * tp_rank_start : 2 * tp_rank_end, ...
+                    ]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              narrow_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -581,18 +579,19 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[..., tp_rank_start //
-                                           mxfp4_block:tp_rank_end //
-                                           mxfp4_block]
+                    narrow_weight = loaded_weight[
+                        ..., tp_rank_start // mxfp4_block : tp_rank_end // mxfp4_block
+                    ]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              narrow_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -608,16 +607,19 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end, ...]
+                    narrow_weight = loaded_weight[
+                        2 * tp_rank_start : 2 * tp_rank_end, ...
+                    ]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              narrow_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -629,16 +631,19 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[..., tp_rank_start // 2:tp_rank_end // 2]
+                    narrow_weight = loaded_weight[
+                        ..., tp_rank_start // 2 : tp_rank_end // 2
+                    ]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              narrow_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -649,16 +654,17 @@ class GptOssModel(nn.Module):
                 if use_ep:
                     narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end]
+                    narrow_weight = loaded_weight[2 * tp_rank_start : 2 * tp_rank_end]
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param,
-                              narrow_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(
+                    param,
+                    narrow_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
@@ -668,23 +674,24 @@ class GptOssModel(nn.Module):
                 name = ".".join(parts[:-2] + parts[-1:])
                 # Handle MLP down projection bias
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if use_ep:
                     loaded_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
                         loaded_weight.zero_()
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name=name,
-                              shard_id=None,
-                              expert_id=expert_id)
+                weight_loader(
+                    param,
+                    loaded_weight,
+                    weight_name=name,
+                    shard_id=None,
+                    expert_id=expert_id,
+                )
                 loaded_params.add(name)
                 continue
 
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -694,7 +701,7 @@ class GptOssModel(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if (("mlp.experts." in name) and name not in params_dict):
+                if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
 
@@ -727,14 +734,17 @@ class GptOssModel(nn.Module):
                     # We should ask the weight loader to return success or not
                     # here since otherwise we may skip experts with other
                     # available replicas.
-                    weight_loader = typing.cast(typing.Callable[..., bool],
-                                                param.weight_loader)
-                    success = weight_loader(param,
-                                            loaded_weight,
-                                            name_mapped,
-                                            shard_id=shard_id,
-                                            expert_id=expert_id,
-                                            return_success=True)
+                    weight_loader = typing.cast(
+                        typing.Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
                     if success:
                         name = name_mapped
                         break
@@ -749,8 +759,9 @@ class GptOssModel(nn.Module):
                         continue
 
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
@@ -763,7 +774,8 @@ class GptOssModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_local_experts)
+            num_experts=self.config.num_local_experts,
+        )
 
     def _load_weights_other(
         self,
@@ -915,9 +927,14 @@ class GptOssModel(nn.Module):
                 stacked_params_mapping,
             )
         elif quant_method == "quark":
-            return self._load_weights_quark(ep_rank_end, ep_rank_start,
-                                            heads_per_rank, head_start,
-                                            weights, stacked_params_mapping)
+            return self._load_weights_quark(
+                ep_rank_end,
+                ep_rank_start,
+                heads_per_rank,
+                head_start,
+                weights,
+                stacked_params_mapping,
+            )
         else:
             return self._load_weights_other(
                 ep_rank_end,
@@ -958,7 +975,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
             ".down_proj.weight": ".w2_weight",
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
-            ".down_proj.input_scale": ".w2_input_scale"
+            ".down_proj.input_scale": ".w2_input_scale",
         },
     )
 

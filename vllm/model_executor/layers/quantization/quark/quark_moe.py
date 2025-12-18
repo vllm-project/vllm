@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from typing import Any
 
 import aiter
@@ -361,23 +360,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
@@ -395,13 +377,15 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 quant_config=self.moe_quant_config,
-                expert_map=expert_map,
+                expert_map=layer.expert_map,
             )
         elif self.use_marlin:
-            assert activation == "silu", f"{activation} not supported for Marlin MoE."
+            assert layer.activation == "silu", (
+                f"{layer.activation} not supported for Marlin MoE."
+            )
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -414,9 +398,9 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 topk_weights,
                 topk_ids,
                 quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
@@ -428,10 +412,10 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
 
@@ -621,23 +605,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         topk_weights, topk_ids, _ = layer.select_experts(
             hidden_states=x,
@@ -655,9 +622,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                activation=activation,
+                activation=layer.activation,
                 quant_config=self.moe_quant_config,
-                expert_map=expert_map,
+                expert_map=layer.expert_map,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
@@ -669,12 +636,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
             )
+
         return out
 
 
@@ -843,24 +811,9 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if enable_eplb:
+        if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod` yet."
             )
@@ -870,14 +823,14 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
+            use_grouped_topk=layer.use_grouped_topk,
+            top_k=layer.top_k,
+            renormalize=layer.renormalize,
+            topk_group=layer.topk_group,
+            num_expert_group=layer.num_expert_group,
+            custom_routing_function=layer.custom_routing_function,
+            scoring_func=layer.scoring_func,
+            e_score_correction_bias=layer.e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
 
@@ -890,8 +843,8 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 ActivationType.Silu.name.lower(): ActivationType.Silu,
                 ActivationType.Gelu.name.lower(): ActivationType.Gelu,
             }
-            assert activation in aiter_acts, (
-                f"Aiter CK fp4 MoE doesn't support activation {activation}"
+            assert layer.activation in aiter_acts, (
+                f"Aiter CK fp4 MoE doesn't support activation {layer.activation}"
             )
             if hasattr(torch, "float4_e2m1fn_x2"):
                 w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
@@ -909,7 +862,7 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 quant_type=QuantType.per_1x32,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                activation=aiter_acts[activation],
+                activation=aiter_acts[layer.activation],
                 doweight_stage1=False,
             )
         else:
@@ -922,9 +875,9 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
             )
@@ -1194,25 +1147,9 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
+        if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
             )
@@ -1222,7 +1159,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
 
             token_num = x.shape[0]
             BLOCKM = 16 if token_num < 2048 else 32
-            topk_weights, topk_ids = fused_topk(x, router_logits, top_k, True)
+            topk_weights, topk_ids = fused_topk(x, router_logits, layer.top_k, True)
             sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_out = (
                 moe_sorting(
                     topk_ids,
@@ -1237,7 +1174,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             _, k2, n2 = self.w2_weight_aiter_tensor.shape
             D = n2 if k2 == k1 else n2 * 2
             cktile_moe_out1 = torch.empty(
-                (token_num, top_k, D), dtype=torch.bfloat16, device=x.device
+                (token_num, layer.top_k, D), dtype=torch.bfloat16, device=x.device
             )
             aiter.moe_cktile2stages_gemm1(
                 x,
@@ -1246,7 +1183,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 sorted_ids,
                 sorted_expert_ids,
                 num_valid_ids,
-                top_k,
+                layer.top_k,
                 self.intermediate_pad // 64 * 64 * 2,
                 self.hidden_pad // 128 * 128,  # k_pad_zeros
                 None,  # sorted_weights
@@ -1262,7 +1199,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 sorted_ids,
                 sorted_expert_ids,
                 num_valid_ids,
-                top_k,
+                layer.top_k,
                 self.hidden_pad // 64 * 64,  # n_pad_zeros
                 self.intermediate_pad // 128 * 128,
                 sorted_weights,  # sorted_weights
@@ -1282,12 +1219,12 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 w1=self.w13_weight_triton_tensor,
                 w2=self.w2_weight_triton_tensor,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+                global_num_experts=layer.global_num_experts,
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 unpadded_N_w1=self.intermediate_size_per_partition * 2,
                 unpadded_K_w1=self.unpadded_hidden_size,
                 unpadded_N_w2=self.unpadded_hidden_size,
