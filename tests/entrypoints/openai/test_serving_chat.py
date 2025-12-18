@@ -396,6 +396,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         lora_request,
         trace_headers,
         priority,
+        data_parallel_rank,
     ):
         return dict(engine_prompt), {}
 
