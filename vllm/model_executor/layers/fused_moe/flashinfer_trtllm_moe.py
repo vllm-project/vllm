@@ -60,7 +60,6 @@ def flashinfer_fused_moe_blockscale_fp8(
         local_expert_offset=expert_offset,
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling,
-        tile_tokens_dim=None,
         routing_method_type=routing_method_type,
         use_shuffled_weight=False,
     )
