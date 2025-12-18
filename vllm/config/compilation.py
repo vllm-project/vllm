@@ -915,8 +915,6 @@ class CompilationConfig:
             "mode is CompilationMode.VLLM_COMPILE"
         )
 
-        added_default_splitting_ops = False
-
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
@@ -930,7 +928,6 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
-                added_default_splitting_ops = True
             elif len(self.splitting_ops) == 0:
                 if (
                     self.cudagraph_mode == CUDAGraphMode.PIECEWISE
@@ -958,44 +955,25 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
 
-        # split MoE ops for cudagraph
-        moe_ops = [
-            "vllm::moe_forward",
-            "vllm::moe_forward_shared",
-        ]
+        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
         backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
         dp_size = data_parallel_size if data_parallel_size is not None else 1
-        need_moe_splitting = (
+        if (
             backend == "deepep_high_throughput"
             and dp_size > 1
-            # pure attn-fusion without inductor partition deliberately disables
-            # piecewise graphs and MoE splitting.
-            and not (
-                self.pass_config.fuse_attn_quant
-                and not self.use_inductor_graph_partition
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
+            logger.info(
+                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
+                "are optimized for prefill and are incompatible with CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "use --all2all-backend with another option, such as "
+                "deepep_low_latency, pplx, or allgather_reducescatter."
             )
-        )
-
-        if need_moe_splitting and self.cudagraph_mode != CUDAGraphMode.NONE:
-            # if we just initialized default splitting_ops for this config,
-            # automatically append the MoE ops
-            if added_default_splitting_ops:
-                for op in moe_ops:
-                    if op not in self.splitting_ops:
-                        self.splitting_ops.append(op)
-
-            # make sure MoE ops are split out
-            if not any(op in self.splitting_ops for op in moe_ops):
-                self.cudagraph_mode = CUDAGraphMode.NONE
-                logger.warning_once(
-                    "DeepEP high throughput backend with data_parallel_size > 1 "
-                    "requires splitting MoE ops from cudagraphs. Please ensure "
-                    "'vllm::moe_forward' or 'vllm::moe_forward_shared' are "
-                    "present in CompilationConfig.splitting_ops."
-                )
-            elif self.cudagraph_mode.has_full_cudagraphs():
-                # fall back to piecewise when MoE splitting is required.
-                self.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            self.cudagraph_mode = CUDAGraphMode.NONE
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
