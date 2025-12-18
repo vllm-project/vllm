@@ -138,6 +138,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
   return ss.str();
 }
+#endif  // VLLM_NUMA_DISABLED
 
 namespace cpu_utils {
 ScratchPadManager::ScratchPadManager() : size_(0), ptr_(nullptr) {
@@ -160,4 +161,3 @@ ScratchPadManager* ScratchPadManager::get_scratchpad_manager() {
   return &manager;
 }
 }  // namespace cpu_utils
-#endif
