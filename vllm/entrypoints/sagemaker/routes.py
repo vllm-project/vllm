@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.api_server import (
     completion,
     create_chat_completion,
     create_completion,
-    health,
     validate_json_request,
 )
 from vllm.entrypoints.openai.protocol import (
@@ -38,6 +37,7 @@ from vllm.entrypoints.pooling.score.api_router import (
     score,
 )
 from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
+from vllm.entrypoints.serve.instrumentator.health import health
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)

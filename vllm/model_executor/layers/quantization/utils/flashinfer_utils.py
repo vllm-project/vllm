@@ -257,6 +257,7 @@ def flashinfer_cutlass_moe_fp8(
             out_dtype=hidden_states.dtype,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
         ),
+        moe_parallel_config=layer.moe_parallel_config,
     )
 
     return fused_experts(
@@ -284,7 +285,7 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
     if flashinfer_moe_backend in backend_map:
         if (
             flashinfer_moe_backend == "latency"
-            and not current_platform.is_device_capability(100)
+            and not current_platform.is_device_capability_family(100)
         ):
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
