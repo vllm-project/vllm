@@ -347,6 +347,14 @@ class OpenAIServingChat(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
                     )
+                    # Handle enforced_str for validation/testing
+                    if request.enforced_str:
+                        toks = tokenizer(
+                            request.enforced_str, add_special_tokens=False
+                        )
+                        sampling_params.enforce_sequence = (
+                            toks.input_ids + [tokenizer.eos_token_id]
+                        )
                     validate_logits_processors_parameters(
                         self.logits_processors,
                         sampling_params,

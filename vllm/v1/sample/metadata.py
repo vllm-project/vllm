@@ -42,3 +42,7 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # req_index -> enforce_sequence (for validation/testing)
+    # Maps request index to token sequence that should be enforced
+    enforce_sequences: dict[int, list[int]] | None = None

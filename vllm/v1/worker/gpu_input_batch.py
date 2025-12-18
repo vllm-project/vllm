@@ -245,6 +245,9 @@ class InputBatch:
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
+        # req_index -> enforce_sequence (for validation/testing)
+        self.enforce_sequences: dict[int, list[int]] = {}
+
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
         self.req_output_token_ids: list[list[int] | None] = []
@@ -416,6 +419,10 @@ class InputBatch:
                 self.bad_words_token_ids[req_index] = (
                     sampling_params.bad_words_token_ids
                 )
+
+            # Handle enforce_sequence for validation/testing
+            if sampling_params.enforce_sequence:
+                self.enforce_sequences[req_index] = sampling_params.enforce_sequence
         elif pooling_params := request.pooling_params:
             pooling_states = request.pooling_states
             assert pooling_states is not None
@@ -499,6 +506,7 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.enforce_sequences.pop(req_index, None)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -594,6 +602,7 @@ class InputBatch:
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
+        swap_dict_values(self.enforce_sequences, i1, i2)
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             (
@@ -726,6 +735,10 @@ class InputBatch:
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
 
+            enforce_seq = self.enforce_sequences.pop(last_req_index, None)
+            if enforce_seq is not None:
+                self.enforce_sequences[empty_index] = enforce_seq
+
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -834,6 +847,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            enforce_sequences=self.enforce_sequences if self.enforce_sequences else None,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
