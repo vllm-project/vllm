@@ -1213,6 +1213,7 @@ def grouped_topk(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
+    packed: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
@@ -1293,6 +1294,7 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
+    topk_weights: torch.Tensor,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1355,7 +1357,10 @@ def eplb_map_to_physical_and_record(
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
-    return topk_ids
+    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+        torch.bfloat16
+    ).view(torch.int16)
+    return packed_tensor
 
 
 def fused_grouped_topk(
@@ -1368,6 +1373,7 @@ def fused_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
+    packed = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
@@ -1382,6 +1388,7 @@ def fused_grouped_topk(
             routed_scaling_factor,
             e_score_correction_bias.to(gating_output.dtype),
             1,  # scoring_func=1 for sigmoid
+            packed
         )
     elif scoring_func == "softmax":
         # Apply softmax in Python, then use fused kernel
@@ -1396,6 +1403,7 @@ def fused_grouped_topk(
             routed_scaling_factor,
             e_score_correction_bias.to(gating_output.dtype),
             0,  # scoring_func=0 (no activation, scores already computed)
+            packed
         )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")

@@ -415,6 +415,34 @@ def flashinfer_trtllm_fp4_routed_moe(
     # ==================================================
 
 
+    # vs moving above
+    # ============ Serving Benchmark Result ============
+    # Successful requests:                     2048
+    # Failed requests:                         0
+    # Maximum request concurrency:             3800
+    # Benchmark duration (s):                  91.22
+    # Total input tokens:                      2095104
+    # Total generated tokens:                  262144
+    # Request throughput (req/s):              22.45
+    # Output token throughput (tok/s):         2873.85
+    # Peak output token throughput (tok/s):    7639.00
+    # Peak concurrent requests:                2048.00
+    # Total token throughput (tok/s):          25842.20
+    # ---------------Time to First Token----------------
+    # Mean TTFT (ms):                          39928.56
+    # Median TTFT (ms):                        39449.62
+    # P99 TTFT (ms):                           79351.18
+    # -----Time per Output Token (excl. 1st token)------
+    # Mean TPOT (ms):                          204.02
+    # Median TPOT (ms):                        217.89
+    # P99 TPOT (ms):                           237.56
+    # ---------------Inter-token Latency----------------
+    # Mean ITL (ms):                           204.05
+    # Median ITL (ms):                         241.85
+    # P99 ITL (ms):                            267.97
+    # ==================================================
+
+
     # Quantize input to FP4
     a1_gscale = layer.w13_input_scale_quant
     (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(

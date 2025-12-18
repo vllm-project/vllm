@@ -1606,6 +1606,7 @@ class FusedMoE(CustomOp):
                 scoring_func=self.scoring_func,
                 routed_scaling_factor=self.routed_scaling_factor,
                 e_score_correction_bias=self.e_score_correction_bias,
+                packed=packed
             )
         elif self.e_score_correction_bias is not None:
             topk_weights, topk_ids = fused_topk_bias(
@@ -1634,12 +1635,13 @@ class FusedMoE(CustomOp):
             )
 
         if self.enable_eplb:
-            topk_ids = eplb_map_to_physical_and_record(
+            return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
-            )
+                topk_weights=topk_weights
+            ), None, None
 
         if (indices_type is not None) and topk_ids.dtype != indices_type:
             topk_ids = topk_ids.to(dtype=indices_type)
@@ -1664,11 +1666,6 @@ class FusedMoE(CustomOp):
             zero_expert_result = None
 
 
-        if packed:
-            packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-                torch.bfloat16
-            ).view(torch.int16)
-            return packed_tensor, None, None
         return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:
