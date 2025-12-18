@@ -235,6 +235,20 @@ pull_request_rules:
       add:
         - rocm
 
+- name: label-cpu
+  description: Automatically apply cpu label
+  conditions:
+    - label != stale
+    - files~=^(?!.*kv_offload)(?!.*cpu_offload).*\bcpu.*
+  actions:
+    label:
+      add:
+        - cpu
+    assign:
+      users:
+        - "fadara01"
+        - "aditew01"
+
 - name: label-structured-output
   description: Automatically apply structured-output label
   conditions:
@@ -334,6 +348,18 @@ pull_request_rules:
     label:
       add:
         - tool-calling
+
+- name: auto-rebase if approved, ready, and 40 commits behind main
+  conditions:
+    - base = main
+    - label=ready
+    - "#approved-reviews-by >= 1"
+    - "#commits-behind >= 40"
+    - -closed
+    - -draft
+    - -conflict
+  actions:
+    rebase: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
