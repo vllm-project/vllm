@@ -67,7 +67,6 @@ class OAIAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
             dtype=torch.float32,
             rope_parameters={
@@ -647,8 +646,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_start,
                 ep_rank_end,
+                ep_rank_start,
                 heads_per_rank,
                 head_start,
                 weights,

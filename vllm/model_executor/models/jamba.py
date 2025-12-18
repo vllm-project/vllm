@@ -480,7 +480,6 @@ class JambaForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config

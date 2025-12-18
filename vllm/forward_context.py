@@ -5,18 +5,16 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ubatch_utils import UBatchSlices
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
 
 logger = init_logger(__name__)
 
@@ -195,7 +193,7 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
-    attn_metadata: dict[str, "AttentionMetadata"] | list[dict[str, "AttentionMetadata"]]
+    attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -294,7 +292,7 @@ def set_forward_context(
         if num_tokens_across_dp is None:
             assert ubatch_slices is None
             assert num_tokens is not None
-            _, num_tokens_across_dp = coordinate_batch_across_dp(
+            _, num_tokens_across_dp, _ = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,

@@ -16,6 +16,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -27,15 +28,15 @@ def flash_attn_maxseqlen_wrapper(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    use_upstream_fa: bool,
+    fa_version: int,
 ) -> torch.Tensor:
+    kwargs = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
     else:
-        if use_upstream_fa:
-            from flash_attn import flash_attn_varlen_func
-        else:
-            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+
+        kwargs["fa_version"] = fa_version
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,
@@ -47,10 +48,9 @@ def flash_attn_maxseqlen_wrapper(
         max_seqlen_k=max_seqlen.item(),
         dropout_p=0.0,
         causal=False,
+        **kwargs,
     )
-    context_layer = einops.rearrange(
-        output, "(b s) h d -> s b (h d)", b=batch_size
-    ).contiguous()
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
 
@@ -62,10 +62,9 @@ def flash_attn_maxseqlen_wrapper_fake(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    use_upstream_fa: bool,
+    fa_version: int,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
@@ -83,10 +82,10 @@ def vit_flash_attn_wrapper(
     max_seqlen: torch.Tensor,
     batch_size: int,
     is_rocm_aiter: bool,
-    use_upstream_fa: bool,
+    fa_version: int,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter, use_upstream_fa
+        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter, fa_version
     )
 
 
@@ -98,13 +97,20 @@ def torch_sdpa_wrapper(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
+    # Never remove the contiguous logic for ROCm
+    # Without it, hallucinations occur with the backend
+    if current_platform.is_rocm():
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+
     outputs = []
-    for i in range(1, len(cu_seqlens)):
-        start_idx = cu_seqlens[i - 1]
-        end_idx = cu_seqlens[i]
-        q_i = q[:, start_idx:end_idx]
-        k_i = k[:, start_idx:end_idx]
-        v_i = v[:, start_idx:end_idx]
+
+    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    q_chunks = torch.split(q, lens, dim=1)
+    k_chunks = torch.split(k, lens, dim=1)
+    v_chunks = torch.split(v, lens, dim=1)
+    for q_i, k_i, v_i in zip(q_chunks, k_chunks, v_chunks):
         q_i, k_i, v_i = (
             einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
         )
@@ -112,7 +118,6 @@ def torch_sdpa_wrapper(
         output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
         outputs.append(output_i)
     context_layer = torch.cat(outputs, dim=1)
-    context_layer = einops.rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
     return context_layer
 
 
@@ -122,8 +127,7 @@ def torch_sdpa_wrapper_fake(
     v: torch.Tensor,
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
-    b, s, h, d = q.shape
-    return torch.empty((s, b, h * d), dtype=q.dtype, device=q.device)
+    return torch.empty_like(q)
 
 
 direct_register_custom_op(
