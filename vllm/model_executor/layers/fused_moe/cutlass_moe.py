@@ -1052,6 +1052,121 @@ def run_cutlass_block_scaled_fused_experts(
     ).sum(dim=1)
 
 
+class CutlassBlockScaleExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(
+        self,
+        out_dtype: torch.dtype | None,
+        ab_strides1: torch.Tensor,
+        ab_strides2: torch.Tensor,
+        c_strides1: torch.Tensor,
+        c_strides2: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        assert quant_config.use_fp8_w8a8
+        super().__init__(quant_config)
+        self.out_dtype = out_dtype
+        self.ab_strides1 = ab_strides1
+        self.ab_strides2 = ab_strides2
+        self.c_strides1 = c_strides1
+        self.c_strides2 = c_strides2
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_chunking(self) -> bool:
+        return True
+
+    def supports_expert_map(self) -> bool:
+        return True
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # topk weights and reduction are fused in moe_unpermute cuda kernel
+        return TopKWeightAndReduceNoOP()
+
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        return self.out_dtype if self.out_dtype is not None else act_dtype
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace1 = (M * topk, max(N, K))
+        workspace2 = (M * topk, max(N // 2, K))
+        output = (M, K)
+        return (workspace1, workspace2, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
+        assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+
+        expert_num_tokens = None
+        if expert_tokens_meta is not None:
+            expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
+        activation_callable = lambda o, i: self.activation(activation, o, i)
+
+        use_batched_format = (
+            self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+        )
+
+        in_dtype = hidden_states.dtype
+        run_cutlass_moe_fp8(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_ids,
+            activation_callable,
+            global_num_experts,
+            expert_map,
+            self.w1_scale,
+            self.w2_scale,
+            a1q_scale,
+            a2_scale,
+            self.ab_strides1,
+            self.ab_strides2,
+            self.c_strides1,
+            self.c_strides2,
+            workspace13,
+            workspace2,
+            expert_num_tokens,
+            self.out_dtype if self.out_dtype is not None else in_dtype,
+            self.per_act_token_quant,
+            self.per_out_ch_quant,
+            use_batched_format,
+            topk_weights,
+        )
+
+
 # W4A8
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
