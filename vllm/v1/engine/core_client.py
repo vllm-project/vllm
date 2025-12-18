@@ -498,6 +498,8 @@ class ClientSentinel(BaseSentinel):
             except queue.Empty:
                 break
 
+        if success:
+            self.is_faulted.clear()
         return success
 
     def pause(self, timeout: int = 1, soft_pause: bool = True):
@@ -534,8 +536,6 @@ class ClientSentinel(BaseSentinel):
         fut = self._loop.create_future()
         await self._task_queue.put((instruction, timeout, kwargs, fut))
         result = await fut
-        if result:
-            self.is_faulted.clear()
         return result
 
     def listen_and_publish_fault_status(self):
