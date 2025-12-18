@@ -1411,6 +1411,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
         if fp8_attention:
+            logger.debug_once("Running Flashinfer prefill in FP8")
             fp8_dtype = current_platform.fp8_dtype()
             q = q.to(fp8_dtype)
             k = k.to(fp8_dtype)
@@ -1498,6 +1499,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         logger.debug_once("Running FlashInfer prefill context chunk", scope="local")
         assert isinstance(prefill, FlashInferPrefillMetadata)
         if fp8_attention:
+            logger.debug_once("Running FlashInfer prefill in FP8")
             fp8_dtype = current_platform.fp8_dtype()
             q = q.to(fp8_dtype)
             k = k.to(fp8_dtype)
@@ -1561,6 +1563,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.query_seq_lens is not None
 
         if fp8_attention:
+            logger.debug_once("Running TRT-LLM ragged prefill in FP8")
             fp8_dtype = current_platform.fp8_dtype()
             q = q.to(fp8_dtype)
             k = k.to(fp8_dtype)
@@ -1617,6 +1620,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self._workspace_buffer.fill_(0)
 
         if fp8_attention:
+            logger.debug_once("Running TRT-LLM ragged prefill context chunk in FP8")
             fp8_dtype = current_platform.fp8_dtype()
             q = q.to(fp8_dtype)
             k = k.to(fp8_dtype)
