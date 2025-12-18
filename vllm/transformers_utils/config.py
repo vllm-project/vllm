@@ -318,13 +318,13 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
+        if (
+            rope_theta is not None or partial_rotary_factor is not None
+        ) and not getattr(config, "rope_parameters", None):
+            config.rope_parameters = {"rope_type": "default"}
         if rope_theta is not None:
-            if not getattr(config, "rope_parameters", None):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
         if partial_rotary_factor is not None:
-            if not getattr(config, "rope_parameters", None):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
