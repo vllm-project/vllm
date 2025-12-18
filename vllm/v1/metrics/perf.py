@@ -1249,7 +1249,7 @@ class PerfMetricsProm:
         self,
         vllm_config: VllmConfig,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ):
         counter_flops = self._counter_cls(
             name="vllm:estimated_flops_per_gpu_total",
@@ -1298,7 +1298,7 @@ class PerfMetricsProm:
 
 
 def make_per_engine(
-    counter: prometheus_client.Counter, per_engine_labelvalues: dict[int, list[str]]
+    counter: prometheus_client.Counter, per_engine_labelvalues: dict[int, list[object]]
 ):
     """Create a counter for each label value."""
     return {
