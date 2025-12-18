@@ -187,11 +187,13 @@ class GDNAttentionMetadataBuilder(
             block_size_value = self.kv_cache_spec.block_size
             chunk_size_value = self.chunk_size
 
+        # APC related tensors
         state_indices_tensor: torch.Tensor | None = None
         block_idx_first_scheduled_token: torch.Tensor | None = None
         block_idx_last_computed_token: torch.Tensor | None = None
         block_idx_last_scheduled_token: torch.Tensor | None = None
         block_idx_first_scheduled_token_p: torch.Tensor | None = None
+
         num_computed_tokens_p: torch.Tensor | None = None
         seq_idx_p: torch.Tensor | None = None
         cu_chunk_seqlen_p: torch.Tensor | None = None
@@ -317,11 +319,6 @@ class GDNAttentionMetadataBuilder(
                 block_idx_first_scheduled_token,
                 block_idx_last_scheduled_token,
             ) = self._compute_prefix_caching_block_indices(m, block_size_value)
-        else:
-            # State will be handled by the spec/non_spec tensors
-            state_indices_tensor = None
-            block_idx_last_computed_token = None
-            block_idx_last_scheduled_token = None
 
         if enable_apc and num_prefills > 0:
             assert block_idx_first_scheduled_token is not None
