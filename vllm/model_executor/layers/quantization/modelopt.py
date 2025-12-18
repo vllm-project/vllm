@@ -336,8 +336,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         self.kv_cache_quant_method = kv_cache_quant_method
         if is_checkpoint_fp8_serialized:
             logger.warning(
-                "Detected ModelOpt fp8 checkpoint. Please note that"
-                " the format is experimental and could change."
+                "Detected ModelOpt fp8 checkpoint (quant_algo=%s). Please note "
+                "that the format is experimental and could change.",
+                quant_method,
             )
 
         # Select LinearMethod implementation based on quant_algo.
