@@ -292,6 +292,13 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return XPUFp8LinearMethod(fp8_config)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedLinearMethod()
+
             return XPUFp8MoEMethod(fp8_config, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -715,8 +722,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant: bool = self.weight_block_size is not None
-        self.fp8_backend = get_fp8_moe_backend(
-            self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
+        self.fp8_backend = (
+            get_fp8_moe_backend(
+                self.block_quant, layer.moe_parallel_config, self.moe.is_lora_enabled
+            )
+            if not current_platform.is_xpu()
+            else None
         )
 
         self.marlin_input_dtype = None
@@ -1106,6 +1117,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
+        if current_platform.is_xpu():
+            return None
         if (
             self.rocm_aiter_moe_enabled
             or self.use_marlin
