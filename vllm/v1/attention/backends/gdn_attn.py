@@ -45,6 +45,7 @@ class GDNAttentionMetadata:
         None  # shape: [batch - num_spec_decodes + 1,]
     )
 
+    # State indices with/without speculative decoding. spec* is None when specdec is disabled.
     spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
     non_spec_state_indices_tensor: torch.Tensor | None = (
         None  # shape: [batch - num_spec_decodes,]
@@ -56,6 +57,8 @@ class GDNAttentionMetadata:
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
     # APC metadata, similar definitions to Mamba2
+    # state_indices_tensor is None when APC is disabled.
+    # When APC is enabled, it takes the role of non_spec_state_indices_tensor
     state_indices_tensor: torch.Tensor | None = None  # shape: [batch,]
     block_idx_last_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
     block_idx_first_scheduled_token_p: torch.Tensor | None = None  # shape: [batch,]
@@ -315,8 +318,8 @@ class GDNAttentionMetadataBuilder(
                 block_idx_last_scheduled_token,
             ) = self._compute_prefix_caching_block_indices(m, block_size_value)
         else:
-            # Always return just a single block per each request
-            state_indices_tensor = m.block_table_tensor[:, 0]
+            # State will be handled by the spec/non_spec tensors
+            state_indices_tensor = None
             block_idx_last_computed_token = None
             block_idx_last_scheduled_token = None
 
@@ -449,6 +452,7 @@ class GDNAttentionMetadataBuilder(
             and num_spec_decodes == 0
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
+            # TODO: check if we are doing extra unnecessary work here if APC is enabled. We might get away with just the state_indices_tensor
             self.non_spec_state_indices_tensor[:num_decodes].copy_(
                 non_spec_state_indices_tensor, non_blocking=True
             )
@@ -464,29 +468,28 @@ class GDNAttentionMetadataBuilder(
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
-            if num_decodes > 0:
+            if enable_apc and num_decodes > 0:
                 self.state_indices_tensor[:num_decodes].copy_(
                     state_indices_tensor, non_blocking=True
                 )
                 state_indices_tensor = self.state_indices_tensor[:num_decodes]
 
-                if enable_apc:
-                    assert block_idx_last_scheduled_token is not None
-                    assert block_idx_last_computed_token is not None
-                    self.block_idx_last_scheduled_token[:num_decodes].copy_(
-                        block_idx_last_scheduled_token[:num_decodes],
-                        non_blocking=True,
-                    )
-                    block_idx_last_scheduled_token = (
-                        self.block_idx_last_scheduled_token[:num_decodes]
-                    )
-                    self.block_idx_last_computed_token[:num_decodes].copy_(
-                        block_idx_last_computed_token[:num_decodes],
-                        non_blocking=True,
-                    )
-                    block_idx_last_computed_token = self.block_idx_last_computed_token[
-                        :num_decodes
-                    ]
+                assert block_idx_last_scheduled_token is not None
+                assert block_idx_last_computed_token is not None
+                self.block_idx_last_scheduled_token[:num_decodes].copy_(
+                    block_idx_last_scheduled_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
+                    :num_decodes
+                ]
+                self.block_idx_last_computed_token[:num_decodes].copy_(
+                    block_idx_last_computed_token[:num_decodes],
+                    non_blocking=True,
+                )
+                block_idx_last_computed_token = self.block_idx_last_computed_token[
+                    :num_decodes
+                ]
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
