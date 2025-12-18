@@ -34,10 +34,10 @@ response = client.responses.create(
         {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "Classify this video"},
+                {"type": "text", "text": "Classify this video"},
                 {
-                    "type": "input_video",
-                    "video_url": "https://example.com/video.mp4",
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
                 },
             ],
         }
