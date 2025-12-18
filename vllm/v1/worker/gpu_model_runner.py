@@ -4724,6 +4724,12 @@ class GPUModelRunner(
         Returns:
             Tuple of (first_capture_memory, graph_memory) in bytes.
         """
+        # Setup: minimal KV cache and private graph pool
+        # NOTE: This must be called BEFORE _get_cudagraph_profiling_info()
+        # because initialize_kv_cache() may update cudagraph_mode based on
+        # attention backend constraints via _check_and_update_cudagraph_mode().
+        self._init_minimal_kv_cache_for_profiling()
+
         (
             full_largest,
             full_count,
@@ -4733,6 +4739,7 @@ class GPUModelRunner(
 
         if full_count == 0 and piecewise_count == 0:
             logger.debug("No CUDA graphs will be captured, skipping profiling")
+            self._cleanup_profiling_kv_cache()
             return 0, 0
 
         logger.info(
@@ -4743,9 +4750,6 @@ class GPUModelRunner(
             piecewise_count,
             piecewise_largest,
         )
-
-        # Setup: minimal KV cache and private graph pool
-        self._init_minimal_kv_cache_for_profiling()
         profiling_pool = torch.cuda.graph_pool_handle()
 
         # Swap graph pool to private one (to avoid corrupting global pool)
