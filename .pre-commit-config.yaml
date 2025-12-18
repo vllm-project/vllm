@@ -58,7 +58,7 @@ repos:
     stages: [pre-commit] # Don't run in CI
   - id: ty-check-ci
     name: ty check all files
-    entry: ty check --output-format github
+    entry: ty check --no-progress --output-format github
     pass_filenames: false
     <<: *ty_common
     stages: [manual] # Only run in CI
