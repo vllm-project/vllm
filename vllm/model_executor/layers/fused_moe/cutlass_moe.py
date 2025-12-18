@@ -1062,11 +1062,10 @@ def run_cutlass_moe_block_scaled_fp8(
     N = w2_q.size(1)
     topk = topk_ids.size(1)
 
-    a1q, a1q_scale = _fp8_quantize(
+    a_q, a1_scale = _fp8_quantize(
         a, A_scale=None, per_act_token=False, block_shape=[128, 128]
     )
-
-    device = a1q.device
+    device = a_q.device
 
     expert_offsets = torch.empty((num_experts + 1,), dtype=torch.int32, device=device)
     problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
@@ -1087,8 +1086,8 @@ def run_cutlass_moe_block_scaled_fp8(
         K,
     )
 
-    rep_a_q = a1q.view(dtype=torch.uint8)[a_map].view(dtype=a1q.dtype)
-    rep_a1_scales = a1q_scale[a_map]
+    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
+    rep_a1_scales = a1_scale[a_map]
 
     # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     # act_out = _resize_cache(workspace2, (M * topk, N))
