@@ -83,6 +83,8 @@ def test_run_handle_instruction(instruction):
 
     def mock_worker_receiver(cmd_socket):
         time.sleep(0.1)
+        if not cmd_socket.poll(timeout=2000):
+            pytest.fail("Timeout waiting for command from sentinel")
         identity, msg = cmd_socket.recv_multipart()
         cmd_dict = json.loads(msg.decode("utf-8"))
         assert cmd_dict["method"] == "pause" if instruction == "pause" else "retry"
@@ -107,6 +109,8 @@ def test_run_handle_instruction(instruction):
     ).start()
 
     time.sleep(0.1)
+    if not client_socket.poll(timeout=2000):
+        pytest.fail("Timeout waiting for response from sentinel")
     identity, _, msg = client_socket.recv_multipart()
     result_dict = json.loads(msg.decode("utf-8"))
     assert result_dict["sentinel_tag"] == "DP_0"

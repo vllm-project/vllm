@@ -86,6 +86,8 @@ def test_fault_receiver():
         sub_socket.connect(FAULT_PUB_ADDR)
         sub_socket.setsockopt_string(zmq.SUBSCRIBE, FAULT_PUB_TOPIC)
 
+        if not sub_socket.poll(timeout=2000):  # 2-second timeout
+            pytest.fail("Timeout waiting for published message")
         message = sub_socket.recv_string()
         sub_socket.close()
         ctx.term()
