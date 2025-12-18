@@ -127,17 +127,14 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1.0)
-
-        self.rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
         self.attn = Attention(
