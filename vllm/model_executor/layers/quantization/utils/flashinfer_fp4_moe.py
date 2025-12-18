@@ -359,9 +359,10 @@ def flashinfer_trtllm_fp4_routed_moe(
 
     # Pack top k ids and expert weights into a single int32 tensor, as
     # required by TRT-LLM
-    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-        torch.bfloat16
-    ).view(torch.int16)
+    packed_tensor = topk_weights.view(torch.int32)
+    # packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+    #     torch.bfloat16
+    # ).view(torch.int16)
 
     # Quantize input to FP4
     a1_gscale = layer.w13_input_scale_quant
