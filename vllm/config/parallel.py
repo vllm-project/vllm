@@ -135,13 +135,13 @@ class ParallelConfig:
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
     all2all_backend: All2AllBackend = "allgather_reducescatter"
-    """All2All backend for MoE expert parallel communication. If not set, uses
-    the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
-    - "naive": Naive all2all implementation using broadcasts
-    - "allgather_reducescatter": All2all based on allgather and reducescatter
-    - "pplx": Use pplx kernels
-    - "deepep_high_throughput": Use deepep high-throughput kernels
-    - "deepep_low_latency": Use deepep low-latency kernels
+    """All2All backend for MoE expert parallel communication. Available options:
+
+    - "naive": Naive all2all implementation using broadcasts\n
+    - "allgather_reducescatter": All2all based on allgather and reducescatter\n
+    - "pplx": Use pplx kernels\n
+    - "deepep_high_throughput": Use deepep high-throughput kernels\n
+    - "deepep_low_latency": Use deepep low-latency kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
