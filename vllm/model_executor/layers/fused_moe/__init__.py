@@ -4,7 +4,10 @@
 from contextlib import contextmanager
 from typing import Any
 
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -49,6 +52,7 @@ __all__ = [
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "RoutingMethodType",
     "SharedFusedMoE",
     "activation_without_mul",
     "override_config",
@@ -63,19 +67,21 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
+        CutlassExpertsW4A8Fp8,
         cutlass_moe_fp4,
         cutlass_moe_fp8,
+        cutlass_moe_w4a8_fp8,
     )
     from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
+        GroupedTopk,
         TritonExperts,
         fused_experts,
         fused_topk,
         get_config_file_name,
-        grouped_topk,
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
@@ -85,11 +91,13 @@ if HAS_TRITON:
         "fused_topk",
         "fused_experts",
         "get_config_file_name",
-        "grouped_topk",
+        "GroupedTopk",
         "cutlass_moe_fp8",
         "cutlass_moe_fp4",
+        "cutlass_moe_w4a8_fp8",
         "CutlassExpertsFp8",
         "CutlassBatchedExpertsFp8",
+        "CutlassExpertsW4A8Fp8",
         "TritonExperts",
         "BatchedTritonExperts",
         "DeepGemmExperts",
