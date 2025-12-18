@@ -4,7 +4,10 @@
 Define LoRA functionality mixin for model runners.
 """
 
+from __future__ import annotations
+
 from contextlib import contextmanager
+from typing import TYPE_CHECKING, TypeAlias
 
 import numpy as np
 import torch
@@ -20,7 +23,8 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = TPUInputBatch | GPUInputBatch
+if TYPE_CHECKING:
+    InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
 
@@ -129,7 +133,20 @@ class LoRAModelRunnerMixin:
         num_scheduled_tokens: np.ndarray,
         num_sampled_tokens: np.ndarray | None = None,
         activate_lora: bool = True,
+        num_active_loras: int = 0,
     ):
+        """
+        Context manager to select dummy LoRAs for capture/warmup.
+
+        Args:
+            lora_config: LoRA configuration, or None if LoRA is disabled.
+            num_scheduled_tokens: Array of scheduled token counts per request.
+            num_sampled_tokens: Array of sampled token counts per request.
+            activate_lora: Whether to activate LoRAs (False means no LoRA).
+            num_active_loras: Number of distinct active LoRAs to use.
+                - 0: Use all max_loras (default behavior for has_lora=True).
+                - >0: Use exactly this many distinct LoRAs.
+        """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
@@ -140,13 +157,24 @@ class LoRAModelRunnerMixin:
             assert self.lora_manager is not None, "LoRA is not enabled"
 
             num_reqs = len(num_scheduled_tokens)
-            num_loras = lora_config.max_loras
+            max_loras = lora_config.max_loras
+
+            # Determine how many distinct LoRAs to use
+            if not activate_lora:
+                # No LoRA active
+                effective_num_loras = 0
+            elif num_active_loras > 0:
+                # Specific number of active LoRAs requested
+                effective_num_loras = min(num_active_loras, max_loras)
+            else:
+                # Default: use all max_loras
+                effective_num_loras = max_loras
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            if activate_lora:
+            if effective_num_loras > 0:
                 prompt_lora_mapping = (
-                    np.arange(num_reqs, dtype=np.int32) % num_loras
+                    np.arange(num_reqs, dtype=np.int32) % effective_num_loras
                 ) + 1
             else:
                 prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
@@ -157,19 +185,20 @@ class LoRAModelRunnerMixin:
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
 
-            # Make dummy lora requests
+            # Make dummy lora requests (only for the active LoRAs)
             lora_requests: set[LoRARequest] = {
                 LoRARequest(
                     lora_name=f"warmup_{lora_id}",
                     lora_int_id=lora_id,
                     lora_path="/not/a/real/path",
                 )
-                for lora_id in range(1, num_loras + 1)
+                for lora_id in range(1, effective_num_loras + 1)
             }
 
-            self._set_active_loras(
-                tuple(sample_lora_mapping), tuple(token_lora_mapping), lora_requests
-            )
+            if lora_requests:
+                self._set_active_loras(
+                    tuple(sample_lora_mapping), tuple(token_lora_mapping), lora_requests
+                )
 
             yield
 
@@ -181,11 +210,27 @@ class LoRAModelRunnerMixin:
         num_sampled_tokens: np.ndarray,
         activate_lora: bool = True,
         remove_lora: bool = True,
+        num_active_loras: int = 0,
     ):
+        """
+        Context manager for dummy runs with LoRA.
+
+        Args:
+            lora_config: LoRA configuration.
+            num_scheduled_tokens: Array of scheduled token counts per request.
+            num_sampled_tokens: Array of sampled token counts per request.
+            activate_lora: Whether to activate LoRAs.
+            remove_lora: Whether to remove LoRAs after the context exits.
+            num_active_loras: Number of distinct active LoRAs to use.
+        """
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
             self.maybe_select_dummy_loras(
-                lora_config, num_scheduled_tokens, num_sampled_tokens, activate_lora
+                lora_config,
+                num_scheduled_tokens,
+                num_sampled_tokens,
+                activate_lora,
+                num_active_loras,
             ),
         ):
             yield
