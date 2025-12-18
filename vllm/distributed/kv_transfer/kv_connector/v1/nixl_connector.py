@@ -744,8 +744,7 @@ class NixlConnectorScheduler:
 
         return meta
 
-    def 
-    (
+    def request_finished(
         self,
         request: "Request",
         block_ids: list[int] | tuple[list[int], ...],
