@@ -425,6 +425,11 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
+    # Some Eagle3 checkpoints use `Eagle3LlamaModel` as the architecture name in
+    # their HF `config.json`. Internally vLLM implements this architecture as
+    # `Eagle3LlamaForCausalLM`, so we register `Eagle3LlamaModel` as an alias
+    # pointing to the same implementation to support those configs.
+    "Eagle3LlamaModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
