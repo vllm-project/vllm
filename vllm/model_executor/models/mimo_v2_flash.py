@@ -13,7 +13,7 @@ from vllm.config import (
     CacheConfig,
     VllmConfig,
     get_current_vllm_config,
-    str_dtype_to_torch_dtype
+    str_dtype_to_torch_dtype,
 )
 from vllm.distributed import (
     get_ep_group,
