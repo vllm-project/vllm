@@ -79,10 +79,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
-    if args.profile and not engine_args.profiler_config.profiler == "torch":
-        raise ValueError(
-            "The torch profiler is not enabled. Please provide profiler_config."
-        )
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
     from vllm import LLM, SamplingParams
@@ -125,8 +121,8 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: str | None = None):
-        if profile_dir:
+    def run_to_completion(do_profile: bool = False):
+        if do_profile:
             llm.start_profile()
             llm_generate()
             llm.stop_profile()
@@ -139,18 +135,24 @@ def main(args: argparse.Namespace):
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion(do_profile=False)
 
     if args.profile:
-        profile_dir = engine_args.profiler_config.torch_profiler_dir
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
+        profiler_config = engine_args.profiler_config
+        if profiler_config.profiler == "torch":
+            print(
+                "Profiling with torch profiler (results will be saved to"
+                f" {profiler_config.torch_profiler_dir})..."
+            )
+        elif profiler_config.profiler == "cuda":
+            print("Profiling with cuda profiler ...")
+        run_to_completion(do_profile=True)
         return
 
     # Benchmark.
     latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+    for _ in tqdm(range(args.num_iters), desc="Bench iterations"):
+        latencies.append(run_to_completion(do_profile=False))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)

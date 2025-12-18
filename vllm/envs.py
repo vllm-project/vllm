@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_DEBUG_MFU_METRICS: bool = False
 
 
 def get_default_cache_root():
@@ -1565,6 +1566,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
     ),
+    # Debug logging for --enable-mfu-metrics
+    "VLLM_DEBUG_MFU_METRICS": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1654,6 +1659,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",
