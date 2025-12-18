@@ -118,8 +118,8 @@ class Fp8MoeBackend(Enum):
     FLASHINFER_TRTLLM = 1
     FLASHINFER_CUTLASS = 2
     DEEPGEMM = 3
-    MARLIN = 5
-    TRITON = 6
+    MARLIN = 4
+    TRITON = 5
 
 
 def get_fp8_moe_backend(
