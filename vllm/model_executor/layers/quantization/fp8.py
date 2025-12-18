@@ -740,9 +740,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         self.allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
-        self.allow_cutlass_block_scaled_grouped_gemm = (
-            self.fp8_backend == Fp8MoeBackend.CUTLASS_BLOCK_SCALED_GROUPED_GEMM
-        )
 
     def create_weights(
         self,
@@ -1304,9 +1301,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
-                allow_cutlass_block_scaled_grouped_gemm=(
-                    self.allow_cutlass_block_scaled_grouped_gemm
-                ),
             )
 
         if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:

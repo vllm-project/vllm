@@ -1674,7 +1674,6 @@ def fused_experts(
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     allow_deep_gemm: bool = False,
-    allow_cutlass_block_scaled_grouped_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
