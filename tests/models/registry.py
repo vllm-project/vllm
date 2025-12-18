@@ -478,7 +478,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
-    "LlamaBidirectionalModel": _HfExamplesInfo("nvidia/llama-nemotron-embed-1b-v2"),
+    "LlamaBidirectionalModel": _HfExamplesInfo(
+        "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
+    ),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo(
         "Alibaba-NLP/gte-modernbert-base", trust_remote_code=True
@@ -546,7 +548,7 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["GteNewForSequenceClassification"]},
     ),
     "LlamaBidirectionalForSequenceClassification": _HfExamplesInfo(
-        "nvidia/llama-nemotron-rerank-1b-v2"
+        "nvidia/llama-nemotron-rerank-1b-v2", trust_remote_code=True
     ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"

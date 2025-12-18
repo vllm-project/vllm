@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+from pathlib import Path
 
 import mteb
 import numpy as np
@@ -17,6 +18,11 @@ from tests.models.utils import (
     RerankModelInfo,
     check_embeddings_close,
     get_vllm_extra_kwargs,
+)
+
+template_home = (
+    Path(__file__).parent.parent.parent.parent.parent
+    / "examples/pooling/score/template"
 )
 
 # Most embedding models on the STS12 task (See #17175):
@@ -55,6 +61,8 @@ _empty_model_meta = ModelMeta(
 
 
 class MtebEncoderMixin(mteb.EncoderProtocol):
+    mteb_model_meta = _empty_model_meta
+
     def encode(
         self,
         inputs: DataLoader[mteb.types.BatchedInput],
@@ -89,8 +97,6 @@ class MtebEncoderMixin(mteb.EncoderProtocol):
 
 
 class VllmMtebEncoder(MtebEncoderMixin):
-    mteb_model_meta = _empty_model_meta
-
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
@@ -113,8 +119,6 @@ class VllmMtebEncoder(MtebEncoderMixin):
 
 
 class HFMtebEncoder(MtebEncoderMixin):
-    mteb_model_meta = _empty_model_meta
-
     def __init__(self, hf_model):
         self.model = hf_model
 
@@ -127,30 +131,6 @@ class HFMtebEncoder(MtebEncoderMixin):
         sentences = [text for batch in inputs for text in batch["text"]]
         embeds = self.model.encode(sentences)
         return embeds
-
-    def similarity(
-        self,
-        embeddings1: np.ndarray,
-        embeddings2: np.ndarray,
-    ) -> np.ndarray:
-        # Cosine similarity
-        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
-        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
-        sim = np.dot(embeddings1, embeddings2.T) / (norm1 * norm2.T)
-        return sim
-
-    def similarity_pairwise(
-        self,
-        embeddings1: Array,
-        embeddings2: Array,
-    ) -> Array:
-        # Cosine similarity
-        norm1 = np.linalg.norm(embeddings1, axis=1, keepdims=True)
-        norm2 = np.linalg.norm(embeddings2, axis=1, keepdims=True)
-        sim = np.sum(embeddings1 * embeddings2, axis=1) / (
-            norm1.flatten() * norm2.flatten()
-        )
-        return sim
 
 
 class OpenAIClientMtebEncoder(MtebEncoderMixin):
@@ -186,6 +166,7 @@ class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
     def __init__(self, vllm_model):
         self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
+        self.chat_template: str | None = getattr(vllm_model, "chat_template", None)
 
     def predict(
         self,
@@ -198,7 +179,11 @@ class VllmMtebCrossEncoder(mteb.CrossEncoderProtocol):
         corpus = [text for batch in inputs2 for text in batch["text"]]
 
         outputs = self.llm.score(
-            queries, corpus, truncate_prompt_tokens=-1, use_tqdm=False
+            queries,
+            corpus,
+            truncate_prompt_tokens=-1,
+            use_tqdm=False,
+            chat_template=self.chat_template,
         )
         scores = np.array(outputs)
         return scores
@@ -439,6 +424,11 @@ def mteb_test_rerank_models(
             model_config._model_info.default_pooling_type
             == model_info.default_pooling_type
         )
+
+        chat_template: str | None = None
+        if model_info.chat_template_name is not None:
+            chat_template = (template_home / model_info.chat_template_name).read_text()
+        vllm_model.chat_template = chat_template
 
         vllm_main_score = run_mteb_rerank(
             vllm_mteb_encoder(vllm_model),
