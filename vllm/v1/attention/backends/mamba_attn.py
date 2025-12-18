@@ -29,21 +29,21 @@ class BaseMambaAttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
+    num_reqs: int
 
     # The following tensors only contain prefill requests and will be None if
     # the batch has no prefill request.
     has_initial_states_p: torch.Tensor | None
-
     query_start_loc_p: torch.Tensor | None
+    num_computed_tokens_p: torch.Tensor | None
+
     state_indices_tensor: torch.Tensor
 
+    # The following tensors are only used for prefix caching and are None if disabled
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
-    num_computed_tokens_p: torch.Tensor | None
-
-    num_reqs: int
-
+    
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
