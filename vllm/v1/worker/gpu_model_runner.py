@@ -2887,6 +2887,7 @@ class GPUModelRunner(
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ) -> tuple[
         CUDAGraphMode,
@@ -2908,11 +2909,13 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
-        has_lora = (
-            len(self.input_batch.lora_id_to_lora_request) > 0
-            if force_has_lora is None
-            else force_has_lora
+        # Compute LoRA state for cudagraph dispatch
+        num_active_loras = (
+            force_num_active_loras
+            if force_num_active_loras is not None
+            else len(self.input_batch.lora_id_to_lora_request)
         )
+        has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         dispatch_cudagraph = (
@@ -2921,6 +2924,7 @@ class GPUModelRunner(
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
                 disable_full=disable_full,
+                num_active_loras=num_active_loras,
             )
             if not force_eager
             else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
@@ -4123,6 +4127,7 @@ class GPUModelRunner(
         remove_lora: bool = True,
         activate_lora: bool = False,
         is_graph_capturing: bool = False,
+        num_active_loras: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -4146,6 +4151,8 @@ class GPUModelRunner(
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             activate_lora: If False, dummy_run is performed without LoRAs.
+            num_active_loras: Number of distinct active LoRAs to capture for.
+                Only used when cudagraph_specialize_lora_count is True.
         """
         if supports_mm_encoder_only(self.model):
             # The current dummy run only covers LM execution, so we can skip it.
@@ -4227,6 +4234,9 @@ class GPUModelRunner(
                 # activated later in the context manager, but we need to know the
                 # LoRA state when determining the batch descriptor for capture
                 force_has_lora=activate_lora,
+                # `force_num_active_loras` is used for cudagraph capture; because we
+                # need to capture graphs for specific num_active_loras counts
+                force_num_active_loras=num_active_loras if activate_lora else 0,
             )
         )
 
@@ -4290,6 +4300,7 @@ class GPUModelRunner(
             num_sampled_tokens,
             activate_lora,
             remove_lora,
+            num_active_loras,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
@@ -4652,6 +4663,24 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    def _get_lora_capture_cases(self) -> list[tuple[bool, int]]:
+        """
+        Returns list of (has_lora, num_active_loras) tuples for CUDA graph capture.
+
+        Returns cases for each num_active_loras from 1 to max_loras.
+        If cudagraph_specialize_lora is True, also includes the no-lora case.
+        """
+        if not self.lora_config:
+            return [(False, 0)]
+
+        max_loras = self.lora_config.max_loras
+        # Capture for each num_active_loras from 1 to max_loras
+        lora_cases = [(True, n) for n in range(1, max_loras + 1)]
+        # Also capture the no-lora case if cudagraph_specialize_lora is True
+        if self.compilation_config.cudagraph_specialize_lora:
+            lora_cases.append((False, 0))
+        return lora_cases
+
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
@@ -4689,13 +4718,8 @@ class GPUModelRunner(
             cudagraph_mode = self.compilation_config.cudagraph_mode
             assert cudagraph_mode is not None
 
-            if self.lora_config:
-                if self.compilation_config.cudagraph_specialize_lora:
-                    lora_cases = [True, False]
-                else:
-                    lora_cases = [True]
-            else:
-                lora_cases = [False]
+            # Build LoRA cases: list of (has_lora, num_active_loras) tuples
+            lora_cases = self._get_lora_capture_cases()
 
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
@@ -4760,10 +4784,23 @@ class GPUModelRunner(
 
     def _capture_cudagraphs(
         self,
-        compilation_cases: list[tuple[int, bool]],
+        compilation_cases: list[tuple[int, tuple[bool, int]]],
         cudagraph_runtime_mode: CUDAGraphMode,
         uniform_decode: bool,
     ):
+        """
+        Capture CUDA graphs for the given compilation cases.
+
+        Args:
+            compilation_cases: List of (num_tokens, (has_lora, num_active_loras))
+                tuples.
+                - num_tokens: batch size to capture
+                - has_lora: whether LoRA is active for this capture
+                - num_active_loras: number of distinct active LoRAs
+                    (0 if not specializing)
+            cudagraph_runtime_mode: FULL or PIECEWISE cudagraph mode.
+            uniform_decode: Whether this is a uniform decode batch.
+        """
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
             and cudagraph_runtime_mode.valid_runtime_modes()
@@ -4781,7 +4818,7 @@ class GPUModelRunner(
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, activate_lora in compilation_cases:
+        for num_tokens, (activate_lora, num_active_loras) in compilation_cases:
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -4813,6 +4850,7 @@ class GPUModelRunner(
                     skip_eplb=True,
                     remove_lora=False,
                     activate_lora=activate_lora,
+                    num_active_loras=num_active_loras,
                 )
             self._dummy_run(
                 num_tokens,
@@ -4822,6 +4860,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 activate_lora=activate_lora,
+                num_active_loras=num_active_loras,
                 is_graph_capturing=True,
             )
         self.maybe_remove_all_loras(self.lora_config)
