@@ -1027,7 +1027,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             num_warps = 8
 
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
-            from aiter.ops.shuffle import shuffle_mxfp4_scale, shuffle_mxfp4_weight
+            from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
 
             w13_aiter_weight = layer.w13_weight.contiguous()
             w13_aiter_scale = layer.w13_weight_scale.contiguous()
@@ -1048,14 +1048,23 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 .view(e, n, -1)
             )
 
-            self.w13_weight_aiter_tensor = shuffle_mxfp4_weight(
+            w13_aiter_weight = w13_aiter_weight.view(torch.float4_e2m1fn_x2)
+            w13_aiter_scale = w13_aiter_scale.view(-1, w13_aiter_scale.shape[-1])
+            w2_aiter_weight = w2_aiter_weight.view(torch.float4_e2m1fn_x2)
+            w2_aiter_scale = w2_aiter_scale.view(-1, w2_aiter_scale.shape[-1])
+
+            self.w13_weight_aiter_tensor = shuffle_weight_a16w4(
                 w13_aiter_weight, 16, True
             )
-            self.w13_scale_aiter_tensor = shuffle_mxfp4_scale(w13_aiter_scale, True)
-            self.w2_weight_aiter_tensor = shuffle_mxfp4_weight(
+            self.w13_scale_aiter_tensor = shuffle_scale_a16w4(
+                w13_aiter_scale, self.num_experts, True
+            )
+            self.w2_weight_aiter_tensor = shuffle_weight_a16w4(
                 w2_aiter_weight, 16, False
             )
-            self.w2_scale_aiter_tensor = shuffle_mxfp4_scale(w2_aiter_scale, False)
+            self.w2_scale_aiter_tensor = shuffle_scale_a16w4(
+                w2_aiter_scale, self.num_experts, False
+            )
             self.w13_bias_aiter_tensor = (
                 layer.w13_bias.view(-1, n // 2, 2)
                 .permute(0, 2, 1)
