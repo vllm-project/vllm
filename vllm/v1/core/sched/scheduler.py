@@ -43,6 +43,7 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     PrefixCacheStats,
     SchedulerStats,
@@ -187,6 +188,12 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
+        # For encoder-decoder models, allocate the maximum number of tokens for Cross
+        # Attn blocks, as for Whisper its input is always padded to the maximum length.
+        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
+        self._num_encoder_max_input_tokens = (
+            MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(vllm_config.model_config)
+        )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -212,6 +219,10 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+
+        self.perf_metrics: ModelMetrics | None = None
+        if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
+            self.perf_metrics = ModelMetrics(vllm_config)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -349,11 +360,11 @@ class Scheduler(SchedulerInterface):
                             if preempted_encoder_inputs:
                                 # Restore encoder compute budget if the preempted
                                 # request had encoder inputs scheduled in this step.
-                                num_tokens_to_restore = sum(
-                                    preempted_req.get_num_encoder_tokens(i)
+                                num_embeds_to_restore = sum(
+                                    preempted_req.get_num_encoder_embeds(i)
                                     for i in preempted_encoder_inputs
                                 )
-                                encoder_compute_budget += num_tokens_to_restore
+                                encoder_compute_budget += num_embeds_to_restore
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
@@ -568,17 +579,11 @@ class Scheduler(SchedulerInterface):
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
-                # Determine if we need to allocate cross-attention blocks.
-                if self.is_encoder_decoder and request.has_encoder_inputs:
-                    # TODO(russellb): For Whisper, we know that the input is
-                    # always padded to the maximum length. If we support other
-                    # encoder-decoder models, this will need to be updated if we
-                    # want to only allocate what is needed.
-                    num_encoder_tokens = (
-                        self.scheduler_config.max_num_encoder_input_tokens
-                    )
-                else:
-                    num_encoder_tokens = 0
+                num_encoder_tokens = (
+                    self._num_encoder_max_input_tokens
+                    if self.is_encoder_decoder and request.has_encoder_inputs
+                    else 0
+                )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -911,10 +916,11 @@ class Scheduler(SchedulerInterface):
         # multiple encoder inputs per request), we need to create temporary
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
-        num_tokens_to_schedule = 0
+        num_embeds_to_schedule = 0
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
+            num_encoder_embeds = mm_feature.mm_position.get_num_embeds
 
             # The encoder output is needed if the two ranges overlap:
             # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
@@ -970,9 +976,8 @@ class Scheduler(SchedulerInterface):
             ):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
-
             if not self.encoder_cache_manager.can_allocate(
-                request, i, encoder_compute_budget, num_tokens_to_schedule
+                request, i, encoder_compute_budget, num_embeds_to_schedule
             ):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
@@ -992,14 +997,31 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
+            # Calculate the number of embeddings to schedule in the current range
+            # of scheduled encoder placholder tokens.
+            start_idx_rel = max(0, num_computed_tokens - start_pos)
+            end_idx_rel = min(
+                num_encoder_tokens, num_computed_tokens + num_new_tokens - start_pos
+            )
+            curr_embeds_start, curr_embeds_end = (
+                mm_feature.mm_position.get_embeds_indices_in_range(
+                    start_idx_rel,
+                    end_idx_rel,
+                )
+            )
+            # There's no embeddings in the current range of encoder placeholder tokens
+            # so we can skip the encoder input.
+            if curr_embeds_end - curr_embeds_start == 0:
+                continue
+
             if self.ec_connector is not None and remote_cache_has_item[i]:
                 mm_hashes_to_schedule.add(request.mm_features[i].identifier)
                 external_load_encoder_input.append(i)
-                num_tokens_to_schedule += num_encoder_tokens
+                num_embeds_to_schedule += num_encoder_embeds
                 continue
 
-            num_tokens_to_schedule += num_encoder_tokens
-            encoder_compute_budget -= num_encoder_tokens
+            num_embeds_to_schedule += num_encoder_embeds
+            encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule.add(request.mm_features[i].identifier)
             encoder_inputs_to_schedule.append(i)
 
@@ -1048,6 +1070,10 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+
+        perf_stats: PerfStats | None = None
+        if self.perf_metrics and self.perf_metrics.is_enabled():
+            perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
@@ -1117,6 +1143,7 @@ class Scheduler(SchedulerInterface):
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
+            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
 
@@ -1125,12 +1152,10 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-
-            # Stop checking for pooler models.
-            pooler_output = None
-            if pooler_outputs:
-                pooler_output = pooler_outputs[req_index]
-                stopped = check_stop(request, self.max_model_len, pooler_output)
+            elif request.pooling_params and pooler_output is not None:
+                # Pooling stops as soon as there is output.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
 
             if stopped:
                 kv_transfer_params = self._free_request(request)
@@ -1246,7 +1271,7 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats
+                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1469,6 +1494,7 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
+        perf_stats: PerfStats | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -1494,6 +1520,7 @@ class Scheduler(SchedulerInterface):
             spec_decoding_stats=spec_stats,
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
+            perf_stats=perf_stats,
         )
 
     def make_spec_decoding_stats(
