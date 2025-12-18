@@ -57,8 +57,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
-from .utils import supports_pdl
-
 logger = init_logger(__name__)
 
 
@@ -369,7 +367,6 @@ def fused_moe_kernel(
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     EVEN_K: tl.constexpr,
-    USE_GDC: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
 ):
     """
@@ -505,7 +502,7 @@ def fused_moe_kernel(
         SPLIT_K,
         False,
         None,
-        USE_GDC,
+        False,
         base_k,
         a_scale_ptrs if a_scale_ptr else None,
         b_scale_ptrs if b_scale_ptr else None,
@@ -525,9 +522,6 @@ def fused_moe_kernel(
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
-    if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
-        tl.extra.cuda.gdc_launch_dependents()
     if use_int8_w8a16:
         accumulator = (accumulator * b_scale).to(compute_type)
     elif use_fp8_w8a8 or use_int8_w8a8:
@@ -694,7 +688,6 @@ def invoke_fused_moe_kernel(
         config = config.copy()
         config["SPLIT_K"] = 1
         BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
-        use_gdc = supports_pdl(A.device)
         EVEN_K = K % (BLOCK_SIZE_K * config["SPLIT_K"]) == 0
         if block_shape is not None:
             BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
@@ -739,7 +732,6 @@ def invoke_fused_moe_kernel(
             HAS_BIAS=HAS_BIAS,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
             EVEN_K=EVEN_K,
-            USE_GDC=use_gdc,
             IS_PRIMARY=IS_PRIMARY,
             **config,
         )
