@@ -139,7 +139,7 @@ for name, p in train_model.named_parameters():
     handle = llm.collective_rpc.remote(
         "update_weight", args=(name, dtype_name, p.shape)
     )
-        model_update_group.broadcast(p, src=0, stream=current_platform.current_stream())
+    model_update_group.broadcast(p, src=0, stream=current_platform.current_stream())
     ray.get(handle)
 
 # Verify that the inference weights have been updated.
