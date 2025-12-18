@@ -52,6 +52,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
+    frombuffer_with_writable_warning_suppressed,
     direct_register_custom_op,
     supports_custom_op,
 )
@@ -649,7 +650,9 @@ class GroupCoordinator:
         )
 
         # Serialize object to tensor and get the size as well
-        object_tensor = torch.frombuffer(pickle.dumps(obj), dtype=torch.uint8)
+        object_tensor = frombuffer_with_writable_warning_suppressed(
+            pickle.dumps(obj), torch.uint8
+        )
 
         size_tensor = torch.tensor(
             [object_tensor.numel()], dtype=torch.long, device="cpu"

@@ -4,6 +4,7 @@ import contextlib
 import importlib.metadata
 import os
 import threading
+import warnings
 from collections.abc import Callable, Collection
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -721,3 +722,24 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def frombuffer_with_writable_warning_suppressed(
+    buffer: bytes | bytearray | memoryview,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Wrapper for torch.frombuffer that suppresses non-writable buffer warning.
+
+    PyTorch's frombuffer emits a UserWarning when the buffer is not writable.
+    This is harmless for our use cases (we don't mutate the tensor or know
+    it will be cloned), so we suppress it.
+
+    See: https://github.com/vllm-project/vllm/issues/26781
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="The given buffer is not writable",
+            category=UserWarning,
+        )
+        return torch.frombuffer(buffer, dtype=dtype)

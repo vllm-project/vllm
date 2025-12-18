@@ -29,6 +29,7 @@ import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import frombuffer_with_writable_warning_suppressed
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
@@ -198,8 +199,10 @@ class ShmRingBuffer:
                 create=True, size=self.total_bytes_of_buffer
             )
             # initialize the metadata section to 0
-            with self.shared_memory.buf[self.metadata_offset :] as metadata_buffer:
-                torch.frombuffer(metadata_buffer, dtype=torch.uint8).fill_(0)
+            with self.shared_memory.buf[self.metadata_offset:] as metadata_buffer:
+                frombuffer_with_writable_warning_suppressed(
+                    metadata_buffer, torch.uint8
+                ).fill_(0)
         else:
             # we are opening an existing buffer
             self.is_creator = False
