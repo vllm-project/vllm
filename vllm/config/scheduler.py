@@ -106,7 +106,7 @@ class SchedulerConfig:
     of arrival.\n
     - "priority" means requests are handled based on given priority (lower
     value means earlier handling) and time of arrival deciding any ties).\n
-    - "sjf" means shortest job first. Requests are scheduled by  prompt length
+    - "sjf" means shortest job first. Requests are scheduled by prompt length
     (shortest first), with aging to prevent starvation."""
 
     disable_chunked_mm_input: bool = False
