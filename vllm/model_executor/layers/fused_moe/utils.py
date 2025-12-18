@@ -181,12 +181,29 @@ def _mxfp4_quantize(
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    # TODO: native mxfp4 is currently not integrated in vllm,
-    # so simulating even on devices supporting this data type natively.
-    # Once integrated, `current_platform.supports_mx()` should be used to
-    # control quantize+dequantize, or simply quantize here down to mxfp4.
     A = quant_dequant_mxfp4(A)
+    return A, None
 
+
+def _mxfp6_e3m2_quantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    per_act_token_quant: bool,
+    block_shape: list[int] | None = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e3m2")
+    return A, None
+
+
+def _mxfp6_e2m3_quantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor | None,
+    per_act_token_quant: bool,
+    block_shape: list[int] | None = None,
+) -> tuple[torch.Tensor, None]:
+    assert block_shape is None
+    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
     return A, None
 
 
@@ -200,40 +217,6 @@ def _mxfp8_e4m3_quantize(
     assert not per_act_token_quant
     assert block_shape is None
     return mxfp8_e4m3_quantize(A)
-
-
-def _mxfp6_e3m2_quantize(
-    A: torch.Tensor,
-    A_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None = None,
-) -> tuple[torch.Tensor, None]:
-    assert block_shape is None
-
-    # TODO: native mxfp6 is currently not integrated in vllm,
-    # so simulating even on devices supporting this data type natively.
-    # Eventually, there should be a check based on
-    # `current_platform.supports_mx()` here.
-    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e3m2")
-
-    return A, None
-
-
-def _mxfp6_e2m3_quantize(
-    A: torch.Tensor,
-    A_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None = None,
-) -> tuple[torch.Tensor, None]:
-    assert block_shape is None
-
-    # TODO: native mxfp6 is currently not integrated in vllm,
-    # so simulating even on devices supporting this data type natively.
-    # Eventually, there should be a check based on
-    # `current_platform.supports_mx()` here.
-    A = quant_dequant_mxfp6(A, quant_dtype="fp6_e2m3")
-
-    return A, None
 
 
 def moe_kernel_quantize_input(
@@ -252,14 +235,14 @@ def moe_kernel_quantize_input(
         return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == "mxfp8":
-        # TODO: `quant_dtype == "mxfp8"` is ambiguous,
-        # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e3m2":
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == "mxfp8":
+        # TODO: `quant_dtype == "mxfp8"` is ambiguous,
+        # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
+        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
 
