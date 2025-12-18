@@ -53,7 +53,10 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
   int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
   int num_padded_cols = sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE;
-
+  
+  // Get the global scaling factor, which will be applied to the SF.
+  // Note SFScale is the same as next GEMM's alpha, which is
+  // (448.f / (Alpha_A / 6.f)).
   float const global_scale = SFScale == nullptr ? 1.0f : SFScale[0];
 
   // Iterate over all rows and cols including padded ones -
@@ -88,6 +91,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       // We do NOT write output for padding because the 'out' tensor is not
       // padded.
       if (rowIdx < numRows && elem_idx < numCols) {
+        // Get the output tensor offset.
+        // Same as inOffset because 8 elements are packed into one uint32_t.
         int64_t inOffset =
             rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
         out[inOffset] = out_val;

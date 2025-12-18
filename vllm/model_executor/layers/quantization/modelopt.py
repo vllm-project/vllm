@@ -1237,7 +1237,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         if bias is not None:
             out = out + bias
-
         return out.view(*output_shape)
 
 
