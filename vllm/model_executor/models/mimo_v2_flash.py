@@ -267,18 +267,11 @@ class MiMoV2Attention(nn.Module):
             v_head_size=self.v_head_dim,
         )
 
-        o_proj_prefix = f"{prefix}.o_proj"
-        normalized_name = o_proj_prefix.lstrip(".")
-        o_proj_quant_config = quant_config
-        if quant_config is not None:
-            ignored = getattr(quant_config, "ignored_layers", None)
-            if ignored is not None and normalized_name in ignored:
-                o_proj_quant_config = None
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.v_head_dim,
             hidden_size,
             bias=False,
-            quant_config=o_proj_quant_config,
+            quant_config=quant_config,
             reduce_results=True,
             prefix=f"{prefix}.o_proj",
         )
@@ -675,7 +668,10 @@ class MiMoV2FlashForCausalLM(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.model = MiMoV2Model(vllm_config=vllm_config, prefix=f"{prefix}.model")
+        self.model = MiMoV2Model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
