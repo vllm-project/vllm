@@ -220,7 +220,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 hidden_states, dim=0
             )
             ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, gathered_hidden_states
+                gathered_hidden_states, current_layer_idx
             )
             # Extract the output corresponding to current rank
             start_idx = hidden_states.shape[0] * get_tensor_model_parallel_rank()
@@ -229,7 +229,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         else:
             # Single TP case
             rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states
+                hidden_states, current_layer_idx
             )
 
         return rank_ffn_output
