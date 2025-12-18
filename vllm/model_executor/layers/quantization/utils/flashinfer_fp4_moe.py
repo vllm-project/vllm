@@ -336,8 +336,7 @@ import flashinfer
 def flashinfer_trtllm_fp4_routed_moe(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
+        packed_tensor: torch.Tensor,
         top_k: int,
         global_num_experts: int,
 ) -> torch.Tensor:
@@ -388,11 +387,32 @@ def flashinfer_trtllm_fp4_routed_moe(
     # ==================================================
     # packed_tensor = topk_weights.view(torch.int32)
 
-
-
-    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-        torch.bfloat16
-    ).view(torch.int16)
+    # vs vanilla
+    # ============ Serving Benchmark Result ============
+    # Successful requests:                     2048
+    # Failed requests:                         0
+    # Maximum request concurrency:             3800
+    # Benchmark duration (s):                  88.01
+    # Total input tokens:                      2095104
+    # Total generated tokens:                  262144
+    # Request throughput (req/s):              23.27
+    # Output token throughput (tok/s):         2978.55
+    # Peak output token throughput (tok/s):    7980.00
+    # Peak concurrent requests:                2048.00
+    # Total token throughput (tok/s):          26783.71
+    # ---------------Time to First Token----------------
+    # Mean TTFT (ms):                          37928.16
+    # Median TTFT (ms):                        37377.80
+    # P99 TTFT (ms):                           75922.01
+    # -----Time per Output Token (excl. 1st token)------
+    # Mean TPOT (ms):                          197.44
+    # Median TPOT (ms):                        208.77
+    # P99 TPOT (ms):                           230.08
+    # ---------------Inter-token Latency----------------
+    # Mean ITL (ms):                           197.56
+    # Median ITL (ms):                         227.86
+    # P99 ITL (ms):                            245.97
+    # ==================================================
 
 
     # Quantize input to FP4

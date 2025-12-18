@@ -1662,6 +1662,13 @@ class FusedMoE(CustomOp):
             )
         else:
             zero_expert_result = None
+
+
+        if packed:
+            packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+                torch.bfloat16
+            ).view(torch.int16)
+            return packed_tensor, None, None
         return topk_weights, topk_ids, zero_expert_result
 
     def must_reduce_shared_expert_outputs(self) -> bool:
