@@ -22,8 +22,8 @@ S3_COMMIT_PREFIX="s3://$BUCKET/$ROCM_SUBPATH/"
 INDICES_OUTPUT_DIR="rocm-indices"
 PYTHON="${PYTHON_PROG:-python3}"
 
-# ROCm uses manylinux_2_28 (Ubuntu 22.04 based)
-MANYLINUX_VERSION="manylinux_2_28"
+# ROCm uses manylinux_2_35 (Ubuntu 22.04 based)
+MANYLINUX_VERSION="manylinux_2_35"
 
 echo "========================================"
 echo "ROCm Wheel Upload Configuration"
