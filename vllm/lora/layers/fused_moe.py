@@ -639,14 +639,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         if self._base_model == "GptOssForCausalLM":
             # For models like GPT-OSS, the weights of w1 (gate_proj) and w3 (up_proj)
             # in the interleaved order, and corresponding LoRA need to be processed.
-            w1_lora_b = w13_lora_b[:, ::2, :]
-            w3_lora_b = w13_lora_b[:, 1::2, :]
-            sliced_w1_lora_b = w1_lora_b[:, start_idx:end_idx, :]
-            sliced_w3_lora_b = w3_lora_b[:, start_idx:end_idx, :]
-
-            return torch.stack([sliced_w1_lora_b, sliced_w3_lora_b], dim=2).flatten(
-                1, 2
-            )
+            return w13_lora_b[:, start_idx * 2 : end_idx * 2, :]
         else:
             slice_size = w13_lora_b.shape[1] // 2
             w1_lora_b = w13_lora_b[:, :slice_size, :]
