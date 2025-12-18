@@ -143,14 +143,6 @@ class CudagraphDispatcher:
 
         max_loras = self.vllm_config.lora_config.max_loras
 
-        # When speculative decoding is enabled, only capture with max_loras
-        # to avoid torch.compile conflicts during CUDA graph capture
-        if self.vllm_config.speculative_config is not None:
-            lora_cases = [(True, max_loras)]
-            if self.compilation_config.cudagraph_specialize_lora:
-                lora_cases.append((False, 0))
-            return lora_cases
-
         # Capture for each num_active_loras from 1 to max_loras
         lora_cases = [(True, n) for n in range(1, max_loras + 1)]
         # Also capture the no-lora case
