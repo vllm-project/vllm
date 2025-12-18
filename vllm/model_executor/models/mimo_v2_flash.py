@@ -46,7 +46,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -661,7 +661,7 @@ class MiMoV2Model(nn.Module):
         return loaded_params
 
 
-class MiMoV2FlashForCausalLM(nn.Module, SupportsPP):
+class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
