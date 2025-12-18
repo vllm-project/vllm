@@ -403,17 +403,19 @@ class InputProcessor:
                 if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
                 else 1
             )
-            # request_id is externally provided, add randomness to ensure uniqueness
-            mm_uuids[modality] = [
-                f"{request_id}-{modality}-{random_uuid():.8}-{i}" for i in range(n)
-            ]
+            mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
-    def assign_request_id(self, request: EngineCoreRequest):
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
         that adds 8 random characters in order to ensure uniquness.
         """
-        assert request.external_req_id is None
+        if request.external_req_id is not None:
+            raise ValueError(
+                "The external_req_id field should not be set on EngineCoreRequests"
+                " passed to vLLM; use the request_id field."
+            )
         request.external_req_id = request.request_id
         request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 

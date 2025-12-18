@@ -6,6 +6,7 @@ from typing import Optional, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import IterationStats
 
 
@@ -32,15 +33,11 @@ class ParentRequest:
     # To efficiently obtain child sampling params
     cached_child_sampling_params: SamplingParams | None
 
-    def __init__(
-        self,
-        request_id: str,
-        external_req_id: str | None,
-        sampling_params: SamplingParams,
-    ) -> None:
-        assert external_req_id is not None
-        self.request_id = request_id
-        self.external_req_id = external_req_id
+    def __init__(self, request: EngineCoreRequest) -> None:
+        assert request.external_req_id is not None
+        sampling_params = request.params
+        self.request_id = request.request_id
+        self.external_req_id = request.external_req_id
         self.sampling_params = sampling_params
 
         self.child_requests = set()

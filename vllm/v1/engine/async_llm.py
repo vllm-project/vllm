@@ -332,9 +332,7 @@ class AsyncLLM(EngineClient):
         assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(
-            request.request_id, request.external_req_id, parent_params
-        )
+        parent_request = ParentRequest(request)
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
@@ -456,7 +454,7 @@ class AsyncLLM(EngineClient):
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
-            if q:
+            if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
@@ -476,7 +474,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            if q:
+            if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
@@ -689,7 +687,7 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
-            if q:
+            if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
@@ -709,7 +707,7 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            if q:
+            if q is not None:
                 await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
