@@ -359,15 +359,67 @@ class NgramProposerGPU:
 
     def propose(
         self,
-        num_tokens_no_spec: torch.Tensor,  # [batch_size] on GPU
-        token_ids_gpu: torch.Tensor,  # [batch_size, max_len] on GPU
-        sampled_flags: torch.Tensor,  # [batch_size] bool on GPU
-        valid_mask: torch.Tensor,  # [batch_size] bool on GPU
+        num_tokens_no_spec: torch.Tensor,  # [batch_size]
+        token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
+        valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
+        valid_sampled_tokens_count: torch.Tensor,  # [batch_size]
+        spec_decode_unsupported_indices: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Propose draft tokens using GPU-accelerated n-gram matching.
+
+        This method:
+        1. Scatters newly sampled tokens into token_ids_gpu
+        2. Updates num_tokens_no_spec in-place
+        3. Computes validity masks for speculative decoding
+        4. Runs n-gram matching kernel to propose draft tokens
+
+        Args:
+            num_tokens_no_spec: Number of tokens per sequence (modified in-place)
+            token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
+            valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
+            valid_sampled_tokens_count: Count of valid tokens per sequence
+            spec_decode_unsupported_indices: Indices of requests that don't
+                support speculative decoding
+
+        Returns:
+            draft_tokens: Proposed draft token IDs [batch_size, k]
+            is_empty_draft_tokens: Boolean mask for empty proposals [batch_size]
+        """
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
-        assert sampled_flags.device == self.device
-        assert valid_mask.device == self.device
+
+        batch_size = num_tokens_no_spec.shape[0]
+        max_new_tokens = valid_sampled_token_ids_gpu.shape[1]  # num_spec_tokens + 1
+
+        # Scatter newly sampled tokens into token_ids_gpu
+        offsets = torch.arange(max_new_tokens, device=self.device)
+        write_positions = num_tokens_no_spec.unsqueeze(1) + offsets.unsqueeze(0)
+        valid_write_mask = offsets.unsqueeze(0) < valid_sampled_tokens_count.unsqueeze(
+            1
+        )
+        scatter_mask = valid_write_mask & (valid_sampled_token_ids_gpu != -1)
+
+        write_positions_long = write_positions.long()
+        existing_values = token_ids_gpu.gather(1, write_positions_long)
+
+        tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_gpu.dtype)
+        tokens_to_scatter = torch.where(
+            scatter_mask,
+            tokens_cast,
+            existing_values,
+        )
+        token_ids_gpu.scatter_(1, write_positions_long, tokens_to_scatter)
+
+        # Update num_tokens_no_spec in-place
+        num_tokens_no_spec += valid_sampled_tokens_count
+
+        # Compute validity masks
+        sampled_flags = valid_sampled_tokens_count > 0
+        valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+
+        if spec_decode_unsupported_indices:
+            valid_mask[spec_decode_unsupported_indices] = False
 
         with set_forward_context(None, self.vllm_config):
             combined_mask = (

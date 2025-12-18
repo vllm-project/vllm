@@ -3537,50 +3537,25 @@ class GPUModelRunner(
             )
 
             batch_size = next_token_ids.shape[0]
-            max_new_tokens = valid_sampled_token_ids_gpu.shape[1]  # num_spec_tokens + 1
 
-            current_lens = self.num_tokens_no_spec_gpu[:batch_size]
-            offsets = torch.arange(max_new_tokens, device=self.device)
-
-            write_positions = current_lens.unsqueeze(1) + offsets.unsqueeze(0)
-            valid_write_mask = offsets.unsqueeze(
-                0
-            ) < valid_sampled_tokens_count.unsqueeze(1)
-            combined_mask = valid_write_mask & (valid_sampled_token_ids_gpu != -1)
-
-            token_ids_slice = self.token_ids_gpu_tensor[:batch_size]
-            write_positions_long = write_positions.long()
-            existing_values = token_ids_slice.gather(1, write_positions_long)
-
-            tokens_cast = valid_sampled_token_ids_gpu.to(token_ids_slice.dtype)
-            tokens_to_scatter = torch.where(
-                combined_mask,
-                tokens_cast,
-                existing_values,
-            )
-            token_ids_slice.scatter_(1, write_positions_long, tokens_to_scatter)
-
-            self.num_tokens_no_spec_gpu[:batch_size] += valid_sampled_tokens_count
-
-            sampled_flags = valid_sampled_tokens_count > 0
-            valid_mask = torch.ones(batch_size, dtype=torch.bool, device=self.device)
-
+            # Get indices of unsupported requests that are in current batch
+            unsupported_indices: list[int] | None = None
             if self.input_batch.spec_decode_unsupported_reqs:
-                # Get indices of unsupported requests that are in current batch
                 unsupported_indices = [
                     self.input_batch.req_id_to_index[req_id]
                     for req_id in self.input_batch.spec_decode_unsupported_reqs
                     if req_id in self.input_batch.req_id_to_index
                     and self.input_batch.req_id_to_index[req_id] < batch_size
                 ]
-                if unsupported_indices:
-                    valid_mask[unsupported_indices] = False
+                if not unsupported_indices:
+                    unsupported_indices = None
 
             draft_token_ids, is_empty_draft_tokens = self.drafter.propose(
                 self.num_tokens_no_spec_gpu[:batch_size],
                 self.token_ids_gpu_tensor[:batch_size],
-                sampled_flags,
-                valid_mask,
+                valid_sampled_token_ids_gpu,
+                valid_sampled_tokens_count,
+                unsupported_indices,
             )
             # Cache is_empty_draft_tokens for filtering in _update_states
             self._is_empty_draft_tokens = is_empty_draft_tokens
