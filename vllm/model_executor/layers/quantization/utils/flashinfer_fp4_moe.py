@@ -359,10 +359,41 @@ def flashinfer_trtllm_fp4_routed_moe(
 
     # Pack top k ids and expert weights into a single int32 tensor, as
     # required by TRT-LLM
-    packed_tensor = topk_weights.view(torch.int32)
-    # packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-    #     torch.bfloat16
-    # ).view(torch.int16)
+
+
+    # ============ Serving Benchmark Result ============
+    # Successful requests:                     2048
+    # Failed requests:                         0
+    # Maximum request concurrency:             3800
+    # Benchmark duration (s):                  75.47
+    # Total input tokens:                      2095104
+    # Total generated tokens:                  262144
+    # Request throughput (req/s):              27.14
+    # Output token throughput (tok/s):         3473.41
+    # Peak output token throughput (tok/s):    9819.00
+    # Peak concurrent requests:                2048.00
+    # Total token throughput (tok/s):          31233.57
+    # ---------------Time to First Token----------------
+    # Mean TTFT (ms):                          31927.73
+    # Median TTFT (ms):                        31407.97
+    # P99 TTFT (ms):                           64745.15
+    # -----Time per Output Token (excl. 1st token)------
+    # Mean TPOT (ms):                          171.29
+    # Median TPOT (ms):                        178.57
+    # P99 TPOT (ms):                           198.90
+    # ---------------Inter-token Latency----------------
+    # Mean ITL (ms):                           171.43
+    # Median ITL (ms):                         188.94
+    # P99 ITL (ms):                            209.07
+    # ==================================================
+    # packed_tensor = topk_weights.view(torch.int32)
+
+
+
+    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
+        torch.bfloat16
+    ).view(torch.int16)
+
 
     # Quantize input to FP4
     a1_gscale = layer.w13_input_scale_quant
