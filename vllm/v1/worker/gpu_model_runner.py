@@ -4730,6 +4730,8 @@ class GPUModelRunner(
         # attention backend constraints via _check_and_update_cudagraph_mode().
         self._init_minimal_kv_cache_for_profiling()
 
+        saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
+
         (
             full_largest,
             full_count,
@@ -4877,6 +4879,8 @@ class GPUModelRunner(
                 self.model.cudagraph_wrapper.concrete_cudagraph_entries.clear()
                 self.model.cudagraph_wrapper.graph_pool = original_pool
         self._cleanup_profiling_kv_cache()
+
+        compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
         graph_estimate = (
             full_per_graph * (full_count - 1) + piecewise_per_graph * piecewise_count
