@@ -923,6 +923,13 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
+        # If no model execution happened but there are waiting requests
+        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
+        # background threads (like NIXL handshake) to make progress.
+        # Without this, the tight polling loop can starve background threads.
+        if not model_executed and self.scheduler.has_unfinished_requests():
+            time.sleep(0.001)
+
         return model_executed
 
     def _handle_client_request(
