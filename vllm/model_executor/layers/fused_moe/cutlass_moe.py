@@ -1089,11 +1089,12 @@ def run_cutlass_moe_block_scaled_fp8(
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a1_scales = a1_scale[a_map]
 
+    c1 = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
+    c2 = torch.empty((M * topk, K), dtype=out_dtype, device=device)
+
     # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
     # act_out = _resize_cache(workspace2, (M * topk, N))
     # mm2_out = _resize_cache(workspace2, (M * topk, K))
-    c1 = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
-    c2 = torch.empty((M * topk, K), dtype=out_dtype, device=device)
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         c1,
