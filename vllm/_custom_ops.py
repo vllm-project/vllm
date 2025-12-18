@@ -20,9 +20,25 @@ if TYPE_CHECKING:
         return lambda name: fn
 else:
     try:
-        from torch.library import register_fake
+        from torch.library import register_fake as torch_register_fake
     except ImportError:
-        from torch.library import impl_abstract as register_fake
+        from torch.library import impl_abstract as torch_register_fake
+
+    def register_fake(op_name):
+        def decorator(fn):
+            try:
+                return torch_register_fake(op_name)(fn)
+            except RuntimeError as exc:  # pragma: no cover - defensive guard
+                if "DispatchKey::Meta" not in str(exc):
+                    raise
+                logger.debug(
+                    "🐛 Skipping duplicate fake registration for %s: %s",
+                    op_name,
+                    exc,
+                )
+                return fn
+
+        return decorator
 
 
 # page attention ops
