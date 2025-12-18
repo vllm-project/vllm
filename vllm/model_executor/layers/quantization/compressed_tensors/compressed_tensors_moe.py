@@ -243,11 +243,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
         super().__init__(moe)
-        _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
+        _nvfp4 = detect_nvfp4_moe_support(
+            self.__class__.__name__, use_marlin=use_marlin
+        )
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         # Use marlin if cutlass is not supported or in the case or NVFp4A16
-        self.use_marlin = _nvfp4.use_marlin or use_marlin
+        self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
         self.layer_name = layer_name
         self.marlin_input_dtype = (
