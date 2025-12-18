@@ -302,7 +302,13 @@ class ExtraData:
 
 class UvaBuffer:
     def __init__(self, *size: int | torch.SymInt, dtype: torch.dtype):
-        assert is_uva_available()
+        if not is_uva_available():
+            raise RuntimeError(
+                "UvaBuffer requires Unified Virtual Addressing (UVA) support, "
+                "but UVA is not available on this system. This typically requires "
+                "a CUDA-enabled GPU with proper driver support. Please check your "
+                "CUDA installation and GPU configuration."
+            )
         self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=True)
         self.np = self.cpu.numpy()
         self.gpu = get_cuda_view_from_cpu_tensor(self.cpu)
