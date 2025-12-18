@@ -43,12 +43,12 @@ trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
   VLLM_DEEP_GEMM_WARMUP=skip \
-  VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
     --tensor-parallel-size 4 \
     --enable-expert-parallel \
     --enable-eplb \
+    --all2all-backend $BACK \
     --eplb-config '{"window_size":200,"step_interval":600,"use_async":true}' \
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \

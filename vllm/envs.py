@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_DEBUG_MFU_METRICS: bool = False
 
 
 def get_default_cache_root():
@@ -1262,7 +1263,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
     ),
-    # all2all backend for vllm's expert parallel communication
+    # [DEPRECATED - will be removed in v0.15.0] all2all backend for vllm's
+    # expert parallel communication. Use --all2all-backend CLI argument instead.
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
     # - "allgather_reducescatter": all2all implementation based on allgather and
@@ -1273,7 +1275,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND": env_with_choices(
         "VLLM_ALL2ALL_BACKEND",
-        "allgather_reducescatter",
+        None,
         [
             "naive",
             "pplx",
@@ -1564,6 +1566,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    ),
+    # Debug logging for --enable-mfu-metrics
+    "VLLM_DEBUG_MFU_METRICS": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
 }
 
