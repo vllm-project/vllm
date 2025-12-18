@@ -195,10 +195,12 @@ class LoRAModelRunnerMixin:
                 for lora_id in range(1, effective_num_loras + 1)
             }
 
-            if lora_requests:
-                self._set_active_loras(
-                    tuple(sample_lora_mapping), tuple(token_lora_mapping), lora_requests
-                )
+            # Always call _set_active_loras to ensure the mapping is updated.
+            # This is important when capturing no-LoRA graphs (effective_num_loras=0)
+            # after capturing LoRA graphs, as we need to clear the previous mapping.
+            self._set_active_loras(
+                tuple(sample_lora_mapping), tuple(token_lora_mapping), lora_requests
+            )
 
             yield
 
