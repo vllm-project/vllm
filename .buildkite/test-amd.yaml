@@ -973,6 +973,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
@@ -1003,6 +1005,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
@@ -1016,6 +1020,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
@@ -1029,6 +1035,8 @@ steps:
   - vllm/
   - tests/models/multimodal
   commands:
+    - export MIOPEN_DEBUG_CONV_DIRECT=0
+    - export MIOPEN_DEBUG_CONV_GEMM=0
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
