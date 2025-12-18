@@ -502,13 +502,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
            &get_cutlass_pplx_moe_mm_data);
 
-  // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
-  ops.def(
-      "cutlass_scaled_mm_supports_block_fp8(int cuda_device_capability) -> "
-      "bool");
-  ops.impl("cutlass_scaled_mm_supports_block_fp8",
-           &cutlass_scaled_mm_supports_block_fp8);
-
   // Check if cutlass sparse scaled_mm is supported for CUDA devices of the
   // given capability
   ops.def(

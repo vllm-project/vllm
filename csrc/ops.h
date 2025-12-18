@@ -225,7 +225,6 @@ int64_t ggml_moe_get_block_size(int64_t type);
 
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
-bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
 
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
