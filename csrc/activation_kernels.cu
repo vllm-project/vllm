@@ -112,22 +112,21 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 // Launch activation and gating kernel using stable APIs.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                    \
-  int d = input.size(-1) / 2;                                               \
-  int64_t num_tokens = input.numel() / input.size(-1);                      \
-  dim3 grid(num_tokens);                                                    \
-  dim3 block(std::min(d, 1024));                                            \
-  if (num_tokens == 0) {                                                    \
-    return;                                                                 \
-  }                                                                         \
-  torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                      \
-        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>     \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<scalar_t*>(out.data_ptr()),                \
-                reinterpret_cast<const scalar_t*>(input.data_ptr()), d);    \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                       \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  dim3 grid(num_tokens);                                                       \
+  dim3 block(std::min(d, 1024));                                               \
+  if (num_tokens == 0) {                                                       \
+    return;                                                                    \
+  }                                                                            \
+  torch::stable::accelerator::DeviceGuard device_guard(input.get_device());    \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());           \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                         \
+        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>        \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),     \
+                                         input.const_data_ptr<scalar_t>(), d); \
       });
 
 void silu_and_mul(torch::stable::Tensor& out,    // [..., d]
@@ -282,36 +281,34 @@ __global__ void swigluoai_and_mul_kernel(
 
 }  // namespace vllm
 
-#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PARAM)             \
-  int d = input.size(-1) / 2;                                               \
-  int64_t num_tokens = input.numel() / input.size(-1);                      \
-  dim3 grid(num_tokens);                                                    \
-  dim3 block(std::min(d, 1024));                                            \
-  torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
-      input.scalar_type(), "act_and_mul_kernel_with_param", [&] {           \
-        vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>>     \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<scalar_t*>(out.data_ptr()),                \
-                reinterpret_cast<const scalar_t*>(input.data_ptr()), d,     \
-                PARAM);                                                     \
+#define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PARAM)               \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  dim3 grid(num_tokens);                                                      \
+  dim3 block(std::min(d, 1024));                                              \
+  torch::stable::accelerator::DeviceGuard device_guard(input.get_device());   \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());          \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                        \
+      input.scalar_type(), "act_and_mul_kernel_with_param", [&] {             \
+        vllm::act_and_mul_kernel_with_param<scalar_t, KERNEL<scalar_t>>       \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),    \
+                                         input.const_data_ptr<scalar_t>(), d, \
+                                         PARAM);                              \
       });
 
-#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                          \
-  int d = input.size(-1) / 2;                                                  \
-  int64_t num_tokens = input.numel() / input.size(-1);                         \
-  dim3 grid(num_tokens);                                                       \
-  dim3 block(std::min(d, 1024));                                               \
-  torch::stable::accelerator::DeviceGuard device_guard(input.get_device());    \
-  cudaStream_t stream = get_current_cuda_stream(input.get_device());           \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                         \
-      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {            \
-        vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
-            <<<grid, block, 0, stream>>>(                                      \
-                reinterpret_cast<scalar_t*>(out.data_ptr()),                   \
-                reinterpret_cast<const scalar_t*>(input.data_ptr()), d, ALPHA, \
-                LIMIT);                                                        \
+#define LAUNCH_SIGLUOAI_AND_MUL(KERNEL, ALPHA, LIMIT)                         \
+  int d = input.size(-1) / 2;                                                 \
+  int64_t num_tokens = input.numel() / input.size(-1);                        \
+  dim3 grid(num_tokens);                                                      \
+  dim3 block(std::min(d, 1024));                                              \
+  torch::stable::accelerator::DeviceGuard device_guard(input.get_device());   \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());          \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                        \
+      input.scalar_type(), "clamp_swiglu_kernel_with_params", [&] {           \
+        vllm::swigluoai_and_mul_kernel<scalar_t, KERNEL<scalar_t>>            \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),    \
+                                         input.const_data_ptr<scalar_t>(), d, \
+                                         ALPHA, LIMIT);                       \
       });
 
 void fatrelu_and_mul(torch::stable::Tensor& out,    // [..., d],
@@ -375,19 +372,18 @@ __global__ void activation_kernel(
 }  // namespace vllm
 
 // Launch element-wise activation kernel using stable APIs.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                    \
-  int d = input.size(-1);                                                   \
-  int64_t num_tokens = input.numel() / d;                                   \
-  dim3 grid(num_tokens);                                                    \
-  dim3 block(std::min(d, 1024));                                            \
-  torch::stable::accelerator::DeviceGuard device_guard(input.get_device()); \
-  cudaStream_t stream = get_current_cuda_stream(input.get_device());        \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                      \
-      input.scalar_type(), "activation_kernel", [&] {                       \
-        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                 \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<scalar_t*>(out.data_ptr()),                \
-                reinterpret_cast<const scalar_t*>(input.data_ptr()), d);    \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
+  int d = input.size(-1);                                                      \
+  int64_t num_tokens = input.numel() / d;                                      \
+  dim3 grid(num_tokens);                                                       \
+  dim3 block(std::min(d, 1024));                                               \
+  torch::stable::accelerator::DeviceGuard device_guard(input.get_device());    \
+  cudaStream_t stream = get_current_cuda_stream(input.get_device());           \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "activation_kernel", [&] {                          \
+        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                    \
+            <<<grid, block, 0, stream>>>(out.mutable_data_ptr<scalar_t>(),     \
+                                         input.const_data_ptr<scalar_t>(), d); \
       });
 
 namespace vllm {
