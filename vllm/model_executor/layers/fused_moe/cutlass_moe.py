@@ -1036,6 +1036,7 @@ def run_cutlass_moe_block_scaled_fp8(
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     a1q = hidden_states
+    a = hidden_states
 
     w1_q = w1.transpose(1, 2)
     w2_q = w2.transpose(1, 2)
@@ -1061,6 +1062,10 @@ def run_cutlass_moe_block_scaled_fp8(
     N = w2_q.size(1)
     topk = topk_ids.size(1)
 
+    a1q, a1q_scale = _fp8_quantize(
+        a, A_scale=None, per_act_token=False, block_shape=[128, 128]
+    )
+
     device = a1q.device
 
     expert_offsets = torch.empty((num_experts + 1,), dtype=torch.int32, device=device)
@@ -1085,9 +1090,11 @@ def run_cutlass_moe_block_scaled_fp8(
     rep_a_q = a1q.view(dtype=torch.uint8)[a_map].view(dtype=a1q.dtype)
     rep_a1_scales = a1q_scale[a_map]
 
-    mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
-    act_out = _resize_cache(workspace2, (M * topk, N))
-    mm2_out = _resize_cache(workspace2, (M * topk, K))
+    # mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
+    # act_out = _resize_cache(workspace2, (M * topk, N))
+    # mm2_out = _resize_cache(workspace2, (M * topk, K))
+    mm1_out = torch.empty((M * topk, N * 2), dtype=out_dtype, device=device)
+    mm2_out = torch.empty((M * topk, K), dtype=out_dtype, device=device)
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         mm1_out,
@@ -1099,7 +1106,9 @@ def run_cutlass_moe_block_scaled_fp8(
         expert_offsets[:-1],
     )
 
-    activation_callable(act_out, mm1_out)
+    # activation_callable(act_out, mm1_out)
+    act_out = torch.empty((M * topk, N), dtype=out_dtype, device=device)
+    torch.ops._C.silu_and_mul(act_out, mm1_out)
 
     a2q, a2q_scale = _fp8_quantize(
         act_out, A_scale=None, per_act_token=False, block_shape=[128, 128]

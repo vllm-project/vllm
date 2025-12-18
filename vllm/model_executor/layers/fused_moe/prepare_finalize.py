@@ -48,15 +48,16 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            quant_config.a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-        )
+        # a1q, a1q_scale = moe_kernel_quantize_input(
+        #     a1,
+        #     quant_config.a1_scale,
+        #     quant_config.quant_dtype,
+        #     quant_config.per_act_token_quant,
+        #     quant_config.block_shape,
+        # )
 
-        return a1q, a1q_scale, None, None, None
+        # return a1q, a1q_scale, None, None, None
+        return a1, None, None, None, None
 
     def finalize(
         self,
