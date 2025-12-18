@@ -516,7 +516,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        # TODO: check if we need both non_spec_state_indices_tensor and state_indices_tensor
+        # TODO: check if we need both non_spec_state_indices_tensor
+        # and state_indices_tensor
         state_indices_tensor = attn_metadata.state_indices_tensor
         block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
         block_idx_last_computed_token = attn_metadata.block_idx_last_computed_token
@@ -537,8 +538,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         start_non_spec_prefill = num_decodes
         end_non_spec_prefill = start_non_spec_prefill + num_prefills
 
-        # APC is enabled if pointers are available to the blocks, the last computed token (the cache position),
-        # and the block to which the state for each request should be written after the forward.
+        # APC is enabled if pointers are available to the blocks, the last
+        # computed token (the cache position), and the block to which the state
+        # for each request should be written after the forward.
         prefix_caching_enabled = bool(
             state_indices_tensor is not None
             and block_idx_last_scheduled_token is not None
