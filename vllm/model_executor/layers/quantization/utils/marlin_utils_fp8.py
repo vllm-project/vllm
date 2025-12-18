@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
-    marlin_quant_input,
     should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
