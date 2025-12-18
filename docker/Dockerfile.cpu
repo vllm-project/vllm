@@ -147,7 +147,9 @@ WORKDIR /workspace/vllm
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get install -y --no-install-recommends vim numactl xz-utils
+    apt-get install -y --no-install-recommends vim numactl xz-utils make clangd-14
+
+RUN ln -s /usr/bin/clangd-14 /usr/bin/clangd
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

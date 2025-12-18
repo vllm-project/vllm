@@ -1,5 +1,5 @@
-#ifndef CPU_ATTN_MACROS_H
-#define CPU_ATTN_MACROS_H
+#ifndef CPU_ARCH_MACROS_H
+#define CPU_ARCH_MACROS_H
 
 // x86_64
 #ifdef __x86_64__
@@ -26,7 +26,7 @@
           _mm512_castsi512_ps(_mm512_set1_epi32(0x42b17218));                  \
       const __m512i vec_127 = _mm512_set1_epi32(0x0000007f);                   \
       const int n_mantissa_bits = 23;                                          \
-      auto fast_exp = [&](vec_op::FP32Vec16& vec) __attribute__((              \
+      auto fast_exp = [&](const vec_op::FP32Vec16& vec) __attribute__((        \
                           always_inline)) {                                    \
         __m512 values = vec.reg;                                               \
         auto less_ln_flt_min_mask =                                            \
@@ -98,7 +98,7 @@
       poly = vbslq_f32(hi_mask, inf, poly);                                    \
       return vbslq_f32(lo_mask, zero, poly);                                   \
     };                                                                         \
-    auto fast_exp = [&](vec_op::FP32Vec16& vec)                                \
+    auto fast_exp = [&](const vec_op::FP32Vec16& vec)                          \
                         __attribute__((always_inline)) {                       \
                           float32x4x4_t result;                                \
                           result.val[0] = neon_expf(vec.reg.val[0]);           \
