@@ -333,8 +333,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             (max_loras), dtype=torch.int32, device=topk_ids.device
         )
 
-        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
-            num_tokens
+        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(num_tokens)
         )
 
         ops.moe_lora_align_block_size(
@@ -378,7 +378,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
         """
-        (_, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(x.size(0))
+        (_, _, _, _, lora_ids, _, num_active_loras) = self.token_mapping_meta.meta_args(
+            x.size(0)
+        )
         fused_moe_lora(
             y,
             x,
@@ -391,6 +393,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_lora_rank,
             top_k_num,
             lora_ids,
+            num_active_loras,
             adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
             shrink_config.get("BLOCK_SIZE_N", 64),
