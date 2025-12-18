@@ -3393,9 +3393,13 @@ class GPUModelRunner(
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if self._draft_token_ids is None:
+        if not self.num_spec_tokens:
             return None
+
         req_ids = self.input_batch.req_ids
+        if self._draft_token_ids is None:
+            return DraftTokenIds(req_ids, [[] for _ in req_ids])
+
         if isinstance(self._draft_token_ids, torch.Tensor):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
