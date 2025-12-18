@@ -377,6 +377,8 @@ class EngineArgs:
     preemption_mode: Optional[str] = SchedulerConfig.preemption_mode
 
     scheduler_delay_factor: float = SchedulerConfig.delay_factor
+    input_queue_batching_delay: float = (
+        SchedulerConfig.input_queue_batching_delay)
     enable_chunked_prefill: Optional[
         bool] = SchedulerConfig.enable_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
@@ -810,6 +812,9 @@ class EngineArgs:
                                      **scheduler_kwargs["num_lookahead_slots"])
         scheduler_group.add_argument("--scheduler-delay-factor",
                                      **scheduler_kwargs["delay_factor"])
+        scheduler_group.add_argument(
+            "--input-queue-batching-delay",
+            **scheduler_kwargs["input_queue_batching_delay"])
         scheduler_group.add_argument("--preemption-mode",
                                      **scheduler_kwargs["preemption_mode"])
         scheduler_group.add_argument("--num-scheduler-steps",
@@ -1204,6 +1209,7 @@ class EngineArgs:
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
+            input_queue_batching_delay=self.input_queue_batching_delay,
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,

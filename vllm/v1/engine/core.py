@@ -743,10 +743,33 @@ class EngineCoreProc(EngineCore):
         if waited:
             logger.debug("EngineCore loop active.")
 
+        # Optionally add a delay to allow more requests to arrive if no
+        # requests are running and there aren't already enough requests for a
+        # full batch waiting.
+        delay = self.vllm_config.scheduler_config.input_queue_batching_delay
+
+        def _should_add_queue_delay() -> bool:
+            if delay <= 0:
+                return False
+            num_running, num_waiting = self.scheduler.get_request_counts()
+            has_running = num_running > 0
+            max_batch_waiting = (
+                num_waiting >= self.vllm_config.scheduler_config.max_num_seqs)
+            return not has_running and not max_batch_waiting
+
+        if _should_add_queue_delay():
+            time.sleep(delay)
+
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
             self._handle_client_request(*req)
+
+            # Optionally add a delay to allow more requests to arrive.
+            # Don't add delays beyond the initial delay if there are more
+            # requests in the queue.
+            if self.input_queue.empty() and _should_add_queue_delay():
+                time.sleep(delay)
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
