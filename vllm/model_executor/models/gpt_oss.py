@@ -51,6 +51,12 @@ from .utils import (
     maybe_prefix,
 )
 
+if (
+    current_platform.is_rocm()
+    and rocm_aiter_ops.is_triton_fused_add_rmsnorm_pad_enabled()
+):
+    from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
+
 
 class OAIAttention(nn.Module):
     def __init__(
@@ -192,7 +198,7 @@ class MLPBlock(torch.nn.Module):
             )
         else:
             g = self.router(x)
-        x = self.experts(hidden_states=x, router_logits=g)
+        x = self.experts(hidden_states=x, router_logits=g)[:, : self.hidden_size]
 
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x.contiguous(), 0)
@@ -223,6 +229,10 @@ class TransformerBlock(torch.nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
+        self.is_rocm_aiter_fused_add_rmsnorm_pad_enabled = (
+            rocm_aiter_ops.is_triton_fused_add_rmsnorm_pad_enabled()
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -238,7 +248,18 @@ class TransformerBlock(torch.nn.Module):
         hidden_states = self.attn(hidden_states, positions)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if self.is_rocm_aiter_fused_add_rmsnorm_pad_enabled:
+            hidden_states, residual = fused_add_rmsnorm_pad(
+                hidden_states,
+                self.post_attention_layernorm.weight,
+                self.post_attention_layernorm.variance_epsilon,
+                residual,
+                x_pad_to_multiple=256,
+            )
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
         output = self.mlp(hidden_states)
         return output, residual
 

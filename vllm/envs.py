@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_CK_MXFP4_MOE: bool = True
     VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
@@ -917,6 +918,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_RMSNORM", "True").lower() in ("true", "1")
+    ),
+    # Whether to use fused add+rmsnorm+pad kernel for gpt-oss
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD", "True").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter mla ops.
     # By default is enabled.
