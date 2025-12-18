@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize, _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
