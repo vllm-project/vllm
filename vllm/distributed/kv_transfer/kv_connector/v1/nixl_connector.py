@@ -23,7 +23,11 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import EngineId, TpKVTopology, yield_req_data
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineId,
+    TpKVTopology,
+    yield_req_data,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
