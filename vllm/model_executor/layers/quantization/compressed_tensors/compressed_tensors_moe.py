@@ -1220,8 +1220,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
+            assert layer.activation == "silu", (
+                f"Expected 'silu' activation but got {layer.activation}"
             )
             assert self.weight_quant.strategy == QuantizationStrategy.BLOCK, (
                 "Flashinfer TRT-LLM backend currently only supports "
@@ -1230,8 +1230,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
             e_score_correction_bias = (
-                e_score_correction_bias.to(x.dtype)
-                if e_score_correction_bias is not None
+                layer.e_score_correction_bias.to(x.dtype)
+                if layer.e_score_correction_bias is not None
                 else None
             )
             routing_method_type = layer.routing_method_type
@@ -1245,16 +1245,16 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 w13_weight_scale_inv=layer.w13_weight_scale_inv,
                 w2_weight=layer.w2_weight,
                 w2_weight_scale_inv=layer.w2_weight_scale_inv,
-                global_num_experts=global_num_experts,
-                top_k=top_k,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
+                global_num_experts=layer.global_num_experts,
+                top_k=layer.top_k,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
                 intermediate_size=layer.intermediate_size_per_partition,
                 expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 block_shape=self.weight_block_size,
                 routing_method_type=routing_method_type,
-                routed_scaling=routed_scaling_factor,
+                routed_scaling=layer.routed_scaling_factor,
             )
 
             return flashinfer_result
