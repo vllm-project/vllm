@@ -524,6 +524,7 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    enable_exemplars: bool = ObservabilityConfig.enable_exemplars
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1034,6 +1035,9 @@ class EngineArgs:
         observability_group.add_argument(
             "--kv-cache-metrics-sample",
             **observability_kwargs["kv_cache_metrics_sample"],
+        )
+        observability_group.add_argument(
+            "--enable-exemplars", **observability_kwargs["enable_exemplars"]
         )
         observability_group.add_argument(
             "--cudagraph-metrics",
@@ -1695,6 +1699,7 @@ class EngineArgs:
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_exemplars=self.enable_exemplars,
         )
 
         # Compilation config overrides
