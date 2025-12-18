@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -125,6 +126,9 @@ class OAIAttention(nn.Module):
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
             sinks=self.sinks,
+            rotary_emb=self.rotary_emb
+            if current_platform.is_rocm() and rocm_aiter_ops.is_enabled()
+            else None,
         )
 
     def forward(
@@ -132,9 +136,9 @@ class OAIAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        # q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v, positions=positions)
         output, _ = self.o_proj(attn_output)
         return output
 
