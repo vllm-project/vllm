@@ -126,6 +126,11 @@ class FrontendArgs:
     """Refresh SSL Context when SSL certificate files change"""
     ssl_cert_reqs: int = int(ssl.CERT_NONE)
     """Whether client certificate is required (see stdlib ssl module's)."""
+    ssl_ciphers: str | None = None
+    """SSL cipher suites to use for HTTPS server.
+    Allows fine-grained control over TLS cipher suites for security compliance.
+    Example: 'TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256'
+    See: https://docs.python.org/3/library/ssl.html#cipher-selection"""
     root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])
