@@ -1158,7 +1158,12 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params or ec_transfer_params:
+            if (
+                new_token_ids
+                or pooler_output is not None
+                or kv_transfer_params
+                or ec_transfer_params
+            ):
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1379,7 +1384,9 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _free_request(
+        self, request: Request
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
@@ -1408,7 +1415,6 @@ class Scheduler(SchedulerInterface):
             return False, None
 
         return self.ec_connector.request_finished(request)
-
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()

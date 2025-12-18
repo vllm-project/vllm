@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import atexit
-from collections import OrderedDict
 import ctypes
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
@@ -70,14 +70,14 @@ class TensorMemoryPool:
         self,
         max_block_size: int,
         min_block_size: int = 512,
-        device_type: str = 'cpu',
-        auto_evict = False
+        device_type: str = "cpu",
+        auto_evict=False,
     ):
         if max_block_size <= 0 or min_block_size <= 0:
             raise ValueError("Block sizes must be positive")
         if max_block_size < min_block_size:
             raise ValueError("Max block size must be greater than min block size")
-        if device_type not in ['cpu', 'cuda']:
+        if device_type not in ["cpu", "cuda"]:
             raise ValueError("device_type must be 'cpu' or 'cuda'")
 
         self.max_block_size = self._round_to_power_of_two(max_block_size)
@@ -105,15 +105,15 @@ class TensorMemoryPool:
             size //= 2
 
     def _allocate_memory(self):
-        if self.device_type == 'cpu':
+        if self.device_type == "cpu":
             self.base_tensor = torch.empty(
                 self.max_block_size // 4, dtype=torch.float32, pin_memory=True
             )
         else:  # cuda
             self.base_tensor = torch.empty(
-                self.max_block_size // 4, dtype=torch.float32, device='cuda'
+                self.max_block_size // 4, dtype=torch.float32, device="cuda"
             )
-        
+
         self.base_address = self.base_tensor.data_ptr()
         initial_block = MemoryBlock(size=self.max_block_size, addr=self.base_address)
         self.free_lists[self.max_block_size][initial_block.addr] = initial_block
@@ -124,7 +124,7 @@ class TensorMemoryPool:
             self.base_address,
             self.max_block_size,
         )
-    
+
     def _allocate(self, required_size: int) -> int:
         current_size = required_size
         while current_size <= self.max_block_size:
@@ -313,7 +313,7 @@ class TensorMemoryPool:
         target_tensor.copy_(pool_tensor)
 
         return target_tensor
-    
+
     def get_addr_by_key(self, key: str) -> int | None:
         if key in self.key_to_addr:
             return self.key_to_addr[key]

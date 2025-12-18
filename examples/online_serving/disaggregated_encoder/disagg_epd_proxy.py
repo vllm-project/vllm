@@ -169,7 +169,9 @@ async def fanout_encoder_primer(
                 for mm_hash, mm_hash_params in encoder_ec_transfer_params.items():
                     # Store params for this mm_hash
                     aggregated_ec_transfer_params[mm_hash] = {
-                        "do_remote_encode": mm_hash_params.get("do_remote_encode", True),
+                        "do_remote_encode": mm_hash_params.get(
+                            "do_remote_encode", True
+                        ),
                         "num_encoder_tokens": mm_hash_params.get("num_encoder_tokens"),
                         "mm_base_addr": mm_hash_params.get("mm_base_addr"),
                         "remote_host": mm_hash_params.get("remote_host"),
@@ -207,6 +209,7 @@ async def fanout_encoder_primer(
         )
 
     return req_data
+
 
 async def maybe_prefill(
     req_data: dict,
