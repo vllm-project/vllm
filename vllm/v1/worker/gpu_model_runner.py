@@ -3506,7 +3506,7 @@ class GPUModelRunner(
             # TODO:(patchy) NGram GPU proposal
             if isinstance(self.drafter, NgramProposer):
                 assert isinstance(sampled_token_ids, list), (
-                    "sampled_token_ids should be a python list whenngram is used."
+                    "sampled_token_ids should be a python list when ngram is used."
                 )
                 draft_token_ids = self.drafter.propose(
                     sampled_token_ids,

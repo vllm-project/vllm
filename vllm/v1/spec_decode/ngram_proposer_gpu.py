@@ -19,18 +19,10 @@ from vllm.forward_context import set_forward_context
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "num_tokens_no_spec": 0,
-        "token_ids_gpu": 0,
-        "combined_mask": 0,
-    }
-)
+@support_torch_compile()
 class NgramGPUKernel(nn.Module):
     """
     GPU-accelerated N-gram proposer using fully async tensor operations.
-
-    Interface: All inputs are GPU tensors (no lists, no numpy arrays)
 
     PERFORMANCE OPTIMIZATION WITH TORCH.COMPILE:
 
@@ -40,19 +32,14 @@ class NgramGPUKernel(nn.Module):
        - WHY: torch.compile fuses allocations into the compiled graph for efficiency
 
     2. Dynamic Shapes:
-       - Batch size (dim 0) and sequence length (dim 1) are marked as dynamic
+       - Batch size (dim 0) is automatically marked as dynamic in support_torch_compile 
        - torch.compile generates specialized kernels for different shapes
-       - The first call with a new shape will trigger recompilation (cached)
 
     3. Graph Compilation:
        - Uses fullgraph=True mode for maximum optimization
-       - All operations are tensor-based (no Python loops or conditionals)
+       - All operations are tensor-based (no Python loops or conditionals 
+            that depend on input values)
        - The entire forward pass is compiled into a single CUDA graph
-
-    4. Memory Efficiency:
-       - torch.compile's memory planning optimizes temporary allocations
-       - Fusion of operations reduces memory bandwidth requirements
-       - No manual memory management needed - compiler handles it
     """
 
     def __init__(
@@ -74,147 +61,159 @@ class NgramGPUKernel(nn.Module):
 
     def _find_first_and_extract_all_n_parallel(
         self,
-        data: torch.Tensor,
+        token_ids: torch.Tensor,
         seq_lengths: torch.Tensor,
-        min_pattern_len: int,
-        max_pattern_len: int,
-        result_len: int,
+        min_ngram_len: int,
+        max_ngram_len: int,
+        num_draft_tokens: int,
     ) -> torch.Tensor:
         """
-        Process all pattern lengths in parallel, selecting the longest match.
-        Completely free of data-dependent control flow, suitable for
-        torch.compile optimization.
+        Find n-gram matches and extract tokens following the match.
 
-        This function allows partial results when there are fewer than result_len
-        tokens available after the match. The remaining positions are filled with 0.
+        For each sequence, searches for the earliest occurrence of the trailing
+        n-gram (the "suffix") earlier in the sequence. When found, extracts
+        the tokens that followed that earlier occurrence as draft predictions.
+        Tries multiple n-gram lengths and selects the longest match.
+
+        Terminology:
+            - suffix: The trailing n-gram at the end of each sequence that we
+                      search for earlier in the history
+            - search_window: A sliding view over the sequence used to find
+                             matches of the suffix
+            - match_position: The starting index where the suffix was found
+            - draft_tokens: Tokens extracted after the match position
+
+        Args:
+            token_ids: Token IDs for each sequence
+                Shape: [batch_size, max_seq_len]
+            seq_lengths: Actual length of each sequence (excluding padding)
+                Shape: [batch_size]
+            min_ngram_len: Minimum n-gram size to search for (e.g., 2)
+            max_ngram_len: Maximum n-gram size to search for (e.g., 5)
+            num_draft_tokens: Number of tokens to extract after match (k)
+
+        Returns:
+            Draft token predictions, -1 for invalid/no-match positions
+                Shape: [batch_size, num_draft_tokens]
         """
-        batch_size = data.shape[0]
-        device = data.device
-        max_seq_len = data.shape[1]
-        num_patterns = max_pattern_len - min_pattern_len + 1
+        batch_size = token_ids.shape[0]
+        max_seq_len = token_ids.shape[1]
+        device = token_ids.device
+        num_ngram_sizes = max_ngram_len - min_ngram_len + 1
 
-        all_windows = data.unfold(1, max_pattern_len, 1)  # [B, num_windows, max_n]
-        num_windows = all_windows.shape[1]
-        window_starts = torch.arange(num_windows, device=device)
-        pattern_lengths = torch.arange(
-            min_pattern_len, max_pattern_len + 1, device=device
+        # ngram_lengths: All n-gram sizes we'll try
+        # Shape: [num_ngram_sizes]
+        ngram_lengths = torch.arange(
+            min_ngram_len, max_ngram_len + 1, device=device
         )
         batch_indices = torch.arange(batch_size, device=device)
 
-        all_first_matches = torch.full(
-            (batch_size, num_patterns), -1, dtype=torch.long, device=device
+        # first_match_positions: Stores the earliest match position for each
+        # (sequence, ngram_length) pair. -1 means no match found.
+        # Shape: [batch_size, num_ngram_sizes]
+        first_match_positions = torch.full(
+            (batch_size, num_ngram_sizes), -1, dtype=torch.long, device=device
         )
 
-        for i, pattern_len in enumerate(range(min_pattern_len, max_pattern_len + 1)):
-            offset = max_pattern_len - pattern_len
+        for i, ngram_len in enumerate(range(min_ngram_len, max_ngram_len + 1)):
+            # Create sliding windows of size ngram_len over each sequence.
+            # Window w contains tokens[w : w + ngram_len].
+            # Shape: [batch_size, num_windows, ngram_len]
+            #   where num_windows = max_seq_len - ngram_len + 1
+            # Note: unfold returns a view (O(1)), so calling it per iteration
+            # is efficient and avoids complex prefix handling for shorter n-grams.
+            search_windows = token_ids.unfold(1, ngram_len, 1)
+            num_windows = search_windows.shape[1]
 
-            # Extract pattern from the end of each sequence
-            pattern_starts = seq_lengths - pattern_len
-            pattern_indices = pattern_starts.unsqueeze(1) + torch.arange(
-                pattern_len, device=device
+            # Extract the trailing suffix (last ngram_len tokens) from each seq
+            # suffix_starts[b] = position where suffix begins in sequence b
+            # Shape: suffix_starts [batch_size], suffix [batch_size, ngram_len]
+            suffix_starts = seq_lengths - ngram_len
+            suffix_indices = suffix_starts.unsqueeze(1) + torch.arange(
+                ngram_len, device=device
             )
-            patterns = torch.gather(data, 1, pattern_indices.clamp(min=0))
+            suffix = torch.gather(token_ids, 1, suffix_indices.clamp(min=0))
 
-            # Slice windows and perform matching
-            current_windows = all_windows[..., offset:]
-            matches = (current_windows == patterns.unsqueeze(1)).all(dim=-1)
+            # Check which windows match the suffix
+            # matches[b, w] = True if window w in sequence b matches suffix[b]
+            # Shape: [batch_size, num_windows]
+            matches = (search_windows == suffix.unsqueeze(1)).all(dim=-1)
 
-            # Validity check: ensure enough space for result extraction
-            max_valid_pattern_start = seq_lengths - pattern_len - 1
-            pattern_start_positions = window_starts + offset
-            valid_mask = pattern_start_positions <= max_valid_pattern_start.unsqueeze(1)
+            # Validity check: the match position must leave room for at least
+            # one token after the suffix to extract as a draft token.
+            # Window positions are simply 0, 1, 2, ... num_windows-1
+            # max_valid_suffix_start[b] = last valid starting position in seq b
+            max_valid_suffix_start = seq_lengths - ngram_len - 1
+            window_positions = torch.arange(num_windows, device=device)
+            valid_mask = window_positions <= max_valid_suffix_start.unsqueeze(1)
             final_matches = matches & valid_mask
 
-            # Handle prefix positions that fall before the available windows
-            if offset > 0:
-                prefix_positions = torch.arange(offset, device=device)
-                gather_indices = prefix_positions.view(1, -1, 1) + torch.arange(
-                    pattern_len, device=device
-                ).view(1, 1, -1)
-                gather_indices = gather_indices.clamp(min=0, max=max_seq_len - 1)
-                expanded_indices = gather_indices.expand(batch_size, -1, -1)
-                prefix_tokens = torch.gather(
-                    data.unsqueeze(1).expand(-1, offset, -1),
-                    2,
-                    expanded_indices,
-                )
-                prefix_matches = (
-                    prefix_tokens == patterns.unsqueeze(1).expand(-1, offset, -1)
-                ).all(dim=-1)
-                prefix_valid_mask = (
-                    prefix_positions <= max_valid_pattern_start.unsqueeze(1)
-                )
-                prefix_final_matches = prefix_matches & prefix_valid_mask
+            # Find first (earliest) match position for each sequence
+            # (argmax returns 0 if no match, so we verify with has_match)
+            first_match_idx = torch.argmax(final_matches.int(), dim=1)
+            has_match = final_matches[batch_indices, first_match_idx]
 
-                combined_matches = torch.cat(
-                    [prefix_final_matches, final_matches], dim=1
-                )
-                start_positions = torch.cat(
-                    [prefix_positions, pattern_start_positions], dim=0
-                )
-            else:
-                combined_matches = final_matches
-                start_positions = pattern_start_positions
+            # Store valid match positions (window index = actual position)
+            first_match_positions[:, i] = torch.where(
+                has_match, first_match_idx, -1
+            )
 
-            # Find first match
-            # (if no match, argmax returns 0, but we verify with has_match)
-            first_indices = torch.argmax(combined_matches.int(), dim=1)
-            has_match = combined_matches[batch_indices, first_indices]
-            match_positions = start_positions[first_indices]
+        # Select the longest n-gram that found a valid match
+        # (search from back to front to prioritize longer n-grams)
+        # Shape: best_ngram_idx [batch_size]
+        best_ngram_idx = (first_match_positions >= 0).int().flip(dims=[1]).argmax(dim=1)
+        best_ngram_idx = num_ngram_sizes - 1 - best_ngram_idx  # Flip back
 
-            # Store valid match positions
-            all_first_matches[:, i] = torch.where(has_match, match_positions, -1)
-
-        # Select the longest valid match,
-        # from back to front, prioritizing longer patterns
-        best_pattern_idx = (all_first_matches >= 0).int().flip(dims=[1]).argmax(dim=1)
-        best_pattern_idx = num_patterns - 1 - best_pattern_idx  # Flip back
-
-        # Extract corresponding results
-        best_match_pos = all_first_matches[batch_indices, best_pattern_idx]
+        # Get the match position for the best n-gram
+        # Shape: best_match_pos [batch_size]
+        best_match_pos = first_match_positions[batch_indices, best_ngram_idx]
 
         # Handle matched cases - completely avoid data-dependent branching
         has_any_match = best_match_pos >= 0
 
-        best_pattern_lengths = pattern_lengths[best_pattern_idx]
+        # best_ngram_lengths[b] = length of the best matching n-gram for seq b
+        # Shape: [batch_size]
+        best_ngram_lengths = ngram_lengths[best_ngram_idx]
 
-        # Calculate result start positions, invalid positions will be
-        # clamped to valid range. We now track true start positions, so the
-        # result starts right after the matched n-gram
-        result_starts = torch.where(
+        # Calculate where to start extracting draft tokens
+        # draft_start[b] = position right after the matched suffix
+        # Shape: draft_start [batch_size]
+        draft_start = torch.where(
             has_any_match,
-            best_match_pos + best_pattern_lengths,
+            best_match_pos + best_ngram_lengths,
             torch.zeros_like(best_match_pos),
         )
-        available_tokens = seq_lengths - result_starts
+        tokens_available = seq_lengths - draft_start
 
-        # Create gather indices
-        result_indices = result_starts.unsqueeze(1) + torch.arange(
-            result_len, device=device
+        # Create gather indices for extracting draft tokens
+        # Shape: draft_indices [batch_size, num_draft_tokens]
+        draft_indices = draft_start.unsqueeze(1) + torch.arange(
+            num_draft_tokens, device=device
         )
-        # Ensure indices are within valid range
-        result_indices = result_indices.clamp(min=0, max=max_seq_len - 1)
+        draft_indices = draft_indices.clamp(min=0, max=max_seq_len - 1)
 
-        # Always execute gather (even for invalid data)
-        extracted_sequences = torch.gather(data, 1, result_indices)
+        # Extract draft tokens (always execute gather, even for invalid positions)
+        # Shape: draft_tokens [batch_size, num_draft_tokens]
+        draft_tokens = torch.gather(token_ids, 1, draft_indices)
 
-        position_indices = torch.arange(result_len, device=device).unsqueeze(0)
-        valid_positions = position_indices < available_tokens.unsqueeze(1)
+        # Mask out positions beyond what's available in the sequence
+        position_indices = torch.arange(num_draft_tokens, device=device).unsqueeze(0)
+        valid_positions = position_indices < tokens_available.unsqueeze(1)
 
-        # Zero out positions beyond the sequence length
-        extracted_sequences = torch.where(
+        draft_tokens = torch.where(
             valid_positions,
-            extracted_sequences,
-            torch.zeros_like(extracted_sequences),
+            draft_tokens,
+            torch.full_like(draft_tokens, -1),
         )
 
-        results = torch.where(
+        # Mask out all positions if no match was found
+        draft_tokens = torch.where(
             has_any_match.unsqueeze(1),
-            extracted_sequences,
-            torch.zeros_like(extracted_sequences),
+            draft_tokens,
+            torch.full_like(draft_tokens, -1),
         )
 
-        return results
+        return draft_tokens
 
     def forward(
         self,
@@ -224,9 +223,6 @@ class NgramGPUKernel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for N-gram proposal using GPU tensor operations.
-
-        This is the core computation method that will be compiled by torch.compile
-        via the @support_torch_compile decorator.
 
         Args:
             num_tokens_no_spec: Number of tokens for each sequence [batch_size]
@@ -253,17 +249,14 @@ class NgramGPUKernel(nn.Module):
         results = self._find_first_and_extract_all_n_parallel(
             token_ids_gpu,
             num_tokens_no_spec,
-            min_pattern_len=self.min_n,
-            max_pattern_len=self.max_n,
-            result_len=self.k,
+            min_ngram_len=self.min_n,
+            max_ngram_len=self.max_n,
+            num_draft_tokens=self.k,
         )
 
-        # Apply combined mask to results. Expand mask explicitly to avoid
-        # relying on broadcasting behavior that can confuse torch.compile.
-        mask = combined_mask.unsqueeze(1).expand(-1, self.k)
-        draft_tokens = torch.where(mask, results, draft_tokens)
+        draft_tokens = torch.where(combined_mask.unsqueeze(1), results, -1)
 
-        is_empty_draft_tokens = (draft_tokens == 0).all(dim=1)
+        is_empty_draft_tokens = (draft_tokens == -1).all(dim=1)
 
         return draft_tokens, is_empty_draft_tokens
 
@@ -333,9 +326,7 @@ class NgramProposerGPU:
         self,
         batch_size: int,
         max_seq_len: int,
-        vocab_size: int = 152064,
-        pattern_len: int = 3,
-        repetition_rate: float = 0.5,
+        pattern_len: int,
         device: str = "cuda",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -344,9 +335,7 @@ class NgramProposerGPU:
         Args:
             batch_size: Number of sequences in the batch
             max_seq_len: Maximum sequence length
-            vocab_size: Vocabulary size for random token generation
             pattern_len: Length of patterns to inject for matching
-            repetition_rate: Rate of n-gram repetitions to inject
             device: Device to place tensors on
 
         Returns:
