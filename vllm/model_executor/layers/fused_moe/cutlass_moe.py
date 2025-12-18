@@ -896,64 +896,6 @@ def cutlass_moe_fp4(
     )
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    inplace: bool,
-    activation: str,
-    apply_router_weight_on_input: bool,
-    expert_map: torch.Tensor | None,
-) -> bool:
-    def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
-        return N % 128 == 0 and K % 128 == 0
-
-    _, K, N = w2.size()
-    if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled: unaligned problem size. "
-            "N: %s, K: %s",
-            N,
-            K,
-        )
-        return False
-
-    if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s). "
-            "w1.dtype: %s, w2.dtype: %s",
-            w1.dtype,
-            w2.dtype,
-        )
-        return False
-
-    if expert_map is not None:
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled: expert_parallel is not supported."
-        )
-        return False
-
-    if activation != "silu":
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled: only activation silu is supported."
-        )
-        return False
-
-    if apply_router_weight_on_input:
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled:"
-            " apply_router_weight_on_input is not supported."
-        )
-        return False
-
-    if inplace:
-        logger.debug_once(
-            "CutlassBlockScaledGroupedGemm disabled: inplace is not supported."
-        )
-        return False
-
-    return True
-
-
 # W4A8
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
