@@ -262,6 +262,7 @@ class LMCacheMPWorkerAdapter:
     ):
         keys = []
         block_ids = []
+
         for op in ops:
             keys.extend(self._block_hashes_to_keys(op.block_hashes))
             block_ids.extend(op.block_ids)
