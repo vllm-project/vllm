@@ -294,7 +294,9 @@ class NemotronHMultiTokenPredictor(nn.Module):
             inputs_embeds = self.get_input_embeddings(input_ids)
 
         if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: ****************************************************************")
+            print(
+                "SMOR: ****************************************************************"
+            )
             print("SMOR ************** NEMOTRON H MTP FORWARD CALLED ************** ")
             print(f"SMOR: input_ids: {input_ids}")
             print(f"SMOR: positions: {positions}")
@@ -358,8 +360,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
 
-        self.num_mtp_layers = self.model.num_mtp_layers
-        
         # LM head for generating logits
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
