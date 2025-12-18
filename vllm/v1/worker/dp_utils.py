@@ -126,7 +126,14 @@ def _synchronize_dp_ranks(
     ]
 
     """
-    assert num_tokens_padded >= num_tokens_unpadded
+    if num_tokens_padded < num_tokens_unpadded:
+        raise RuntimeError(
+            f"Data Parallel synchronization error: padded token count "
+            f"({num_tokens_padded}) is less than unpadded token count "
+            f"({num_tokens_unpadded}). This indicates an internal error in "
+            f"token padding calculation. Please report this issue at "
+            f"https://github.com/vllm-project/vllm/issues"
+        )
 
     # Coordinate between the DP ranks via an All Reduce
     # to determine the total number of tokens that each rank
@@ -143,7 +150,16 @@ def _synchronize_dp_ranks(
     should_dp_pad = bool(torch.all(tensor[3] == 1).item())
 
     # DP ranks should all have the same value for should_attempt_dp_padding.
-    assert should_attempt_dp_padding == should_dp_pad
+    if should_attempt_dp_padding != should_dp_pad:
+        raise RuntimeError(
+            f"Data Parallel synchronization error: DP padding configuration "
+            f"mismatch across ranks. Local rank attempted DP padding: "
+            f"{should_attempt_dp_padding}, but synchronized value is: "
+            f"{should_dp_pad}. All DP ranks must have consistent padding "
+            f"configuration. This may indicate a configuration issue or "
+            f"race condition. Please report this issue at "
+            f"https://github.com/vllm-project/vllm/issues"
+        )
 
     # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
@@ -216,7 +232,14 @@ def coordinate_batch_across_dp(
     should_attempt_ubatching = False
     if allow_microbatching:
         # Check preconditions for microbatching
-        assert uniform_decode is not None
+        if uniform_decode is None:
+            raise RuntimeError(
+                "Microbatching requires the 'uniform_decode' parameter to be "
+                "specified. When 'allow_microbatching' is True, you must "
+                "provide 'uniform_decode' to indicate whether the batch "
+                "contains only single-token decodes. This is required for "
+                "proper microbatch threshold checking."
+            )
         should_attempt_ubatching = check_ubatch_thresholds(
             parallel_config,
             num_tokens_unpadded,
