@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ErrorResponse,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -1418,10 +1419,9 @@ async def test_tool_choice_validation_without_parser():
         tool_choice="required",
     )
     response_required = await serving_chat.create_chat_completion(req_required)
-    assert hasattr(response_required, "body")
-    error_body = response_required.body.decode()
-    assert "tool_choice" in error_body
-    assert "--tool-call-parser" in error_body
+    assert isinstance(response_required, ErrorResponse)
+    assert "tool_choice" in response_required.error.message
+    assert "--tool-call-parser" in response_required.error.message
 
     # Test named tool_choice without tool_parser
     req_named = ChatCompletionRequest(
@@ -1431,7 +1431,6 @@ async def test_tool_choice_validation_without_parser():
         tool_choice={"type": "function", "function": {"name": "get_weather"}},
     )
     response_named = await serving_chat.create_chat_completion(req_named)
-    assert hasattr(response_named, "body")
-    error_body = response_named.body.decode()
-    assert "tool_choice" in error_body
-    assert "--tool-call-parser" in error_body
+    assert isinstance(response_named, ErrorResponse)
+    assert "tool_choice" in response_named.error.message
+    assert "--tool-call-parser" in response_named.error.message
