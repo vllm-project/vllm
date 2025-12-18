@@ -53,8 +53,22 @@ class PiecewiseBackend:
         self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
+        self.is_encoder_compilation = vllm_backend.is_encoder
 
         self.compile_ranges = self.compilation_config.get_compile_ranges()
+        if self.is_encoder_compilation:
+            # For encoder compilation we use the max int32 value
+            # to set the upper bound of the compile ranges
+            max_int32 = 2**31 - 1
+            last_compile_range = self.compile_ranges[-1]
+            assert (
+                last_compile_range.end
+                == vllm_config.scheduler_config.max_num_batched_tokens
+            )
+            self.compile_ranges[-1] = Range(
+                start=last_compile_range.start, end=max_int32
+            )
+
         log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
@@ -156,8 +170,7 @@ class PiecewiseBackend:
         range_entry = self._find_range_for_shape(runtime_shape)
 
         assert range_entry is not None, (
-            f"Shape out of considered range: {runtime_shape} "
-            "[1, max_num_batched_tokens]"
+            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
         )
 
         self._maybe_compile_for_range_entry(range_entry, args)

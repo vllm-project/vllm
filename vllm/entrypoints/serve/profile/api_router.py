@@ -5,7 +5,7 @@
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
 
-import vllm.envs as envs
+from vllm.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -35,15 +35,12 @@ async def stop_profile(raw_request: Request):
 
 
 def attach_router(app: FastAPI):
-    if envs.VLLM_TORCH_PROFILER_DIR:
+    profiler_config = getattr(app.state.args, "profiler_config", None)
+    assert profiler_config is None or isinstance(profiler_config, ProfilerConfig)
+    if profiler_config is not None and profiler_config.profiler is not None:
         logger.warning_once(
-            "Torch Profiler is enabled in the API server. This should ONLY be "
-            "used for local development!"
+            "Profiler with mode '%s' is enabled in the "
+            "API server. This should ONLY be used for local development!",
+            profiler_config.profiler,
         )
-    elif envs.VLLM_TORCH_CUDA_PROFILE:
-        logger.warning_once(
-            "CUDA Profiler is enabled in the API server. This should ONLY be "
-            "used for local development!"
-        )
-    if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
         app.include_router(router)
