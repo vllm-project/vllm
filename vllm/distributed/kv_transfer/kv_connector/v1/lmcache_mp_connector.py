@@ -907,5 +907,3 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
-        # Clean up lookup future in scheduler adapter
-        self.scheduler_adapter.cleanup_lookup_result(request_id)
