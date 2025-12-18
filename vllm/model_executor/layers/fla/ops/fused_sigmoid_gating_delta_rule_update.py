@@ -1,13 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
 from vllm.triton_utils import tl, triton
-from typing import Optional
 
 
-@triton.heuristics({
-    "USE_INITIAL_STATE": lambda args: args["h0_source"] is not None,
-    "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-})
+@triton.heuristics(
+    {
+        "USE_INITIAL_STATE": lambda args: args["h0_source"] is not None,
+        "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+    }
+)
 @triton.jit(do_not_specialize=["T"])
 def fused_sigmoid_gating_delta_rule_update_kernel(
     A_log,
@@ -37,7 +40,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_VARLEN: tl.constexpr,
 ):
     """
-    Fused kernel that combines sigmoid gating computation with recurrent delta rule update.
+    Fused kernel that combines sigmoid gating with recurrent delta rule update.
     """
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -77,8 +80,13 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
         idx = tl.load(h0_indices + i_n)
         # if idx >= 0:
         tmp0 = tl.where(idx < 0, 0, idx)
-        p_h0 = (h0_source + tmp0 * HV * K * V + i_hv * K * V +
-                o_k[:, None] * V + o_v[None, :])
+        p_h0 = (
+            h0_source
+            + tmp0 * HV * K * V
+            + i_hv * K * V
+            + o_k[:, None] * V
+            + o_v[None, :]
+        )
         temp1 = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
         temp2 = tl.zeros_like(temp1)
         value0 = tl.where(idx < 0, temp2, temp1)
@@ -146,8 +154,13 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     if USE_INITIAL_STATE:
         idx = tl.load(h0_indices + i_n)
         if idx >= 0:
-            p_h0 = (h0_source + idx * HV * K * V + i_hv * K * V +
-                    o_k[:, None] * V + o_v[None, :])
+            p_h0 = (
+                h0_source
+                + idx * HV * K * V
+                + i_hv * K * V
+                + o_k[:, None] * V
+                + o_v[None, :]
+            )
             tl.store(p_h0, b_h.to(p_h0.dtype.element_ty), mask=mask_h)
 
 
@@ -163,14 +176,15 @@ def fused_sigmoid_gating_delta_rule_update(
     b: torch.Tensor,
     initial_state_source: torch.Tensor,
     initial_state_indices: torch.Tensor,
-    scale: Optional[float] = None,
+    scale: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
-    This function uses a single fused kernel that combines both sigmoid gating computation
-    and the recurrent delta rule update for better performance.
+    This function uses a single fused kernel that combines
+    both sigmoid gating computation and the recurrent delta rule
+    update for better performance.
     """
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -182,7 +196,7 @@ def fused_sigmoid_gating_delta_rule_update(
     num_warps = 1
 
     if scale is None:
-        scale = k.shape[-1]**-0.5
+        scale = k.shape[-1] ** -0.5
     else:
         assert scale > 0, "scale must be positive"
 
