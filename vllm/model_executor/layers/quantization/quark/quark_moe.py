@@ -3,9 +3,7 @@
 
 from typing import Any
 
-import aiter
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm import envs
@@ -1016,8 +1014,8 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         w13_bias = layer.w13_bias.to(torch.float32)
         w2_bias = layer.w2_bias.to(torch.float32)
 
-        layer.w13_bias = Parameter(w13_bias, requires_grad=False)
-        layer.w2_bias = Parameter(w2_bias, requires_grad=False)
+        layer.w13_bias = torch.nn.Parameter(w13_bias, requires_grad=False)
+        layer.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
 
         # FIXME warp need to be adjusted based on batch size
         # only apply to  batched mode
@@ -1164,6 +1162,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             )
 
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            from aiter import moe_cktile2stages_gemm1, moe_cktile2stages_gemm2
             from aiter.fused_moe import fused_topk, moe_sorting
 
             token_num = x.shape[0]
@@ -1185,7 +1184,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             cktile_moe_out1 = torch.empty(
                 (token_num, layer.top_k, D), dtype=torch.bfloat16, device=x.device
             )
-            aiter.moe_cktile2stages_gemm1(
+            moe_cktile2stages_gemm1(
                 x,
                 self.w13_weight_aiter_tensor,
                 cktile_moe_out1,
@@ -1201,7 +1200,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 self.w13_bias_aiter_tensor,
                 BLOCKM,  # block_size
             )
-            aiter.moe_cktile2stages_gemm2(
+            moe_cktile2stages_gemm2(
                 cktile_moe_out1,
                 self.w2_weight_aiter_tensor,
                 moe_out,
