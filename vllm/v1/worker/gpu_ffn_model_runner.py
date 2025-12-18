@@ -130,8 +130,10 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
         try:
             hidden_states, recv_metadata = self.connector.recv_attn_output()
-            if hasattr(self.connector, 'dp_metadata_list'):
-                dp_metadata = self.connector.dp_metadata_list.get(recv_metadata.stage_idx, None)
+            if hasattr(self.connector, "dp_metadata_list"):
+                dp_metadata = self.connector.dp_metadata_list.get(
+                    recv_metadata.stage_idx, None
+                )
             else:
                 dp_metadata = None
             current_layer_idx = recv_metadata.layer_idx
