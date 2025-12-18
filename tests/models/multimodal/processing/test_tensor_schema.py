@@ -12,7 +12,11 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
