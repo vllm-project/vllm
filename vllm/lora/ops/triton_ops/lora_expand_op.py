@@ -138,6 +138,7 @@ def _lora_expand(
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
+    num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
@@ -291,6 +292,7 @@ def _lora_expand_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
+    num_active_loras: int,
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:

@@ -57,6 +57,7 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
+        self.specialize_lora_count = False
         # Default cudagraph_mode to NONE until initialize_cudagraph_keys is called
         self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -93,7 +94,11 @@ class CudagraphDispatcher:
                         )
 
     def _create_padded_batch_descriptor(
-        self, num_tokens: int, uniform_decode: bool, has_lora: bool
+        self,
+        num_tokens: int,
+        uniform_decode: bool,
+        has_lora: bool,
+        num_active_loras: int = 0,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
@@ -111,6 +116,7 @@ class CudagraphDispatcher:
             num_reqs=num_reqs,
             uniform=uniform_decode,
             has_lora=has_lora,
+            num_active_loras=num_active_loras,
         )
 
     def add_cudagraph_key(
@@ -120,6 +126,37 @@ class CudagraphDispatcher:
             f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
         )
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
+
+    def _get_lora_cases(self) -> list[tuple[bool, int]]:
+        """
+        Returns list of (has_lora, num_active_loras) tuples for graph capture.
+
+        Returns cases for each num_active_loras from 1 to max_loras.
+        If cudagraph_specialize_lora is True, also includes the no-lora case.
+
+        Note: When speculative decoding is enabled, we fall back to capturing
+        only with max_loras to avoid conflicts with torch.compile during
+        CUDA graph capture.
+        """
+        if not self.vllm_config.lora_config:
+            return [(False, 0)]
+
+        max_loras = self.vllm_config.lora_config.max_loras
+
+        # When speculative decoding is enabled, only capture with max_loras
+        # to avoid torch.compile conflicts during CUDA graph capture
+        if self.vllm_config.speculative_config is not None:
+            lora_cases = [(True, max_loras)]
+            if self.compilation_config.cudagraph_specialize_lora:
+                lora_cases.append((False, 0))
+            return lora_cases
+
+        # Capture for each num_active_loras from 1 to max_loras
+        lora_cases = [(True, n) for n in range(1, max_loras + 1)]
+        # Also capture the no-lora case
+        if self.compilation_config.cudagraph_specialize_lora:
+            lora_cases.append((False, 0))
+        return lora_cases
 
     def initialize_cudagraph_keys(
         self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int = 1
@@ -135,26 +172,30 @@ class CudagraphDispatcher:
 
         self._compute_bs_to_padded_graph_size()
 
-        # LoRA activation cases to specialize the cuda graphs on
-        if self.vllm_config.lora_config:
-            if self.compilation_config.cudagraph_specialize_lora:
-                lora_cases = [True, False]
-            else:
-                lora_cases = [True]
-        else:
-            lora_cases = [False]
+        # Early exit if cudagraphs are disabled
+        if cudagraph_mode == CUDAGraphMode.NONE:
+            self.keys_initialized = True
+            return
+
+        self._compute_bs_to_padded_graph_size()
+
+        # Track whether we have LoRA config (always specialize on count)
+        self.has_lora_config = self.vllm_config.lora_config is not None
+
+        # Get LoRA cases to capture
+        lora_cases = self._get_lora_cases()
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs, has_lora in product(
+            for bs, (has_lora, num_active_loras) in product(
                 self.compilation_config.cudagraph_capture_sizes, lora_cases
             ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
                     self._create_padded_batch_descriptor(
-                        bs, False, has_lora
+                        bs, False, has_lora, num_active_loras
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
 
@@ -173,10 +214,14 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs, has_lora in product(cudagraph_capture_sizes_for_decode, lora_cases):
+            for bs, (has_lora, num_active_loras) in product(
+                cudagraph_capture_sizes_for_decode, lora_cases
+            ):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    self._create_padded_batch_descriptor(bs, True, has_lora),
+                    self._create_padded_batch_descriptor(
+                        bs, True, has_lora, num_active_loras
+                    ),
                 )
 
         self.keys_initialized = True
@@ -187,6 +232,7 @@ class CudagraphDispatcher:
         uniform_decode: bool = False,
         has_lora: bool = False,
         disable_full: bool = False,
+        num_active_loras: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -202,6 +248,13 @@ class CudagraphDispatcher:
             disable_full: If True, skip FULL cudagraph checks and
                 return PIECEWISE or NONE only. (can be used for features like
                 cascade attention that are not supported by full cudagraphs)
+
+        Args:
+            num_tokens: Number of tokens in the batch.
+            uniform_decode: Whether this is a uniform decode batch.
+            has_lora: Whether this batch has active LoRA adapters.
+            disable_full: Whether to disable full cudagraph mode.
+            num_active_loras: Number of distinct active LoRA adapters.
         """
         if (
             not self.keys_initialized
@@ -210,8 +263,18 @@ class CudagraphDispatcher:
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
+        # When speculative decoding is enabled, always use max_loras for lookup
+        # since we only capture graphs with max_loras
+        effective_num_active_loras = num_active_loras
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.lora_config is not None
+            and has_lora
+        ):
+            effective_num_active_loras = self.vllm_config.lora_config.max_loras
+
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora
+            num_tokens, uniform_decode, has_lora, effective_num_active_loras
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
