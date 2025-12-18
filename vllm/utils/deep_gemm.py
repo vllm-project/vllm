@@ -38,7 +38,7 @@ class DeepGemmQuantScaleFMT(Enum):
             return DeepGemmQuantScaleFMT.FLOAT32
         return (
             DeepGemmQuantScaleFMT.UE8M0
-            if current_platform.is_device_capability(100)
+            if current_platform.is_device_capability_family(100)
             else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
         )
 
@@ -50,7 +50,7 @@ def is_deep_gemm_supported() -> bool:
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
-        or current_platform.is_device_capability(100)
+        or current_platform.is_device_capability_family(100)
     )
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
@@ -383,6 +383,7 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
+    "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
