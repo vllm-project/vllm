@@ -989,6 +989,8 @@ steps:
   - vllm/inputs/
   - vllm/v1/core/
   commands:
+  - export MIOPEN_DEBUG_CONV_DIRECT=0
+  - export MIOPEN_DEBUG_CONV_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 - label: Multi-Modal Models Test (Extended) 1 # 60min
