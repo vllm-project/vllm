@@ -148,7 +148,7 @@ def run_tests(
             # Use TRITON_ATTN for spec decoding test for consistency
             attention_config = {"backend": "TRITON_ATTN"}
         else:
-            attention_config = {"backend": "ROCM_AITER_FA"}
+            attention_config = {"backend": "ROCM_ATTN"}
     else:
         attention_config = {"backend": "FLEX_ATTENTION"}
 
@@ -284,14 +284,6 @@ def run_test(
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
 
-    # On ROCm: use float16 for first test (ROCM_AITER_FA), but float32 for
-    # spec decoding test (TRITON_ATTN) for better precision.
-    # On others: always use float32.
-    if current_platform.is_rocm() and not is_testing_with_spec_decoding:
-        dtype = "float16"
-    else:
-        dtype = "float32"
-
     with VllmRunner(
         model,
         max_model_len=512,
@@ -301,7 +293,7 @@ def run_test(
         # enforce_eager=True,
         async_scheduling=async_scheduling,
         distributed_executor_backend=executor,
-        dtype=dtype,
+        dtype="float32",
         speculative_config=spec_config,
         disable_log_stats=False,
         attention_config=attention_config,
