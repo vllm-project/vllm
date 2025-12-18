@@ -8,7 +8,10 @@ from collections.abc import Iterable, Iterator
 from enum import Enum
 from typing import Any
 
-from vllm.v1.core.sched.policy.weighted_score_sorter import WeightedScoreSorter
+from vllm.v1.core.sched.policy.shortest_job_first import (
+    TimeAndLengthScorer,
+    WeightedScoreSorter,
+)
 from vllm.v1.request import Request
 
 
@@ -219,9 +222,13 @@ class SJFRequestQueue(RequestHeap):
     """A Shortest Job First (SJF) queue where requests are ordered by weighted score.
     Requests with higher weighted scores (shorter jobs) are processed first."""
 
+    def __init__(self):
+        super().__init__()
+        self.scorer = TimeAndLengthScorer()
+
     def _request_to_heap(self, request: Request) -> WeightedScoreSorter:
         """Convert request to `WeightedScoreSorter` for heap."""
-        return WeightedScoreSorter(request)
+        return WeightedScoreSorter(request, self.scorer)
 
     def _heap_to_request(self, element: WeightedScoreSorter) -> Request:
         """Extract request from the `WeightedScoreSorter`."""
