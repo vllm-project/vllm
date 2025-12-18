@@ -232,33 +232,11 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: ****************************************************************")
-            print("SMOR ************** PROPOSE CALLED ************** ")
-            print(f"SMOR: target_token_ids: {target_token_ids}")
-            print(f"SMOR: target_positions: {target_positions}")
-            print(f"SMOR: target_hidden_states.shape: {target_hidden_states.shape}")
-            print(f"SMOR: next_token_ids: {next_token_ids}")
-            print(f"SMOR: last_token_indices: {last_token_indices}")
-            print("\n")
-            
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: num_tokens: {num_tokens}")
-            print(f"SMOR: batch_size: {batch_size}")
-            print("\n")
-        
-        # TODO SMOR- currently assumes a single batch
-        is_prefill = last_token_indices is None
-        is_all_rejected = last_token_indices is not None and last_token_indices.item() == 0
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: last_token_indices: {last_token_indices}")
-                print("\n")
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
@@ -269,16 +247,10 @@ class EagleProposer:
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[: num_tokens - 1] = target_token_ids[1:]
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: self.input_ids[: num_tokens - 1]: {self.input_ids[: num_tokens - 1]}")
-            print("\n")
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: self.input_ids[last_token_indices]: {self.input_ids[last_token_indices]}")
-            print("\n")
-            
+
         assert self.runner is not None
 
         if self.attn_metadata_builder is None:
@@ -324,9 +296,6 @@ class EagleProposer:
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens_dp_padded
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: num_input_tokens: {num_input_tokens}")
-                print("\n")
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
@@ -347,12 +316,8 @@ class EagleProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
             input_ids = self.input_ids[:num_input_tokens]
-            if get_tensor_model_parallel_rank() == 0:   
-                print(f"SMOR: input_ids: {input_ids}")
-                print("\n")
             inputs_embeds = None
 
-        model_kwargs = {}
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -360,14 +325,10 @@ class EagleProposer:
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
+            model_kwargs = {}
             if self.pass_spec_step_idx:
                 model_kwargs["spec_step_idx"] = 0
 
-            if get_tensor_model_parallel_rank() == 0:
-                print("SMOR ************** PROPOSE SPEC TOKEN 0 ************** ")
-                print(f"SMOR: input_ids: {input_ids}")
-                print(f"SMOR: positions: {self._get_positions(num_input_tokens)}")
-                print("\n")
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
@@ -382,94 +343,7 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
-        if get_tensor_model_parallel_rank() == 0:
-            print("SMOR ************** PROPOSE TOKEN 0 Ended ************** ")
-            print(f"SMOR: logits: {logits}")
-            print("\n")
-            
-        # ************************************************* SMOR *************************************************
-        # Start of potential fix
-        # Currently work specifically for prefill
-        
-        # if we run it through multiple draft layers, we need to offset the draft index
-        # that will later on be used for the auto regressive loop
-        offset_by_multi_draft_layers = 0
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: num mtp layers: {self.model.num_mtp_layers}")
-            print(f"SMOR: self.draft_indexer_metadata_builder is None: {self.draft_indexer_metadata_builder is None}")
-            print("\n")
-        
-        draft_token_ids = logits.argmax(dim=-1)
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: draft_token_ids after iter 0: {draft_token_ids}")
-            print("\n")
-        if is_prefill:
-            offset_by_multi_draft_layers = 1
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: last_token_indices: {last_token_indices}")
-                print("\n")
-            self.input_ids[: num_tokens - 2] = target_token_ids[2:]
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: self.input_ids[: num_tokens - 2]: {target_token_ids[2:]}")
-                print("\n")
-            draft_token_ids = draft_token_ids.to(self.input_ids[last_token_indices].dtype)
-            self.input_ids[num_tokens -2] = next_token_ids
-            self.input_ids[num_tokens -1] = draft_token_ids
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: self.input_ids[num_tokens -2: num_tokens]: {self.input_ids[num_tokens -2: num_tokens]}")
-                print("\n")
-            attn_metadata = attn_metadata_builder.build_for_drafting(
-                common_attn_metadata=common_attn_metadata, draft_index=1
-            )
-            
-            per_layer_attn_metadata = {}
-            for layer_name in self.attn_layer_names:
-                per_layer_attn_metadata[layer_name] = attn_metadata
 
-            for layer_name in self.indexer_layer_names:
-                assert draft_indexer_metadata is not None
-                per_layer_attn_metadata[layer_name] = draft_indexer_metadata
-            
-            target_positions += 1
-            self._set_positions(num_tokens, target_positions)
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: target_positions: {target_positions}")
-                print("\n")
-            self.hidden_states[:num_tokens] = hidden_states # mtp's module 1 hs
-            input_ids = self.input_ids[:num_input_tokens]
-            
-            with set_forward_context(
-                per_layer_attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-            ):
-                model_kwargs["spec_step_idx"] += 1
-                
-                if get_tensor_model_parallel_rank() == 0:
-                    print("SMOR ************** PROPOSE forward 1 for layer 1 ************** ")
-                    print(f"SMOR: input_ids: {input_ids}")
-                    print(f"SMOR: positions: {self._get_positions(num_input_tokens)}")
-                    print("\n")
-                ret_hidden_states = self.model(
-                    input_ids=input_ids,
-                    positions=self._get_positions(num_input_tokens),
-                    hidden_states=self.hidden_states[:num_input_tokens],
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-                if self.method == "mtp":
-                    last_hidden_states = ret_hidden_states
-                    hidden_states = last_hidden_states
-                else:
-                    last_hidden_states, hidden_states = ret_hidden_states
-        
-            sample_hidden_states = last_hidden_states[last_token_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
-        # elif is_all_rejected:
-            
-        # ************************************************* SMOR *************************************************
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
             draft_token_ids = logits.argmax(dim=-1)
@@ -479,13 +353,6 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: target_positions: {target_positions}")
-                print(f"SMOR: last_token_indices: {last_token_indices}")
-                print(f"SMOR: positions: {positions}")
-                print("\n")
-                
-        # TODO smor- which should be taken? 
         if self.method in (
             "deepseek_mtp",
             "ernie_mtp",
@@ -509,9 +376,7 @@ class EagleProposer:
             return torch.cat(draft_token_ids_list, dim=1)
 
         draft_token_ids = logits.argmax(dim=-1)
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: draft_token_ids, after iter 1: {draft_token_ids}")
-            print("\n")
+
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
         ):
@@ -524,18 +389,11 @@ class EagleProposer:
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: draft_token_ids_list: {draft_token_ids_list}")
-            print("\n")
+
         batch_size_dp_padded, batch_size_across_dp = self._pad_batch_across_dp(
             num_tokens_unpadded=batch_size,
             num_tokens_padded=batch_size,
         )
-
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: batch_size_dp_padded: {batch_size_dp_padded}")
-            print(f"SMOR: batch_size_across_dp: {batch_size_across_dp}")
-            print("\n")
 
         if (
             self.use_cuda_graph
@@ -557,9 +415,6 @@ class EagleProposer:
             self.token_arange_np[: batch_size + 1]
         ).clone()
 
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"SMOR: self.attn_layer_names: {self.attn_layer_names}")
-            print("\n")
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -630,7 +485,7 @@ class EagleProposer:
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
-                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1 + offset_by_multi_draft_layers
+                common_attn_metadata=common_attn_metadata, draft_index=token_index + 1
             )
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
@@ -656,18 +511,10 @@ class EagleProposer:
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
+                model_kwargs = {}
                 if self.pass_spec_step_idx:
-                    model_kwargs["spec_step_idx"] += 1
-                
-                if get_tensor_model_parallel_rank() == 0:
-                    print("SMOR ************** PROPOSE CONT ************** ")
-                    print(f"SMOR: token_index: {token_index}")
-                    print(f"SMOR: input_ids: {input_ids}")
-                    print(f"SMOR: positions: {self._get_positions(input_batch_size)}")
-                    print(f"SMOR: input_batch_size: {input_batch_size}")
-                    print(f"SMOR: clamped_positions: {clamped_positions}")
-                    print(f"SMOR: batch_size: {batch_size}")
-                    print("\n")
+                    model_kwargs["spec_step_idx"] = token_index + 1
+
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self._get_positions(input_batch_size),
@@ -684,9 +531,6 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
-            if get_tensor_model_parallel_rank() == 0:
-                print(f"SMOR: draft_token_ids: {draft_token_ids}")
-                print("\n")
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
