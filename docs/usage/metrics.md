@@ -45,6 +45,38 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
+## Exemplars
+
+vLLM supports Prometheus exemplars for request-level histogram metrics.
+Exemplars attach request IDs to metric observations, enabling correlation
+between metrics and individual requests for debugging and tracing.
+
+**Enable exemplars** with the `--enable-exemplars` flag:
+
+```bash
+vllm serve <model> --enable-exemplars
+```
+
+To view exemplars, query the metrics endpoint with OpenMetrics format:
+
+```bash
+curl -H "Accept: application/openmetrics-text" http://0.0.0.0:8000/metrics
+```
+
+Exemplars appear in the output as annotations on histogram bucket samples:
+
+```text
+vllm:e2e_request_latency_seconds_bucket{le="0.1",model_name="..."} 42.0 # {request_id="cmpl-abc123"} 0.05
+```
+
+**Note**: To store and query exemplars in Prometheus, start Prometheus with:
+
+```bash
+prometheus --enable-feature=exemplar-storage
+```
+
+For more details, see the [metrics design documentation](../design/metrics.md#exemplars).
+
 ## Deprecation Policy
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`

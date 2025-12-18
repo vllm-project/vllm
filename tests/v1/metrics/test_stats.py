@@ -21,6 +21,7 @@ def test_prefill_kv_computed_with_cache():
     # Case 1: With prefix cache (1200 tokens cached)
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-request-1",
         num_prompt_tokens=10000,
         max_tokens_param=100,
         req_stats=req_stats,
@@ -50,6 +51,7 @@ def test_prefill_kv_computed_no_cache():
     # Case 2: No prefix cache
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-request-2",
         num_prompt_tokens=2000,
         max_tokens_param=100,
         req_stats=req_stats,
@@ -79,6 +81,7 @@ def test_prefill_kv_computed_edge_cases():
     # Case 3: Negative num_cached_tokens (shouldn't happen, but handle gracefully)
     iteration_stats.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-request-3",
         num_prompt_tokens=100,
         max_tokens_param=10,
         req_stats=req_stats,
@@ -96,6 +99,7 @@ def test_prefill_kv_computed_edge_cases():
     iteration_stats2 = IterationStats()
     iteration_stats2.update_from_finished_request(
         finish_reason=FinishReason.STOP,
+        request_id="test-request-4",
         num_prompt_tokens=100,
         max_tokens_param=10,
         req_stats=req_stats,

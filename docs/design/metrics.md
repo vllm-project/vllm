@@ -315,6 +315,61 @@ combined according to matching labels. In vLLM, we add a `model_name`
 label to every metric which includes the name of the model served by
 that instance.
 
+#### Exemplars
+
+vLLM supports Prometheus exemplars for request-level histogram metrics.
+Exemplars attach contextual information (such as request IDs) to specific
+metric observations, enabling correlation between metrics and individual
+requests. This is particularly useful for debugging and tracing specific
+requests that exhibit unusual behavior.
+
+**Enable exemplars** with the `--enable-exemplars` CLI flag. Exemplars are
+disabled by default to minimize overhead.
+
+**Supported Metrics**: Exemplars are attached to the following per-request
+histogram metrics:
+
+- `vllm:e2e_request_latency_seconds`
+- `vllm:request_queue_time_seconds`
+- `vllm:request_prefill_time_seconds`
+- `vllm:request_inference_time_seconds`
+- `vllm:request_decode_time_seconds`
+- `vllm:request_prefill_kv_computed_tokens`
+- `vllm:request_prompt_tokens`
+- `vllm:request_generation_tokens`
+- `vllm:request_time_per_output_token_seconds`
+- `vllm:request_params_max_tokens`
+
+**Exemplar Format**: Each exemplar includes a `request_id` label that
+identifies the specific request associated with the metric observation.
+The exemplar appears in the OpenMetrics format as:
+
+```text
+vllm:e2e_request_latency_seconds_bucket{le="0.1",model_name="..."} 42.0 # {request_id="cmpl-abc123"} 0.05
+```
+
+**Limitations**:
+
+- Exemplars follow the OpenMetrics specification limit of 128 UTF-8
+  characters for the combined length of all label names and values.
+  Request IDs longer than 117 characters (accounting for the `request_id`
+  label name) will be truncated with a warning logged.
+- Exemplars are only exposed when the metrics endpoint is accessed with
+  OpenMetrics format support (content type: `application/openmetrics-text`).
+- Prometheus server must be configured with `--enable-feature=exemplar-storage`
+  to store and query exemplars.
+- **Multiprocess mode incompatibility**: Exemplars are not supported when
+  using multiple API server processes (`--api-server-count > 1`). When
+  exemplars are enabled, multiprocess mode is automatically disabled, which
+  means metrics from multiple API server processes will not be aggregated.
+  Each API server process will expose separate metrics. If you need aggregated
+  metrics across multiple API servers, either disable exemplars or use
+  `--api-server-count=1`.
+
+**Overhead**: Exemplars add minimal overhead (~100 bytes per exemplar).
+They are stored in Prometheus's in-memory circular buffer and appended to
+the Write-Ahead Log (WAL) when exemplar storage is enabled.
+
 Example output:
 
 ```bash

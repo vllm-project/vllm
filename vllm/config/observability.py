@@ -72,8 +72,11 @@ class ObservabilityConfig:
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
     argument."""
 
-    enable_mfu_metrics: bool = False
-    """Enable Model FLOPs Utilization (MFU) metrics."""
+    enable_exemplars: bool = False
+    """Enable Prometheus exemplars for request-level histogram metrics.
+    Exemplars attach request IDs to metric observations, enabling correlation
+    between metrics and individual requests. Adds minimal overhead (~100 bytes
+    per exemplar). Requires Prometheus server with --enable-feature=exemplar-storage."""
 
     @cached_property
     def collect_model_forward_time(self) -> bool:
