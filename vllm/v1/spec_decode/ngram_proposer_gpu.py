@@ -32,12 +32,12 @@ class NgramGPUKernel(nn.Module):
        - WHY: torch.compile fuses allocations into the compiled graph for efficiency
 
     2. Dynamic Shapes:
-       - Batch size (dim 0) is automatically marked as dynamic in support_torch_compile 
+       - Batch size (dim 0) is automatically marked as dynamic in support_torch_compile
        - torch.compile generates specialized kernels for different shapes
 
     3. Graph Compilation:
        - Uses fullgraph=True mode for maximum optimization
-       - All operations are tensor-based (no Python loops or conditionals 
+       - All operations are tensor-based (no Python loops or conditionals
             that depend on input values)
        - The entire forward pass is compiled into a single CUDA graph
     """
@@ -103,9 +103,7 @@ class NgramGPUKernel(nn.Module):
 
         # ngram_lengths: All n-gram sizes we'll try
         # Shape: [num_ngram_sizes]
-        ngram_lengths = torch.arange(
-            min_ngram_len, max_ngram_len + 1, device=device
-        )
+        ngram_lengths = torch.arange(min_ngram_len, max_ngram_len + 1, device=device)
         batch_indices = torch.arange(batch_size, device=device)
 
         # first_match_positions: Stores the earliest match position for each
@@ -154,9 +152,7 @@ class NgramGPUKernel(nn.Module):
             has_match = final_matches[batch_indices, first_match_idx]
 
             # Store valid match positions (window index = actual position)
-            first_match_positions[:, i] = torch.where(
-                has_match, first_match_idx, -1
-            )
+            first_match_positions[:, i] = torch.where(has_match, first_match_idx, -1)
 
         # Select the longest n-gram that found a valid match
         # (search from back to front to prioritize longer n-grams)
@@ -310,9 +306,7 @@ class NgramProposerGPU:
         token_ids, num_tokens, sampled_flags, valid_mask = self._generate_dummy_data(
             batch_size=self.max_num_seqs,
             max_seq_len=self.max_model_len,
-            vocab_size=self.vocab_size,
             pattern_len=self.k,
-            repetition_rate=0.5,
             device=self.device,
         )
 
