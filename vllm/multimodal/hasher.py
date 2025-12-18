@@ -1,13 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Multimodal content hashing utilities.
 
+This module provides hashing functionality for multimodal content (images,
+tensors, etc.) used in cache key generation. It supports both high-performance
+blake3 hashing and FIPS 140-3 compliant SHA-256 hashing.
+
+FIPS Compliance:
+    blake3 is not FIPS 140-3 approved. For environments requiring FIPS
+    compliance (government, healthcare, finance), set the environment
+    variable VLLM_USE_FIPS_HASHING=1 to use SHA-256 instead.
+
+Environment Variables:
+    VLLM_USE_FIPS_HASHING: Set to "1", "true", or "yes" to enable
+        FIPS-compliant SHA-256 hashing instead of blake3.
+"""
+
+import hashlib
+import os
 import pickle
 import uuid
 from collections.abc import Iterable
 
 import numpy as np
 import torch
-from blake3 import blake3
 from PIL import Image
 
 from vllm.logger import init_logger
@@ -16,16 +32,96 @@ from .base import MediaWithBytes
 
 logger = init_logger(__name__)
 
+# blake3 is optional - not FIPS 140-3 approved
+# In FIPS-constrained environments, blake3 may not be available or allowed
+try:
+    from blake3 import blake3 as _blake3
+
+    _HAS_BLAKE3 = True
+except ImportError:
+    _blake3 = None
+    _HAS_BLAKE3 = False
+
+
+def _use_fips_hashing() -> bool:
+    """Determine whether to use FIPS-compliant hashing.
+
+    Returns True if:
+    - VLLM_USE_FIPS_HASHING environment variable is set to a truthy value
+    - blake3 is not available (automatic fallback)
+
+    Returns:
+        bool: True if FIPS-compliant SHA-256 should be used, False for blake3.
+    """
+    fips_env = os.environ.get("VLLM_USE_FIPS_HASHING", "0")
+    use_fips = fips_env.lower() in ("1", "true", "yes")
+
+    if use_fips:
+        logger.info("FIPS-compliant hashing enabled via VLLM_USE_FIPS_HASHING")
+    elif not _HAS_BLAKE3:
+        logger.info("blake3 not available, using FIPS-compliant SHA-256 hashing")
+
+    return use_fips or not _HAS_BLAKE3
+
+
+_USE_FIPS_HASHING = _use_fips_hashing()
+
+
+class _Blake3Hasher:
+    """Wrapper for blake3 hasher with consistent interface."""
+
+    def __init__(self):
+        if _blake3 is None:
+            raise RuntimeError("blake3 is not available")
+        self._hasher = _blake3()
+
+    def update(self, data: bytes | memoryview) -> None:
+        self._hasher.update(data)
+
+    def hexdigest(self) -> str:
+        return self._hasher.hexdigest()
+
+
+class _Sha256Hasher:
+    """FIPS 140-3 compliant SHA-256 hasher with consistent interface.
+
+    This provides the same interface as _Blake3Hasher but uses the
+    FIPS-approved SHA-256 algorithm from hashlib.
+    """
+
+    def __init__(self):
+        self._hasher = hashlib.sha256()
+
+    def update(self, data: bytes | memoryview) -> None:
+        # hashlib requires bytes, not memoryview
+        if isinstance(data, memoryview):
+            data = bytes(data)
+        self._hasher.update(data)
+
+    def hexdigest(self) -> str:
+        return self._hasher.hexdigest()
+
+
+def _create_hasher() -> _Blake3Hasher | _Sha256Hasher:
+    """Create the appropriate hasher based on FIPS configuration.
+
+    Returns:
+        A hasher instance with update() and hexdigest() methods.
+    """
+    if _USE_FIPS_HASHING:
+        return _Sha256Hasher()
+    return _Blake3Hasher()
+
 
 class MultiModalHasher:
     @classmethod
     def serialize_item(cls, obj: object) -> Iterable[bytes | memoryview]:
         # Simple cases
-        if isinstance(obj, (bytes, memoryview)):
+        if isinstance(obj, bytes | memoryview):
             return (obj,)
         if isinstance(obj, str):
             return (obj.encode("utf-8"),)
-        if isinstance(obj, (int, float)):
+        if isinstance(obj, int | float):
             return (np.array(obj).tobytes(),)
 
         if isinstance(obj, Image.Image):
@@ -99,7 +195,7 @@ class MultiModalHasher:
         obj: object,
     ) -> Iterable[bytes | memoryview]:
         # Recursive cases
-        if isinstance(obj, (list, tuple)):
+        if isinstance(obj, list | tuple):
             for i, elem in enumerate(obj):
                 yield from cls.iter_item_to_bytes(f"{key}.{i}", elem)
         elif isinstance(obj, dict):
@@ -111,7 +207,7 @@ class MultiModalHasher:
 
     @classmethod
     def hash_kwargs(cls, **kwargs: object) -> str:
-        hasher = blake3()
+        hasher = _create_hasher()
 
         for k, v in kwargs.items():
             for bytes_ in cls.iter_item_to_bytes(k, v):

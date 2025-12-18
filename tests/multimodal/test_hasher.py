@@ -93,3 +93,120 @@ def test_hash_image_exif_id():
     assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
     # second image has non-UUID in ImageID, so it should hash to the image data
     assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)
+
+
+# Tests for FIPS 140-3 compliant hashing support
+class TestFIPSHashing:
+    """Test FIPS-compliant SHA-256 hashing functionality."""
+
+    def test_sha256_hasher_basic(self):
+        """Test that _Sha256Hasher produces valid hashes."""
+        from vllm.multimodal.hasher import _Sha256Hasher
+
+        hasher = _Sha256Hasher()
+        hasher.update(b"test data")
+        result = hasher.hexdigest()
+
+        # SHA-256 produces 64-character hex digest
+        assert len(result) == 64
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_sha256_hasher_memoryview(self):
+        """Test that _Sha256Hasher handles memoryview correctly."""
+        from vllm.multimodal.hasher import _Sha256Hasher
+
+        data = b"test data"
+        mv = memoryview(data)
+
+        hasher1 = _Sha256Hasher()
+        hasher1.update(data)
+
+        hasher2 = _Sha256Hasher()
+        hasher2.update(mv)
+
+        assert hasher1.hexdigest() == hasher2.hexdigest()
+
+    def test_blake3_hasher_basic(self):
+        """Test that _Blake3Hasher produces valid hashes when available."""
+        from vllm.multimodal.hasher import _HAS_BLAKE3, _Blake3Hasher
+
+        if not _HAS_BLAKE3:
+            pytest.skip("blake3 not available")
+
+        hasher = _Blake3Hasher()
+        hasher.update(b"test data")
+        result = hasher.hexdigest()
+
+        # blake3 also produces 64-character hex digest by default
+        assert len(result) == 64
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_blake3_and_sha256_produce_different_hashes(self):
+        """Test that blake3 and SHA-256 produce different hashes for same input."""
+        from vllm.multimodal.hasher import _HAS_BLAKE3, _Blake3Hasher, _Sha256Hasher
+
+        if not _HAS_BLAKE3:
+            pytest.skip("blake3 not available")
+
+        data = b"test data for hashing"
+
+        blake3_hasher = _Blake3Hasher()
+        blake3_hasher.update(data)
+
+        sha256_hasher = _Sha256Hasher()
+        sha256_hasher.update(data)
+
+        # Different algorithms should produce different hashes
+        assert blake3_hasher.hexdigest() != sha256_hasher.hexdigest()
+
+    def test_create_hasher_returns_correct_type(self):
+        """Test that _create_hasher returns appropriate hasher type."""
+        from vllm.multimodal.hasher import (
+            _USE_FIPS_HASHING,
+            _Blake3Hasher,
+            _create_hasher,
+            _Sha256Hasher,
+        )
+
+        hasher = _create_hasher()
+
+        if _USE_FIPS_HASHING:
+            assert isinstance(hasher, _Sha256Hasher)
+        else:
+            assert isinstance(hasher, _Blake3Hasher)
+
+    def test_hash_kwargs_consistency_with_fips(self):
+        """Test that hash_kwargs produces consistent results."""
+        data = {"key1": "value1", "key2": 42, "key3": b"bytes"}
+
+        hash1 = MultiModalHasher.hash_kwargs(**data)
+        hash2 = MultiModalHasher.hash_kwargs(**data)
+
+        assert hash1 == hash2
+
+    def test_hash_kwargs_with_image_fips(self):
+        """Test that image hashing works in FIPS mode."""
+        image = Image.new("RGB", size=(10, 10), color=(255, 0, 0))
+
+        # Should not raise an exception
+        result = MultiModalHasher.hash_kwargs(image=image)
+        assert isinstance(result, str)
+        assert len(result) == 64
+
+    def test_hash_kwargs_with_tensor_fips(self):
+        """Test that tensor hashing works in FIPS mode."""
+        tensor = torch.zeros((5, 10, 20), dtype=torch.float32)
+
+        # Should not raise an exception
+        result = MultiModalHasher.hash_kwargs(data=tensor)
+        assert isinstance(result, str)
+        assert len(result) == 64
+
+    def test_hash_kwargs_with_numpy_array_fips(self):
+        """Test that numpy array hashing works in FIPS mode."""
+        arr = np.zeros((5, 10, 20))
+
+        # Should not raise an exception
+        result = MultiModalHasher.hash_kwargs(data=arr)
+        assert isinstance(result, str)
+        assert len(result) == 64
