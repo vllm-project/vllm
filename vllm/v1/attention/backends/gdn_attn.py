@@ -10,14 +10,14 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
+from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -76,10 +76,10 @@ class GDNAttentionMetadata:
     token_chunk_offset_ptr: torch.Tensor | None = None
 
 
-class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
+class GDNAttentionMetadataBuilder(
+    BaseMambaAttentionMetadataBuilder[GDNAttentionMetadata]
+):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -88,9 +88,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        assert isinstance(kv_cache_spec, MambaSpec)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.vllm_config = vllm_config
-        self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
         self.device = device
