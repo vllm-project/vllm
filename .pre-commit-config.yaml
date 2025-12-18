@@ -54,7 +54,7 @@ repos:
       language: python
       types: [python]
       require_serial: true
-      additional_dependencies: [ty==0.0.2]
+      additional_dependencies: [ty==0.0.2, pandas-stubs, scipy-stubs, types-cachetools, types-PyYAML, types-requests, types-setuptools, types-torch]
     stages: [pre-commit] # Don't run in CI
   - id: ty-check-ci
     name: ty check all files
