@@ -331,6 +331,7 @@ def flashinfer_trtllm_fp4_moe(
 
     return out
 
+import flashinfer
 
 def flashinfer_trtllm_fp4_routed_moe(
         layer: torch.nn.Module,
@@ -355,7 +356,6 @@ def flashinfer_trtllm_fp4_routed_moe(
     Returns:
         Output tensor from the MoE layer
     """
-    import flashinfer
 
     # Pack top k ids and expert weights into a single int32 tensor, as
     # required by TRT-LLM

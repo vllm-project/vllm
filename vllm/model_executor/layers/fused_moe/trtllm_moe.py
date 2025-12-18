@@ -92,7 +92,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if x_scale is not None:
             x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x_quant.shape[:-1], -1)
 
-        # NOTE(elvircrn) Make sure that the function returning this already does this
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16
         ).view(torch.int16)
