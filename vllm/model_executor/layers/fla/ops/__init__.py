@@ -7,10 +7,9 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 from .chunk import chunk_gated_delta_rule
+from .fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from .fused_recurrent import fused_recurrent_gated_delta_rule
 from .layernorm_guard import RMSNormGated
-from .layernorm_guard import RMSNormGated
-from .fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 
 __all__ = [
     "RMSNormGated",
