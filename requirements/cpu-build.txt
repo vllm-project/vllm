@@ -1,7 +1,7 @@
 cmake>=3.26.1
 ninja
 packaging>=24.2
-setuptools>=77.0.3,<81.0.0
+setuptools==77.0.3 # this version can reuse CMake build dir
 setuptools-scm>=8
 torch==2.9.1+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
 torch==2.9.1; platform_system == "Darwin" or platform_machine == "ppc64le" or platform_machine == "aarch64"
