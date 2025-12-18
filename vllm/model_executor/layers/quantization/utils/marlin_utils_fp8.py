@@ -151,11 +151,12 @@ def prepare_fp8_layer_for_marlin(
             # (1, 1) =>(repeat)=> (1, size_n)
             scales = scales.view(1, 1).repeat_interleave(part_size_n, 1)
         elif scales.nelement() == len(logical_widths):
-            # tensor-wise quantization with logical_widths -> 
+            # tensor-wise quantization with logical_widths ->
             #    channel-wise quantization
             assert sum(logical_widths) == part_size_n, (
                 f"Sum of logical_widths ({sum(logical_widths)}) must be equal "
-                f"to part_size_n ({part_size_n})")
+                f"to part_size_n ({part_size_n})"
+            )
             scales = scales.view(1, -1)
             scales = scales.repeat_interleave(torch.tensor(logical_widths), 1)
         elif scales.nelement() > 1 and scales.nelement() != part_size_n:
