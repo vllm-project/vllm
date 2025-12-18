@@ -955,12 +955,14 @@ def _valid_cutlass_block_scaled_grouped_gemm(
 
 
 # TODO(bnell): would be nice combine/integrate with regular cutlass_fp8.
-def run_cutlass_block_scaled_fused_experts(
+def run_cutlass_moe_block_scaled_fp8(
     a: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    workspace13: torch.Tensor,
+    workspace2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
 ) -> torch.Tensor:
@@ -1017,11 +1019,12 @@ def run_cutlass_block_scaled_fused_experts(
     rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
     rep_a1_scales = a1_scale[a_map]
 
-    c1 = torch.empty((m * topk, n * 2), dtype=out_dtype, device=device)
-    c2 = torch.empty((m * topk, k), dtype=out_dtype, device=device)
+    mm1_out = _resize_cache(workspace13, (m * topk, n * 2))
+    act_out = _resize_cache(workspace2, (m * topk, n))
+    mm2_out = _resize_cache(workspace2, (m * topk, k))
 
     ops.cutlass_blockwise_scaled_grouped_mm(
-        c1,
+        mm1_out,
         rep_a_q,
         w1_q,
         rep_a1_scales,
@@ -1030,25 +1033,24 @@ def run_cutlass_block_scaled_fused_experts(
         expert_offsets[:-1],
     )
 
-    intermediate = torch.empty((m * topk, n), dtype=out_dtype, device=device)
-    torch.ops._C.silu_and_mul(intermediate, c1)
+    torch.ops._C.silu_and_mul(act_out, mm1_out)
 
-    intermediate_q, a2_scale = _fp8_quantize(
-        intermediate, A_scale=None, per_act_token=False, block_shape=[128, 128]
+    a2q, a2q_scale = _fp8_quantize(
+        act_out, A_scale=None, per_act_token=False, block_shape=[128, 128]
     )
 
     ops.cutlass_blockwise_scaled_grouped_mm(
-        c2,
-        intermediate_q,
+        mm2_out,
+        a2q,
         w2_q,
-        a2_scale,
+        a2q_scale,
         w2_scale,
         problem_sizes2,
         expert_offsets[:-1],
     )
 
     return (
-        c2[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)
+        mm2_out[c_map].view(m, topk, k) * topk_weights.view(m, topk, 1).to(out_dtype)
     ).sum(dim=1)
 
 
