@@ -809,10 +809,6 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
-    if is_mm_prefix:
-        # Multimodal bidirectional attention needs a larger tile size
-        return 64
-
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
