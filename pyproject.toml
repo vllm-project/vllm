@@ -109,12 +109,8 @@ markers = [
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 
-[tool.ty.src]
-root = "./vllm"
-respect-ignore-files = true
-
 [tool.ty.environment]
-python = "./.venv"
+root = ["./"]
 
 [tool.typos.files]
 # these files may be written in non english words
