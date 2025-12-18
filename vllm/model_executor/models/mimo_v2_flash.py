@@ -9,7 +9,12 @@ from torch import nn
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    str_dtype_to_torch_dtype
+)
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -142,14 +147,8 @@ class MiMoV2MoE(nn.Module):
         )
 
         dtype = getattr(config, "moe_router_dtype", "float32")
-        if dtype == "auto":
-            self.gate_dtype = None
-        elif dtype == "float" or dtype == "float32":
-            self.gate_dtype = torch.float32
-        elif dtype == "bfloat16":
-            self.gate_dtype = torch.bfloat16
-        elif dtype == "half" or dtype == "float16":
-            self.gate_dtype = torch.float16
+        self.gate_dtype = str_dtype_to_torch_dtype(dtype)
+
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.n_routed_experts,
