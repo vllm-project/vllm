@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import weakref
 
 import pytest
@@ -19,9 +18,11 @@ prompts = ["The chef prepared a delicious meal."]
 
 @pytest.fixture(scope="module")
 def llm():
-    # Set ROCm-specific environment variables before LLM initialization
+    # ROCm: Use FLEX_ATTENTION backend as it's the only attention backend
+    # that supports encoder-only models on ROCm.
+    attention_config = None
     if current_platform.is_rocm():
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+        attention_config = {"backend": "FLEX_ATTENTION"}
 
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
@@ -32,6 +33,7 @@ def llm():
         gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
+        attention_config=attention_config,
     )
 
     yield weakref.proxy(llm)

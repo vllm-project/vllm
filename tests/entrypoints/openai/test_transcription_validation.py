@@ -7,6 +7,7 @@ import json
 import pytest
 
 from ...utils import RemoteOpenAIServer
+from .conftest import add_attention_backend
 
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -20,11 +21,13 @@ MISTRAL_FORMAT_ARGS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", ["mistralai/Voxtral-Mini-3B-2507"])
-async def test_basic_audio(mary_had_lamb, model_name):
+async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
     server_args = ["--enforce-eager"]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
@@ -44,7 +47,7 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio_with_lora(mary_had_lamb):
+async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
     """Ensure STT (transcribe) requests can pass LoRA through to generate."""
     # ROCm SPECIFIC CONFIGURATION:
     # To ensure the test passes on ROCm, we modify the max model length to 512.
@@ -66,6 +69,8 @@ async def test_basic_audio_with_lora(mary_had_lamb):
         "1",
     ]
 
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
@@ -84,11 +89,13 @@ async def test_basic_audio_with_lora(mary_had_lamb):
 
 
 @pytest.mark.asyncio
-async def test_basic_audio_gemma(foscolo):
+async def test_basic_audio_gemma(foscolo, rocm_aiter_fa_attention):
     # Gemma accuracy on some of the audio samples we use is particularly bad,
     # hence we use a different one here. WER is evaluated separately.
     model_name = "google/gemma-3n-E2B-it"
     server_args = ["--enforce-eager"]
+
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
         model_name, server_args, max_wait_seconds=480

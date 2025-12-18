@@ -40,15 +40,10 @@ def server(model: dict[str, Any]):
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
 
     # ROCm: Use Flex Attention to support encoder-only self-attention.
-    env_overrides = {}
     if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
-        }
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
-    with RemoteOpenAIServer(
-        model["name"], args, env_dict=env_overrides
-    ) as remote_server:
+    with RemoteOpenAIServer(model["name"], args) as remote_server:
         yield remote_server
 
 

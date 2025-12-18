@@ -47,13 +47,10 @@ def server(request: pytest.FixtureRequest):
     ]
 
     # ROCm: Use FLEX_ATTENTION backend
-    env_overrides = {}
     if current_platform.is_rocm():
-        env_overrides = {
-            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION",
-        }
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
