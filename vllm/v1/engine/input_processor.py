@@ -24,7 +24,10 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
-from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
+from vllm.v1.structured_output.backend_guidance import (
+    has_guidance_unsupported_json_features,
+    validate_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
 )
@@ -340,8 +343,22 @@ class InputProcessor:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
-                if isinstance(self.tokenizer, MistralTokenizer):
+
+                # Check if schema has features unsupported by guidance
+                so_params = params.structured_outputs
+                skip_guidance = False
+                if so_params.json:
+                    if isinstance(so_params.json, str):
+                        import json
+
+                        schema = json.loads(so_params.json)
+                    else:
+                        schema = so_params.json
+                    skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                if isinstance(self.tokenizer, MistralTokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
+                    # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(params)
                     params.structured_outputs._backend = "outlines"
                 else:
