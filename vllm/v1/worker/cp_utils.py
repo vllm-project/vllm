@@ -26,13 +26,16 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
                     f"supported in {layer_impl.__class__.__name__}."
                 )
-            if dcp_size > 1:
+            if dcp_size > 1 and not layer_impl.need_to_return_lse_for_decode:
                 raise ValueError(
-                    "Decode Context Parallelism (DCP) requires the attention backend to "
-                    "return softmax LSE values during decode. "
-                    f"The current attention backend ({attention_impl.__class__.__name__}) "
-                    "does not support this.\n\n"
-                    "To fix this, try using a different attention backend, for example:\n"
+                    "Decode Context Parallelism (DCP) requires the attention backend "
+                    "to return softmax LSE values during decode. "
+                    "The current attention backend "
+                    f"({layer_impl.__class__.__name__}) "
+                    "does not support this."
+                    "\n\n"
+                    "To fix this, try using a different attention backend, "
+                    "for example:\n"
                     "  export VLLM_ATTENTION_BACKEND=FLASH_ATTENTION\n"
                     "or disable DCP."
                 )
