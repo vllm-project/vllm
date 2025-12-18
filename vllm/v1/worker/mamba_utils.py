@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 import itertools
-from typing import Any, Callable
+from typing import Any
 
 import torch
 import triton
 import triton.language as tl
 
 from vllm.config import CacheConfig
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaCopySpec,
+)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -66,64 +67,9 @@ def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSp
     return mamba_group_ids, mamba_specs[0]
 
 
-@dataclass
-class MambaCopySpec(ABC):
-
-    @staticmethod
-    @abstractmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        """
-        Return the offset of the source block idx which needs to be copied.
-        """
-        pass
-
-    @staticmethod
-    @abstractmethod 
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        """
-        Return the offset of the data in the source block which needs to be copied.
-        """
-        pass
-
-    @staticmethod
-    @abstractmethod 
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        """
-        Return the number of elements to be copied.
-        """
-        pass
-
-class MambaFullCopySpec(MambaCopySpec):
-
-    @staticmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        return accept_token_bias
-
-    @staticmethod
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return 0
-    
-    @staticmethod
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return state.numel()
-
-class MambaConvCopySpec(MambaCopySpec):
-
-    @staticmethod
-    def block_idx_offset_func(accept_token_bias: int) -> int:
-        return accept_token_bias
-    
-    @staticmethod
-    def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return accept_token_bias * state.stride(0)
-    
-    @staticmethod
-    def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
-        return state.numel() - accept_token_bias * state.stride(0)
-
-
-def mamba_copy_block_for_qwen_next(
+def mamba_copy_block(
     kv_cache_config: KVCacheConfig,
+    mamba_spec: MambaSpec,
     mamba_group_ids: list[int],
     src_block_idx: int,
     dest_block_idx: int,
@@ -137,6 +83,7 @@ def mamba_copy_block_for_qwen_next(
     src_state_list = []
     dest_state_list = []
     num_elements_list = []
+    copy_specs: tuple[type[MambaCopySpec], ...] = mamba_spec.copy_specs
     for mamba_group_id in mamba_group_ids:
         block_ids = req_state.block_ids[mamba_group_id]
         dest_block_id = block_ids[dest_block_idx]
@@ -144,7 +91,6 @@ def mamba_copy_block_for_qwen_next(
         for layer_name in layer_names:
             attention = forward_context[layer_name]
             kv_caches: list[list[torch.Tensor]] = attention.kv_cache[0]
-            copy_specs: list[type[MambaCopySpec]] = [MambaConvCopySpec, MambaFullCopySpec]
             for state, copy_spec in zip(kv_caches, copy_specs):
                 src_block_id = block_ids[src_block_idx + copy_spec.block_idx_offset_func(accept_token_bias)]
                 data_offset = copy_spec.data_offset_func(state[0], accept_token_bias)
@@ -205,8 +151,9 @@ def preprocess_mamba(
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            mamba_copy_block_for_qwen_next(
+            mamba_copy_block(
                 kv_cache_config,
+                mamba_spec,
                 mamba_group_ids,
                 prev_state_idx,
                 curr_state_idx,
@@ -253,8 +200,9 @@ def postprocess_mamba(
             accept_token_bias = aligned_new_computed_tokens - num_tokens_running_state
             src_block_idx = mamba_state_idx[req_id]
             dest_block_idx = aligned_new_computed_tokens // mamba_spec.block_size - 1
-            mamba_copy_block_for_qwen_next(
+            mamba_copy_block(
                 kv_cache_config,
+                mamba_spec,
                 mamba_group_ids,
                 src_block_idx,
                 dest_block_idx,
