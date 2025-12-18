@@ -256,7 +256,7 @@ def triton_kernel_fused_oss_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     activation: str = "silu",
-    quant_config: FusedMoEQuantConfig | None = None,
+    quant_config: FusedMoEQuantConfig = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,

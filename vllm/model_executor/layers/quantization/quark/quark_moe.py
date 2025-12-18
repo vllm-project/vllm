@@ -804,6 +804,20 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
         torch.cuda.empty_cache()
 
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        w1_scale = self.w13_precision_config
+        w2_scale = self.w2_precision_config
+
+        # TODO: how to set scale?
+        return mxfp4_w4a4_moe_quant_config(
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -821,15 +835,6 @@ class QuarkW4MXFp4MoEMethod(QuarkW4MXFp4MoEMethodBase):
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
-            use_grouped_topk=layer.use_grouped_topk,
-            top_k=layer.top_k,
-            renormalize=layer.renormalize,
-            topk_group=layer.topk_group,
-            num_expert_group=layer.num_expert_group,
-            custom_routing_function=layer.custom_routing_function,
-            scoring_func=layer.scoring_func,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
         )
 
         if not self.emulate:
