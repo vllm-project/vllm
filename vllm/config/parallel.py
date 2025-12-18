@@ -36,6 +36,14 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+All2AllBackend = Literal[
+    "naive",
+    "pplx",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "allgather_reducescatter",
+    "flashinfer_all2allv",
+]
 
 
 @config
@@ -126,17 +134,7 @@ class ParallelConfig:
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
       for grouped expert models with no redundant experts."""
-    all2all_backend: (
-        Literal[
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ]
-        | None
-    ) = None
+    all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. If not set, uses
     the value from VLLM_ALL2ALL_BACKEND environment variable. Available options:
     - "naive": Naive all2all implementation using broadcasts
@@ -495,22 +493,17 @@ class ParallelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
-        # Explicitly include backend affecting factor
-        # Use self.all2all_backend (which includes CLI value or env fallback)
-        # but keep the key name for compatibility
-        factors["VLLM_ALL2ALL_BACKEND"] = str(self.all2all_backend)
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Set all2all_backend from env var if not specified, with deprecation warning
-        if self.all2all_backend is None:
+        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
+            logger.warning_once(
+                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
+                "will be removed in v0.15.0. Please use the "
+                "--all2all-backend command-line argument instead."
+            )
             self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-            if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-                logger.warning_once(
-                    "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                    "will be removed in v0.14.0. Please use the "
-                    "--all2all-backend command-line argument instead."
-                )
 
         # Continue with the rest of the initialization
         self.world_size = (
