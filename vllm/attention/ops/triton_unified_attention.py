@@ -800,7 +800,6 @@ def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
-    is_mm_prefix: bool,
     is_prefill: bool,
 ) -> int:
     """Select tile size with Gemma3-specific optimization.
@@ -809,10 +808,6 @@ def _get_tile_size(
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
     """
-    if is_mm_prefix:
-        # Multimodal bidirectional attention needs a larger tile size
-        return 64
-
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
@@ -903,14 +898,12 @@ def unified_attention(
         head_size,
         sliding_window_val,
         q.element_size(),
-        is_mm_prefix=use_mm_prefix,
         is_prefill=True,
     )
     TILE_SIZE_DECODE = _get_tile_size(
         head_size,
         sliding_window_val,
         q.element_size(),
-        is_mm_prefix=use_mm_prefix,
         is_prefill=False,
     )
 
