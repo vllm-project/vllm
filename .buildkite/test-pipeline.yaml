@@ -1329,6 +1329,7 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 - label: LM Eval Large Models (H200) # optional
+  timeout_in_minutes: 60
   gpu: h200
   optional: true
   num_gpus: 8
