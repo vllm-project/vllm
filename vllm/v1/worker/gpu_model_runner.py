@@ -163,6 +163,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.workspace import lock_workspace
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import TensorMemoryPool
 
 from .utils import (
     AttentionGroup,
@@ -604,6 +605,10 @@ class GPUModelRunner(
             device="cpu",
             pin_memory=self.pin_memory,
         )
+
+        if has_ec_transfer():
+            self.ec_main_cache = TensorMemoryPool()
+            get_ec_transfer().register_encoder_cache(self.ec_main_cache)
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
@@ -2187,8 +2192,10 @@ class GPUModelRunner(
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
+            addr = self.ec_main_cache.store_tensor(output)
+            pooled_tensor = self.ec_main_cache.load_tensor(addr)
             self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                output,
+                pooled_tensor,
                 is_embed=pos_info.is_embed,
             )
             logger.debug("Finish execute for mm hash %s", mm_hash)

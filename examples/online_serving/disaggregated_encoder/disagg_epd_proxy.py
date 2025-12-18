@@ -77,18 +77,22 @@ async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
-) -> None:
+) -> dict[str, dict]:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
+    4. Collect and aggregate ec_transfer_params by mm_hash.
+
+    Returns:
+        dict mapping mm_hash to ec_transfer_params dict
     """
     logger.info("[%s] Processing multimodal items...", req_id)
 
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
-        return  # nothing to do
+        return {}  # nothing to do
 
     logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
 
@@ -122,6 +126,9 @@ async def fanout_encoder_primer(
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
+    # Aggregate ec_transfer_params by mm_hash
+    aggregated_ec_transfer_params: dict[str, dict] = {}
+
     # Fail fast if any sub-request failed
     for idx, r in enumerate(results):
         if isinstance(r, Exception):
@@ -152,10 +159,54 @@ async def fanout_encoder_primer(
                 detail=f"Encoder request failed: {detail}",
             )
 
+        # Extract ec_transfer_params from encoder response
+        try:
+            response_json = await r.json()
+            encoder_ec_transfer_params = response_json.get("ec_transfer_params")
+            if encoder_ec_transfer_params:
+                # encoder_ec_transfer_params is a dict keyed by mm_hash
+                # Format: {mm_hash: {do_remote_encode, num_encoder_tokens, remote_engine_id, ...}}
+                for mm_hash, mm_hash_params in encoder_ec_transfer_params.items():
+                    # Store params for this mm_hash
+                    aggregated_ec_transfer_params[mm_hash] = {
+                        "do_remote_encode": mm_hash_params.get("do_remote_encode", True),
+                        "num_encoder_tokens": mm_hash_params.get("num_encoder_tokens"),
+                        "mm_base_addr": mm_hash_params.get("mm_base_addr"),
+                        "remote_host": mm_hash_params.get("remote_host"),
+                        "remote_port": mm_hash_params.get("remote_port"),
+                    }
+                    logger.debug(
+                        "[%s] Collected ec_transfer_params for mm_hash %s from encoder #%d",
+                        req_id,
+                        mm_hash,
+                        idx,
+                    )
+        except Exception as e:
+            logger.warning(
+                "[%s] Failed to extract ec_transfer_params from encoder response #%d: %s",
+                req_id,
+                idx,
+                str(e),
+            )
+
     logger.info(
-        "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
+        "[%s] All %d encoder requests completed successfully, collected %d mm_hashes",
+        req_id,
+        len(mm_items),
+        len(aggregated_ec_transfer_params),
     )
 
+    # Add aggregated ec_transfer_params to request data for prefill
+    req_data = orig_request
+    if aggregated_ec_transfer_params:
+        req_data["ec_transfer_params"] = aggregated_ec_transfer_params
+        logger.info(
+            "[%s] Added aggregated_ec_transfer_params for %d mm_hashes to prefill request",
+            req_id,
+            len(aggregated_ec_transfer_params),
+        )
+
+    return req_data
 
 async def maybe_prefill(
     req_data: dict,
@@ -320,7 +371,7 @@ async def forward_non_stream(
 ) -> dict:
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        req_data = await fanout_encoder_primer(req_data, e_urls, req_id)
 
         # Step 2: Process through Prefill instance
         req_data = await maybe_prefill(req_data, p_url, req_id)
@@ -328,6 +379,9 @@ async def forward_non_stream(
         # Step 3: Process through Decode instance
         logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
         headers = {"x-request-id": req_id}
+
+        # logger.debug(f"hero: make non stream tokens become 3 only")
+        # req_data["max_tokens"] = 3
 
         # Non-streaming response
         async with decode_session.post(
