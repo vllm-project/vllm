@@ -34,7 +34,7 @@ def detect_nvfp4_moe_support(
 ) -> NvFp4Support:
     """Detect platform support for NV-FP4 fused-MoE path"""
 
-    # Force Marlin if requested
+    # Force Marlin if requested in the case of NVFp4A16
     if use_marlin:
         if is_fp4_marlin_supported():
             _logger.info_once("Using Marlin FP4 MoE kernel as requested.")
