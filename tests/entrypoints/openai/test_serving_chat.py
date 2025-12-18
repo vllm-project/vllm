@@ -19,9 +19,9 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
+from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from ...utils import RemoteOpenAIServer
@@ -76,15 +76,10 @@ def default_server_args(with_tool_parser: bool):
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(
-    monkeypatch_module: pytest.MonkeyPatch, default_server_args: list[str]
-):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-        with RemoteOpenAIServer(
-            GPT_OSS_MODEL_NAME, default_server_args
-        ) as remote_server:
-            yield remote_server
+def gptoss_server(default_server_args: list[str]):
+    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -877,7 +872,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -905,7 +900,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
             [
@@ -927,7 +922,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -971,7 +966,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1008,7 +1003,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1052,7 +1047,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1089,7 +1084,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1133,7 +1128,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _, _ = serving_chat._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat._make_request_with_harmony(req_2)
         verify_harmony_messages(
             input_messages_2,
             [
@@ -1183,7 +1178,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the third turn's input
         req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_3, _, _ = serving_chat._make_request_with_harmony(req_3)
+        input_messages_3, _ = serving_chat._make_request_with_harmony(req_3)
         verify_harmony_messages(
             input_messages_3,
             [
@@ -1246,7 +1241,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the fourth turn's input
         req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_4, _, _ = serving_chat._make_request_with_harmony(req_4)
+        input_messages_4, _ = serving_chat._make_request_with_harmony(req_4)
         verify_harmony_messages(
             input_messages_4,
             [
@@ -1295,7 +1290,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1327,7 +1322,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1357,7 +1352,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
