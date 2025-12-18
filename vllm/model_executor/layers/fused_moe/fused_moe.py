@@ -1696,7 +1696,6 @@ def fused_experts(
         and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
     ):
         assert quant_config is not None
-        assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
             hidden_states=hidden_states,
             w1=w1,
