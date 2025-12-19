@@ -51,6 +51,9 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
     UsageInfo,
 )
+from vllm.entrypoints.openai.serving_chat_stream_harmony import (
+    extract_harmony_streaming_delta,
+)
 from vllm.entrypoints.openai.serving_engine import (
     GenerationError,
     OpenAIServing,
@@ -837,64 +840,17 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids = as_list(output.token_ids)
 
                     if self.use_harmony:
-                        if cur_channel == "final":
-                            delta_message = DeltaMessage(content=delta_text)
-                        elif cur_channel == "analysis":
-                            if request.include_reasoning:
-                                delta_message = DeltaMessage(reasoning=delta_text)
-                            else:
-                                delta_message = None
-                        elif (
-                            cur_channel == "commentary"
-                            and cur_recipient
-                            and cur_recipient.startswith("functions.")
-                        ):
-                            # Count completed tool calls to determine index
-                            base_index = 0
-                            for msg in harmony_parser.messages:
-                                if (
-                                    msg.channel == "commentary"
-                                    and msg.recipient
-                                    and msg.recipient.startswith("functions.")
-                                ):
-                                    base_index += 1
-
-                            if prev_recipient != cur_recipient:
-                                tool_name = cur_recipient.split("functions.", 1)[1]
-                                delta_message = DeltaMessage(
-                                    tool_calls=[
-                                        DeltaToolCall(
-                                            id=make_tool_call_id(),
-                                            type="function",
-                                            function=DeltaFunctionCall(
-                                                name=tool_name,
-                                                arguments="",
-                                            ),
-                                            index=base_index,
-                                        )
-                                    ]
-                                )
-                            elif delta_text:
-                                delta_message = DeltaMessage(
-                                    tool_calls=[
-                                        DeltaToolCall(
-                                            index=base_index,
-                                            function=DeltaFunctionCall(
-                                                arguments=delta_text
-                                            ),
-                                        )
-                                    ]
-                                )
-                            else:
-                                delta_message = None
-
-                            if delta_message is not None:
-                                harmony_tools_streamed[i] = True
-                        elif cur_channel == "commentary":
-                            # Tool call preambles meant to be shown to the user
-                            delta_message = DeltaMessage(content=delta_text)
-                        else:
-                            delta_message = None
+                        delta_message, tools_streamed_flag = (
+                            extract_harmony_streaming_delta(
+                                harmony_parser=harmony_parser,
+                                cur_channel=cur_channel,
+                                cur_recipient=cur_recipient,
+                                prev_recipient=prev_recipient,
+                                delta_text=delta_text,
+                                include_reasoning=request.include_reasoning,
+                            )
+                        )
+                        harmony_tools_streamed[i] |= tools_streamed_flag
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         if (
