@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import glob
+import importlib
 import json
 import os
 import platform
@@ -487,10 +489,18 @@ class CpuPlatform(Platform):
     @classmethod
     def import_kernels(cls) -> None:
         """Import any platform-specific C kernels."""
-        # FIXME: dispatch on available instruction set
+        import torch
+
+        if torch.cpu._is_avx512_supported():  # noqa: SIM108
+            module = "vllm._C_avx512"
+        else:
+            # FIXME: dispatch on other instructions sets
+            module = "vllm._C"
+
         try:
-            import vllm._C  # noqa: F401
+            importlib.import_module(module)
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C: %r", e)
+            logger.warning("Failed to import %s: %r", module, e)
+
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
