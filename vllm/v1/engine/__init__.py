@@ -16,6 +16,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -137,6 +138,9 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    # Per-step spec decoding stats.
+    spec_decoding_stats: SpecDecodingStats | None = None
 
     @property
     def finished(self) -> bool:

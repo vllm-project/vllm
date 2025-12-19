@@ -29,6 +29,7 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 
 class RequestOutputCollector:
@@ -204,6 +205,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        spec_decoding_stats: SpecDecodingStats | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -253,7 +255,7 @@ class RequestState:
                 return None
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            request_id, outputs, finished, kv_transfer_params, spec_decoding_stats
         )
 
     def _new_request_output(
@@ -262,6 +264,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        spec_decoding_stats: SpecDecodingStats | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -298,6 +301,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            spec_decoding_stats=spec_decoding_stats,
         )
 
     def _new_completion_output(
@@ -505,12 +509,14 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Create and handle RequestOutput objects.
+            spec_decoding_stats = engine_core_output.spec_decoding_stats
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                spec_decoding_stats,
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
