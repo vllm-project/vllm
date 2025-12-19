@@ -77,8 +77,6 @@ python3 -m twine --version
 
 # copy release wheels to local directory
 DIST_DIR=/tmp/vllm-release-dist
-# generate source tarball
-git archive --format=tar.gz --output="$DIST_DIR/vllm-${RELEASE_VERSION}.tar.gz" $BUILDKITE_COMMIT
 echo "Existing wheels on S3:"
 aws s3 ls "$S3_COMMIT_PREFIX"
 echo "Copying wheels to local directory"
@@ -86,7 +84,10 @@ mkdir -p $DIST_DIR
 # include only wheels for the release version, ignore all files with "dev" or "rc" in the name
 aws s3 cp --recursive --exclude "*" --include "vllm-${RELEASE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
+# generate source tarball
+git archive --format=tar.gz --output="$DIST_DIR/vllm-${RELEASE_VERSION}.tar.gz" $BUILDKITE_COMMIT
 ls -la $DIST_DIR
+
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
 PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${RELEASE_VERSION}*.whl" -not -name "*+*")
@@ -94,8 +95,8 @@ if [ -z "$PYPI_WHEEL_FILES" ]; then
   echo "No default variant wheels found, quitting..."
   exit 1
 fi
-python3 -m twine check "${PYPI_WHEEL_FILES[@]}"
-python3 -m twine --non-interactive --verbose upload "${PYPI_WHEEL_FILES[@]}"
+python3 -m twine check $PYPI_WHEEL_FILES
+python3 -m twine --non-interactive --verbose upload $PYPI_WHEEL_FILES
 echo "Wheels uploaded to PyPI"
 
 # create release on GitHub with the release version and all wheels
