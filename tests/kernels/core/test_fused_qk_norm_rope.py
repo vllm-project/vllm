@@ -53,7 +53,7 @@ def _apply_qk_norm_rope(
 @pytest.mark.parametrize("is_neox", IS_NEOX)
 @pytest.mark.parametrize("eps", EPS_VALUES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("partial_rope", PARTIAL_ROPE)
+@pytest.mark.parametrize("rotary_ratio", [1.0, 0.5, 0.25])
 @torch.inference_mode()
 def test_fused_qk_norm_rope_matches_reference(
     device: str,
@@ -61,7 +61,7 @@ def test_fused_qk_norm_rope_matches_reference(
     is_neox: bool,
     eps: float,
     seed: int,
-    partial_rope: bool,
+    rotary_ratio: float,
 ):
     torch.set_default_device(device)
     current_platform.seed_everything(seed)
@@ -79,7 +79,7 @@ def test_fused_qk_norm_rope_matches_reference(
     k_norm.weight.data.normal_(mean=1.0, std=0.1)
     q_weight = q_norm.weight.data
     k_weight = k_norm.weight.data
-    rotary_dim = head_dim // 2 if partial_rope else head_dim
+    rotary_dim = int(head_dim * rotary_ratio)
     rope = RotaryEmbedding(
         head_size=head_dim,
         rotary_dim=rotary_dim,
