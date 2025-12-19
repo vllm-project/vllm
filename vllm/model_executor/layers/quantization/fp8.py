@@ -297,7 +297,7 @@ class Fp8Config(QuantizationConfig):
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
             ):
-                return UnquantizedLinearMethod()
+                return UnquantizedFusedMoEMethod(layer.moe_config)
 
             return XPUFp8MoEMethod(fp8_config, layer)
         elif isinstance(layer, Attention):
