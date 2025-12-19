@@ -401,7 +401,6 @@ class Processor:
             "prompt_token_ids"] if decoder_inputs["type"] != "embeds" else None
         prompt_embeds = decoder_inputs["prompt_embeds"] if decoder_inputs[
             "type"] == "embeds" else None
-        enable_metrics = decoder_inputs.get("enable_metrics")
 
         sampling_params = None
         pooling_params = None
@@ -457,7 +456,6 @@ class Processor:
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             trace_headers=trace_headers,
-            enable_metrics=enable_metrics,
         )
 
     def _validate_model_inputs(self, encoder_inputs: Optional[SingletonInputs],

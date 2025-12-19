@@ -139,9 +139,6 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
-    # req_id -> metrics
-    capture_metrics_result: Optional[dict[str, dict[str, float]]] = None
-
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
