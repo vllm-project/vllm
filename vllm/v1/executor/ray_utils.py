@@ -320,18 +320,19 @@ def initialize_ray_cluster(
             the default Ray cluster address.
     """
 
-    def _gpu_mismatch_msg_builder(
+    def _devices_count_mismatch_msg_builder(
         *,
-        available_gpus: int,
+        available_devices: int,
         scope: str,
     ) -> tuple[str, tuple[Any, ...]]:
         """Build a message for GPU mismatch error."""
 
         fmt = (
-            "Required (%d) GPUs (TP=%d, PP=%d, PCP=%d) exceeds %s available GPUs (%d). "
+            "Required (%d) devices (TP=%d, PP=%d, PCP=%d) "
+            "exceeds %s available devices (%d). "
             "This may result in placement group allocation failures. "
             "Consider reducing world size (TP*PP*PCP) to %d or less, "
-            "or ensure Ray cluster has at least %d GPUs available."
+            "or ensure Ray cluster has at least %d devices available."
         )
 
         args = (
@@ -340,8 +341,8 @@ def initialize_ray_cluster(
             parallel_config.pipeline_parallel_size,
             parallel_config.prefill_context_parallel_size,
             scope,
-            available_gpus,
-            available_gpus,
+            available_devices,
+            available_devices,
             parallel_config.world_size,
         )
 
@@ -354,21 +355,24 @@ def initialize_ray_cluster(
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
 
-        cluster_gpus = int(ray.cluster_resources().get("GPU", 0))
-        if current_platform.is_cuda() and parallel_config.world_size > cluster_gpus:
-            fmt, args = _gpu_mismatch_msg_builder(
-                available_gpus=cluster_gpus, scope="ray cluster"
+        device_str = current_platform.ray_device_key
+        cluster_devices = int(ray.cluster_resources().get(device_str, 0))
+        if (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ) and parallel_config.world_size > cluster_devices:
+            fmt, args = _devices_count_mismatch_msg_builder(
+                available_devices=cluster_devices, scope="ray cluster"
             )
             logger.warning(fmt, *args)
 
     else:
-        if current_platform.is_cuda() and parallel_config.world_size > 1:
+        if current_platform.is_cuda_alike() and parallel_config.world_size > 1:
             from vllm.utils.torch_utils import cuda_device_count_stateless
 
-            local_available_gpus = cuda_device_count_stateless()
-            if parallel_config.world_size > local_available_gpus:
-                fmt, args = _gpu_mismatch_msg_builder(
-                    available_gpus=local_available_gpus, scope="local node"
+            local_available_devices = cuda_device_count_stateless()
+            if parallel_config.world_size > local_available_devices:
+                fmt, args = _devices_count_mismatch_msg_builder(
+                    available_devices=local_available_devices, scope="local node"
                 )
                 logger.warning(fmt, *args)
 
