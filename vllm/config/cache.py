@@ -243,8 +243,13 @@ class CacheConfig:
     def __post_init__(self) -> None:
         if self.enable_prefix_caching:
             if self.mamba_cache_mode == "none":
-                self.mamba_cache_mode = "last"
+                self.mamba_cache_mode = "align"
+                logger.warning(
+                    "mamba_cache_mode set to 'align' defaultly when prefix caching is enabled"
+                )
         else:
-            assert self.mamba_cache_mode == "none", (
-                "mamba_cache_mode must be 'none' when prefix caching is disabled"
-            )
+            if self.mamba_cache_mode != "none":
+                self.mamba_cache_mode = "none"
+                logger.warning(
+                    "mamba_cache_mode set to 'none' when prefix caching is disabled"
+                )
