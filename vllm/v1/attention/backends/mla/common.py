@@ -1435,7 +1435,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return_softmax_lse,
         fp8_attention: bool,
     ):
-        logger.debug_once("Running Cudnn prefill new tokens")
+        logger.debug_once("Running Cudnn prefill new tokens", scope="local")
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
         assert fp8_attention is False, "Cudnn prefill does not support fp8 attention"
