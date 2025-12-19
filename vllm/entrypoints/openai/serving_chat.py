@@ -299,7 +299,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 # For GPT-OSS.
-                conversation, engine_prompts = self._make_request_with_harmony(request)
+                should_include_tools = tool_dicts is not None
+                conversation, engine_prompts = self._make_request_with_harmony(
+                    request, should_include_tools
+                )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -1833,6 +1836,7 @@ class OpenAIServingChat(OpenAIServing):
     def _make_request_with_harmony(
         self,
         request: ChatCompletionRequest,
+        should_include_tools: bool = True,
     ):
         messages: list[OpenAIMessage] = []
 
@@ -1850,12 +1854,14 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_effort=request.reasoning_effort,
             browser_description=None,
             python_description=None,
-            with_custom_tools=request.tools is not None,
+            with_custom_tools=should_include_tools,
         )
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message(tools=request.tools)
+        dev_msg = get_developer_message(
+            tools=request.tools if should_include_tools else None
+        )
         messages.append(dev_msg)
 
         # Add user message.
