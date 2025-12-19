@@ -1294,7 +1294,8 @@ def vllm_topk_softmax(
     topk_indices: torch.Tensor,
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
-    renormalize: bool,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
     ops.topk_softmax(
         topk_weights,
@@ -1302,12 +1303,33 @@ def vllm_topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
+        e_score_correction_bias,
     )
 
     return topk_weights, topk_indices
 
 
-def dispatch_topk_func(
+def vllm_topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    ops.topk_sigmoid(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+    )
+
+    return topk_weights, topk_indices
+
+
+def dispatch_topk_softmax_func(
     use_rocm_aiter: bool = False,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     if use_rocm_aiter:
@@ -1315,11 +1337,20 @@ def dispatch_topk_func(
     return vllm_topk_softmax
 
 
+def dispatch_topk_sigmoid_func(
+    use_rocm_aiter: bool = False,
+) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if use_rocm_aiter:
+        return rocm_aiter_ops.topk_sigmoid
+    return vllm_topk_sigmoid
+
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    scoring_func: str = "softmax",
     indices_type: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
@@ -1339,12 +1370,26 @@ def fused_topk(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
-    topk_weights, topk_ids = topk_func(
-        topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
-    )
+    if scoring_func == "softmax":
+        topk_func = dispatch_topk_softmax_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
+        topk_weights, topk_ids = topk_func(
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        )
 
-    return topk_weights, topk_ids, token_expert_indices
+        return topk_weights, topk_ids, token_expert_indices
+    elif scoring_func == "sigmoid":
+        topk_func = dispatch_topk_sigmoid_func(
+            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
+        )
+        topk_weights, topk_ids = topk_func(
+            topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
+        )
+
+        return topk_weights, topk_ids, token_expert_indices
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
 
 def fused_topk_bias(
@@ -1353,7 +1398,52 @@ def fused_topk_bias(
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
+    scoring_func: str = "softmax",
+    indices_type: torch.dtype | None = None,
 ):
+    if not rocm_aiter_ops.is_fused_moe_enabled():
+        assert hidden_states.size(0) == gating_output.size(0), (
+            "Number of tokens mismatch"
+        )
+
+        M, _ = hidden_states.size()
+
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+
+        if scoring_func == "softmax":
+            topk_weights, topk_ids = vllm_topk_softmax(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                e_score_correction_bias,
+            )
+            return topk_weights, topk_ids
+        elif scoring_func == "sigmoid":
+            topk_weights, topk_ids = vllm_topk_sigmoid(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                e_score_correction_bias,
+            )
+            return topk_weights, topk_ids
+        else:
+            raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     n_routed_experts = gating_output.shape[-1]
     scores = gating_output.softmax(dim=-1)
     scores_for_choice = scores.view(
