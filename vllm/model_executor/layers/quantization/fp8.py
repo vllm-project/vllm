@@ -25,7 +25,6 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
-    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
@@ -1124,6 +1123,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             BatchedDeepGemmExperts,
             BatchedTritonExperts,
             TritonExperts,
+            TritonOrDeepGemmExperts,
         )
 
         assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
