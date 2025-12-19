@@ -1457,12 +1457,29 @@ class Molmo2ProcessorWrapper:
         return self.vocab[FRAME_END_TOKEN]
     
     @cached_property
+    def im_low_res_id(self) -> int:
+        return self.vocab[IMAGE_LOW_RES_TOKEN]
+    
+    @cached_property
     def image_placeholder_id(self) -> int:
         return self.vocab[IMAGE_PROMPT]
     
     @cached_property
     def video_placeholder_id(self) -> int:
         return self.vocab[VIDEO_PROMPT]
+    
+    @cached_property
+    def image_token_ids(self) -> list[int]:
+        return [
+            self.image_patch_id,
+            self.im_col_id,
+            self.im_start_id,
+            self.low_res_im_start_id,
+            self.frame_start_id,
+            self.im_end_id,
+            self.frame_end_id,
+            self.im_low_res_id,
+        ]
 
     def select_tiling(
         self,
@@ -2165,17 +2182,6 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
         video_use_col_tokens = processor.processor.video_use_col_tokens
         use_frame_special_tokens = processor.processor.use_frame_special_tokens
 
-        image_tokens = [
-            IMAGE_PATCH_TOKEN,
-            IM_COL_TOKEN,
-            IM_START_TOKEN,
-            LOW_RES_IMAGE_START_TOKEN,
-            FRAME_START_TOKEN,
-            IM_END_TOKEN,
-            FRAME_END_TOKEN,
-            IMAGE_LOW_RES_TOKEN,
-        ]
-
         def get_image_replacement_molmo2(item_idx: int) -> list[int]:
             images = mm_items.get_items("image", ImageProcessorItems)
             image = images.get(item_idx)
@@ -2208,9 +2214,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             )
             img_token_ids = extra_joint + joint
             
-            return PromptUpdateDetails.select_text(
+            return PromptUpdateDetails.select_token_ids(
                 img_token_ids,
-                "".join(image_tokens)
+                processor.image_token_ids,
             )
         
         def get_video_replacement_molmo2(item_idx: int) -> list[int]:
@@ -2241,9 +2247,9 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
                 joint = [start_id] + nrows * joint_row + [end_id]
                 img_token_ids += joint
             
-            return PromptUpdateDetails.select_text(
+            return PromptUpdateDetails.select_token_ids(
                 img_token_ids,
-                "".join(image_tokens)
+                processor.image_token_ids,
             )
 
         return [
