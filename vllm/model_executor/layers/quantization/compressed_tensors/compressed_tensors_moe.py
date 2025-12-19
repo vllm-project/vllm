@@ -235,6 +235,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
+        self.use_emulation = _nvfp4.use_emulation
         self.group_size = 16
         self.layer_name = layer_name
         self.marlin_input_dtype = (
@@ -249,6 +250,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif self.use_marlin:
             logger.info_once("Using Marlin for CompressedTensorsW4A4Nvfp4MoEMethod.")
+        elif self.use_emulation:
+            logger.info_once("Using emulation mode for CompressedTensorsW4A4Nvfp4MoEMethod.")
         else:
             logger.info_once("Using Cutlass for CompressedTensorsW4A4Nvfp4MoEMethod.")
 
@@ -402,6 +405,50 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
             return
+
+        if self.use_emulation:
+            E = layer.w13_weight_global_scale.size(0)
+
+            inv_gscale_w13 = (
+                1.0 / layer.w13_weight_global_scale[:, 0].float()
+            ).view(E, 1, 1).half()
+            layer.w13_weight_scale = torch.nn.Parameter(
+                layer.w13_weight_scale.half() * inv_gscale_w13,
+                requires_grad=False,
+            )
+
+            inv_gscale_w2 = (
+                1.0 / layer.w2_weight_global_scale.float()
+            ).view(E, 1, 1).half()
+            layer.w2_weight_scale = torch.nn.Parameter(
+                layer.w2_weight_scale.half() * inv_gscale_w2,
+                requires_grad=False,
+            )
+
+            delattr(layer, "w13_weight_global_scale")
+            delattr(layer, "w2_weight_global_scale")
+
+            w13_input_global_scale = layer.w13_input_global_scale.max(
+                dim=1
+            ).values.to(torch.float32)
+            layer.w13_input_scale_quant = torch.nn.Parameter(
+                w13_input_global_scale, requires_grad=False
+            )
+            layer.w2_input_scale_quant = torch.nn.Parameter(
+                layer.w2_input_global_scale.to(torch.float32), requires_grad=False
+            )
+
+            layer.g1_alphas = torch.nn.Parameter(
+                (1.0 / w13_input_global_scale) * layer.w13_weight_scale_2,
+                requires_grad=False,
+            )
+            layer.g2_alphas = torch.nn.Parameter(
+                ((1.0 / layer.w2_input_global_scale) * layer.w2_weight_scale_2).to(
+                    torch.float32
+                ),
+                requires_grad=False,
+            )
+            return
         # w13
         if (
             self.allow_flashinfer
@@ -535,6 +582,16 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
+
+        if self.use_emulation:
+            return nvfp4_moe_quant_config(
+                g1_alphas=None,
+                g2_alphas=None,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
 
         return nvfp4_moe_quant_config(
             g1_alphas=layer.g1_alphas,
