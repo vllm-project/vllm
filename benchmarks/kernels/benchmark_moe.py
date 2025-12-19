@@ -140,10 +140,13 @@ def benchmark_config(
 
         if use_fp8_w8a8:
             quant_dtype = torch.float8_e4m3fn
+            weight_dtype = None
         elif use_int8_w8a16:
-            quant_dtype = torch.int8
+            quant_dtype = None
+            weight_dtype = torch.int8
         else:
             quant_dtype = None
+            weight_dtype = None
 
         quant_config = FusedMoEQuantConfig.make(
             quant_dtype=quant_dtype,
@@ -152,6 +155,7 @@ def benchmark_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_quant_shape,
+            weight_dtype=weight_dtype,
         )
 
         with override_config(config):
