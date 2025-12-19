@@ -899,7 +899,7 @@ class CompilationConfig:
         self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(
-        self, all2all_backend: str | None = None, data_parallel_size: int | None = None
+        self, all2all_backend: str, data_parallel_size: int = 1
     ):
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
@@ -956,11 +956,9 @@ class CompilationConfig:
                 self.splitting_ops = []
 
         # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
-        backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
-        dp_size = data_parallel_size if data_parallel_size is not None else 1
         if (
-            backend == "deepep_high_throughput"
-            and dp_size > 1
+            all2all_backend == "deepep_high_throughput"
+            and data_parallel_size > 1
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
             # TODO: Piecewise Cuda graph might be enabled

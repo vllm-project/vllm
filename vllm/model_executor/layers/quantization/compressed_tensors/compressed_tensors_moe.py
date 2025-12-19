@@ -96,6 +96,7 @@ from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -716,6 +717,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             get_marlin_input_dtype(layer_name) if self.use_marlin else None
         )
 
+        self.allow_deep_gemm = (
+            self.block_quant
+            and envs.VLLM_MOE_USE_DEEP_GEMM
+            and is_deep_gemm_supported()
+            and list(self.weight_block_size) == get_mk_alignment_for_contiguous_layout()
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1231,6 +1239,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     if self.disable_expert_map
                     else layer.expert_map,  # ???
                     quant_config=self.moe_quant_config,
+                    allow_deep_gemm=self.allow_deep_gemm,
                 )
             else:
                 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -1272,6 +1281,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
+                allow_deep_gemm=self.allow_deep_gemm,
             )
 
     @property
