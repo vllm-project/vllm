@@ -13,7 +13,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from PIL import ImageOps
 from PIL.Image import Image
-from transformers import BatchFeature, ProcessorMixin, TensorType
+from transformers import (
+    BatchFeature,
+    PretrainedConfig,
+    ProcessorMixin,
+    TensorType,
+)
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 from transformers.video_utils import VideoInput, VideoMetadata
@@ -70,6 +75,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_down
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -95,14 +101,6 @@ logger = init_logger(__name__)
 
 # Special tokens. These should be present in any tokenizer we use
 # because the preprocessor relies on them.
-IMAGE_PATCH_TOKEN = "<im_patch>"  # Where to insert high-res tokens
-IMAGE_LOW_RES_TOKEN = "<im_low>"  # Where to insert low-res tokens
-IM_START_TOKEN = "<im_start>"
-LOW_RES_IMAGE_START_TOKEN = "<low_res_im_start>"
-FRAME_START_TOKEN = "<frame_start>"
-IM_END_TOKEN = "<im_end>"
-FRAME_END_TOKEN = "<frame_end>"
-IM_COL_TOKEN = "<im_col>"
 IMAGE_PROMPT = "<|image|>"
 VIDEO_PROMPT = "<|video|>"
 _MAX_VIDEO_FPS = 8
@@ -1190,10 +1188,6 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-def _lowest_multiple(x: int, k: int) -> int:
-    return (x // k) * k
-
-
 def get_patches_grid_size(
     *,
     image_h: int,
@@ -1204,8 +1198,8 @@ def get_patches_grid_size(
 ) -> tuple[int, int]:
     patch_h = image_h // patch_size
     patch_w = image_w // patch_size
-    h_pad = _lowest_multiple(patch_h + pool_h - 1, pool_h) - patch_h
-    w_pad = _lowest_multiple(patch_w + pool_w - 1, pool_w) - patch_w
+    h_pad = round_down(patch_h + pool_h - 1, pool_h) - patch_h
+    w_pad = round_down(patch_w + pool_w - 1, pool_w) - patch_w
     nrows = (patch_h + h_pad) // pool_h
     ncols = (patch_w + w_pad) // pool_w
 
@@ -1380,10 +1374,11 @@ class Molmo2ProcessorWrapper:
     Wraps :class:`Molmo2Processor` so that it can be called directly.
     """
 
-    def __init__(self, processor: ProcessorMixin):
+    def __init__(self, processor: ProcessorMixin, hf_config: PretrainedConfig):
         super().__init__()
 
         self.processor = processor
+        self.hf_config = hf_config
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -1473,35 +1468,35 @@ class Molmo2ProcessorWrapper:
 
     @cached_property
     def image_patch_id(self) -> int:
-        return self.vocab[IMAGE_PATCH_TOKEN]
+        return self.hf_config.image_patch_id
 
     @cached_property
     def im_col_id(self) -> int:
-        return self.vocab[IM_COL_TOKEN]
+        return self.hf_config.image_col_id
 
     @cached_property
     def im_start_id(self) -> int:
-        return self.vocab[IM_START_TOKEN]
+        return self.hf_config.image_start_token_id
 
     @cached_property
     def im_end_id(self) -> int:
-        return self.vocab[IM_END_TOKEN]
+        return self.hf_config.image_end_token_id
 
     @cached_property
     def low_res_im_start_id(self) -> int:
-        return self.vocab[LOW_RES_IMAGE_START_TOKEN]
+        return self.hf_config.low_res_image_start_token_id
 
     @cached_property
     def frame_start_id(self) -> int:
-        return self.vocab[FRAME_START_TOKEN]
+        return self.hf_config.frame_start_token_id
 
     @cached_property
     def frame_end_id(self) -> int:
-        return self.vocab[FRAME_END_TOKEN]
+        return self.hf_config.frame_end_token_id
 
     @cached_property
     def im_low_res_id(self) -> int:
-        return self.vocab[IMAGE_LOW_RES_TOKEN]
+        return self.hf_config.image_low_res_id
 
     @cached_property
     def image_placeholder_id(self) -> int:
@@ -1731,8 +1726,8 @@ def get_target_fps(
     max_frames: int,
     total_frames: int,
     frame_sample_mode: str,
-    candidate_target_fps: tuple[float],
-) -> float:
+    candidate_target_fps: list[float],
+) -> float | None:
     """
     Get the target fps that best spans the video and has the most frames sampled
     """
@@ -1783,7 +1778,8 @@ def get_frame_times_and_chosen_fps(
 class Molmo2ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Molmo2ProcessorWrapper:
         processor = self.ctx.get_hf_processor(**kwargs)
-        return Molmo2ProcessorWrapper(processor)
+        hf_config = self.ctx.get_hf_config()
+        return Molmo2ProcessorWrapper(processor, hf_config)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
