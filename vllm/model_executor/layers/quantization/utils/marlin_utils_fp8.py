@@ -22,7 +22,7 @@ logger = init_logger(__name__)
 
 
 def is_fp8_marlin_supported():
-    return current_platform.has_device_capability(80)
+    return current_platform.has_device_capability(75)
 
 
 def fp8_fused_exponent_bias_into_scales(scales):

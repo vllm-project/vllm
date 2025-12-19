@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 
 def is_fp4_marlin_supported():
-    return current_platform.has_device_capability(80)
+    return current_platform.has_device_capability(75)
 
 
 def nvfp4_marlin_process_scales(marlin_scales):
