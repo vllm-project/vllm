@@ -251,7 +251,7 @@ class MambaCopySpec(ABC):
         """
         pass
 
-class MambaFullCopySpec(MambaCopySpec):
+class MambaTemporalCopySpec(MambaCopySpec):
     @staticmethod
     def block_idx_offset_func(accept_token_bias: int) -> int:
         return accept_token_bias
@@ -271,22 +271,36 @@ class MambaConvCopySpec(MambaCopySpec):
     
     @staticmethod
     def data_offset_func(state: torch.Tensor, accept_token_bias: int) -> int:
+        # TODO: check contiguous!
         return accept_token_bias * state.stride(0)
     
     @staticmethod
     def num_elements_func(state: torch.Tensor, accept_token_bias: int) -> int:
         return state.numel() - accept_token_bias * state.stride(0)
 
+MambaFullCopySpec = MambaTemporalCopySpec
 
 class MambaCopySpecCalculator:
     @classmethod
     def linear_attention_copy_spec(cls):
-        return (MambaFullCopySpec,)
+        return (MambaTemporalCopySpec,)
     
     @classmethod
     def mamba1_state_copy_spec(cls):
-        return MambaConvCopySpec, MambaFullCopySpec
+        return MambaConvCopySpec, MambaTemporalCopySpec
+
+    @classmethod
+    def mamba2_state_copy_spec(cls):
+        return MambaConvCopySpec, MambaTemporalCopySpec
+
+    @classmethod
+    def short_conv_state_copy_spec(cls):
+        return (MambaConvCopySpec,)
 
     @classmethod
     def gated_delta_net_copy_spec(cls):
-        return MambaConvCopySpec, MambaFullCopySpec
+        return MambaConvCopySpec, MambaTemporalCopySpec
+    
+    @classmethod
+    def kda_state_copy_spec(cls):
+        return MambaConvCopySpec, MambaConvCopySpec, MambaConvCopySpec, MambaTemporalCopySpec

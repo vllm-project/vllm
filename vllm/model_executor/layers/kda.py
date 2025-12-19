@@ -31,7 +31,11 @@ from .linear import (
     RowParallelLinear,
 )
 from .mamba.abstract import MambaBase
-from .mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
+from .mamba.mamba_utils import (
+    MambaCopySpecCalculator, 
+    MambaStateDtypeCalculator, 
+    MambaStateShapeCalculator,
+)
 from .mamba.ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from .quantization.base_config import QuantizationConfig
 
@@ -99,6 +103,9 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size, self.num_heads, self.head_dim, conv_kernel_size=self.conv_size
         )
+
+    def get_copy_spec(self):
+        return MambaCopySpecCalculator.kda_state_copy_spec()
 
     def __init__(
         self,
