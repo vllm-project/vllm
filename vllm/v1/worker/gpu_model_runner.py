@@ -4708,6 +4708,10 @@ class GPUModelRunner(
             delattr(self, "kv_cache_config")
         self.cache_config.num_gpu_blocks = None
 
+        for layer in self.compilation_config.static_forward_context.values():
+            if hasattr(layer, "kv_cache"):
+                layer.kv_cache = []
+
         gc.collect()
         torch.cuda.empty_cache()
 
