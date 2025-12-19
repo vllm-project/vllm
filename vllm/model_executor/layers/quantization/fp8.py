@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
+    fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
@@ -1148,7 +1149,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
         if self.use_marlin:
-            return None
+            return fp8_w8a16_moe_quant_config(
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                block_shape=self.weight_block_size,
+            )
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=(
