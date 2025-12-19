@@ -1677,7 +1677,6 @@ def fused_experts(
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
-    use_fp8_w8a8 = quant_config.use_fp8_w8a8
 
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
