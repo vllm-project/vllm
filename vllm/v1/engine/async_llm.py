@@ -612,7 +612,6 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -643,7 +642,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs = {}
             _validate_truncation_size(
                 self.model_config.max_model_len,
-                truncate_prompt_tokens,
+                pooling_params.truncate_prompt_tokens,
                 tokenization_kwargs,
             )
 
