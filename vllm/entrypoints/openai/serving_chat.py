@@ -1846,11 +1846,25 @@ class OpenAIServingChat(OpenAIServing):
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
+        sys_msg_kwargs = {
+            "reasoning_effort": request.reasoning_effort,
+            "browser_description": None,
+            "python_description": None,
+            "with_custom_tools": request.tools is not None,
+            **(request.chat_template_kwargs or {}),
+        }
+        allowed_keys = {
+            "model_identity",
+            "reasoning_effort",
+            "start_date",
+            "browser_description",
+            "python_description",
+            "container_description",
+            "instructions",
+            "with_custom_tools",
+        }
         sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=request.tools is not None,
+            **{k: v for k, v in sys_msg_kwargs.items() if k in allowed_keys}
         )
         messages.append(sys_msg)
 
