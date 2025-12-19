@@ -35,6 +35,8 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     )
 endif()
 
+list(APPEND CXX_COMPILE_FLAGS
+    "-DVLLM_CPU_EXTENSION")
 
 if(NOT MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-fopenmp")
@@ -105,7 +107,7 @@ else()
     endif()
 endif()
 
-if (AVX2_FOUND)
+if (AVX2_FOUND) # FIXME: using the CXX_COMPILE_FLAGS_AVX2 list here
     list(APPEND CXX_COMPILE_FLAGS_AVX2 "-mavx2")
     message(WARNING "vLLM CPU backend using AVX2 ISA")
 
@@ -394,13 +396,13 @@ target_include_directories(
 )
 target_link_libraries(dnnl_ext dnnl torch)
 target_compile_options(dnnl_ext PRIVATE ${ONEDNN_CXX_COMPILE_FLAGS} -fPIC) # FIXME: this should handle AVX512 and others
-list(APPEND LIBS dnnl_ext)
+list(APPEND LIBS_AVX512 dnnl_ext)
 
 set(VLLM_EXT_AVX512_SRC
     "csrc/cpu/shm.cpp"
     "csrc/cpu/cpu_wna16.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
-    ${VLLM_EXT_AVX512_SRC}
+    ${VLLM_EXT_SRC}
 )
 
 # FIXME: enable these if required
@@ -414,7 +416,7 @@ if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
         "csrc/cpu/sgl-kernels/moe_fp8.cpp"
         ${VLLM_EXT_AVX512_SRC}
     )
-add_compile_definitions(-DCPU_CAPABILITY_AVX512)
+    add_compile_definitions(-DCPU_CAPABILITY_AVX512)
 endif()
 
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
@@ -435,7 +437,7 @@ define_extension_target(
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_AVX512_SRC}
-    LIBRARIES ${LIBS}
+    LIBRARIES ${LIBS_AVX512}
     COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
     USE_SABI 3
     WITH_SOABI
