@@ -1849,6 +1849,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
+
+def str_dtype_to_torch_dtype(type: str):
+    return _STR_DTYPE_TO_TORCH_DTYPE.get(type)
+
+
 # model_type -> reason
 _FLOAT16_NOT_SUPPORTED_MODELS = {
     "gemma2": "Numerical instability. Please use bfloat16 or float32 instead.",
