@@ -516,8 +516,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-        # TODO: check if we need both non_spec_state_indices_tensor
-        # and state_indices_tensor
+        # Block table used for automatic prefix caching
         state_indices_tensor = attn_metadata.state_indices_tensor
         block_idx_last_scheduled_token = attn_metadata.block_idx_last_scheduled_token
         block_idx_last_computed_token = attn_metadata.block_idx_last_computed_token
@@ -698,7 +697,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=conv_indices_decode,
+                # TODO: check if it suffices to pass in the decode states here rather
+                #   than all state. Previously this was
+                #   non_spec_state_indices_tensor[:m.num_actual_tokens]
+                conv_state_indices=state_indices_decode,
+                # TODO: check if we can use the full indices table, perhaps not
+                # conv_state_indices=conv_indices_decode,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
                 validate_data=True,
