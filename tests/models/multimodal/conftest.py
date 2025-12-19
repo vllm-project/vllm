@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pytest configuration for vLLM tests."""
+"""Pytest configuration for vLLM multimodal tests."""
 
 import warnings
 
@@ -9,16 +9,13 @@ import torch
 from vllm.platforms import current_platform
 
 
-def pytest_configure(config):
-    """Disable Flash/MemEfficient SDP on ROCm to avoid HF
-    Transformers accuracy issues.
-    """
+def pytest_collection_modifyitems(config, items):
+    """Configure ROCm-specific settings based on collected tests."""
     if not current_platform.is_rocm():
         return
 
     skip_patterns = ["test_granite_speech.py"]
     if any(pattern in str(arg) for arg in config.args for pattern in skip_patterns):
-        # Skip disabling SDP for Granite Speech tests on ROCm
         return
 
     # Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
