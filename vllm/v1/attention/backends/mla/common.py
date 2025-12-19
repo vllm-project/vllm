@@ -558,6 +558,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.dcp_rank = 0
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -986,6 +987,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
+
+                # After DCP distribution, the maximum number of tokens for any rank is
+                # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
+                # and I is cp_kv_cache_interleave_size.
+                # This eliminates GPU->CPU sync while minimizing workspace
+                # over-allocation.
+                num_partitions = self.dcp_world_size * self.cp_kv_cache_interleave_size
+                max_seq_len = (
+                    (max_seq_len + num_partitions - 1) // num_partitions
+                ) * self.cp_kv_cache_interleave_size
 
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
