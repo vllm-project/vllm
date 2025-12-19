@@ -4833,6 +4833,7 @@ class GPUModelRunner(
                     ),
                 )
 
+            counter_before_piecewise = compilation_counter.num_cudagraph_captured
             if piecewise_largest is not None:
                 _, piecewise_per_graph = profile_graph_mode(
                     largest_size=piecewise_largest,
@@ -4842,8 +4843,10 @@ class GPUModelRunner(
                     batch_sizes=self.cudagraph_batch_sizes,
                     measure_first_capture=False,
                 )
+            piecewise_graphs_captured = (
+                compilation_counter.num_cudagraph_captured - counter_before_piecewise
+            )
 
-        # Cleanup: restore pool, clear entries, cleanup KV cache
         set_cudagraph_capturing_enabled(False)
         if isinstance(self.model, CUDAGraphWrapper):
             self.model.concrete_cudagraph_entries.clear()
@@ -4855,7 +4858,13 @@ class GPUModelRunner(
                 self.model.cudagraph_wrapper.graph_pool = original_pool
         self._cleanup_profiling_kv_cache()
 
-        compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+        # Reset counter to exclude FULL graphs (will be recaptured in
+        # capture_model), but preserve piecewise counts since those graphs
+        # are reused. This is safe because piecewise graphs don't access
+        # the KV cache.
+        compilation_counter.num_cudagraph_captured = (
+            saved_num_cudagraph_captured + piecewise_graphs_captured
+        )
 
         graph_estimate = (
             full_per_graph * (full_count - 1) + piecewise_per_graph * piecewise_count
