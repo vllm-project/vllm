@@ -59,7 +59,6 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
 )
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
@@ -104,6 +103,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -1231,6 +1231,7 @@ class OpenAIServing:
         lora_request: LoRARequest | None,
         trace_headers: Mapping[str, str] | None,
         priority: int,
+        data_parallel_rank: int | None = None,
     ) -> tuple[EngineCoreRequest, dict[str, Any]]:
         """Use the Processor to process inputs for AsyncLLM."""
         tokenization_kwargs: dict[str, Any] = {}
@@ -1246,6 +1247,7 @@ class OpenAIServing:
             tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=priority,
+            data_parallel_rank=data_parallel_rank,
         )
         return engine_request, tokenization_kwargs
 

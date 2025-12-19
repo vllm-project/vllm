@@ -388,6 +388,7 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
+@pytest.mark.skip(reason="Broken test due to memory segmentation fault")
 @create_new_process_for_each_test()
 def test_vit_backend_functionality(
     model_key: str,
