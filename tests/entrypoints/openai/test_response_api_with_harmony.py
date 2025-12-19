@@ -996,7 +996,7 @@ async def test_chat_truncation_content_not_null(client: OpenAI, model_name: str)
         model=model_name,
         messages=[{"role": "user", "content": "What is the role of AI in medicine?"}],
         temperature=0.0,
-        max_tokens=150,
+        max_tokens=250,
     )
 
     choice = response.choices[0]
