@@ -280,7 +280,7 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            w, h, _ = image.shape
             return ImageSize(w, h)
 
         assert_never(image)

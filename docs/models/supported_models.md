@@ -23,8 +23,6 @@ Currently, the Transformers modeling backend works for the following:
 - Architectures: encoder-only, decoder-only, mixture-of-experts
 - Attention types: full attention and/or sliding attention
 
-_*Vision-language models currently accept only image inputs. Support for video inputs will be added in a future release._
-
 If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers modeling backend, it will be compatible with the following features of vLLM:
 
 - All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)

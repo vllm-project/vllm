@@ -1112,7 +1112,18 @@ class GPUModelRunner(
         assert mm_budget is not None
 
         dummy_modality = mm_budget.get_modality_with_max_tokens()
-        return self._get_mm_dummy_batch(dummy_modality, num_seqs)
+
+        # TBD:
+        # The mm_dummy_batch below is only retrieved when
+        # supports_multimodal_raw_input_only is True.
+        # Currently, only the transform modeling backend and terratorch have
+        # supports_multimodal_raw_input_only as True.
+        # When testing the transform modeling backend, it was found that
+        # if num_seqs (usually the default 256) is passed in here,
+        # an OOM error occurs.
+        # It needs to be confirmed what value should be passed in here,
+        # for now it is fixed to 1.
+        return self._get_mm_dummy_batch(dummy_modality, 1)
 
     def _get_cumsum_and_arange(
         self,
