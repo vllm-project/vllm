@@ -355,8 +355,14 @@ class OpenAIServingChat(OpenAIServing):
                         if isinstance(tokens, str):
                             import json
                             tokens = json.loads(tokens)
+                        # Handle dict with 'tokens' key containing token objects
+                        # e.g. {"tokens": [{"token": "123", ...}, ...]}
+                        if isinstance(tokens, dict) and "tokens" in tokens:
+                            tokens = [
+                                int(t["token"]) for t in tokens["tokens"]
+                            ]
                         sampling_params.enforce_sequence = (
-                            list(tokens) + [tokenizer.eos_token_id]
+                            [int(t) for t in tokens] + [tokenizer.eos_token_id]
                         )
                     elif request.enforced_str:
                         toks = tokenizer(
