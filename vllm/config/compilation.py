@@ -8,7 +8,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, TypeAdapter, field_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -17,7 +17,6 @@ from vllm.config.utils import (
     Range,
     config,
     get_hash_factors,
-    handle_deprecated,
     hash_factors,
 )
 from vllm.logger import init_logger
@@ -97,7 +96,7 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -126,27 +125,6 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
-
-    # Deprecated flags
-    enable_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_norm_quant and fuse_act_quant 
-    instead. Will be removed in v0.13.0 or v1.0.0, whichever is sooner.
-    """
-    enable_attn_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_attn_quant instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_noop: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use eliminate_noops instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_sequence_parallelism: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use enable_sp instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_async_tp: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_gemm_comms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
-    enable_fi_allreduce_fusion: bool = Field(default=None)
-    """Deprecated in: v0.12.0. Use fuse_allreduce_rms instead. 
-    Will be removed in v0.13.0 or v1.0.0, whichever is sooner."""
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -206,15 +184,7 @@ class PassConfig:
         Any future fields that don't affect compilation should be excluded.
         """
 
-        ignored_fields = [
-            "enable_fusion",
-            "enable_attn_fusion",
-            "enable_noop",
-            "enable_sequence_parallelism",
-            "enable_async_tp",
-            "enable_fi_allreduce_fusion",
-        ]
-        return hash_factors(get_hash_factors(self, ignored_factors=ignored_fields))
+        return hash_factors(get_hash_factors(self, set()))
 
     @field_validator(
         "fuse_norm_quant",
@@ -224,12 +194,6 @@ class PassConfig:
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
-        "enable_fusion",
-        "enable_attn_fusion",
-        "enable_noop",
-        "enable_sequence_parallelism",
-        "enable_async_tp",
-        "enable_fi_allreduce_fusion",
         mode="wrap",
     )
     @classmethod
@@ -241,49 +205,6 @@ class PassConfig:
 
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
-
-        # Map old flags to new flags and issue warnings
-        handle_deprecated(
-            self,
-            "enable_fusion",
-            ["fuse_norm_quant", "fuse_act_quant"],
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_attn_fusion",
-            "fuse_attn_quant",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_sequence_parallelism",
-            "enable_sp",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_async_tp",
-            "fuse_gemm_comms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_fi_allreduce_fusion",
-            "fuse_allreduce_rms",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
-
-        handle_deprecated(
-            self,
-            "enable_noop",
-            "eliminate_noops",
-            "v0.13.0 or v1.0.0, whichever is sooner",
-        )
 
         if not self.eliminate_noops:
             if self.fuse_norm_quant or self.fuse_act_quant:
@@ -330,7 +251,7 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -369,7 +290,7 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -516,14 +437,14 @@ class CompilationConfig:
 
     compile_ranges_split_points: list[int] | None = None
     """Split points that represent compile ranges for inductor.
-    The compile ranges are 
-    [1, split_points[0]], 
-    [split_points[0] + 1, split_points[1]], ..., 
+    The compile ranges are
+    [1, split_points[0]],
+    [split_points[0] + 1, split_points[1]], ...,
     [split_points[-1] + 1, max_num_batched_tokens].
     Compile sizes are also used single element ranges,
     the range is represented as [compile_sizes[i], compile_sizes[i]].
-    
-    If a range overlaps with the compile size, graph for compile size 
+
+    If a range overlaps with the compile size, graph for compile size
     will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
     graph for compile size 4 will be compiled and used instead of the graph
     for range [1, 8].
@@ -978,7 +899,7 @@ class CompilationConfig:
         self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(
-        self, all2all_backend: str | None = None, data_parallel_size: int | None = None
+        self, all2all_backend: str, data_parallel_size: int = 1
     ):
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
@@ -994,8 +915,6 @@ class CompilationConfig:
             "mode is CompilationMode.VLLM_COMPILE"
         )
 
-        added_default_splitting_ops = False
-
         if self.pass_config.fuse_attn_quant and not self.use_inductor_graph_partition:
             self.set_splitting_ops_for_attn_fusion()
         else:
@@ -1009,11 +928,14 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
-                added_default_splitting_ops = True
             elif len(self.splitting_ops) == 0:
-                logger.warning_once(
-                    "Using piecewise compilation with empty splitting_ops"
-                )
+                if (
+                    self.cudagraph_mode == CUDAGraphMode.PIECEWISE
+                    or self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+                ):
+                    logger.warning_once(
+                        "Using piecewise cudagraph with empty splitting_ops"
+                    )
                 if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                     logger.warning_once(
                         "Piecewise compilation with empty splitting_ops do not"
@@ -1033,44 +955,23 @@ class CompilationConfig:
                     self.cudagraph_mode = CUDAGraphMode.FULL
                 self.splitting_ops = []
 
-        # split MoE ops for cudagraph
-        moe_ops = [
-            "vllm::moe_forward",
-            "vllm::moe_forward_shared",
-        ]
-        backend = all2all_backend or envs.VLLM_ALL2ALL_BACKEND
-        dp_size = data_parallel_size if data_parallel_size is not None else 1
-        need_moe_splitting = (
-            backend == "deepep_high_throughput"
-            and dp_size > 1
-            # pure attn-fusion without inductor partition deliberately disables
-            # piecewise graphs and MoE splitting.
-            and not (
-                self.pass_config.fuse_attn_quant
-                and not self.use_inductor_graph_partition
+        # Disable CUDA graphs for DeepEP high-throughput since its not CG compatible
+        if (
+            all2all_backend == "deepep_high_throughput"
+            and data_parallel_size > 1
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # TODO: Piecewise Cuda graph might be enabled
+            # if torch compile cache key issue fixed
+            # See https://github.com/vllm-project/vllm/pull/25093
+            logger.info(
+                "DeepEP: Disabling CUDA Graphs since DeepEP high-throughput kernels "
+                "are optimized for prefill and are incompatible with CUDA Graphs. "
+                "In order to use CUDA Graphs for decode-optimized workloads, "
+                "use --all2all-backend with another option, such as "
+                "deepep_low_latency, pplx, or allgather_reducescatter."
             )
-        )
-
-        if need_moe_splitting and self.cudagraph_mode != CUDAGraphMode.NONE:
-            # if we just initialized default splitting_ops for this config,
-            # automatically append the MoE ops
-            if added_default_splitting_ops:
-                for op in moe_ops:
-                    if op not in self.splitting_ops:
-                        self.splitting_ops.append(op)
-
-            # make sure MoE ops are split out
-            if not any(op in self.splitting_ops for op in moe_ops):
-                self.cudagraph_mode = CUDAGraphMode.NONE
-                logger.warning_once(
-                    "DeepEP high throughput backend with data_parallel_size > 1 "
-                    "requires splitting MoE ops from cudagraphs. Please ensure "
-                    "'vllm::moe_forward' or 'vllm::moe_forward_shared' are "
-                    "present in CompilationConfig.splitting_ops."
-                )
-            elif self.cudagraph_mode.has_full_cudagraphs():
-                # fall back to piecewise when MoE splitting is required.
-                self.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            self.cudagraph_mode = CUDAGraphMode.NONE
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant

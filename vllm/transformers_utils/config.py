@@ -66,6 +66,7 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
+    bagel="BagelConfig",
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
@@ -306,24 +307,33 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
 
-    rope_theta_names = ("rope_theta", "rotary_emb_base")
-    rope_theta = getattr_iter(config, rope_theta_names, None)
+    # Older custom models may use non-standard field names
+    # which need patching for both Transformers v4 and v5.
+    names = ["rope_theta", "rotary_emb_base"]
+    rope_theta = getattr_iter(config, names, None, warn=True)
+    names = ["partial_rotary_factor", "rotary_pct", "rotary_emb_fraction"]
+    partial_rotary_factor = getattr_iter(config, names, None, warn=True)
+
     if Version(version("transformers")) < Version("5.0.0.dev0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
+        if (
+            rope_theta is not None or partial_rotary_factor is not None
+        ) and not getattr(config, "rope_parameters", None):
+            config.rope_parameters = {"rope_type": "default"}
         if rope_theta is not None:
-            if not hasattr(config, "rope_parameters"):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["rope_theta"] = rope_theta
-        partial_rotary_factor_names = ("partial_rotary_factor", "rotary_pct")
-        partial_rotary_factor = getattr_iter(config, partial_rotary_factor_names, None)
         if partial_rotary_factor is not None:
-            if not hasattr(config, "rope_parameters"):
-                config.rope_parameters = {"rope_type": "default"}
             config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-    elif rope_theta is not None or hasattr(config, "rope_parameters"):
+    elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
+        # Patch these fields in case they used non-standard names
+        if rope_theta is not None:
+            config.rope_theta = rope_theta
+        if partial_rotary_factor is not None:
+            config.partial_rotary_factor = partial_rotary_factor
+        # Standardize and validate RoPE parameters
         config.standardize_rope_params()
         config.validate_rope()
 
@@ -608,6 +618,28 @@ def get_config(
         hf_overrides=hf_overrides_kw,
         **kwargs,
     )
+
+    # Patching defaults for GGUF models
+    if _is_gguf:
+        # Some models have different default values between GGUF and HF.
+        def apply_gguf_default(key: str, gguf_default: Any):
+            """
+            Apply GGUF defaults unless explicitly configured.
+
+            This function reads/writes external `config` and `config_dict`.
+            If the specified `key` is not in `config_dict` (i.e. not explicitly
+            configured and the default HF value is used), it updates the
+            corresponding `config` value to `gguf_default`.
+            """
+            if key not in config_dict:
+                config.update({key: gguf_default})
+
+        # Apply architecture-specific GGUF defaults.
+        if config.model_type in {"qwen3_moe"}:
+            # Qwen3 MoE: norm_topk_prob is always true.
+            # Note that, this parameter is always false (HF default) on Qwen2 MoE.
+            apply_gguf_default("norm_topk_prob", True)
+
     # Special architecture mapping check for GGUF models
     if _is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:

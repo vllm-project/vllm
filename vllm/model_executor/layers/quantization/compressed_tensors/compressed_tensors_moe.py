@@ -96,6 +96,7 @@ from vllm.utils.deep_gemm import (
     get_col_major_tma_aligned_tensor,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -469,16 +470,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             logger.debug_once("Finished shuffling weights for TRT-LLM MOE")
 
-            layer.gemm1_weights_fp4_shuffled = Parameter(
+            layer.w13_weight = Parameter(
                 gemm1_weights_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_weights_fp4_shuffled = Parameter(
-                gemm2_weights_fp4_shuffled, requires_grad=False
-            )
-            layer.gemm1_scales_fp4_shuffled = Parameter(
+            layer.w2_weight = Parameter(gemm2_weights_fp4_shuffled, requires_grad=False)
+            layer.w13_weight_scale = Parameter(
                 gemm1_scales_fp4_shuffled, requires_grad=False
             )
-            layer.gemm2_scales_fp4_shuffled = Parameter(
+            layer.w2_weight_scale = Parameter(
                 gemm2_scales_fp4_shuffled, requires_grad=False
             )
 
@@ -487,12 +486,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 (layer.w2_input_scale_quant * layer.g1_alphas).to(torch.float32),
                 requires_grad=False,
             )
-
-            # Clean up weights that won't be used by TRT-LLM
-            del layer.w2_weight
-            del layer.w2_weight_scale
-            del layer.w13_weight
-            del layer.w13_weight_scale
         else:
             # swizzle weight scales
             layer.w13_weight_scale = torch.nn.Parameter(
@@ -634,17 +627,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
+            # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
+            # only (no EP).
             from vllm.model_executor.layers.fused_moe.cutlass_moe import cutlass_moe_fp4
 
-            assert layer.expert_map is None, (
-                "Expert Parallelism / expert_map "
-                "is currently not supported for "
-                "CompressedTensorsW4A4Nvfp4MoEMethod."
-            )
             assert self.moe_quant_config is not None
-
-            # Cutlass moe takes in activations in BF16/Half precision
-            # and fp4 quantized weights loaded from the checkpoint
             return cutlass_moe_fp4(
                 a=x,
                 w1_fp4=layer.w13_weight,
@@ -652,6 +639,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 quant_config=self.moe_quant_config,
+                expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 # TODO(bnell): derive these from arguments
                 m=x.shape[0],
@@ -727,6 +715,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.layer_name = layer_name
         self.marlin_input_dtype = (
             get_marlin_input_dtype(layer_name) if self.use_marlin else None
+        )
+
+        self.allow_deep_gemm = (
+            self.block_quant
+            and envs.VLLM_MOE_USE_DEEP_GEMM
+            and is_deep_gemm_supported()
+            and list(self.weight_block_size) == get_mk_alignment_for_contiguous_layout()
         )
 
     def create_weights(
@@ -1244,6 +1239,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     if self.disable_expert_map
                     else layer.expert_map,  # ???
                     quant_config=self.moe_quant_config,
+                    allow_deep_gemm=self.allow_deep_gemm,
                 )
             else:
                 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -1266,9 +1262,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     ab_strides2=self.ab_strides2,
                     c_strides1=self.c_strides1,
                     c_strides2=self.ab_strides1_c_strides2,
-                    parallel_config=getattr(
-                        getattr(layer, "vllm_config", None), "parallel_config", None
-                    ),
                 )
 
         else:
@@ -1288,6 +1281,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
+                allow_deep_gemm=self.allow_deep_gemm,
             )
 
     @property

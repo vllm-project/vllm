@@ -43,9 +43,11 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -211,6 +213,9 @@ class EngineCore:
         freeze_gc_heap()
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -672,10 +677,6 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
-        # Enable environment variable cache (e.g. assume no more
-        # environment variable overrides after this point)
-        enable_envs_cache()
-
     @contextmanager
     def _perform_handshakes(
         self,
@@ -924,6 +925,13 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
+        # If no model execution happened but there are waiting requests
+        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
+        # background threads (like NIXL handshake) to make progress.
+        # Without this, the tight polling loop can starve background threads.
+        if not model_executed and self.scheduler.has_unfinished_requests():
+            time.sleep(0.001)
+
         return model_executed
 
     def _handle_client_request(
@@ -1049,9 +1057,14 @@ class EngineCoreProc(EngineCore):
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
+                    request: Any
                     if request_type == EngineCoreRequestType.ADD:
-                        request = add_request_decoder.decode(data_frames)
-                        request = self.preprocess_add_request(request)
+                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        try:
+                            request = self.preprocess_add_request(req)
+                        except Exception:
+                            self._handle_request_preproc_error(req)
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -1134,6 +1147,30 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
+        """Log and return a request-scoped error response for exceptions raised
+        from the add request preprocessing in the input socket processing thread.
+        """
+        logger.exception(
+            "Unexpected error pre-processing request %s", request.request_id
+        )
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                        )
+                    ],
+                ),
+            )
+        )
 
 
 class DPEngineCoreProc(EngineCoreProc):
