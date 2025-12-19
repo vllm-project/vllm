@@ -4,6 +4,12 @@ import weakref
 from collections.abc import Callable
 
 import torch
+<<<<<<< HEAD
+||||||| parent of 2053f37cf (fix: Update hasattr(torch.ops._C, ...) to use has_op())
+from vllm._ops_dispatch import get_ops
+=======
+from vllm._ops_dispatch import get_ops, has_op
+>>>>>>> 2053f37cf (fix: Update hasattr(torch.ops._C, ...) to use has_op())
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops

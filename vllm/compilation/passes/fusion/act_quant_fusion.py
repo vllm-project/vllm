@@ -12,7 +12,7 @@ from torch._inductor.pattern_matcher import (
     register_replacement,
 )
 from torch._ops import OpOverload
-from vllm._ops_dispatch import get_ops
+from vllm._ops_dispatch import get_ops, has_op
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

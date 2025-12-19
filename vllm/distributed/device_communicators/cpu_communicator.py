@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 import torch
-from vllm._ops_dispatch import get_ops
+from vllm._ops_dispatch import get_ops, has_op
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle

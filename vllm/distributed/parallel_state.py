@@ -389,7 +389,9 @@ class GroupCoordinator:
             current_platform.is_cuda_alike() or current_platform.is_tpu()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and has_op("init_shm_manager")
+        self.use_cpu_custom_send_recv = current_platform.is_cpu() and has_op(
+            "init_shm_manager"
+        )
 
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True

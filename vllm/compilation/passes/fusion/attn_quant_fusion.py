@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, ParamSpec
 
 import torch
+from vllm._ops_dispatch import has_op
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
