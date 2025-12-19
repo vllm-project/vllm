@@ -396,7 +396,11 @@ target_include_directories(
 )
 target_link_libraries(dnnl_ext dnnl torch)
 target_compile_options(dnnl_ext PRIVATE ${ONEDNN_CXX_COMPILE_FLAGS} -fPIC) # FIXME: this should handle AVX512 and others
+
 list(APPEND LIBS_AVX512 dnnl_ext)
+if(ENABLE_NUMA) # FIXME: clean this up, temporarily here to fix build
+    list(APPEND LIBS_AVX512 numa)
+endif()
 
 set(VLLM_EXT_AVX512_SRC
     "csrc/cpu/shm.cpp"
