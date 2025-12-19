@@ -322,41 +322,42 @@ def initialize_ray_cluster(
     assert_ray_available()
     from vllm.platforms import current_platform
 
-    # Prevalidate GPU requirements before Ray processing
-    if current_platform.is_cuda() and parallel_config.world_size > 1:
-        from vllm.utils.torch_utils import cuda_device_count_stateless
-
-        available_gpus = cuda_device_count_stateless()
-        if parallel_config.world_size > available_gpus:
-            logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
-                parallel_config.world_size,
-                available_gpus,
-                available_gpus,
-                parallel_config.world_size,
-            )
-
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
-    elif current_platform.is_rocm() or current_platform.is_xpu():
-        # Try to connect existing ray instance and create a new one if not found
-        try:
-            ray.init("auto")
-        except ConnectionError:
-            logger.warning(
-                "No existing RAY instance detected. "
-                "A new instance will be launched with current node resources."
-            )
-            ray.init(
-                address=ray_address,
-                num_gpus=parallel_config.world_size,
-                runtime_env=parallel_config.ray_runtime_env,
-            )
     else:
-        ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
+        # Prevalidate GPU requirements before Ray processing
+        if current_platform.is_cuda() and parallel_config.world_size > 1:
+            from vllm.utils.torch_utils import cuda_device_count_stateless
+
+            available_gpus = cuda_device_count_stateless()
+            if parallel_config.world_size > available_gpus:
+                logger.warning(
+                    "TP x PP size (%d) exceeds locally available GPUs (%d). "
+                    "This may result in Ray placement group allocation failures. "
+                    "Consider reducing tensor_parallel_size to %d or less, "
+                    "or ensure your Ray cluster has %d GPUs available.",
+                    parallel_config.world_size,
+                    available_gpus,
+                    available_gpus,
+                    parallel_config.world_size,
+                )
+        
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            # Try to connect existing ray instance and create a new one if not found
+            try:
+                ray.init("auto")
+            except ConnectionError:
+                logger.warning(
+                    "No existing RAY instance detected. "
+                    "A new instance will be launched with current node resources."
+                )
+                ray.init(
+                    address=ray_address,
+                    num_gpus=parallel_config.world_size,
+                    runtime_env=parallel_config.ray_runtime_env,
+                )
+        else:
+            ray.init(address=ray_address, runtime_env=parallel_config.ray_runtime_env)
 
     device_str = current_platform.ray_device_key
     if not device_str:
