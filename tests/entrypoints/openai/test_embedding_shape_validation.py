@@ -5,215 +5,20 @@ Embedding shape validation in multimodal APIs.
 
 Tests verify that embeddings with correct ndim but incorrect hidden_size
 are rejected before they can cause crashes during model inference.
-"""
 
-import base64
-import io
+Validation is performed by the parser (MultiModalDataParser) and EmbeddingItems
+classes, not by CompletionRenderer or MediaIO classes.
+"""
 
 import pytest
 import torch
 
-from vllm.entrypoints.renderer import CompletionRenderer
-from vllm.multimodal.audio import AudioEmbeddingMediaIO
-from vllm.multimodal.image import ImageEmbeddingMediaIO
 from vllm.multimodal.parse import (
     AudioEmbeddingItems,
     ImageEmbeddingItems,
     MultiModalDataParser,
     VideoEmbeddingItems,
 )
-
-
-def _encode_tensor(tensor: torch.Tensor) -> bytes:
-    """Helper to encode a tensor as base64 bytes."""
-    buffer = io.BytesIO()
-    torch.save(tensor, buffer)
-    buffer.seek(0)
-    return base64.b64encode(buffer.read())
-
-
-def _create_valid_embedding(hidden_size: int = 768) -> torch.Tensor:
-    """Create a valid 2D embedding tensor."""
-    return torch.randn(10, hidden_size, dtype=torch.float32)
-
-
-def _create_valid_batched_embedding(hidden_size: int = 768) -> torch.Tensor:
-    """Create a valid 3D batched embedding tensor."""
-    return torch.randn(2, 10, hidden_size, dtype=torch.float32)
-
-
-def _create_wrong_hidden_size_embedding(
-    expected: int = 768, wrong: int = 4096
-) -> torch.Tensor:
-    """Create an embedding with wrong hidden_size (attack payload)."""
-    return torch.randn(10, wrong, dtype=torch.float32)
-
-
-class TestPromptEmbedsShapeValidation:
-    """Test hidden_size validation in prompt embeddings (Completions API)."""
-
-    def test_valid_hidden_size_accepted(self, model_config):
-        """Baseline: Embeddings with correct hidden_size should work."""
-        renderer = CompletionRenderer(model_config)
-
-        hidden_size = model_config.hf_text_config.hidden_size
-        valid_tensor = _create_valid_embedding(hidden_size)
-        encoded = _encode_tensor(valid_tensor)
-
-        # Should not raise any exception
-        result = renderer.load_prompt_embeds(encoded)
-        assert len(result) == 1
-        assert result[0]["prompt_embeds"].shape == valid_tensor.shape
-
-    def test_wrong_hidden_size_rejected(self, model_config):
-        """Security: Embeddings with wrong hidden_size should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
-        expected_hidden_size = model_config.hf_text_config.hidden_size
-        wrong_hidden_size = 4096  # Different from expected
-        invalid_tensor = torch.randn(10, wrong_hidden_size, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError) as exc_info:
-            renderer.load_prompt_embeds(encoded)
-
-        error_msg = str(exc_info.value)
-        assert "hidden" in error_msg.lower() and "mismatch" in error_msg.lower()
-        assert str(wrong_hidden_size) in error_msg
-        assert str(expected_hidden_size) in error_msg
-
-    def test_extremely_large_hidden_size_rejected(self, model_config):
-        """Security: Embeddings with huge hidden_size should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
-        huge_hidden_size = 1000000
-        invalid_tensor = torch.randn(10, huge_hidden_size, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError) as exc_info:
-            renderer.load_prompt_embeds(encoded)
-
-        assert "mismatch" in str(exc_info.value).lower()
-
-    def test_tiny_hidden_size_rejected(self, model_config):
-        """Security: Embeddings with undersized hidden_size should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
-        tiny_hidden_size = 8
-        invalid_tensor = torch.randn(10, tiny_hidden_size, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError):
-            renderer.load_prompt_embeds(encoded)
-
-    def test_batch_with_wrong_hidden_size_rejected(self, model_config):
-        """Security: Batch with wrong hidden_size tensor should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
-        expected_hidden_size = model_config.hf_text_config.hidden_size
-        wrong_hidden_size = expected_hidden_size + 100
-
-        batch = [
-            _encode_tensor(torch.randn(10, expected_hidden_size, dtype=torch.float32)),
-            _encode_tensor(torch.randn(10, wrong_hidden_size, dtype=torch.float32)),
-        ]
-
-        with pytest.raises(ValueError):
-            renderer.load_prompt_embeds(batch)
-
-
-class TestImageEmbedsShapeValidation:
-    """Test ndim validation in image embeddings (Chat API)."""
-
-    def test_valid_2d_tensor_accepted(self):
-        """Baseline: 2D tensors should be accepted."""
-        io_handler = ImageEmbeddingMediaIO()
-
-        valid_tensor = torch.randn(10, 768, dtype=torch.float32)
-        encoded = _encode_tensor(valid_tensor)
-
-        result = io_handler.load_base64("", encoded.decode("utf-8"))
-        assert result.shape == valid_tensor.shape
-
-    def test_valid_3d_tensor_accepted(self):
-        """Baseline: 3D tensors should be accepted."""
-        io_handler = ImageEmbeddingMediaIO()
-
-        valid_tensor = torch.randn(2, 10, 768, dtype=torch.float32)
-        encoded = _encode_tensor(valid_tensor)
-
-        result = io_handler.load_base64("", encoded.decode("utf-8"))
-        assert result.shape == valid_tensor.shape
-
-    def test_1d_tensor_rejected(self):
-        """Security: 1D tensors should be rejected."""
-        io_handler = ImageEmbeddingMediaIO()
-
-        invalid_tensor = torch.randn(768, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError) as exc_info:
-            io_handler.load_base64("", encoded.decode("utf-8"))
-
-        assert "2D" in str(exc_info.value) or "3D" in str(exc_info.value)
-
-    def test_4d_tensor_rejected(self):
-        """Security: 4D tensors should be rejected."""
-        io_handler = ImageEmbeddingMediaIO()
-
-        invalid_tensor = torch.randn(1, 2, 10, 768, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError) as exc_info:
-            io_handler.load_base64("", encoded.decode("utf-8"))
-
-        assert "2D" in str(exc_info.value) or "3D" in str(exc_info.value)
-
-
-class TestAudioEmbedsShapeValidation:
-    """Test ndim validation in audio embeddings (Chat API)."""
-
-    def test_valid_2d_tensor_accepted(self):
-        """Baseline: 2D tensors should be accepted."""
-        io_handler = AudioEmbeddingMediaIO()
-
-        valid_tensor = torch.randn(10, 768, dtype=torch.float32)
-        encoded = _encode_tensor(valid_tensor)
-
-        result = io_handler.load_base64("", encoded.decode("utf-8"))
-        assert result.shape == valid_tensor.shape
-
-    def test_valid_3d_tensor_accepted(self):
-        """Baseline: 3D tensors should be accepted."""
-        io_handler = AudioEmbeddingMediaIO()
-
-        valid_tensor = torch.randn(2, 10, 768, dtype=torch.float32)
-        encoded = _encode_tensor(valid_tensor)
-
-        result = io_handler.load_base64("", encoded.decode("utf-8"))
-        assert result.shape == valid_tensor.shape
-
-    def test_1d_tensor_rejected(self):
-        """Security: 1D tensors should be rejected."""
-        io_handler = AudioEmbeddingMediaIO()
-
-        invalid_tensor = torch.randn(768, dtype=torch.float32)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError) as exc_info:
-            io_handler.load_base64("", encoded.decode("utf-8"))
-
-        assert "2D" in str(exc_info.value) or "3D" in str(exc_info.value)
-
-    def test_scalar_rejected(self):
-        """Security: Scalar tensors should be rejected."""
-        io_handler = AudioEmbeddingMediaIO()
-
-        invalid_tensor = torch.tensor(1.0)
-        encoded = _encode_tensor(invalid_tensor)
-
-        with pytest.raises(ValueError):
-            io_handler.load_base64("", encoded.decode("utf-8"))
 
 
 class TestMultiModalParserShapeValidation:
@@ -372,33 +177,6 @@ class TestEmbeddingItemsDirectValidation:
 class TestShapeValidationIntegration:
     """Integration tests verifying attack scenarios are blocked."""
 
-    def test_attack_scenario_completions_api(self, model_config):
-        """
-        Simulate attack through Completions API with wrong hidden_size.
-
-        Attack scenario:
-        1. Attacker crafts embedding with wrong hidden_size
-        2. Encodes it as base64
-        3. Sends to /v1/completions with prompt_embeds parameter
-        4. Server should reject before inference crashes
-        """
-        renderer = CompletionRenderer(model_config)
-
-        expected_hidden_size = model_config.hf_text_config.hidden_size
-        wrong_hidden_size = expected_hidden_size * 2
-
-        # Attacker payload
-        attack_tensor = torch.randn(100, wrong_hidden_size, dtype=torch.float32)
-        attack_payload = _encode_tensor(attack_tensor)
-
-        # Should be rejected
-        with pytest.raises(ValueError) as exc_info:
-            renderer.load_prompt_embeds(attack_payload)
-
-        error_msg = str(exc_info.value)
-        assert str(expected_hidden_size) in error_msg
-        assert str(wrong_hidden_size) in error_msg
-
     def test_attack_scenario_multimodal_image(self):
         """
         Simulate attack through Chat API with image embeddings.
@@ -429,35 +207,17 @@ class TestShapeValidationIntegration:
         with pytest.raises(ValueError):
             parser.parse_mm_data({"audio": attack_tensor})
 
-    def test_multiple_valid_embeddings_accepted(self, model_config):
+    def test_attack_scenario_multimodal_video(self):
         """
-        Regression test: Multiple valid embeddings should still work.
+        Simulate attack through Chat API with video embeddings.
+
+        Verifies validation occurs in multimodal parser path.
         """
-        renderer = CompletionRenderer(model_config)
+        expected_hidden_size = 768
+        wrong_hidden_size = 1024
+        parser = MultiModalDataParser(expected_hidden_size=expected_hidden_size)
 
-        hidden_size = model_config.hf_text_config.hidden_size
-        valid_tensors = [
-            _encode_tensor(torch.randn(10, hidden_size, dtype=torch.float32)),
-            _encode_tensor(torch.randn(20, hidden_size, dtype=torch.float32)),
-            _encode_tensor(torch.randn(15, hidden_size, dtype=torch.float32)),
-        ]
+        attack_tensor = torch.randn(1, 100, wrong_hidden_size)
 
-        result = renderer.load_prompt_embeds(valid_tensors)
-        assert len(result) == 3
-
-
-# Pytest fixtures
-@pytest.fixture
-def model_config():
-    """ModelConfig for testing with prompt embeds enabled."""
-    from vllm.config import ModelConfig
-
-    return ModelConfig(
-        model="facebook/opt-125m",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float32",
-        seed=0,
-        enable_prompt_embeds=True,
-    )
+        with pytest.raises(ValueError):
+            parser.parse_mm_data({"video": attack_tensor})
