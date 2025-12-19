@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -609,11 +608,14 @@ class MiMoV2Model(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
                 if param_name == "qkv_proj" and shard_id == "v":
-                    v_scale = self.v_scale if self.v_scale is not None else getattr(self.config,
-                                                                                    "attention_value_scale", None)
+                    v_scale = (
+                        self.v_scale
+                        if self.v_scale is not None
+                        else getattr(self.config, "attention_value_scale", None)
+                    )
                     if v_scale is not None and (
-                            name.endswith("weight_scale_inv")
-                            or name.endswith(".bias")):
+                        name.endswith("weight_scale_inv") or name.endswith(".bias")
+                    ):
                         loaded_weight *= float(v_scale)
 
                 weight_loader(param, loaded_weight, shard_id)
