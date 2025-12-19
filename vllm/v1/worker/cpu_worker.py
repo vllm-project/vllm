@@ -85,7 +85,12 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            try:
+                ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            except Exception:  # FIXME: hack to get this working for non-AVX2 builds.
+                ret = torch.ops._C_avx512_utils.init_cpu_threads_env(
+                    self.local_omp_cpuid
+                )
             if ret:
                 logger.info(ret)
 
