@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, cast
@@ -612,6 +613,7 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -626,6 +628,9 @@ class AsyncLLM(EngineClient):
 
         The caller of generate() iterates the returned AsyncGenerator,
         returning the RequestOutput back to the caller.
+
+        NOTE: truncate_prompt_tokens is deprecated in v0.14.
+        TODO: Remove truncate_prompt_tokens in v0.15.
         """
 
         try:
@@ -640,6 +645,16 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
+
+            if truncate_prompt_tokens is not None:
+                warnings.warn(
+                    "The `truncate_prompt_tokens` parameter in `AsyncLLM.encode()` "
+                    "is deprecated and will be removed in v0.15. "
+                    "Please use `pooling_params.truncate_prompt_tokens` instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+
             _validate_truncation_size(
                 self.model_config.max_model_len,
                 pooling_params.truncate_prompt_tokens,
