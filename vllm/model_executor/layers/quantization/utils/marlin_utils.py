@@ -48,7 +48,7 @@ def query_marlin_supported_quant_types(
             -1 if capability_tuple is None else capability_tuple.to_int()
         )
 
-    if device_capability < 80:
+    if device_capability < 75:
         return []
 
     # - has_zp is True: return quant_types that has zero points

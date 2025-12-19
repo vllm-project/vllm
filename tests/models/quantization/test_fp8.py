@@ -75,7 +75,6 @@ def test_models(
 
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
-        m.setenv("VLLM_ATTENTION_BACKEND", backend)
 
         MAX_MODEL_LEN = 1024
         NUM_LOG_PROBS = 8
@@ -86,6 +85,7 @@ def test_models(
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             kv_cache_dtype="auto",
+            attention_config={"backend": backend},
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS
@@ -97,6 +97,7 @@ def test_models(
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
+            attention_config={"backend": backend},
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS

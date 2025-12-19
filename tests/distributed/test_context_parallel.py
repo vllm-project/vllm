@@ -219,14 +219,12 @@ def _test_cp_gsm8k(
         ]
     )
 
-    server_env = {}
     if attn_backend:
-        server_env["VLLM_ATTENTION_BACKEND"] = attn_backend
+        server_args.append(f"--attention-backend={attn_backend}")
 
     with RemoteOpenAIServer(
         model_id,
         server_args,
-        env_dict=server_env,
         max_wait_seconds=720,
     ) as remote_server:
         host = f"http://{remote_server.host}"

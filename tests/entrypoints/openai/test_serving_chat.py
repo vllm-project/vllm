@@ -52,8 +52,19 @@ def with_tool_parser(request) -> bool:
     return request.param
 
 
+@pytest.fixture(
+    scope="module",
+    params=[True],
+    ids=["exclude_tools_when_tool_choice_none"],
+)
+def exclude_tools_when_tool_choice_none(request) -> bool:
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def default_server_args(with_tool_parser: bool):
+def default_server_args(
+    with_tool_parser: bool, exclude_tools_when_tool_choice_none: bool
+):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--enforce-eager",
@@ -72,19 +83,16 @@ def default_server_args(with_tool_parser: bool):
                 "--enable-auto-tool-choice",
             ]
         )
+    if exclude_tools_when_tool_choice_none:
+        args.append("--exclude-tools-when-tool-choice-none")
     return args
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(
-    monkeypatch_module: pytest.MonkeyPatch, default_server_args: list[str]
-):
-    with monkeypatch_module.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
-        with RemoteOpenAIServer(
-            GPT_OSS_MODEL_NAME, default_server_args
-        ) as remote_server:
-            yield remote_server
+def gptoss_server(default_server_args: list[str]):
+    server_args = default_server_args + ["--attention-backend=TRITON_ATTN"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, server_args) as remote_server:
+        yield remote_server
 
 
 @pytest_asyncio.fixture
@@ -340,6 +348,69 @@ async def test_gpt_oss_tool_message_array_content(
     assert response_multi_array.choices[0].message is not None
 
 
+@pytest.mark.asyncio
+async def test_gpt_oss_tool_choice_none(
+    gptoss_client: OpenAI,
+    with_tool_parser: bool,
+    exclude_tools_when_tool_choice_none: bool,
+):
+    if not (with_tool_parser and exclude_tools_when_tool_choice_none):
+        pytest.skip(
+            "skip tool_choice tests when non-tool or "
+            "--exclude-tools-when-tool-choice-none not set"
+        )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
+                    },
+                    "required": ["city", "state", "unit"],
+                },
+            },
+        }
+    ]
+
+    messages = [
+        {
+            "role": "user",
+            "content": "What's the temperature(in degrees Celsius) in Dallas?",
+        },
+    ]
+
+    tool_choice_auto = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
+        temperature=0.0,
+    )
+    msg = tool_choice_auto.choices[0].message
+    assert len(msg.tool_calls) == 1
+
+    tool_choice_none = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        tool_choice="none",
+        temperature=0.0,
+    )
+
+    msg = tool_choice_none.choices[0].message
+    assert len(msg.tool_calls) == 0
+
+
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
@@ -401,6 +472,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         lora_request,
         trace_headers,
         priority,
+        data_parallel_rank,
     ):
         return dict(engine_prompt), {}
 
