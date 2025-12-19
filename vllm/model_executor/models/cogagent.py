@@ -187,9 +187,9 @@ class VisionExpertAttention(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
 
         self.rotary_emb = get_rope(
-            self.head_dim,
-            self.head_dim,
-            self.max_position_embeddings,
+            head_size=self.head_dim,
+            max_position=self.max_position_embeddings,
+            is_neox_style=True,
         )
 
         self.vision_expert_query_key_value = QKVParallelLinear(
